@@ -1,0 +1,16 @@
+---
+description: Always package changed upload files into one Desktop replace folder
+alwaysApply: true
+---
+
+# Deploy: Desktop replace folder
+
+Whenever the user asks for app changes that need uploading to the live server:
+
+1. After finishing code changes, create **one new folder on the Desktop** containing **only the files that must be replaced**, keeping the same path hierarchy (`includes/…`, `public/…`, `cron/…`, etc.).
+2. Folder naming: short English name, e.g. `wa-settings-ui-fix`, `wa-expiry-auto-remind` — avoid Arabic folder names (Windows encoding issues).
+3. Include a `README.txt` listing the files and a one-line upload note.
+4. **Never** put live secrets in the pack: do not overwrite/include `config/config.php` unless the user explicitly asks.
+5. Tell the user the Desktop folder name and which paths to upload.
+6. Prefer wiping/recreating that pack folder so it does not mix old unrelated files.
+7. Live site is PHP 7.0 on Apache; deploy only changed files with matching hierarchy (existing project convention: often via a Desktop pack the user uploads manually).

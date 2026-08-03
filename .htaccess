@@ -1,0 +1,7 @@
+# منع الوصول المباشر لمجلدات حساسة عند وضع DocumentRoot على جذر المشروع
+# الأفضل جعل DocumentRoot = public فقط
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^(config|includes|database|cron)/ - [F,L]
+</IfModule>

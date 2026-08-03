@@ -1,0 +1,11 @@
+{
+  "site_name": "WiFi-Net-SALES",
+  "language": "ar",
+  "currency": "د.ع",
+  "grace_days": 2,
+  "whatsapp_enabled": true,
+  "whatsapp_provider": "local",
+  "whatsapp_local_url": "http://172.16.16.13:3001",
+  "whatsapp_local_key": "local-secret-change-me",
+  "whatsapp_sender_note": "WiFi-Net-SALES"
+}

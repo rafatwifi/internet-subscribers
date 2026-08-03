@@ -1,0 +1,422 @@
+<?php
+
+/**
+ * تشفير كلمة مرور متوافق حتى لو password_hash غير متاح
+ */
+function admin_password_hash($plain)
+{
+    $plain = (string) $plain;
+    if (function_exists('password_hash')) {
+        $hash = @password_hash($plain, PASSWORD_DEFAULT);
+        if (is_string($hash) && $hash !== '') {
+            return $hash;
+        }
+    }
+    return 'md5:' . md5($plain);
+}
+
+function admin_password_verify($plain, $hash)
+{
+    $plain = (string) $plain;
+    $hash = (string) $hash;
+    if ($hash === '') {
+        return false;
+    }
+    if (strpos($hash, 'md5:') === 0) {
+        return hash_equals(substr($hash, 4), md5($plain));
+    }
+    if (strlen($hash) === 32 && ctype_xdigit($hash)) {
+        return hash_equals($hash, md5($plain));
+    }
+    if (function_exists('password_verify')) {
+        return @password_verify($plain, $hash);
+    }
+    return false;
+}
+
+/** الأدوار المتاحة */
+function admin_roles()
+{
+    return array('admin', 'manager', 'staff');
+}
+
+function admin_role_label($role, $lang = null)
+{
+    if ($lang === null) {
+        $lang = isset($GLOBALS['lang']) ? $GLOBALS['lang'] : 'ar';
+    }
+    $map = array(
+        'admin' => array('ar' => 'مدير', 'en' => 'Admin'),
+        'manager' => array('ar' => 'مشرف', 'en' => 'Manager'),
+        'staff' => array('ar' => 'موظف', 'en' => 'Staff'),
+    );
+    if (!isset($map[$role])) {
+        return $role;
+    }
+    return $lang === 'en' ? $map[$role]['en'] : $map[$role]['ar'];
+}
+
+function admin_role_hint($role, $lang = null)
+{
+    if ($lang === null) {
+        $lang = isset($GLOBALS['lang']) ? $GLOBALS['lang'] : 'ar';
+    }
+    if ($role === 'admin') {
+        return $lang === 'en'
+            ? 'Full access: users, settings, money, delete'
+            : 'كل الصلاحيات: مستخدمين، إعدادات، فلوس، حذف';
+    }
+    if ($role === 'manager') {
+        return $lang === 'en'
+            ? 'Daily work + reports + log (no settings/users)'
+            : 'الشغل اليومي + تقارير + لوك (بدون إعدادات/مستخدمين)';
+    }
+    return $lang === 'en'
+        ? 'Subscribers, activate, debts, messages, rentals'
+        : 'مشتركين، تفعيل، ديون، رسائل، إيجار';
+}
+
+/** صلاحيات كل دور */
+function role_permissions($role)
+{
+    $role = normalize_admin_role($role);
+    if ($role === 'admin') {
+        return array(
+            'dashboard', 'subscribers', 'activate', 'debts', 'messages', 'rentals',
+            'subscriptions', 'reports', 'logs', 'plans',
+            'settings', 'users', 'backup', 'clear_data',
+        );
+    }
+    if ($role === 'manager') {
+        return array(
+            'dashboard', 'subscribers', 'activate', 'debts', 'messages', 'rentals',
+            'subscriptions', 'reports', 'logs',
+        );
+    }
+    return array(
+        'dashboard', 'subscribers', 'activate', 'debts', 'messages', 'rentals',
+    );
+}
+
+function normalize_admin_role($role)
+{
+    $role = strtolower(trim((string) $role));
+    if (!in_array($role, admin_roles(), true)) {
+        return 'staff';
+    }
+    return $role;
+}
+
+function user_can($perm, $role = null)
+{
+    if ($role === null) {
+        $u = current_admin();
+        $role = $u && isset($u['role']) ? $u['role'] : 'staff';
+    }
+    $perms = role_permissions($role);
+    return in_array($perm, $perms, true);
+}
+
+function require_perm($perm)
+{
+    require_login();
+    if (!user_can($perm)) {
+        $lang = isset($GLOBALS['lang']) ? $GLOBALS['lang'] : 'ar';
+        flash('error', $lang === 'en' ? 'No permission' : 'ما عندك صلاحية لهالصفحة');
+        redirect('index.php');
+    }
+}
+
+function ensure_admin_users_table($pdo, $config = null)
+{
+    static $ready = false;
+    if ($ready) {
+        return;
+    }
+    try {
+        $pdo->exec(
+            'CREATE TABLE IF NOT EXISTS admin_users (
+                id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                username VARCHAR(60) NOT NULL,
+                display_name VARCHAR(80) NOT NULL,
+                password_hash VARCHAR(255) NOT NULL,
+                role VARCHAR(20) NOT NULL DEFAULT "staff",
+                is_active TINYINT(1) NOT NULL DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NULL DEFAULT NULL,
+                UNIQUE KEY uq_admin_username (username)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+        );
+
+        try {
+            $col = $pdo->query("SHOW COLUMNS FROM admin_users LIKE 'role'")->fetch();
+            if (!$col) {
+                $pdo->exec('ALTER TABLE admin_users ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT "staff" AFTER password_hash');
+            }
+        } catch (Exception $e) {
+        }
+
+        $count = (int) $pdo->query('SELECT COUNT(*) FROM admin_users')->fetchColumn();
+        if ($count === 0) {
+            $plain = 'admin123';
+            if (is_array($config) && isset($config['admin_password']) && (string) $config['admin_password'] !== '') {
+                $plain = (string) $config['admin_password'];
+            }
+            $hash = admin_password_hash($plain);
+            $ins = $pdo->prepare(
+                'INSERT INTO admin_users (username, display_name, password_hash, role)
+                 VALUES (:u, :d, :h, :r)'
+            );
+            $ins->execute(array(':u' => 'admin', ':d' => 'Admin', ':h' => $hash, ':r' => 'admin'));
+            $ins->execute(array(':u' => 'staff', ':d' => 'Staff', ':h' => $hash, ':r' => 'staff'));
+        } else {
+            // أول مستخدم admin بدون دور واضح → مدير
+            try {
+                $pdo->exec("UPDATE admin_users SET role = 'admin' WHERE username = 'admin' AND (role IS NULL OR role = '' OR role = 'staff') AND id = (SELECT mid FROM (SELECT MIN(id) AS mid FROM admin_users WHERE username = 'admin') t)");
+            } catch (Exception $e) {
+                try {
+                    $pdo->exec("UPDATE admin_users SET role = 'admin' WHERE username = 'admin'");
+                } catch (Exception $e2) {
+                }
+            }
+        }
+        $ready = true;
+    } catch (Exception $e) {
+        $ready = false;
+        throw $e;
+    }
+}
+
+function require_login()
+{
+    if (empty($_SESSION['admin_logged_in'])) {
+        redirect('login.php');
+    }
+}
+
+function current_admin()
+{
+    if (empty($_SESSION['admin_logged_in'])) {
+        return null;
+    }
+    return array(
+        'id' => isset($_SESSION['admin_user_id']) ? (int) $_SESSION['admin_user_id'] : 0,
+        'username' => isset($_SESSION['admin_username']) ? (string) $_SESSION['admin_username'] : 'admin',
+        'display_name' => isset($_SESSION['admin_display_name']) ? (string) $_SESSION['admin_display_name'] : 'Admin',
+        'role' => isset($_SESSION['admin_role']) ? normalize_admin_role($_SESSION['admin_role']) : 'admin',
+    );
+}
+
+function current_admin_label()
+{
+    $u = current_admin();
+    if (!$u) {
+        return '';
+    }
+    if ($u['display_name'] !== '' && $u['display_name'] !== $u['username']) {
+        return $u['display_name'] . ' (' . $u['username'] . ')';
+    }
+    return $u['username'];
+}
+
+function set_admin_session_from_row($row)
+{
+    $_SESSION['admin_logged_in'] = true;
+    $_SESSION['admin_user_id'] = (int) $row['id'];
+    $_SESSION['admin_username'] = $row['username'];
+    $_SESSION['admin_display_name'] = $row['display_name'];
+    $_SESSION['admin_role'] = normalize_admin_role(isset($row['role']) ? $row['role'] : 'staff');
+}
+
+function attempt_login($pdo, $config, $username, $password)
+{
+    $username = trim((string) $username);
+    $password = (string) $password;
+    if ($password === '') {
+        return false;
+    }
+
+    try {
+        ensure_admin_users_table($pdo, $config);
+    } catch (Exception $e) {
+    }
+
+    if ($username !== '') {
+        try {
+            $stmt = $pdo->prepare(
+                'SELECT * FROM admin_users WHERE username = :u AND is_active = 1 LIMIT 1'
+            );
+            $stmt->execute(array(':u' => $username));
+            $row = $stmt->fetch();
+            if ($row && !empty($row['password_hash']) && admin_password_verify($password, $row['password_hash'])) {
+                set_admin_session_from_row($row);
+                return true;
+            }
+        } catch (Exception $e) {
+        }
+    }
+
+    if (isset($config['admin_password'])
+        && hash_equals((string) $config['admin_password'], $password)
+        && ($username === '' || strtolower($username) === 'admin')
+    ) {
+        $_SESSION['admin_logged_in'] = true;
+        $_SESSION['admin_user_id'] = 0;
+        $_SESSION['admin_username'] = 'admin';
+        $_SESSION['admin_display_name'] = 'Admin';
+        $_SESSION['admin_role'] = 'admin';
+        try {
+            $stmt = $pdo->prepare('SELECT * FROM admin_users WHERE username = "admin" LIMIT 1');
+            $stmt->execute();
+            $row = $stmt->fetch();
+            if ($row) {
+                $pdo->prepare('UPDATE admin_users SET password_hash = :h, role = "admin", updated_at = NOW() WHERE id = :id')
+                    ->execute(array(
+                        ':h' => admin_password_hash($password),
+                        ':id' => (int) $row['id'],
+                    ));
+                set_admin_session_from_row($row);
+                $_SESSION['admin_role'] = 'admin';
+            }
+        } catch (Exception $e) {
+        }
+        return true;
+    }
+
+    return false;
+}
+
+function verify_user_password($pdo, $userId, $password)
+{
+    try {
+        $stmt = $pdo->prepare('SELECT password_hash FROM admin_users WHERE id = :id AND is_active = 1');
+        $stmt->execute(array(':id' => (int) $userId));
+        $hash = $stmt->fetchColumn();
+        if (!$hash) {
+            return false;
+        }
+        return admin_password_verify((string) $password, $hash);
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+function change_user_password($pdo, $userId, $newPassword)
+{
+    $hash = admin_password_hash((string) $newPassword);
+    $pdo->prepare('UPDATE admin_users SET password_hash = :h, updated_at = NOW() WHERE id = :id')
+        ->execute(array(':h' => $hash, ':id' => (int) $userId));
+}
+
+function list_admin_users($pdo)
+{
+    try {
+        ensure_admin_users_table($pdo);
+        return $pdo->query(
+            'SELECT id, username, display_name, role, is_active, created_at, updated_at
+             FROM admin_users
+             ORDER BY id ASC'
+        )->fetchAll();
+    } catch (Exception $e) {
+        return array();
+    }
+}
+
+function get_admin_user($pdo, $id)
+{
+    $st = $pdo->prepare('SELECT * FROM admin_users WHERE id = :id LIMIT 1');
+    $st->execute(array(':id' => (int) $id));
+    $row = $st->fetch();
+    return $row ? $row : null;
+}
+
+function create_admin_user($pdo, $username, $displayName, $password, $role)
+{
+    $username = trim((string) $username);
+    $displayName = trim((string) $displayName);
+    $role = normalize_admin_role($role);
+    if ($username === '' || $displayName === '' || strlen((string) $password) < 4) {
+        return 'invalid';
+    }
+    if (!preg_match('/^[a-zA-Z0-9._-]{2,40}$/', $username)) {
+        return 'username';
+    }
+    $exists = $pdo->prepare('SELECT id FROM admin_users WHERE username = :u LIMIT 1');
+    $exists->execute(array(':u' => $username));
+    if ($exists->fetchColumn()) {
+        return 'taken';
+    }
+    $pdo->prepare(
+        'INSERT INTO admin_users (username, display_name, password_hash, role, is_active)
+         VALUES (:u, :d, :h, :r, 1)'
+    )->execute(array(
+        ':u' => $username,
+        ':d' => $displayName,
+        ':h' => admin_password_hash($password),
+        ':r' => $role,
+    ));
+    return 'ok';
+}
+
+function delete_admin_user($pdo, $id, $currentId)
+{
+    $id = (int) $id;
+    $currentId = (int) $currentId;
+    if ($id <= 0 || $id === $currentId) {
+        return 'self';
+    }
+    $admins = (int) $pdo->query("SELECT COUNT(*) FROM admin_users WHERE role = 'admin' AND is_active = 1")->fetchColumn();
+    $row = get_admin_user($pdo, $id);
+    if (!$row) {
+        return 'missing';
+    }
+    if (normalize_admin_role($row['role']) === 'admin' && $admins <= 1) {
+        return 'last_admin';
+    }
+    $pdo->prepare('DELETE FROM admin_users WHERE id = :id')->execute(array(':id' => $id));
+    return 'ok';
+}
+
+function update_admin_user_meta($pdo, $id, $displayName, $role = null)
+{
+    $displayName = trim((string) $displayName);
+    if ($displayName === '') {
+        return false;
+    }
+    if ($role !== null) {
+        $role = normalize_admin_role($role);
+        $pdo->prepare('UPDATE admin_users SET display_name = :d, role = :r, updated_at = NOW() WHERE id = :id')
+            ->execute(array(':d' => $displayName, ':r' => $role, ':id' => (int) $id));
+    } else {
+        $pdo->prepare('UPDATE admin_users SET display_name = :d, updated_at = NOW() WHERE id = :id')
+            ->execute(array(':d' => $displayName, ':id' => (int) $id));
+    }
+    return true;
+}
+
+function count_active_admins($pdo)
+{
+    try {
+        return (int) $pdo->query("SELECT COUNT(*) FROM admin_users WHERE role = 'admin' AND is_active = 1")->fetchColumn();
+    } catch (Exception $e) {
+        return 0;
+    }
+}
+
+function logout()
+{
+    $_SESSION = array();
+    if (ini_get('session.use_cookies')) {
+        $params = session_get_cookie_params();
+        setcookie(
+            session_name(),
+            '',
+            time() - 42000,
+            $params['path'],
+            $params['domain'],
+            (bool) $params['secure'],
+            (bool) $params['httponly']
+        );
+    }
+    session_destroy();
+}

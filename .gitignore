@@ -1,0 +1,4 @@
+config/config.php
+config/settings.json
+whatsapp-gateway/node_modules/
+whatsapp-gateway/auth/
