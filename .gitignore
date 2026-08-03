@@ -2,3 +2,10 @@ config/config.php
 config/settings.json
 whatsapp-gateway/node_modules/
 whatsapp-gateway/auth/
+whatsapp-gateway/*.log
+*.rar
+*.zip
+.DS_Store
+Thumbs.db
+.env
+.env.*
