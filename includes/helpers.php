@@ -328,6 +328,11 @@ function export_csv($filename, $headers, $rows)
     exit;
 }
 
+function message_type_base($type)
+{
+    return preg_replace('/(_retry)+$/', '', (string) $type);
+}
+
 function message_type_title($type)
 {
     $lang = isset($GLOBALS['lang']) ? $GLOBALS['lang'] : 'ar';
@@ -349,7 +354,7 @@ function message_type_title($type)
         'reminder_auto' => $en ? 'auto debt reminder' : 'تذكير دين تلقائي',
         'text' => $en ? 'message' : 'رسالة',
     );
-    $type = (string) $type;
+    $type = message_type_base($type);
     return isset($map[$type]) ? $map[$type] : ($en ? 'message' : 'رسالة');
 }
 

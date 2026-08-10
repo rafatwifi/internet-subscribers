@@ -40,6 +40,7 @@ $pdo = db_connect($config);
 require_once __DIR__ . '/invoices.php';
 require_once __DIR__ . '/activity.php';
 require_once __DIR__ . '/rental.php';
+require_once __DIR__ . '/activate_service.php';
 
 $archivesFile = __DIR__ . '/archives.php';
 if (is_file($archivesFile)) {
@@ -99,6 +100,13 @@ try {
 try {
     if (function_exists('ensure_rental_columns')) {
         ensure_rental_columns($pdo);
+    }
+} catch (Exception $e) {
+} catch (Throwable $e) {
+}
+try {
+    if (function_exists('ensure_preferred_plan_column')) {
+        ensure_preferred_plan_column($pdo);
     }
 } catch (Exception $e) {
 } catch (Throwable $e) {

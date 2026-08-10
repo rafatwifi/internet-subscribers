@@ -477,6 +477,24 @@ body.ltr .nav-role { margin-right: 0; margin-left: 6px; }
   border-color: #f5c6cb;
   background: #fffafa;
 }
+.msg-log-item.msg-resolved {
+  border-color: #bbf7d0;
+  background: #f8fafc;
+}
+.msg-resolved-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  color: #16a34a;
+  font-weight: 900;
+  font-size: 16px;
+  line-height: 1;
+}
+.msg-resolved-badge {
+  background: #ecfdf5 !important;
+  color: #166534 !important;
+}
 .pay-mode-box {
   margin: 16px 0 8px;
   padding: 12px;
@@ -948,6 +966,23 @@ tr.row-focus {
   gap: 8px;
   font-weight: 700;
   cursor: pointer;
+}
+.pay-partial-box {
+  margin-top: 12px;
+  max-width: 420px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--line, #e2e8f0);
+  background: #f8fafc;
+}
+.pay-partial-box label {
+  display: block;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+.pay-partial-box select,
+.pay-partial-box input[type="number"] {
+  width: 100%;
 }
 
 .debts-mini-table td,
@@ -2595,7 +2630,74 @@ input.chk-sm[type="checkbox"],
   font-size: 12px;
   color: #334155;
 }
+.bulk-activate-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line, #e2e8f0);
+  background: #f8fafc;
+}
+.bulk-activate-bar .bulk-check-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.bulk-activate-bar .bulk-pay-modes {
+  display: inline-flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.bulk-activate-bar .bulk-wa-toggle {
+  margin: 0;
+}
+#subsTable .sub-check-cell {
+  width: 36px;
+  text-align: center;
+  vertical-align: middle;
+}
+#subsTable .sub-check-lab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  cursor: pointer;
+}
+#subsTable input.sub-check {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+.change-plan-form select {
+  max-width: 100%;
+}
+
 #msgLogTable tr.row-msg-fail td { background: rgba(220, 38, 38, 0.05); }
+#msgLogTable tr.row-msg-resolved td { background: transparent; }
+#msgLogTable .msg-status-log {
+  white-space: nowrap;
+}
+#msgLogTable .msg-fail-muted {
+  color: #94a3b8;
+  font-weight: 700;
+}
+#msgLogTable .msg-resolved-ok {
+  color: #16a34a;
+  font-weight: 800;
+  font-size: 12px;
+}
+#msgLogTable .dot-msg.resolved {
+  background: #86efac;
+  box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.2);
+}
+#msgLogTable .acts-resolved {
+  font-size: 18px;
+}
 .nowrap { white-space: nowrap; }
 .muted { color: #6b7a88; }
 .meta {

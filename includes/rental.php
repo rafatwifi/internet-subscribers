@@ -93,6 +93,86 @@ function subscriber_has_rental($sub)
     return !empty($sub['rental_enabled']) && !empty($sub['rental_device_id']);
 }
 
+/**
+ * هل للمشترك اشتراك نشط حالياً؟
+ */
+function subscriber_is_active($pdo, $subscriberId)
+{
+    $st = $pdo->prepare(
+        'SELECT id FROM subscriptions
+         WHERE subscriber_id = :id AND status = "active" AND end_date >= CURDATE()
+         LIMIT 1'
+    );
+    $st->execute(array(':id' => (int) $subscriberId));
+    return (bool) $st->fetchColumn();
+}
+
+/**
+ * إضافة دين إيجار فوري لحساب المشترك (عند تفعيل الإيجار وهو نشط).
+ * يرجع: array($ok, $amountOrMessage)
+ */
+function add_immediate_rental_debt($pdo, $subscriberId, $deviceId = '', $settings = null)
+{
+    $subscriberId = (int) $subscriberId;
+    if ($subscriberId <= 0) {
+        return array(false, 'مشترك غير صالح');
+    }
+    if ($settings === null) {
+        $settings = function_exists('settings_load') ? settings_load() : array();
+    }
+    $fee = rental_fee_amount($settings);
+    if ($fee <= 0) {
+        return array(false, 'رسوم الإيجار صفر');
+    }
+    $dev = rental_device_by_id($deviceId, $settings);
+    $devName = $dev ? $dev['name'] : 'جهاز إيجار';
+    $month = date('Y-m');
+    $note = 'إيجار (' . $devName . ')';
+
+    // تجنب تكرار نفس دين الإيجار لنفس الشهر إن كان غير مسدد
+    $dup = $pdo->prepare(
+        'SELECT id FROM invoices
+         WHERE subscriber_id = :sid AND status = "unpaid" AND month_label = :m
+           AND notes LIKE :note
+         LIMIT 1'
+    );
+    $dup->execute(array(
+        ':sid' => $subscriberId,
+        ':m' => $month,
+        ':note' => '%' . $note . '%',
+    ));
+    if ($dup->fetch()) {
+        return array(false, 'موجود مسبقاً');
+    }
+
+    $ins = $pdo->prepare(
+        'INSERT INTO invoices
+            (subscription_id, subscriber_id, month_label, amount, cost_price, profit, due_date, status, notes)
+         VALUES
+            (NULL, :sid, :month, :amount, 0, 0, :due, "unpaid", :notes)'
+    );
+    $ins->execute(array(
+        ':sid' => $subscriberId,
+        ':month' => $month,
+        ':amount' => $fee,
+        ':due' => date('Y-m-d'),
+        ':notes' => $note,
+    ));
+    $newId = (int) $pdo->lastInsertId();
+    if (function_exists('activity_log')) {
+        activity_log(
+            $pdo,
+            $subscriberId,
+            'invoice',
+            $newId,
+            'create',
+            'إضافة دين إيجار فوري #' . $newId,
+            $note . "\nالمبلغ: " . $fee . "\nالشهر: " . $month
+        );
+    }
+    return array(true, $fee);
+}
+
 function rental_badge_html($sub, $settings = null)
 {
     if (!subscriber_has_rental($sub)) {

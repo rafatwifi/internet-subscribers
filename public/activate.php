@@ -43,24 +43,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $sendWhatsapp = post('send_whatsapp') === '1';
         $sendOldDebts = $sendWhatsapp && post('send_old_debts') === '1';
         $ledgerImport = post('ledger_import') === '1';
-        // نقد = دفع الآن | آجل = دين
         $payMode = post('pay_mode') === 'credit' ? 'credit' : 'cash';
-
-        // ديون قديمة قبل إضافة فاتورة التفعيل (للرسالة)
-        $oldDebtLines = array();
-        $oldDebtSum = 0.0;
-        if ($sendOldDebts && $subscriberId > 0) {
-            $oldSt = $pdo->prepare(
-                'SELECT month_label, amount, notes FROM invoices
-                 WHERE subscriber_id = :id AND status = "unpaid"
-                 ORDER BY due_date ASC, id ASC'
-            );
-            $oldSt->execute(array(':id' => $subscriberId));
-            foreach ($oldSt->fetchAll() as $od) {
-                $oldDebtLines[] = $od;
-                $oldDebtSum += (float) $od['amount'];
-            }
-        }
 
         if ($startDate === '') {
             $startDate = date('Y-m-d');
@@ -70,199 +53,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             redirect($subscriberId > 0 ? ('activate.php?subscriber_id=' . $subscriberId) : 'activate.php');
         }
 
-        $planStmt = $pdo->prepare('SELECT * FROM service_plans WHERE id = :id AND is_active = 1');
-        $planStmt->execute(array(':id' => $planId));
-        $plan = $planStmt->fetch();
-        if (!$plan) {
-            flash('error', 'الباقة غير موجودة');
-            redirect('activate.php');
-        }
-
-        // الأولوية لأيام يكتبها المستخدم — النهاية تُحسب من تاريخ البداية
-        if ($daysLeftPost >= 0) {
-            $endDate = date('Y-m-d', strtotime($startDate . ' +' . $daysLeftPost . ' days'));
-        } elseif ($endDate === '') {
-            $endDate = subscription_period_end($startDate, $config);
-        }
-        if ($endDate < $startDate) {
-            flash('error', 'تاريخ الانتهاء غير صحيح');
-            redirect('activate.php');
-        }
-
-        // أيام متبقية من اشتراك نشط (تجديد مبكر) تُضاف على نهاية الفترة الجديدة
-        $carryDays = 0;
-        if (!$ledgerImport) {
-            $carrySt = $pdo->prepare(
-                'SELECT end_date FROM subscriptions
-                 WHERE subscriber_id = :id AND status = "active" AND end_date >= CURDATE()
-                 ORDER BY end_date DESC LIMIT 1'
-            );
-            $carrySt->execute(array(':id' => $subscriberId));
-            $oldEnd = $carrySt->fetchColumn();
-            if ($oldEnd) {
-                $carryDays = (int) floor((strtotime($oldEnd) - strtotime(date('Y-m-d'))) / 86400);
-                if ($carryDays < 0) {
-                    $carryDays = 0;
-                }
-            }
-            if ($carryDays > 0) {
-                $endDate = date('Y-m-d', strtotime($endDate . ' +' . $carryDays . ' days'));
-            }
-        }
-
-        // نقل دفتر: أيام + باقة فقط بدون فاتورة/واتساب تفعيل
         if ($ledgerImport) {
+            if ($endDate === '' && $daysLeftPost < 0) {
+                $endDate = subscription_period_end($startDate, $config);
+            }
             $daysForLedger = ($daysLeftPost >= 0)
                 ? $daysLeftPost
                 : max(0, (int) ceil((strtotime($endDate) - strtotime(date('Y-m-d'))) / 86400));
             list($ok, $msg) = apply_subscriber_days_left($pdo, $subscriberId, $daysForLedger, $planId);
             flash($ok ? 'success' : 'error', $msg);
-            redirect($ok ? ('subscriber.php?id=' . $subscriberId) : 'activate.php?subscriber_id=' . $subscriberId . '&days=' . $daysForLedger);
+            redirect($ok ? 'subscribers.php' : ('activate.php?subscriber_id=' . $subscriberId . '&days=' . $daysForLedger));
         }
 
-        $serviceName = $plan['name'];
-        $monthlyPrice = (float) $plan['monthly_price'];
-        $costPrice = isset($plan['cost_price']) ? (float) $plan['cost_price'] : 0;
-
-        $subRowSt = $pdo->prepare('SELECT * FROM subscribers WHERE id = :id');
-        $subRowSt->execute(array(':id' => $subscriberId));
-        $subscriberRow = $subRowSt->fetch();
-        if (!$subscriberRow) {
-            flash('error', 'المشترك غير موجود');
-            redirect('activate.php');
-        }
-        $settingsNow = settings_load();
-        $rentalFee = 0;
-        $rentalDev = null;
-        if (subscriber_has_rental($subscriberRow)) {
-            $rentalFee = rental_fee_amount($settingsNow);
-            $rentalDev = rental_device_by_id($subscriberRow['rental_device_id'], $settingsNow);
-        }
-        $chargeTotal = $monthlyPrice + $rentalFee;
-
-        $isCash = ($payMode === 'cash');
-        $invStatus = $isCash ? 'paid' : 'unpaid';
-        $profit = $isCash ? ($chargeTotal - $costPrice) : 0;
-        $modeLabel = $isCash ? 'نقد' : 'آجل';
-        $invNotes = $modeLabel;
-        if ($rentalFee > 0) {
-            $invNotes .= ' — اشتراك ' . $monthlyPrice . ' + إيجار ' . $rentalFee;
-            if ($rentalDev) {
-                $invNotes .= ' (' . $rentalDev['name'] . ')';
-            }
-        }
-        if ($msgNote !== '') {
-            $invNotes .= ' — ' . $msgNote;
-        }
-
-        $pdo->beginTransaction();
-        try {
-            // إنهاء الاشتراكات النشطة السابقة لهذا المشترك
-            $pdo->prepare(
-                'UPDATE subscriptions SET status = "expired"
-                 WHERE subscriber_id = :id AND status = "active"'
-            )->execute(array(':id' => $subscriberId));
-
-            $stmt = $pdo->prepare(
-                'INSERT INTO subscriptions
-                (subscriber_id, service_name, monthly_price, cost_price, start_date, end_date, status, activation_msg_sent)
-                VALUES
-                (:subscriber_id, :service_name, :monthly_price, :cost_price, :start_date, :end_date, "active", 0)'
-            );
-            $stmt->execute(array(
-                ':subscriber_id' => $subscriberId,
-                ':service_name' => $serviceName,
-                ':monthly_price' => $monthlyPrice,
-                ':cost_price' => $costPrice,
-                ':start_date' => $startDate,
-                ':end_date' => $endDate,
-            ));
-            $subscriptionId = (int) $pdo->lastInsertId();
-
-            $monthLabel = date('Y-m', strtotime($startDate));
-            $inv = $pdo->prepare(
-                'INSERT INTO invoices
-                (subscription_id, subscriber_id, month_label, amount, cost_price, profit, due_date, status, paid_at, notes)
-                VALUES
-                (:subscription_id, :subscriber_id, :month_label, :amount, :cost_price, :profit, :due_date, :status, :paid_at, :notes)'
-            );
-            $inv->execute(array(
-                ':subscription_id' => $subscriptionId,
-                ':subscriber_id' => $subscriberId,
-                ':month_label' => $monthLabel,
-                ':amount' => $chargeTotal,
-                ':cost_price' => $costPrice,
-                ':profit' => $profit,
-                ':due_date' => $startDate,
-                ':status' => $invStatus,
-                ':paid_at' => $isCash ? date('Y-m-d H:i:s') : null,
-                ':notes' => $invNotes,
-            ));
-
-            $subInfo = $pdo->prepare(
-                'SELECT sub.*, s.name, s.phone, s.rental_enabled, s.rental_device_id
-                 FROM subscriptions sub
-                 JOIN subscribers s ON s.id = sub.subscriber_id
-                 WHERE sub.id = :id'
-            );
-            $subInfo->execute(array(':id' => $subscriptionId));
-            $row = $subInfo->fetch();
-
-            if ($sendWhatsapp && $row) {
-                $extra = $msgNote;
-                if ($isCash) {
-                    $extra = trim(($extra !== '' ? $extra . "\n" : '') . 'تم استلام المبلغ نقداً');
-                } else {
-                    $extra = trim(($extra !== '' ? $extra . "\n" : '') . 'الدفع آجل — يرجى التسديد');
-                }
-                if ($sendOldDebts && $oldDebtLines) {
-                    $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
-                    $extra .= "\n\nالديون السابقة:";
-                    foreach ($oldDebtLines as $od) {
-                        $lab = month_short_label($od['month_label']);
-                        $extra .= "\n• " . $lab . ': ' . money_format_iqd($od['amount'], $currency);
-                        if (!empty($od['notes'])) {
-                            $extra .= ' (' . $od['notes'] . ')';
-                        }
-                    }
-                    $extra .= "\nإجمالي السابق: " . money_format_iqd($oldDebtSum, $currency);
-                    if (!$isCash) {
-                        $extra .= "\nدين التفعيل: " . money_format_iqd($chargeTotal, $currency);
-                        $extra .= "\nالإجمالي الكلي: " . money_format_iqd($oldDebtSum + $chargeTotal, $currency);
-                    } else {
-                        $totalAfter = subscriber_unpaid_total($pdo, $subscriberId);
-                        $extra .= "\nالإجمالي المتبقي: " . money_format_iqd($totalAfter, $currency);
-                    }
-                } elseif (!$isCash) {
-                    $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
-                    $totalAfter = subscriber_unpaid_total($pdo, $subscriberId);
-                    $extra .= "\nإجمالي الدين: " . money_format_iqd($totalAfter, $currency);
-                }
-                $rentName = $rentalDev ? $rentalDev['name'] : '';
-                $msg = activation_message_with_rental($row, $config, $extra, $rentalFee, $rentName);
-                $result = whatsapp_send($config, $row['phone'], $msg, 'activation');
-                log_message($pdo, $subscriberId, $result);
-                if (!empty($result['success'])) {
-                    $pdo->prepare('UPDATE subscriptions SET activation_msg_sent = 1 WHERE id = :id')
-                        ->execute(array(':id' => $subscriptionId));
-                    flash('success', 'تم التفعيل (' . $modeLabel . ') وإرسال رسالة');
-                } else {
-                    flash('info', 'تم التفعيل (' . $modeLabel . ') لكن ' . whatsapp_fail_user_message($result));
-                }
+        list($ok, $msg, $details) = activate_one_subscriber($pdo, $config, $subscriberId, array(
+            'plan_id' => $planId,
+            'pay_mode' => $payMode,
+            'send_whatsapp' => $sendWhatsapp,
+            'send_old_debts' => $sendOldDebts,
+            'message_note' => $msgNote,
+            'start_date' => $startDate,
+            'end_date' => $endDate,
+            'days_left' => ($daysRaw === '' ? null : $daysLeftPost),
+            'carry_days' => true,
+        ));
+        if ($ok) {
+            $waOk = is_array($details) && array_key_exists('whatsapp_ok', $details) ? $details['whatsapp_ok'] : null;
+            if ($sendWhatsapp && $waOk === false) {
+                flash('info', $msg);
             } else {
-                $okMsg = 'تم التفعيل (' . $modeLabel . ')' . ($rentalFee > 0 ? ' مع إيجار ' . $rentalFee : '');
-                if ($carryDays > 0) {
-                    $okMsg .= ' — أُضيف +' . $carryDays . ' يوم من الاشتراك السابق';
-                }
-                flash('success', $okMsg);
+                flash('success', $msg);
             }
-
-            $pdo->commit();
-        } catch (Exception $e) {
-            $pdo->rollBack();
-            flash('error', 'فشل التفعيل: ' . $e->getMessage());
+        } else {
+            flash('error', $msg);
+            redirect('activate.php?subscriber_id=' . $subscriberId);
         }
-        redirect('subscriber.php?id=' . $subscriberId);
+        redirect('subscribers.php');
     }
 }
 

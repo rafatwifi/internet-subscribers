@@ -33,11 +33,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $phone = normalize_phone((string) post('phone', ''));
         $address = post('address');
         $notes = post('notes');
+        $planId = (int) post('plan_id', '0');
         $addDebts = post('add_debts') === '1';
         $sendDebtWa = post('send_debt_whatsapp') === '1';
 
         if ($name === '' || $phone === '') {
             flash('error', 'الاسم والهاتف مطلوبان');
+            redirect('subscribers.php?add=1');
+        }
+        if ($planId <= 0) {
+            flash('error', 'اختر نوع الاشتراك');
+            redirect('subscribers.php?add=1');
+        }
+        $planChk = $pdo->prepare('SELECT id, name FROM service_plans WHERE id = :id AND is_active = 1');
+        $planChk->execute(array(':id' => $planId));
+        $planRow = $planChk->fetch();
+        if (!$planRow) {
+            flash('error', 'نوع الاشتراك غير موجود');
             redirect('subscribers.php?add=1');
         }
         if (subscriber_name_taken($pdo, $name)) {
@@ -47,20 +59,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $newId = 0;
         try {
+            ensure_preferred_plan_column($pdo);
             $pdo->beginTransaction();
             $stmt = $pdo->prepare(
-                'INSERT INTO subscribers (name, phone, address, notes) VALUES (:name, :phone, :address, :notes)'
+                'INSERT INTO subscribers (name, phone, address, notes, preferred_plan_id)
+                 VALUES (:name, :phone, :address, :notes, :plan_id)'
             );
             $stmt->execute(array(
                 ':name' => $name,
                 ':phone' => $phone,
                 ':address' => ($address !== '' && $address !== null) ? $address : null,
                 ':notes' => ($notes !== '' && $notes !== null) ? $notes : null,
+                ':plan_id' => $planId,
             ));
             $newId = (int) $pdo->lastInsertId();
             $debtInfo = array('count' => 0, 'sum' => 0.0);
             if ($addDebts) {
                 $debtInfo = insert_opening_debts($pdo, $newId, $_POST);
+            }
+            if (function_exists('activity_log')) {
+                activity_log(
+                    $pdo,
+                    $newId,
+                    'subscriber',
+                    $newId,
+                    'create',
+                    'إضافة مشترك جديد — ' . $name,
+                    'الهاتف: ' . $phone . "\nنوع الاشتراك: " . $planRow['name']
+                );
             }
             $pdo->commit();
 
@@ -85,7 +111,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } elseif ((int) $debtInfo['count'] > 0) {
                 flash('success', 'تم إضافة المشترك مع ' . (int) $debtInfo['count'] . ' دين');
             } else {
-                flash('success', 'تم إضافة المشترك بنجاح');
+                flash('success', 'تم إضافة المشترك — الباقة: ' . $planRow['name']);
             }
         } catch (PDOException $e) {
             if ($pdo->inTransaction()) {
@@ -99,6 +125,56 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             redirect('subscribers.php?add=1');
         }
         redirect('subscribers.php?focus=' . (int) $newId . '&per_page=all');
+    }
+
+    if ($action === 'bulk_activate') {
+        $ids = isset($_POST['ids']) && is_array($_POST['ids']) ? $_POST['ids'] : array();
+        $payMode = post('pay_mode') === 'credit' ? 'credit' : 'cash';
+        $sendWa = post('send_whatsapp') === '1';
+        $cleanIds = array();
+        foreach ($ids as $rawId) {
+            $sid = (int) $rawId;
+            if ($sid > 0) {
+                $cleanIds[$sid] = $sid;
+            }
+        }
+        $cleanIds = array_values($cleanIds);
+        if (!$cleanIds) {
+            flash('error', 'حدد مشتركاً واحداً على الأقل');
+            redirect('subscribers.php');
+        }
+        $okN = 0;
+        $failN = 0;
+        $failNames = array();
+        foreach ($cleanIds as $sid) {
+            list($ok, $msg) = activate_one_subscriber($pdo, $config, $sid, array(
+                'plan_id' => 0,
+                'pay_mode' => $payMode,
+                'send_whatsapp' => $sendWa,
+                'send_old_debts' => false,
+                'carry_days' => true,
+            ));
+            if ($ok) {
+                $okN++;
+            } else {
+                $failN++;
+                $nm = $pdo->prepare('SELECT name FROM subscribers WHERE id = :id');
+                $nm->execute(array(':id' => $sid));
+                $failNames[] = (string) $nm->fetchColumn() . ' (' . $msg . ')';
+            }
+        }
+        $modeLabel = $payMode === 'credit' ? 'آجل' : 'نقد';
+        $note = 'تفعيل جماعي (' . $modeLabel . '): نجح ' . $okN;
+        if ($failN > 0) {
+            $note .= ' / فشل ' . $failN;
+            if ($failNames) {
+                $note .= ' — ' . implode('؛ ', array_slice($failNames, 0, 5));
+            }
+            flash($okN > 0 ? 'info' : 'error', $note);
+        } else {
+            flash('success', $note);
+        }
+        redirect('subscribers.php');
     }
 
     if ($action === 'delete') {
@@ -341,7 +417,7 @@ if (isset($_GET['live']) && $_GET['live'] === '1') {
         $html .= render_subscriber_table_row($liveRow, $nLive++, $config, $lang);
     }
     if ($html === '') {
-        $html = '<tr><td colspan="9">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
+        $html = '<tr><td colspan="10">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
     }
     echo json_encode(array(
         'html' => $html,
@@ -355,6 +431,7 @@ function subscribers_list_select_sql()
 {
     return 'SELECT s.*,
     (SELECT COALESCE(SUM(amount),0) FROM invoices i WHERE i.subscriber_id = s.id AND i.status = "unpaid") AS debt,
+    (SELECT sp.name FROM service_plans sp WHERE sp.id = s.preferred_plan_id LIMIT 1) AS preferred_plan_name,
     (SELECT sub.service_name FROM subscriptions sub
         WHERE sub.subscriber_id = s.id AND sub.status = "active" AND sub.end_date >= CURDATE()
         ORDER BY sub.id DESC LIMIT 1) AS active_service,
@@ -454,13 +531,17 @@ function render_subscriber_table_row($row, $n, $config, $lang)
         $rowClass = 'row-normal';
     }
 
+    $pkgLabel = !empty($row['active_service'])
+        ? $row['active_service']
+        : (!empty($row['preferred_plan_name']) ? $row['preferred_plan_name'] : '-');
     $html = '<tr class="' . e($rowClass) . '" data-search="' . e($searchText) . '" data-id="' . (int) $row['id'] . '" id="sub-row-' . (int) $row['id'] . '">';
+    $html .= '<td class="sub-check-cell"><label class="sub-check-lab"><input type="checkbox" class="sub-check" name="ids[]" value="' . (int) $row['id'] . '" form="bulkActivateForm"></label></td>';
     $html .= '<td>' . (int) $n . '</td>';
     $html .= '<td><a class="sub-name" href="subscriber.php?id=' . (int) $row['id'] . '">' . e($row['name']) . '</a>';
     $html .= rental_badge_html($row);
     $html .= '</td>';
     $html .= '<td>' . e(format_phone_display($row['phone'])) . '</td>';
-    $html .= '<td>' . e(!empty($row['active_service']) ? $row['active_service'] : '-') . '</td>';
+    $html .= '<td>' . e($pkgLabel) . '</td>';
     $html .= render_subscriber_month_cell($row, $lang);
     $html .= '<td>';
     if ($daysInfo) {
@@ -585,6 +666,9 @@ $totalRows = (int) $countStmt->fetchColumn();
 
 $totalAll = (int) $pdo->query('SELECT COUNT(*) FROM subscribers')->fetchColumn();
 $showAdd = isset($_GET['add']) && $_GET['add'] === '1';
+$servicePlans = $pdo->query(
+    'SELECT id, name, monthly_price FROM service_plans WHERE is_active = 1 ORDER BY sort_order ASC, monthly_price ASC, id ASC'
+)->fetchAll();
 $focusId = isset($_GET['focus']) ? (int) $_GET['focus'] : 0;
 if ($focusId > 0 && $perPageRaw !== 'all') {
     // حتى يظهر المشترك المضاف ونقدر نسكرول عليه
@@ -829,6 +913,17 @@ function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
                     </div>
                 </div>
                 <div>
+                    <label><?php echo e(t('sub_type')); ?></label>
+                    <select name="plan_id" required>
+                        <option value=""><?php echo e($lang === 'en' ? 'Choose package…' : 'اختر نوع الاشتراك…'); ?></option>
+                        <?php foreach ($servicePlans as $sp): ?>
+                            <option value="<?php echo (int) $sp['id']; ?>">
+                                <?php echo e($sp['name'] . ' — ' . money_format_iqd($sp['monthly_price'], $config['currency'])); ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div>
                     <label><?php echo e(t('address')); ?> <span class="meta">(<?php echo e($lang === 'en' ? 'optional' : 'اختياري'); ?>)</span></label>
                     <input name="address" placeholder="<?php echo e($lang === 'en' ? 'Optional' : 'اختياري'); ?>">
                 </div>
@@ -943,10 +1038,35 @@ function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
             ?>
         </p>
     <?php endif; ?>
+
+    <form method="post" id="bulkActivateForm" class="bulk-activate-bar">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="action" value="bulk_activate">
+        <label class="bulk-check-all">
+            <input type="checkbox" id="subCheckAll" title="<?php echo e(t('select_all')); ?>">
+            <span><?php echo e(t('select_all')); ?></span>
+        </label>
+        <span class="meta" id="bulkSelectedCount">0</span>
+        <div class="bulk-pay-modes">
+            <label class="pay-mode-opt"><input type="radio" name="pay_mode" value="cash" checked> <?php echo e(t('pay_cash')); ?></label>
+            <label class="pay-mode-opt"><input type="radio" name="pay_mode" value="credit"> <?php echo e(t('pay_credit')); ?></label>
+        </div>
+        <label class="toggle bulk-wa-toggle">
+            <input type="checkbox" name="send_whatsapp" value="1" checked>
+            <span class="toggle-ui"></span>
+            <span class="toggle-text"><?php echo e(t('send_message')); ?></span>
+        </label>
+        <button class="btn" type="submit" id="bulkActivateBtn" disabled
+            onclick="return confirm(<?php echo json_encode($lang === 'en' ? 'Activate selected with their current packages?' : 'تفعيل المحددين كلٌّ حسب باقته الحالية؟'); ?>);">
+            <?php echo e(t('bulk_activate')); ?>
+        </button>
+    </form>
+
     <div class="table-wrap">
         <table id="subsTable" class="table-compact">
             <thead>
             <tr>
+                <th class="sub-check-cell" title="<?php echo e(t('select_all')); ?>"></th>
                 <th><?php echo subs_sort_link('id', '#', $sortKey, $sortDir, $q, $perPageRaw); ?></th>
                 <th><?php echo subs_sort_link('name', t('name'), $sortKey, $sortDir, $q, $perPageRaw); ?></th>
                 <th><?php echo subs_sort_link('phone', t('phone'), $sortKey, $sortDir, $q, $perPageRaw); ?></th>
@@ -962,7 +1082,7 @@ function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
             <?php
             $n = $offset + 1;
             if (!$rows) {
-                echo '<tr><td colspan="9">' . e($lang === 'en' ? 'No subscribers' : 'ماكو مشتركين') . '</td></tr>';
+                echo '<tr><td colspan="10">' . e($lang === 'en' ? 'No subscribers' : 'ماكو مشتركين') . '</td></tr>';
             }
             foreach ($rows as $row) {
                 echo render_subscriber_table_row($row, $n++, $config, $lang);
@@ -1083,12 +1203,46 @@ window.DEBT_ENTRY = {
   var originalHtml = tbody ? tbody.innerHTML : '';
   var originalPagerDisplay = pager ? pager.style.display : '';
 
+  var checkAll = document.getElementById('subCheckAll');
+  var bulkBtn = document.getElementById('bulkActivateBtn');
+  var bulkCount = document.getElementById('bulkSelectedCount');
+  var countLabel = <?php echo json_encode($lang === 'en' ? 'selected' : 'محدد'); ?>;
+  function visibleChecks() {
+    return tbody ? Array.prototype.slice.call(tbody.querySelectorAll('input.sub-check')) : [];
+  }
+  function syncBulk() {
+    var list = visibleChecks();
+    var n = 0;
+    list.forEach(function (c) { if (c.checked) n++; });
+    if (bulkCount) bulkCount.textContent = n + ' ' + countLabel;
+    if (bulkBtn) bulkBtn.disabled = n < 1;
+    if (checkAll && list.length) {
+      checkAll.checked = n > 0 && n === list.length;
+      checkAll.indeterminate = n > 0 && n < list.length;
+    } else if (checkAll) {
+      checkAll.checked = false;
+      checkAll.indeterminate = false;
+    }
+  }
+  if (checkAll) {
+    checkAll.addEventListener('change', function () {
+      visibleChecks().forEach(function (c) { c.checked = !!checkAll.checked; });
+      syncBulk();
+    });
+  }
+  if (tbody) {
+    tbody.addEventListener('change', function (e) {
+      if (e.target && e.target.classList && e.target.classList.contains('sub-check')) syncBulk();
+    });
+  }
+
   function fetchLive(q) {
     var myReq = ++liveReq;
     if (!tbody) return;
     if (!q) {
       tbody.innerHTML = originalHtml;
       if (pager) pager.style.display = originalPagerDisplay || '';
+      syncBulk();
       return;
     }
     var url = 'subscribers.php?live=1&q=' + encodeURIComponent(q);
@@ -1104,6 +1258,7 @@ window.DEBT_ENTRY = {
         var data = JSON.parse(xhr.responseText);
         tbody.innerHTML = data.html || '';
         if (pager) pager.style.display = 'none';
+        syncBulk();
       } catch (e) {}
     };
     xhr.send();
@@ -1133,6 +1288,7 @@ window.DEBT_ENTRY = {
       filter.focus();
     });
   }
+  syncBulk();
 
   var focusId = <?php echo (int) $focusId; ?>;
   if (focusId > 0) {

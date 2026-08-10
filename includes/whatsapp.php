@@ -194,6 +194,48 @@ function log_message($pdo, $subscriberId, $result)
 }
 
 /**
+ * فشل انحل لاحقاً: إرسال ناجح بعده لنفس المشترك (نفس النص أو نفس نوع الرسالة).
+ * يرجع: [log_id => true, ...]
+ */
+function message_logs_resolved_map($pdo, $logRows)
+{
+    $map = array();
+    $failIds = array();
+    foreach ($logRows as $row) {
+        if (empty($row['success']) && !empty($row['id']) && !empty($row['subscriber_id'])) {
+            $failIds[] = (int) $row['id'];
+        }
+    }
+    if (!$failIds) {
+        return $map;
+    }
+    $failIds = array_values(array_unique($failIds));
+    $in = implode(',', array_map('intval', $failIds));
+    $sql = "SELECT m1.id
+            FROM message_logs m1
+            WHERE m1.id IN ($in)
+              AND m1.success = 0
+              AND EXISTS (
+                  SELECT 1 FROM message_logs m2
+                  WHERE m2.subscriber_id = m1.subscriber_id
+                    AND m2.success = 1
+                    AND m2.id > m1.id
+                    AND (
+                        m2.body = m1.body
+                        OR REPLACE(m2.message_type, '_retry', '') = REPLACE(m1.message_type, '_retry', '')
+                    )
+              )";
+    try {
+        foreach ($pdo->query($sql)->fetchAll() as $r) {
+            $map[(int) $r['id']] = true;
+        }
+    } catch (Exception $e) {
+        // لا تكسر صفحة السجل
+    }
+    return $map;
+}
+
+/**
  * إعادة محاولة إرسال رسالة فاشلة من السجل
  * يرجع array($ok, $message)
  */
@@ -415,7 +457,17 @@ function payment_message($row, $config)
 {
     $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
     $amount = money_format_iqd($row['amount'], $currency);
-    $month = month_short_label($row['month_label']);
+    if (!empty($row['about'])) {
+        $month = trim((string) $row['about']);
+    } elseif (function_exists('invoice_debt_label')) {
+        $month = invoice_debt_label($row);
+    } else {
+        $month = month_short_label(isset($row['month_label']) ? $row['month_label'] : '');
+        $notes = isset($row['notes']) ? trim((string) $row['notes']) : '';
+        if ($notes !== '' && (empty($row['month_label']) || !preg_match('/^\d{4}-\d{1,2}$/', (string) $row['month_label']))) {
+            $month .= ' — ' . $notes;
+        }
+    }
     $remaining = isset($row['remaining']) ? money_format_iqd($row['remaining'], $currency) : '';
     $tpl = '';
     if (isset($config['templates']['payment_ok']) && trim((string) $config['templates']['payment_ok']) !== '') {

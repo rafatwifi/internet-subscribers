@@ -150,6 +150,7 @@ function apply_invoice_payment($pdo, $config, $invoiceId, $payAmount, $sendWhats
             'amount' => $payAmount,
             'remaining' => $remainingTotal,
             'notes' => isset($row['notes']) ? $row['notes'] : '',
+            'about' => invoice_debt_label($row),
         );
         $msg = payment_message($payRow, $config);
         $result = whatsapp_send($config, $row['phone'], $msg, 'payment');
@@ -189,20 +190,61 @@ function subscriber_monthly_price($pdo, $subscriberId)
 }
 
 /**
- * تسديد ديون مشترك (كامل أو جزئي عبر أقدم الفواتير)
- * يرجع array($ok, $message, $details)
+ * تسمية دين للعرض/الرسالة (شهر أو غرض + ملاحظة قصيرة)
  */
-function apply_subscriber_payment($pdo, $config, $subscriberId, $payAmount, $sendWhatsapp)
+function invoice_debt_label($inv)
+{
+    $month = isset($inv['month_label']) ? (string) $inv['month_label'] : '';
+    $label = function_exists('month_short_label') ? month_short_label($month) : $month;
+    $notes = isset($inv['notes']) ? trim((string) $inv['notes']) : '';
+    if ($notes === '') {
+        return $label;
+    }
+    // تجاهل ملاحظات التسديد الجزئي التقنية
+    if (strpos($notes, 'تسديد جزئي من فاتورة') === 0) {
+        $parts = explode('—', $notes, 2);
+        $notes = isset($parts[1]) ? trim($parts[1]) : '';
+        if ($notes === '') {
+            return $label;
+        }
+    }
+    // للأغراض أو الملاحظات المفيدة نضيفها
+    if ($month === '' || !preg_match('/^\d{4}-\d{1,2}$/', $month)) {
+        return $label . ' — ' . $notes;
+    }
+    return $label;
+}
+
+/**
+ * تسديد ديون مشترك.
+ * $targetInvoiceId > 0 = تسديد دين محدد (جزئي أو كامل لهذا الدين فقط)
+ * بدون هدف = توزيع على أقدم الديون (تسديد الكل عادة)
+ */
+function apply_subscriber_payment($pdo, $config, $subscriberId, $payAmount, $sendWhatsapp, $targetInvoiceId = 0)
 {
     $subscriberId = (int) $subscriberId;
     $payAmount = (float) $payAmount;
+    $targetInvoiceId = (int) $targetInvoiceId;
     $remainingPay = $payAmount;
     if ($subscriberId <= 0 || $remainingPay <= 0) {
         return array(false, 'أدخل مبلغ تسديد صحيح', null);
     }
 
+    // تسديد دين محدد — الرسالة تأخذ شهر/غرض ذلك الدين
+    if ($targetInvoiceId > 0) {
+        $chk = $pdo->prepare(
+            'SELECT id FROM invoices
+             WHERE id = :id AND subscriber_id = :sid AND status = "unpaid"'
+        );
+        $chk->execute(array(':id' => $targetInvoiceId, ':sid' => $subscriberId));
+        if (!$chk->fetch()) {
+            return array(false, 'الدين المختار غير موجود أو مسدد', null);
+        }
+        return apply_invoice_payment($pdo, $config, $targetInvoiceId, $payAmount, $sendWhatsapp);
+    }
+
     $st = $pdo->prepare(
-        'SELECT id, amount FROM invoices
+        'SELECT id, amount, month_label, notes FROM invoices
          WHERE subscriber_id = :id AND status = "unpaid"
          ORDER BY due_date ASC, id ASC'
     );
@@ -215,6 +257,7 @@ function apply_subscriber_payment($pdo, $config, $subscriberId, $payAmount, $sen
     $paidTotal = 0.0;
     $lastDetails = null;
     $lastOk = false;
+    $paidLabels = array();
     foreach ($invoices as $inv) {
         if ($remainingPay <= 0) {
             break;
@@ -233,6 +276,10 @@ function apply_subscriber_payment($pdo, $config, $subscriberId, $payAmount, $sen
         $remainingPay -= $chunk;
         $lastDetails = $details;
         $lastOk = true;
+        $lab = invoice_debt_label($inv);
+        if ($lab !== '' && !in_array($lab, $paidLabels, true)) {
+            $paidLabels[] = $lab;
+        }
     }
 
     if (!$lastOk || $paidTotal <= 0) {
@@ -243,6 +290,16 @@ function apply_subscriber_payment($pdo, $config, $subscriberId, $payAmount, $sen
     $info = $pdo->prepare('SELECT name, phone FROM subscribers WHERE id = :id');
     $info->execute(array(':id' => $subscriberId));
     $subRow = $info->fetch();
+
+    $aboutLabel = '';
+    if (count($paidLabels) === 1) {
+        $aboutLabel = $paidLabels[0];
+    } elseif (count($paidLabels) > 1) {
+        $aboutLabel = implode(' + ', $paidLabels);
+    } elseif ($lastDetails && !empty($lastDetails['row'])) {
+        $aboutLabel = invoice_debt_label($lastDetails['row']);
+    }
+
     $details = array(
         'paid_amount' => $paidTotal,
         'remaining_invoice' => 0,
@@ -250,20 +307,26 @@ function apply_subscriber_payment($pdo, $config, $subscriberId, $payAmount, $sen
         'row' => array(
             'name' => $subRow ? $subRow['name'] : '',
             'phone' => $subRow ? $subRow['phone'] : '',
-            'month_label' => date('Y-m'),
-            'notes' => '',
+            'month_label' => ($lastDetails && !empty($lastDetails['row']['month_label']))
+                ? $lastDetails['row']['month_label']
+                : date('Y-m'),
+            'notes' => ($lastDetails && !empty($lastDetails['row']['notes']))
+                ? $lastDetails['row']['notes']
+                : '',
         ),
         'full' => ($remainingTotal <= 0.0001),
+        'about_label' => $aboutLabel,
     );
 
     if ($sendWhatsapp && $subRow) {
         $payRow = array(
             'name' => $subRow['name'],
             'phone' => $subRow['phone'],
-            'month_label' => date('Y-m'),
+            'month_label' => $details['row']['month_label'],
             'amount' => $paidTotal,
             'remaining' => $remainingTotal,
-            'notes' => '',
+            'notes' => $details['row']['notes'],
+            'about' => $aboutLabel,
         );
         $msg = payment_message($payRow, $config);
         $result = whatsapp_send($config, $subRow['phone'], $msg, 'payment');

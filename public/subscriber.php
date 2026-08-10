@@ -58,6 +58,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('subscriber.php?id=' . $id);
     }
 
+    if ($action === 'change_plan') {
+        $planId = (int) post('plan_id', '0');
+        list($ok, $msg) = change_subscriber_plan($pdo, $config, $id, $planId);
+        flash($ok ? 'success' : 'error', $msg);
+        redirect('subscriber.php?id=' . $id);
+    }
+
     if ($action === 'update_rental') {
         $enabled = post('rental_enabled') === '1';
         $deviceId = trim((string) post('rental_device_id', ''));
@@ -72,6 +79,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!$enabled) {
             $deviceId = null;
         }
+
+        $oldSt = $pdo->prepare('SELECT rental_enabled, rental_device_id FROM subscribers WHERE id = :id');
+        $oldSt->execute(array(':id' => $id));
+        $oldRent = $oldSt->fetch();
+        $wasOn = $oldRent ? subscriber_has_rental($oldRent) : false;
+
         $pdo->prepare(
             'UPDATE subscribers SET rental_enabled = :en, rental_device_id = :dev WHERE id = :id'
         )->execute(array(
@@ -89,7 +102,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $enabled ? ('تفعيل إيجار: ' . ($dev ? $dev['name'] : $deviceId)) : 'إيقاف جهاز الإيجار',
             $enabled ? ('الرسوم الشهرية: ' . rental_fee_amount()) : ''
         );
-        flash('success', $enabled ? 'تم حفظ جهاز الإيجار' : 'تم إيقاف جهاز الإيجار');
+
+        $flashMsg = $enabled ? 'تم حفظ جهاز الإيجار' : 'تم إيقاف جهاز الإيجار';
+        // إذا فعّلنا الإيجار الآن والمشترك نشط — يُضاف مبلغ الإيجار كدين فوراً
+        if ($enabled && !$wasOn && subscriber_is_active($pdo, $id)) {
+            list($debtOk, $debtVal) = add_immediate_rental_debt($pdo, $id, $deviceId);
+            if ($debtOk) {
+                $flashMsg .= ' — أُضيف دين إيجار ' . money_format_iqd($debtVal, $config['currency']) . ' للحساب';
+            }
+        }
+        flash('success', $flashMsg);
         redirect('subscriber.php?id=' . $id . '#rental');
     }
 
@@ -127,20 +149,47 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'pay_debts') {
         $mode = post('pay_mode', 'full') === 'partial' ? 'partial' : 'full';
         $sendWa = post('send_whatsapp') === '1';
+        $targetInvoiceId = (int) post('invoice_id', '0');
         $totalDue = subscriber_unpaid_total($pdo, $id);
         if ($totalDue <= 0) {
             flash('error', 'ماكو ديون غير مسددة');
             redirect('subscriber.php?id=' . $id . '&tab=pay#debts');
         }
-        $payAmount = ($mode === 'full') ? $totalDue : (float) post('pay_amount', '0');
-        if ($payAmount <= 0) {
-            flash('error', 'أدخل مبلغ تسديد صحيح');
-            redirect('subscriber.php?id=' . $id . '&tab=pay#debts');
-        }
-        if ($payAmount > $totalDue) {
+        if ($mode === 'partial') {
+            if ($targetInvoiceId <= 0) {
+                flash('error', 'اختر أي دين تريد تسديده');
+                redirect('subscriber.php?id=' . $id . '&tab=pay#debts');
+            }
+            $invChk = $pdo->prepare(
+                'SELECT amount FROM invoices
+                 WHERE id = :iid AND subscriber_id = :sid AND status = "unpaid"'
+            );
+            $invChk->execute(array(':iid' => $targetInvoiceId, ':sid' => $id));
+            $invDue = $invChk->fetchColumn();
+            if ($invDue === false) {
+                flash('error', 'الدين المختار غير موجود أو مسدد');
+                redirect('subscriber.php?id=' . $id . '&tab=pay#debts');
+            }
+            $payAmount = (float) post('pay_amount', '0');
+            if ($payAmount <= 0) {
+                flash('error', 'أدخل مبلغ تسديد صحيح');
+                redirect('subscriber.php?id=' . $id . '&tab=pay#debts');
+            }
+            if ($payAmount > (float) $invDue) {
+                $payAmount = (float) $invDue;
+            }
+        } else {
             $payAmount = $totalDue;
+            $targetInvoiceId = 0;
         }
-        list($ok, $msg, $details) = apply_subscriber_payment($pdo, $config, $id, $payAmount, $sendWa);
+        list($ok, $msg, $details) = apply_subscriber_payment(
+            $pdo,
+            $config,
+            $id,
+            $payAmount,
+            $sendWa,
+            $targetInvoiceId
+        );
         if (!$ok) {
             flash('error', $msg);
         } else {
@@ -613,6 +662,73 @@ $isActiveSub = !empty($activeSubCard);
     <?php endif; ?>
 </div>
 
+<?php
+$plansForChange = $pdo->query(
+    'SELECT id, name, monthly_price FROM service_plans WHERE is_active = 1 ORDER BY sort_order ASC, monthly_price ASC, id ASC'
+)->fetchAll();
+$currentPlanMatchId = 0;
+if ($activeSubCard) {
+    foreach ($plansForChange as $pf) {
+        if (strcasecmp((string) $pf['name'], (string) $activeSubCard['service_name']) === 0) {
+            $currentPlanMatchId = (int) $pf['id'];
+            break;
+        }
+    }
+} elseif (!empty($subscriber['preferred_plan_id'])) {
+    $currentPlanMatchId = (int) $subscriber['preferred_plan_id'];
+}
+?>
+<div class="panel glass-panel" id="changePlan">
+    <h2><?php echo e(t('change_sub_type')); ?></h2>
+    <?php if ($activeSubCard): ?>
+        <p class="meta" style="margin:0 0 10px">
+            <?php echo e($lang === 'en' ? 'Current' : 'الحالي'); ?>:
+            <strong><?php echo e($activeSubCard['service_name']); ?></strong>
+            — <?php echo e(money_format_iqd($activeSubCard['monthly_price'], $config['currency'])); ?>
+            <?php if ($hasRent): ?>
+                + <?php echo e($lang === 'en' ? 'rent' : 'إيجار'); ?> <?php echo e(money_format_iqd($rentalFee, $config['currency'])); ?>
+            <?php endif; ?>
+        </p>
+        <form method="post" class="change-plan-form" onsubmit="return confirm(<?php echo json_encode($lang === 'en' ? 'Change package and update the account amount?' : 'تغيير نوع الاشتراك وتعديل المبلغ على الحساب؟'); ?>);">
+            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+            <input type="hidden" name="action" value="change_plan">
+            <div class="form-grid" style="max-width:520px">
+                <div>
+                    <label><?php echo e(t('sub_type')); ?></label>
+                    <select name="plan_id" required>
+                        <?php foreach ($plansForChange as $pf): ?>
+                            <option value="<?php echo (int) $pf['id']; ?>" <?php echo $currentPlanMatchId === (int) $pf['id'] ? 'selected' : ''; ?>>
+                                <?php echo e($pf['name'] . ' — ' . money_format_iqd($pf['monthly_price'], $config['currency'])); ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+            </div>
+            <div class="actions" style="margin-top:12px">
+                <button class="btn" type="submit"><?php echo e(t('change_sub_type')); ?></button>
+            </div>
+        </form>
+    <?php else: ?>
+        <p class="meta" style="margin:0">
+            <?php echo e($lang === 'en'
+                ? 'No active subscription. Set package when adding, or activate first.'
+                : 'ماكو اشتراك نشط. حدّد الباقة عند الإضافة أو فعّل المشترك أولاً.'); ?>
+        </p>
+        <?php if (!empty($subscriber['preferred_plan_id'])): ?>
+            <?php
+            $prefName = '';
+            foreach ($plansForChange as $pf) {
+                if ((int) $pf['id'] === (int) $subscriber['preferred_plan_id']) {
+                    $prefName = $pf['name'];
+                    break;
+                }
+            }
+            ?>
+            <p class="meta"><?php echo e(t('sub_type')); ?>: <strong><?php echo e($prefName !== '' ? $prefName : ('#' . (int) $subscriber['preferred_plan_id'])); ?></strong></p>
+        <?php endif; ?>
+    <?php endif; ?>
+</div>
+
 <div class="panel glass-panel" id="rental">
     <h2><?php echo e($lang === 'en' ? 'Rental device' : 'جهاز إيجار'); ?></h2>
     <form method="post" id="rentalForm">
@@ -738,6 +854,23 @@ $isActiveSub = !empty($activeSubCard);
         <?php if ($unpaid <= 0): ?>
             <p class="meta" style="margin:0"><?php echo e($lang === 'en' ? 'No unpaid debts.' : 'ماكو ديون غير مسددة.'); ?></p>
         <?php else: ?>
+        <?php
+        $unpaidInvoices = array();
+        foreach ($invoices as $invPay) {
+            if (isset($invPay['status']) && $invPay['status'] === 'unpaid') {
+                $unpaidInvoices[] = $invPay;
+            }
+        }
+        // الأقدم أولاً في قائمة الاختيار
+        usort($unpaidInvoices, function ($a, $b) {
+            $da = isset($a['due_date']) ? (string) $a['due_date'] : '';
+            $db = isset($b['due_date']) ? (string) $b['due_date'] : '';
+            if ($da === $db) {
+                return (int) $a['id'] - (int) $b['id'];
+            }
+            return strcmp($da, $db);
+        });
+        ?>
         <form method="post" id="payDebtsForm" class="pay-debts-form">
             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
             <input type="hidden" name="action" value="pay_debts">
@@ -755,9 +888,22 @@ $isActiveSub = !empty($activeSubCard);
                     <span><?php echo e(t('pay_partial_mode')); ?></span>
                 </label>
             </div>
-            <div id="payPartialBox" class="hidden" style="margin-top:10px;max-width:280px">
-                <label><?php echo e(t('partial_pay')); ?></label>
-                <input type="number" name="pay_amount" id="payAmountInput" min="1" step="1" max="<?php echo (int) $unpaid; ?>" value="<?php echo (int) $unpaid; ?>">
+            <div id="payPartialBox" class="hidden pay-partial-box">
+                <label for="payInvoiceSelect"><?php echo e(t('pay_choose_debt')); ?></label>
+                <select name="invoice_id" id="payInvoiceSelect">
+                    <option value=""><?php echo e($lang === 'en' ? '— Select debt —' : '— اختر الدين —'); ?></option>
+                    <?php foreach ($unpaidInvoices as $uinv): ?>
+                        <option value="<?php echo (int) $uinv['id']; ?>"
+                            data-amount="<?php echo (float) $uinv['amount']; ?>">
+                            <?php
+                            echo e(invoice_debt_label($uinv) . ' — ' . money_format_iqd($uinv['amount'], $config['currency']));
+                            ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+                <label for="payAmountInput" style="margin-top:10px"><?php echo e(t('partial_pay')); ?></label>
+                <input type="number" name="pay_amount" id="payAmountInput" min="1" step="1" max="<?php echo (int) $unpaid; ?>" value="">
+                <p class="meta" id="payDebtHint" style="margin:6px 0 0"></p>
             </div>
             <div class="actions toggle-row" style="margin-top:14px">
                 <label class="toggle">
@@ -776,13 +922,38 @@ $isActiveSub = !empty($activeSubCard);
           var partial = document.getElementById('payModePartial');
           var box = document.getElementById('payPartialBox');
           var amt = document.getElementById('payAmountInput');
+          var sel = document.getElementById('payInvoiceSelect');
+          var hint = document.getElementById('payDebtHint');
+          var currency = <?php echo json_encode(isset($config['currency']) ? $config['currency'] : 'د.ع'); ?>;
+          function money(n) {
+            try { return Math.round(n).toLocaleString('en-US') + ' ' + currency; }
+            catch (e) { return Math.round(n) + ' ' + currency; }
+          }
+          function syncDebt() {
+            if (!sel || !amt) return;
+            var opt = sel.options[sel.selectedIndex];
+            var due = opt ? (parseFloat(opt.getAttribute('data-amount') || '0') || 0) : 0;
+            if (due > 0) {
+              amt.max = String(Math.round(due));
+              if (!amt.value || parseFloat(amt.value) > due || parseFloat(amt.value) <= 0) {
+                amt.value = String(Math.round(due));
+              }
+              if (hint) hint.textContent = <?php echo json_encode($lang === 'en' ? 'Max for this debt: ' : 'أعلى مبلغ لهذا الدين: '); ?> + money(due);
+            } else {
+              amt.max = '';
+              if (hint) hint.textContent = <?php echo json_encode($lang === 'en' ? 'Choose which debt to pay' : 'اختر أي دين تريد تسديده من القائمة'); ?>;
+            }
+          }
           function sync() {
             var isPartial = partial && partial.checked;
             if (box) box.classList.toggle('hidden', !isPartial);
             if (amt) amt.required = !!isPartial;
+            if (sel) sel.required = !!isPartial;
+            if (isPartial) syncDebt();
           }
           if (full) full.addEventListener('change', sync);
           if (partial) partial.addEventListener('change', sync);
+          if (sel) sel.addEventListener('change', syncDebt);
           sync();
         })();
         </script>
@@ -966,17 +1137,28 @@ $isActiveSub = !empty($activeSubCard);
     <?php if (!$msgLogs): ?>
         <p style="color:var(--muted);margin:0"><?php echo e($lang === 'en' ? 'No messages yet for this subscriber.' : 'ما انرسلت أي رسالة لهذا المشترك لحد الآن.'); ?></p>
     <?php else: ?>
+        <?php $msgResolvedMap = message_logs_resolved_map($pdo, $msgLogs); ?>
         <div class="msg-log-list">
             <?php foreach ($msgLogs as $log): ?>
                 <?php
                 $ok = !empty($log['success']);
+                $resolved = !$ok && !empty($msgResolvedMap[(int) $log['id']]);
                 $short = message_short_summary($log['message_type'], $log['body'], $ok);
+                $resolvedTitle = $lang === 'en' ? 'Resolved by a later successful send' : 'انحلت لاحقاً بإرسال ناجح';
+                $itemCls = $ok ? '' : ($resolved ? ' msg-resolved' : ' msg-failed');
                 ?>
-                <div class="msg-log-item<?php echo $ok ? '' : ' msg-failed'; ?>">
+                <div class="msg-log-item<?php echo $itemCls; ?>">
                     <div class="msg-log-head">
-                        <span class="badge <?php echo $ok ? 'paid' : 'expired'; ?>">
-                            <?php echo $ok ? ($lang === 'en' ? 'Sent' : 'أُرسلت') : ($lang === 'en' ? 'Failed' : 'فشلت'); ?>
-                        </span>
+                        <?php if ($ok): ?>
+                            <span class="badge paid"><?php echo e($lang === 'en' ? 'Sent' : 'أُرسلت'); ?></span>
+                        <?php elseif ($resolved): ?>
+                            <span class="badge paid msg-resolved-badge" title="<?php echo e($resolvedTitle); ?>">
+                                <?php echo e($lang === 'en' ? 'Fail → Fixed' : 'فشل → انحلت'); ?>
+                            </span>
+                            <span class="msg-resolved-arrow" title="<?php echo e($resolvedTitle); ?>">→</span>
+                        <?php else: ?>
+                            <span class="badge expired"><?php echo e($lang === 'en' ? 'Failed' : 'فشلت'); ?></span>
+                        <?php endif; ?>
                         <strong><?php echo e(message_type_title($log['message_type'])); ?></strong>
                         <span class="meta"><?php echo e($log['created_at']); ?></span>
                     </div>
@@ -985,7 +1167,7 @@ $isActiveSub = !empty($activeSubCard);
                         <summary><?php echo e($lang === 'en' ? 'Full message content' : 'المحتوى الكامل للرسالة'); ?></summary>
                         <pre class="msg-full-body"><?php echo e($log['body']); ?></pre>
                     </details>
-                    <?php if (!$ok): ?>
+                    <?php if (!$ok && !$resolved): ?>
                         <form method="post" class="msg-retry-form">
                             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                             <input type="hidden" name="action" value="retry_message">

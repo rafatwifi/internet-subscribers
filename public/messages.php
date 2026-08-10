@@ -271,6 +271,7 @@ $pdo->exec(
 
 $filtered = array();
 $logRows = array();
+$logResolvedMap = array();
 $logTotal = 0;
 $logPages = 1;
 
@@ -303,6 +304,7 @@ if ($mode === 'log') {
     );
     $st->execute($params);
     $logRows = $st->fetchAll();
+    $logResolvedMap = message_logs_resolved_map($pdo, $logRows);
 } elseif ($mode === 'debt') {
     $filtered = $pdo->query(
         "SELECT s.id, s.name, s.phone,
@@ -413,6 +415,7 @@ render_header(t('messages'), 'messages');
             <?php foreach ($logRows as $row): ?>
                 <?php
                 $ok = !empty($row['success']);
+                $resolved = !$ok && !empty($logResolvedMap[(int) $row['id']]);
                 $bodyFull = (string) $row['body'];
                 $bodyShort = $bodyFull;
                 if (function_exists('mb_substr')) {
@@ -423,8 +426,10 @@ render_header(t('messages'), 'messages');
                     $bodyShort = substr($bodyShort, 0, 120) . '…';
                 }
                 $bodyShort = str_replace(array("\r\n", "\n", "\r"), ' ', $bodyShort);
+                $rowCls = $ok ? '' : ($resolved ? 'row-msg-resolved' : 'row-msg-fail');
+                $resolvedTitle = $lang === 'en' ? 'Resolved by a later successful send' : 'انحلت لاحقاً بإرسال ناجح';
                 ?>
-                <tr class="<?php echo $ok ? '' : 'row-msg-fail'; ?>">
+                <tr class="<?php echo e($rowCls); ?>">
                     <td class="nowrap"><?php echo e($row['created_at']); ?></td>
                     <td>
                         <?php if (!empty($row['subscriber_id'])): ?>
@@ -437,10 +442,15 @@ render_header(t('messages'), 'messages');
                     </td>
                     <td class="nowrap"><?php echo e(format_phone_display($row['phone'])); ?></td>
                     <td><small><?php echo e(message_type_title($row['message_type'])); ?></small></td>
-                    <td>
+                    <td class="msg-status-log">
                         <?php if ($ok): ?>
                             <span class="dot-msg ok" title="<?php echo e($lang === 'en' ? 'Sent' : 'تم'); ?>"></span>
                             <?php echo e($lang === 'en' ? 'OK' : 'تم'); ?>
+                        <?php elseif ($resolved): ?>
+                            <span class="dot-msg resolved" title="<?php echo e($resolvedTitle); ?>"></span>
+                            <span class="msg-fail-muted"><?php echo e($lang === 'en' ? 'Fail' : 'فشل'); ?></span>
+                            <span class="msg-resolved-arrow" title="<?php echo e($resolvedTitle); ?>" aria-label="<?php echo e($resolvedTitle); ?>">→</span>
+                            <span class="msg-resolved-ok"><?php echo e($lang === 'en' ? 'Fixed' : 'انحلت'); ?></span>
                         <?php else: ?>
                             <span class="dot-msg fail"></span>
                             <?php echo e($lang === 'en' ? 'Fail' : 'فشل'); ?>
@@ -456,7 +466,7 @@ render_header(t('messages'), 'messages');
                         <?php endif; ?>
                     </td>
                     <td class="acts-cell">
-                        <?php if (!$ok): ?>
+                        <?php if (!$ok && !$resolved): ?>
                             <form method="post" class="inline-form">
                                 <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                                 <input type="hidden" name="action" value="retry_log">
@@ -465,6 +475,8 @@ render_header(t('messages'), 'messages');
                                 <input type="hidden" name="page" value="<?php echo (int) $logPage; ?>">
                                 <button class="link-act" type="submit" title="<?php echo e($lang === 'en' ? 'Retry' : 'إعادة إرسال'); ?>">↻</button>
                             </form>
+                        <?php elseif ($resolved): ?>
+                            <span class="msg-resolved-arrow acts-resolved" title="<?php echo e($resolvedTitle); ?>">→</span>
                         <?php endif; ?>
                     </td>
                 </tr>
