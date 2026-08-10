@@ -4,7 +4,15 @@ require_once __DIR__ . '/../includes/bootstrap.php';
 require_once __DIR__ . '/../includes/layout.php';
 require_login();
 
-$subscribers = $pdo->query('SELECT id, name, phone FROM subscribers ORDER BY name')->fetchAll();
+$subscribers = $pdo->query(
+    'SELECT s.id, s.name, s.phone,
+        (SELECT DATEDIFF(sub.end_date, CURDATE())
+         FROM subscriptions sub
+         WHERE sub.subscriber_id = s.id AND sub.status = "active" AND sub.end_date >= CURDATE()
+         ORDER BY sub.end_date DESC LIMIT 1) AS days_left
+     FROM subscribers s
+     ORDER BY s.name'
+)->fetchAll();
 $plans = $pdo->query('SELECT * FROM service_plans WHERE is_active = 1 ORDER BY sort_order ASC, monthly_price ASC, id ASC')->fetchAll();
 
 $preselectId = isset($_GET['subscriber_id']) ? (int) $_GET['subscriber_id'] : 0;
@@ -33,13 +41,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $daysLeftPost = ($daysRaw === '') ? -1 : (int) $daysRaw;
         $msgNote = (string) post('message_note', '');
         $sendWhatsapp = post('send_whatsapp') === '1';
+        $sendOldDebts = $sendWhatsapp && post('send_old_debts') === '1';
         $ledgerImport = post('ledger_import') === '1';
         // نقد = دفع الآن | آجل = دين
         $payMode = post('pay_mode') === 'credit' ? 'credit' : 'cash';
 
+        // ديون قديمة قبل إضافة فاتورة التفعيل (للرسالة)
+        $oldDebtLines = array();
+        $oldDebtSum = 0.0;
+        if ($sendOldDebts && $subscriberId > 0) {
+            $oldSt = $pdo->prepare(
+                'SELECT month_label, amount, notes FROM invoices
+                 WHERE subscriber_id = :id AND status = "unpaid"
+                 ORDER BY due_date ASC, id ASC'
+            );
+            $oldSt->execute(array(':id' => $subscriberId));
+            foreach ($oldSt->fetchAll() as $od) {
+                $oldDebtLines[] = $od;
+                $oldDebtSum += (float) $od['amount'];
+            }
+        }
+
+        if ($startDate === '') {
+            $startDate = date('Y-m-d');
+        }
         if ($subscriberId <= 0 || $planId <= 0 || $startDate === '') {
             flash('error', 'اختر المشترك والباقة وتاريخ البداية');
-            redirect('activate.php');
+            redirect($subscriberId > 0 ? ('activate.php?subscriber_id=' . $subscriberId) : 'activate.php');
         }
 
         $planStmt = $pdo->prepare('SELECT * FROM service_plans WHERE id = :id AND is_active = 1');
@@ -59,6 +87,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($endDate < $startDate) {
             flash('error', 'تاريخ الانتهاء غير صحيح');
             redirect('activate.php');
+        }
+
+        // أيام متبقية من اشتراك نشط (تجديد مبكر) تُضاف على نهاية الفترة الجديدة
+        $carryDays = 0;
+        if (!$ledgerImport) {
+            $carrySt = $pdo->prepare(
+                'SELECT end_date FROM subscriptions
+                 WHERE subscriber_id = :id AND status = "active" AND end_date >= CURDATE()
+                 ORDER BY end_date DESC LIMIT 1'
+            );
+            $carrySt->execute(array(':id' => $subscriberId));
+            $oldEnd = $carrySt->fetchColumn();
+            if ($oldEnd) {
+                $carryDays = (int) floor((strtotime($oldEnd) - strtotime(date('Y-m-d'))) / 86400);
+                if ($carryDays < 0) {
+                    $carryDays = 0;
+                }
+            }
+            if ($carryDays > 0) {
+                $endDate = date('Y-m-d', strtotime($endDate . ' +' . $carryDays . ' days'));
+            }
         }
 
         // نقل دفتر: أيام + باقة فقط بدون فاتورة/واتساب تفعيل
@@ -108,6 +157,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $pdo->beginTransaction();
         try {
+            // إنهاء الاشتراكات النشطة السابقة لهذا المشترك
+            $pdo->prepare(
+                'UPDATE subscriptions SET status = "expired"
+                 WHERE subscriber_id = :id AND status = "active"'
+            )->execute(array(':id' => $subscriberId));
+
             $stmt = $pdo->prepare(
                 'INSERT INTO subscriptions
                 (subscriber_id, service_name, monthly_price, cost_price, start_date, end_date, status, activation_msg_sent)
@@ -160,6 +215,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 } else {
                     $extra = trim(($extra !== '' ? $extra . "\n" : '') . 'الدفع آجل — يرجى التسديد');
                 }
+                if ($sendOldDebts && $oldDebtLines) {
+                    $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
+                    $extra .= "\n\nالديون السابقة:";
+                    foreach ($oldDebtLines as $od) {
+                        $lab = month_short_label($od['month_label']);
+                        $extra .= "\n• " . $lab . ': ' . money_format_iqd($od['amount'], $currency);
+                        if (!empty($od['notes'])) {
+                            $extra .= ' (' . $od['notes'] . ')';
+                        }
+                    }
+                    $extra .= "\nإجمالي السابق: " . money_format_iqd($oldDebtSum, $currency);
+                    if (!$isCash) {
+                        $extra .= "\nدين التفعيل: " . money_format_iqd($chargeTotal, $currency);
+                        $extra .= "\nالإجمالي الكلي: " . money_format_iqd($oldDebtSum + $chargeTotal, $currency);
+                    } else {
+                        $totalAfter = subscriber_unpaid_total($pdo, $subscriberId);
+                        $extra .= "\nالإجمالي المتبقي: " . money_format_iqd($totalAfter, $currency);
+                    }
+                } elseif (!$isCash) {
+                    $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
+                    $totalAfter = subscriber_unpaid_total($pdo, $subscriberId);
+                    $extra .= "\nإجمالي الدين: " . money_format_iqd($totalAfter, $currency);
+                }
                 $rentName = $rentalDev ? $rentalDev['name'] : '';
                 $msg = activation_message_with_rental($row, $config, $extra, $rentalFee, $rentName);
                 $result = whatsapp_send($config, $row['phone'], $msg, 'activation');
@@ -167,12 +245,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!empty($result['success'])) {
                     $pdo->prepare('UPDATE subscriptions SET activation_msg_sent = 1 WHERE id = :id')
                         ->execute(array(':id' => $subscriptionId));
-                    flash('success', 'تم التفعيل (' . $modeLabel . ') وإرسال واتساب');
+                    flash('success', 'تم التفعيل (' . $modeLabel . ') وإرسال رسالة');
                 } else {
                     flash('info', 'تم التفعيل (' . $modeLabel . ') لكن ' . whatsapp_fail_user_message($result));
                 }
             } else {
-                flash('success', 'تم التفعيل (' . $modeLabel . ')' . ($rentalFee > 0 ? ' مع إيجار ' . $rentalFee : ''));
+                $okMsg = 'تم التفعيل (' . $modeLabel . ')' . ($rentalFee > 0 ? ' مع إيجار ' . $rentalFee : '');
+                if ($carryDays > 0) {
+                    $okMsg .= ' — أُضيف +' . $carryDays . ' يوم من الاشتراك السابق';
+                }
+                flash('success', $okMsg);
             }
 
             $pdo->commit();
@@ -180,9 +262,293 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $pdo->rollBack();
             flash('error', 'فشل التفعيل: ' . $e->getMessage());
         }
-        redirect('subscriptions.php');
+        redirect('subscriber.php?id=' . $subscriberId);
     }
 }
+
+// بيانات المشترك المختار مسبقاً + باقته الحالية
+$quickMode = ($preselectId > 0 && empty($_GET['advanced']));
+$preselectSub = null;
+$carryDaysUi = 0;
+$currentPlanId = 0;
+$currentPlan = null;
+$lastServiceName = '';
+$rentalFeeUi = 0.0;
+$chargePreview = 0.0;
+$hasRentUi = false;
+if ($preselectId > 0) {
+    foreach ($subscribers as $s) {
+        if ((int) $s['id'] === $preselectId) {
+            $preselectSub = $s;
+            $carryDaysUi = isset($s['days_left']) ? (int) $s['days_left'] : 0;
+            if ($carryDaysUi < 0) {
+                $carryDaysUi = 0;
+            }
+            break;
+        }
+    }
+    $lastSubSt = $pdo->prepare(
+        'SELECT service_name, monthly_price FROM subscriptions
+         WHERE subscriber_id = :id
+         ORDER BY (status = "active") DESC, id DESC
+         LIMIT 1'
+    );
+    $lastSubSt->execute(array(':id' => $preselectId));
+    $lastSub = $lastSubSt->fetch();
+    if ($lastSub) {
+        $lastServiceName = (string) $lastSub['service_name'];
+        $lastPrice = (float) $lastSub['monthly_price'];
+        foreach ($plans as $p) {
+            if (strcasecmp((string) $p['name'], $lastServiceName) === 0) {
+                $currentPlan = $p;
+                $currentPlanId = (int) $p['id'];
+                break;
+            }
+        }
+        if (!$currentPlan) {
+            foreach ($plans as $p) {
+                if ((float) $p['monthly_price'] === $lastPrice) {
+                    $currentPlan = $p;
+                    $currentPlanId = (int) $p['id'];
+                    break;
+                }
+            }
+        }
+    }
+    if (!$currentPlan && $plans) {
+        $currentPlan = $plans[0];
+        $currentPlanId = (int) $currentPlan['id'];
+    }
+    $subFullSt = $pdo->prepare('SELECT * FROM subscribers WHERE id = :id');
+    $subFullSt->execute(array(':id' => $preselectId));
+    $subFull = $subFullSt->fetch();
+    $settingsUi = settings_load();
+    if ($subFull && subscriber_has_rental($subFull)) {
+        $hasRentUi = true;
+        $rentalFeeUi = (float) rental_fee_amount($settingsUi);
+    }
+    if ($currentPlan) {
+        $chargePreview = (float) $currentPlan['monthly_price'] + $rentalFeeUi;
+    }
+}
+
+$oldDebtsUi = array();
+$oldDebtsSumUi = 0.0;
+if ($quickMode && $preselectId > 0) {
+    $odUi = $pdo->prepare(
+        'SELECT month_label, amount, notes FROM invoices
+         WHERE subscriber_id = :id AND status = "unpaid"
+         ORDER BY due_date ASC, id ASC'
+    );
+    $odUi->execute(array(':id' => $preselectId));
+    $oldDebtsUi = $odUi->fetchAll();
+    foreach ($oldDebtsUi as $od) {
+        $oldDebtsSumUi += (float) $od['amount'];
+    }
+}
+
+if ($quickMode && $preselectSub):
+    $backUrl = 'subscriber.php?id=' . (int) $preselectId;
+    $advUrl = 'activate.php?subscriber_id=' . (int) $preselectId . '&advanced=1';
+    $hasOldDebtsUi = count($oldDebtsUi) > 0;
+    render_header(t('quick_activate'), 'activate');
+?>
+<div class="modal-backdrop quick-activate-wrap" id="quickActivateBox">
+    <div class="modal-card quick-activate-card">
+        <div class="quick-top">
+            <div>
+                <h3><?php echo e(t('quick_activate')); ?></h3>
+                <p class="quick-sub-name"><?php echo e($preselectSub['name']); ?></p>
+                <p class="meta quick-phone"><?php echo e(format_phone_display($preselectSub['phone'])); ?></p>
+            </div>
+            <a class="quick-adv-link" href="<?php echo e($advUrl); ?>" title="<?php echo e(t('advanced')); ?>">
+                <span class="quick-adv-ico" aria-hidden="true">⚙</span>
+                <span><?php echo e(t('advanced')); ?></span>
+            </a>
+        </div>
+        <?php if ($carryDaysUi > 0): ?>
+            <div class="carry-days-hint quick-carry">
+                <strong>+<?php echo (int) $carryDaysUi; ?> <?php echo e($lang === 'en' ? 'extra days' : 'يوم إضافي'); ?></strong>
+                — <?php echo e($lang === 'en' ? 'added on top of the new period' : 'تنضاف فوق مدة الاشتراك الجديد'); ?>
+            </div>
+        <?php endif; ?>
+
+        <form method="post" id="quickActivateForm">
+            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+            <input type="hidden" name="action" value="create">
+            <input type="hidden" name="subscriber_id" value="<?php echo (int) $preselectId; ?>">
+            <input type="hidden" name="start_date" value="<?php echo e(date('Y-m-d')); ?>">
+            <input type="hidden" name="end_date" id="quickEndDate" value="<?php echo e($defaultEnd); ?>">
+            <input type="hidden" name="days_left" value="">
+
+            <div class="quick-grid">
+                <div class="quick-col">
+                    <div class="quick-plan-line">
+                        <span class="meta"><?php echo e(t('current_package')); ?></span>
+                        <strong id="quickPlanLabel"><?php echo e($currentPlan ? $currentPlan['name'] : '—'); ?></strong>
+                    </div>
+                    <select name="plan_id" id="quickPlanSelect" required class="quick-plan-select">
+                        <?php foreach ($plans as $p): ?>
+                            <option value="<?php echo (int) $p['id']; ?>"
+                                data-price="<?php echo (float) $p['monthly_price']; ?>"
+                                <?php echo $currentPlanId === (int) $p['id'] ? ' selected' : ''; ?>>
+                                <?php echo e($p['name'] . ' | ' . money_format_iqd($p['monthly_price'], $config['currency'])); ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                    <button type="button" class="btn ghost sm quick-details-btn" id="togglePlanDetails">
+                        <?php echo e(t('show_details')); ?>
+                    </button>
+
+                    <div class="quick-amount-box">
+                        <span><?php echo e(t('activate_amount')); ?></span>
+                        <strong id="quickAmountLabel"><?php echo e(money_format_iqd($chargePreview, $config['currency'])); ?></strong>
+                        <?php if ($hasRentUi): ?>
+                            <small class="meta" id="quickRentNote"><?php echo e($lang === 'en' ? 'Includes rent' : 'يشمل الإيجار'); ?> (<?php echo e(money_format_iqd($rentalFeeUi, $config['currency'])); ?>)</small>
+                        <?php endif; ?>
+                    </div>
+                </div>
+
+                <div class="quick-col">
+                    <div class="pay-mode-box">
+                        <div class="pay-mode-label"><?php echo e(t('pay_mode')); ?></div>
+                        <div class="pay-mode-row">
+                            <label class="pay-mode-option">
+                                <input type="radio" name="pay_mode" value="cash" checked>
+                                <span class="pay-mode-card cash">
+                                    <strong><?php echo e(t('pay_cash')); ?></strong>
+                                    <small><?php echo e(t('pay_cash_hint')); ?></small>
+                                </span>
+                            </label>
+                            <label class="pay-mode-option">
+                                <input type="radio" name="pay_mode" value="credit">
+                                <span class="pay-mode-card credit">
+                                    <strong><?php echo e(t('pay_credit')); ?></strong>
+                                    <small><?php echo e(t('pay_credit_hint')); ?></small>
+                                </span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <?php if ($hasOldDebtsUi): ?>
+                    <div class="quick-old-debts">
+                        <div class="quick-old-head">
+                            <span><?php echo e(t('old_debts')); ?></span>
+                            <strong><?php echo e(money_format_iqd($oldDebtsSumUi, $config['currency'])); ?></strong>
+                        </div>
+                        <ul class="quick-old-list">
+                            <?php foreach ($oldDebtsUi as $od): ?>
+                                <li>
+                                    <span><?php echo e(month_short_label($od['month_label'])); ?><?php if (!empty($od['notes'])): ?> — <?php echo e($od['notes']); ?><?php endif; ?></span>
+                                    <strong><?php echo e(money_format_iqd($od['amount'], $config['currency'])); ?></strong>
+                                </li>
+                            <?php endforeach; ?>
+                        </ul>
+                        <div class="quick-old-total meta">
+                            <?php echo e(t('grand_total')); ?>:
+                            <strong id="quickGrandTotal"><?php echo e(money_format_iqd($oldDebtsSumUi + $chargePreview, $config['currency'])); ?></strong>
+                            <small>(<?php echo e($lang === 'en' ? 'if credit / remaining if cash' : 'مع التفعيل إن كان آجل'); ?>)</small>
+                        </div>
+                    </div>
+                    <?php endif; ?>
+
+                    <div class="quick-msg-box">
+                        <label class="toggle">
+                            <input type="checkbox" name="send_whatsapp" id="quickSendMsg" value="1" checked>
+                            <span class="toggle-ui"></span>
+                            <span class="toggle-text"><?php echo e(t('send_message')); ?></span>
+                        </label>
+                        <?php if ($hasOldDebtsUi): ?>
+                        <div class="quick-nested-toggle" id="quickOldDebtsToggle">
+                            <label class="toggle">
+                                <input type="checkbox" name="send_old_debts" value="1" checked>
+                                <span class="toggle-ui"></span>
+                                <span class="toggle-text"><?php echo e(t('send_old_debts_detail')); ?></span>
+                            </label>
+                        </div>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            </div>
+
+            <div class="quick-actions">
+                <button class="btn quick-activate-btn" type="submit" onclick="return confirm(<?php echo json_encode(t('confirm_activate')); ?>);"><?php echo e(t('activate')); ?></button>
+                <a class="btn ghost quick-cancel-btn" href="<?php echo e($backUrl); ?>"><?php echo e($lang === 'en' ? 'Cancel' : 'إلغاء'); ?></a>
+            </div>
+        </form>
+    </div>
+</div>
+<script>
+(function () {
+  var rentFee = <?php echo json_encode((float) $rentalFeeUi); ?>;
+  var oldSum = <?php echo json_encode((float) $oldDebtsSumUi); ?>;
+  var currency = <?php echo json_encode(isset($config['currency']) ? $config['currency'] : 'د.ع'); ?>;
+  var planSel = document.getElementById('quickPlanSelect');
+  var planLabel = document.getElementById('quickPlanLabel');
+  var amountLabel = document.getElementById('quickAmountLabel');
+  var grandLabel = document.getElementById('quickGrandTotal');
+  var toggleBtn = document.getElementById('togglePlanDetails');
+  var sendMsg = document.getElementById('quickSendMsg');
+  var nested = document.getElementById('quickOldDebtsToggle');
+  var showTxt = <?php echo json_encode(t('show_details')); ?>;
+  var hideTxt = <?php echo json_encode(t('hide_details')); ?>;
+  function money(n) {
+    try { return Math.round(n).toLocaleString('en-US') + ' ' + currency; } catch (e) { return Math.round(n) + ' ' + currency; }
+  }
+  function syncMsgNest() {
+    if (!nested || !sendMsg) return;
+    var on = !!sendMsg.checked;
+    nested.style.display = on ? '' : 'none';
+    var inp = nested.querySelector('input[type="checkbox"]');
+    if (!inp) return;
+    inp.disabled = !on;
+    if (!on) {
+      inp.checked = false;
+    } else if (!inp.dataset.userTouched) {
+      inp.checked = true;
+    }
+  }
+  function sync() {
+    if (!planSel) return;
+    var opt = planSel.options[planSel.selectedIndex];
+    if (!opt) return;
+    var price = parseFloat(opt.getAttribute('data-price') || '0') || 0;
+    var total = price + (rentFee || 0);
+    if (planLabel) {
+      var name = (opt.textContent || '').split('|')[0];
+      planLabel.textContent = name ? name.replace(/^\s+|\s+$/g, '') : opt.textContent;
+    }
+    if (amountLabel) amountLabel.textContent = money(total);
+    if (grandLabel) grandLabel.textContent = money(oldSum + total);
+  }
+  if (planSel) {
+    planSel.classList.add('is-collapsed');
+    planSel.addEventListener('change', sync);
+    sync();
+  }
+  if (toggleBtn && planSel) {
+    toggleBtn.addEventListener('click', function () {
+      var open = planSel.classList.toggle('is-open');
+      planSel.classList.toggle('is-collapsed', !open);
+      toggleBtn.textContent = open ? hideTxt : showTxt;
+    });
+  }
+  if (sendMsg) {
+    sendMsg.addEventListener('change', syncMsgNest);
+    syncMsgNest();
+  }
+  if (nested) {
+    var nestedInp = nested.querySelector('input[type="checkbox"]');
+    if (nestedInp) {
+      nestedInp.addEventListener('change', function () { nestedInp.dataset.userTouched = '1'; });
+    }
+  }
+})();
+</script>
+<?php
+render_footer();
+return;
+endif;
 
 render_header(t('activate'), 'activate');
 ?>
@@ -193,7 +559,12 @@ render_header(t('activate'), 'activate');
             ? 'Choose subscriber, package, and Cash or Credit — or ledger import for remaining days only'
             : 'تفعيل جديد (نقد/آجل) — أو نقل من الدفتر للأيام الباقية فقط بدون فاتورة'); ?>
     </p>
-    <form method="post" id="subForm">
+    <?php if ($preselectId > 0): ?>
+    <div class="actions" style="margin-top:0;margin-bottom:10px">
+        <a class="btn secondary sm" href="activate.php?subscriber_id=<?php echo (int) $preselectId; ?>"><?php echo e($lang === 'en' ? 'Back to quick' : 'رجوع للتفعيل السريع'); ?></a>
+    </div>
+    <?php endif; ?>
+    <form method="post" id="subForm" onsubmit="return confirm(<?php echo json_encode(t('confirm_activate')); ?>);">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="action" value="create">
         <div class="actions toggle-row" style="margin-top:0;margin-bottom:14px">
@@ -206,21 +577,26 @@ render_header(t('activate'), 'activate');
         <div class="form-grid">
             <div>
                 <label><?php echo e(t('subscribers')); ?></label>
-                <select name="subscriber_id" required>
+                <select name="subscriber_id" id="subscriberSelect" required>
                     <option value="">...</option>
                     <?php foreach ($subscribers as $s): ?>
-                        <option value="<?php echo (int) $s['id']; ?>"<?php echo ($preselectId === (int) $s['id']) ? ' selected' : ''; ?>>
+                        <?php $dLeft = isset($s['days_left']) ? (int) $s['days_left'] : 0; if ($dLeft < 0) { $dLeft = 0; } ?>
+                        <option value="<?php echo (int) $s['id']; ?>"
+                            data-days-left="<?php echo $dLeft; ?>"
+                            <?php echo ($preselectId === (int) $s['id']) ? ' selected' : ''; ?>>
                             <?php echo e($s['name'] . ' - ' . format_phone_display($s['phone'])); ?>
+                            <?php if ($dLeft > 0): ?> (+<?php echo $dLeft; ?>)<?php endif; ?>
                         </option>
                     <?php endforeach; ?>
                 </select>
+                <div id="carryDaysHint" class="carry-days-hint" hidden></div>
             </div>
             <div>
                 <label><?php echo e(t('package')); ?></label>
                 <select name="plan_id" id="planSelect" required>
                     <option value="">...</option>
                     <?php foreach ($plans as $p): ?>
-                        <option value="<?php echo (int) $p['id']; ?>">
+                        <option value="<?php echo (int) $p['id']; ?>"<?php echo $currentPlanId === (int) $p['id'] ? ' selected' : ''; ?>>
                             <?php echo e($p['name'] . ' | ' . money_format_iqd($p['monthly_price'], $config['currency'])); ?>
                         </option>
                     <?php endforeach; ?>
@@ -243,6 +619,7 @@ render_header(t('activate'), 'activate');
             <div>
                 <label><?php echo e(t('to_date')); ?></label>
                 <input type="date" name="end_date" id="endDate" value="<?php echo e($defaultEnd); ?>" required>
+                <small class="field-hint" id="carryEndNote" hidden></small>
             </div>
             <div>
                 <label><?php echo e(t('message_note')); ?></label>
@@ -279,7 +656,7 @@ render_header(t('activate'), 'activate');
         </div>
         <div class="actions">
             <button class="btn" type="submit" id="activateSubmitBtn"><?php echo e(t('activate')); ?></button>
-            <a class="btn ghost" href="subscriptions.php"><?php echo e(t('movements_list')); ?></a>
+            <a class="btn ghost" href="subscriptions.php<?php echo $preselectId > 0 ? ('?subscriber_id=' . (int) $preselectId) : ''; ?>" id="movementsLink"><?php echo e(t('movements_list')); ?></a>
         </div>
     </form>
 </div>
@@ -293,6 +670,9 @@ render_header(t('activate'), 'activate');
   var waRow = document.getElementById('waToggleRow');
   var waChk = document.getElementById('sendWaChk');
   var submitBtn = document.getElementById('activateSubmitBtn');
+  var subSelect = document.getElementById('subscriberSelect');
+  var carryHint = document.getElementById('carryDaysHint');
+  var movLink = document.getElementById('movementsLink');
   var periodMode = <?php echo json_encode($periodMode); ?>;
   var syncing = false;
   function ymd(d) {
@@ -333,18 +713,60 @@ render_header(t('activate'), 'activate');
     var db = new Date(parseInt(pb[0],10), parseInt(pb[1],10)-1, parseInt(pb[2],10));
     return Math.max(0, Math.round((db - da) / 86400000));
   }
+  function carryDays() {
+    if (!subSelect) return 0;
+    var opt = subSelect.options[subSelect.selectedIndex];
+    if (!opt) return 0;
+    var n = parseInt(opt.getAttribute('data-days-left') || '0', 10);
+    return (isNaN(n) || n < 0) ? 0 : n;
+  }
+  var carryEndNote = document.getElementById('carryEndNote');
+  function syncCarryUi() {
+    var n = carryDays();
+    if (carryHint) {
+      if (n > 0) {
+        carryHint.hidden = false;
+        carryHint.innerHTML = <?php echo json_encode($lang === 'en'
+            ? '<strong>+{n} extra days</strong> — still left on current sub; will be added on top of the new period'
+            : '<strong>+{n} يوم إضافي</strong> — باقية من الاشتراك الحالي، وتنضاف فوق مدة الاشتراك الجديد'); ?>
+          .replace(/\{n\}/g, String(n));
+      } else {
+        carryHint.hidden = true;
+        carryHint.innerHTML = '';
+      }
+    }
+    if (carryEndNote) {
+      if (n > 0) {
+        carryEndNote.hidden = false;
+        carryEndNote.textContent = <?php echo json_encode($lang === 'en'
+            ? 'End date already includes +{n} carry days from the old subscription.'
+            : 'تاريخ النهاية فيه أصلاً +{n} يوم مرحّلة من الاشتراك القديم.'); ?>
+          .replace(/\{n\}/g, String(n));
+      } else {
+        carryEndNote.hidden = true;
+        carryEndNote.textContent = '';
+      }
+    }
+    if (movLink && subSelect && subSelect.value) {
+      movLink.href = 'subscriptions.php?subscriber_id=' + encodeURIComponent(subSelect.value);
+    } else if (movLink) {
+      movLink.href = 'subscriptions.php';
+    }
+  }
   function fromDays() {
     if (syncing || !days || !end || !start || !start.value) return;
     var n = parseInt(days.value, 10);
     if (isNaN(n) || n < 0 || days.value === '') return;
     syncing = true;
-    end.value = addDays(start.value, n);
+    end.value = addDays(addDays(start.value, n), carryDays());
     syncing = false;
   }
   function fromEnd() {
     if (syncing || !days || !end || !end.value || !start || !start.value) return;
     syncing = true;
-    days.value = String(Math.max(0, daysBetween(start.value, end.value)));
+    var total = Math.max(0, daysBetween(start.value, end.value));
+    var c = carryDays();
+    days.value = String(Math.max(0, total - c));
     syncing = false;
   }
   function applyDefaultPeriod() {
@@ -354,7 +776,7 @@ render_header(t('activate'), 'activate');
       return;
     }
     syncing = true;
-    end.value = defaultEndFromStart(start.value);
+    end.value = addDays(defaultEndFromStart(start.value), carryDays());
     syncing = false;
   }
   function syncLedgerUi() {
@@ -373,10 +795,18 @@ render_header(t('activate'), 'activate');
   if (days) days.addEventListener('change', fromDays);
   if (end) end.addEventListener('change', fromEnd);
   if (start) start.addEventListener('change', applyDefaultPeriod);
+  if (subSelect) {
+    subSelect.addEventListener('change', function () {
+      syncCarryUi();
+      applyDefaultPeriod();
+    });
+  }
   if (ledger) {
     ledger.addEventListener('change', syncLedgerUi);
     syncLedgerUi();
   }
+  syncCarryUi();
+  if (subSelect && subSelect.value) applyDefaultPeriod();
   if (days && days.value === '' && !(ledger && ledger.checked)) {
     try { days.focus(); } catch (e) {}
   }

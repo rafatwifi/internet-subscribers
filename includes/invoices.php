@@ -163,8 +163,122 @@ function apply_invoice_payment($pdo, $config, $invoiceId, $payAmount, $sendWhats
 }
 
 /**
+ * سعر الاشتراك الشهري للمشترك (آخر اشتراك، أو باقة نشطة)
+ */
+function subscriber_monthly_price($pdo, $subscriberId)
+{
+    $subscriberId = (int) $subscriberId;
+    if ($subscriberId <= 0) {
+        return 0.0;
+    }
+    try {
+        $st = $pdo->prepare(
+            'SELECT monthly_price FROM subscriptions
+             WHERE subscriber_id = :id
+             ORDER BY (status = "active") DESC, id DESC
+             LIMIT 1'
+        );
+        $st->execute(array(':id' => $subscriberId));
+        $price = (float) $st->fetchColumn();
+        if ($price > 0) {
+            return $price;
+        }
+    } catch (Exception $e) {
+    }
+    return 0.0;
+}
+
+/**
+ * تسديد ديون مشترك (كامل أو جزئي عبر أقدم الفواتير)
+ * يرجع array($ok, $message, $details)
+ */
+function apply_subscriber_payment($pdo, $config, $subscriberId, $payAmount, $sendWhatsapp)
+{
+    $subscriberId = (int) $subscriberId;
+    $payAmount = (float) $payAmount;
+    $remainingPay = $payAmount;
+    if ($subscriberId <= 0 || $remainingPay <= 0) {
+        return array(false, 'أدخل مبلغ تسديد صحيح', null);
+    }
+
+    $st = $pdo->prepare(
+        'SELECT id, amount FROM invoices
+         WHERE subscriber_id = :id AND status = "unpaid"
+         ORDER BY due_date ASC, id ASC'
+    );
+    $st->execute(array(':id' => $subscriberId));
+    $invoices = $st->fetchAll();
+    if (!$invoices) {
+        return array(false, 'ماكو ديون غير مسددة', null);
+    }
+
+    $paidTotal = 0.0;
+    $lastDetails = null;
+    $lastOk = false;
+    foreach ($invoices as $inv) {
+        if ($remainingPay <= 0) {
+            break;
+        }
+        $due = (float) $inv['amount'];
+        $chunk = ($remainingPay >= $due) ? $due : $remainingPay;
+        // واتساب مرة واحدة بعد آخر دفعة
+        list($ok, $msg, $details) = apply_invoice_payment($pdo, $config, (int) $inv['id'], $chunk, false);
+        if (!$ok) {
+            if ($paidTotal <= 0) {
+                return array(false, $msg, null);
+            }
+            break;
+        }
+        $paidTotal += $chunk;
+        $remainingPay -= $chunk;
+        $lastDetails = $details;
+        $lastOk = true;
+    }
+
+    if (!$lastOk || $paidTotal <= 0) {
+        return array(false, 'فشل التسديد', null);
+    }
+
+    $remainingTotal = subscriber_unpaid_total($pdo, $subscriberId);
+    $info = $pdo->prepare('SELECT name, phone FROM subscribers WHERE id = :id');
+    $info->execute(array(':id' => $subscriberId));
+    $subRow = $info->fetch();
+    $details = array(
+        'paid_amount' => $paidTotal,
+        'remaining_invoice' => 0,
+        'remaining_total' => $remainingTotal,
+        'row' => array(
+            'name' => $subRow ? $subRow['name'] : '',
+            'phone' => $subRow ? $subRow['phone'] : '',
+            'month_label' => date('Y-m'),
+            'notes' => '',
+        ),
+        'full' => ($remainingTotal <= 0.0001),
+    );
+
+    if ($sendWhatsapp && $subRow) {
+        $payRow = array(
+            'name' => $subRow['name'],
+            'phone' => $subRow['phone'],
+            'month_label' => date('Y-m'),
+            'amount' => $paidTotal,
+            'remaining' => $remainingTotal,
+            'notes' => '',
+        );
+        $msg = payment_message($payRow, $config);
+        $result = whatsapp_send($config, $subRow['phone'], $msg, 'payment');
+        log_message($pdo, $subscriberId, $result);
+        $details['whatsapp_ok'] = !empty($result['success']);
+        $details['whatsapp_msg'] = !empty($result['success']) ? '' : whatsapp_fail_user_message($result);
+    }
+
+    return array(true, 'ok', $details);
+}
+
+/**
  * إدخال ديون لمشترك (من نموذج إضافة)
  * يرجع array('count' => int, 'sum' => float)
+ * الأنواع: month | item | month_rent (اشتراك + إيجار)
  */
 function insert_opening_debts($pdo, $subscriberId, $post)
 {
@@ -174,26 +288,78 @@ function insert_opening_debts($pdo, $subscriberId, $post)
     $dnotes = isset($post['debt_notes']) && is_array($post['debt_notes']) ? $post['debt_notes'] : array();
     $debtCount = 0;
     $debtSum = 0.0;
+
+    $subPrice = subscriber_monthly_price($pdo, $subscriberId);
+    $rentFee = 0.0;
+    $rentLabel = '';
+    $hasRent = false;
+    if (function_exists('subscriber_has_rental')) {
+        $subStmt = $pdo->prepare('SELECT * FROM subscribers WHERE id = :id');
+        $subStmt->execute(array(':id' => (int) $subscriberId));
+        $subRow = $subStmt->fetch();
+        if ($subRow && subscriber_has_rental($subRow)) {
+            $hasRent = true;
+            $settings = function_exists('settings_load') ? settings_load() : array();
+            $rentFee = function_exists('rental_fee_amount') ? (float) rental_fee_amount($settings) : 0.0;
+            $dev = function_exists('rental_device_by_id')
+                ? rental_device_by_id(isset($subRow['rental_device_id']) ? $subRow['rental_device_id'] : '', $settings)
+                : null;
+            if ($dev && !empty($dev['name'])) {
+                $rentLabel = $dev['name'];
+            }
+        }
+    }
+
     $insDebt = $pdo->prepare(
         'INSERT INTO invoices (subscription_id, subscriber_id, month_label, amount, cost_price, due_date, status, notes)
          VALUES (NULL, :subscriber_id, :month_label, :amount, 0, :due_date, "unpaid", :notes)'
     );
     $n = max(count($amounts), count($months), count($kinds), count($dnotes));
     for ($i = 0; $i < $n; $i++) {
+        $rawKind = isset($kinds[$i]) ? (string) $kinds[$i] : 'month';
+        if ($rawKind === 'item') {
+            $kind = 'item';
+        } elseif ($rawKind === 'month_rent') {
+            $kind = 'month_rent';
+        } else {
+            $kind = 'month';
+        }
+
         $amt = isset($amounts[$i]) ? (float) $amounts[$i] : 0;
-        if ($amt <= 0) {
-            continue;
-        }
-        $kind = isset($kinds[$i]) && $kinds[$i] === 'item' ? 'item' : 'month';
-        $month = isset($months[$i]) ? trim((string) $months[$i]) : '';
-        if ($kind === 'item') {
-            if ($month === '' || preg_match('/^\d{4}-\d{2}$/', $month)) {
-                $month = 'غرض';
-            }
-        } elseif ($month === '') {
-            $month = date('Y-m');
-        }
         $dnote = isset($dnotes[$i]) ? trim((string) $dnotes[$i]) : '';
+        $month = isset($months[$i]) ? trim((string) $months[$i]) : '';
+
+        if ($kind === 'month_rent') {
+            if (!$hasRent) {
+                continue;
+            }
+            $calc = $subPrice + $rentFee;
+            if ($amt <= 0) {
+                $amt = $calc;
+            }
+            if ($amt <= 0) {
+                continue;
+            }
+            if ($month === '') {
+                $month = date('Y-m');
+            }
+            if ($dnote === '') {
+                $dnote = 'اشتراك ' . (int) $subPrice . ' + إيجار ' . (int) $rentFee
+                    . ($rentLabel !== '' ? (' (' . $rentLabel . ')') : '');
+            }
+        } else {
+            if ($amt <= 0) {
+                continue;
+            }
+            if ($kind === 'item') {
+                if ($month === '' || preg_match('/^\d{4}-\d{2}$/', $month)) {
+                    $month = 'غرض';
+                }
+            } elseif ($month === '') {
+                $month = date('Y-m');
+            }
+        }
+
         $insDebt->execute(array(
             ':subscriber_id' => (int) $subscriberId,
             ':month_label' => $month,
@@ -203,7 +369,8 @@ function insert_opening_debts($pdo, $subscriberId, $post)
         ));
         $newId = (int) $pdo->lastInsertId();
         if (function_exists('activity_log')) {
-            $details = 'الشهر: ' . $month . "\n"
+            $details = 'النوع: ' . $kind . "\n"
+                . 'الشهر: ' . $month . "\n"
                 . 'المبلغ: ' . $amt . "\n"
                 . 'ملاحظات: ' . ($dnote !== '' ? $dnote : '-');
             activity_log(

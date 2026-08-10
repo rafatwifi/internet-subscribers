@@ -124,6 +124,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('subscriber.php?id=' . $id . '#messages');
     }
 
+    if ($action === 'pay_debts') {
+        $mode = post('pay_mode', 'full') === 'partial' ? 'partial' : 'full';
+        $sendWa = post('send_whatsapp') === '1';
+        $totalDue = subscriber_unpaid_total($pdo, $id);
+        if ($totalDue <= 0) {
+            flash('error', 'ماكو ديون غير مسددة');
+            redirect('subscriber.php?id=' . $id . '&tab=pay#debts');
+        }
+        $payAmount = ($mode === 'full') ? $totalDue : (float) post('pay_amount', '0');
+        if ($payAmount <= 0) {
+            flash('error', 'أدخل مبلغ تسديد صحيح');
+            redirect('subscriber.php?id=' . $id . '&tab=pay#debts');
+        }
+        if ($payAmount > $totalDue) {
+            $payAmount = $totalDue;
+        }
+        list($ok, $msg, $details) = apply_subscriber_payment($pdo, $config, $id, $payAmount, $sendWa);
+        if (!$ok) {
+            flash('error', $msg);
+        } else {
+            $paidAmt = isset($details['paid_amount']) ? (float) $details['paid_amount'] : $payAmount;
+            $remain = isset($details['remaining_total']) ? (float) $details['remaining_total'] : 0;
+            $note = 'تم تسديد ' . money_format_iqd($paidAmt, $config['currency']);
+            if ($remain > 0) {
+                $note .= ' — المتبقي ' . money_format_iqd($remain, $config['currency']);
+            }
+            if ($sendWa) {
+                if (!empty($details['whatsapp_ok'])) {
+                    $note .= ' + واتساب';
+                } elseif (!empty($details['whatsapp_msg'])) {
+                    $note .= ' — ' . $details['whatsapp_msg'];
+                }
+            }
+            flash('success', $note);
+        }
+        redirect('subscriber.php?id=' . $id . '&tab=pay#debts');
+    }
+
     if ($action === 'add_debts') {
         $debtInfo = insert_opening_debts($pdo, $id, $_POST);
         $debtCount = is_array($debtInfo) ? (int) $debtInfo['count'] : (int) $debtInfo;
@@ -390,7 +428,13 @@ $lastMsg = $msgLogs ? $msgLogs[0] : null;
 $activityLogs = fetch_subscriber_activity($pdo, $id, 150);
 
 $editMode = isset($_GET['edit']) && $_GET['edit'] === '1';
-$debtTab = isset($_GET['tab']) && $_GET['tab'] === 'add_debt' ? 'add_debt' : 'list';
+$debtTab = 'list';
+if (isset($_GET['tab'])) {
+    $tabGet = (string) $_GET['tab'];
+    if ($tabGet === 'add_debt' || $tabGet === 'pay' || $tabGet === 'list') {
+        $debtTab = $tabGet;
+    }
+}
 if (isset($_GET['edit_inv']) && (int) $_GET['edit_inv'] > 0) {
     $debtTab = 'list';
 }
@@ -538,10 +582,23 @@ endif;
     </div>
 </div>
 
+<?php
+$settingsRental = settings_load();
+$rentalDevices = rental_devices_list($settingsRental);
+$rentalFee = rental_fee_amount($settingsRental);
+$hasRent = subscriber_has_rental($subscriber);
+$currentRentDev = $hasRent ? rental_device_by_id($subscriber['rental_device_id'], $settingsRental) : null;
+$subMonthlyPrice = subscriber_monthly_price($pdo, $id);
+$isActiveSub = !empty($activeSubCard);
+?>
 <div class="page-head name-with-edit">
     <h1>
         <?php echo e($subscriber['name']); ?>
         <a class="edit-icon" href="subscriber.php?id=<?php echo (int) $id; ?>&edit=1" title="<?php echo e(t('edit')); ?>">✎</a>
+        <span class="sub-status <?php echo $isActiveSub ? 'is-active' : 'is-off'; ?>">
+            <span class="status-dot" aria-hidden="true"></span>
+            <?php echo e($isActiveSub ? t('status_active') : t('status_inactive')); ?>
+        </span>
     </h1>
     <p><?php echo e(format_phone_display($subscriber['phone'])); ?></p>
 </div>
@@ -551,15 +608,11 @@ endif;
     <a class="btn" href="subscriber.php?id=<?php echo (int) $id; ?>&edit=1"><?php echo e(t('edit')); ?></a>
     <a class="btn secondary" href="activate.php?subscriber_id=<?php echo (int) $id; ?>"><?php echo e(t('activate')); ?></a>
     <a class="btn money" href="subscriber.php?id=<?php echo (int) $id; ?>&tab=add_debt#debts"><?php echo e($lang === 'en' ? 'Add debt' : 'إضافة دين'); ?></a>
+    <?php if ($unpaid > 0): ?>
+    <a class="btn" style="background:#16a34a;border-color:#16a34a;color:#fff" href="subscriber.php?id=<?php echo (int) $id; ?>&tab=pay#debts"><?php echo e(t('pay_debts')); ?></a>
+    <?php endif; ?>
 </div>
 
-<?php
-$settingsRental = settings_load();
-$rentalDevices = rental_devices_list($settingsRental);
-$rentalFee = rental_fee_amount($settingsRental);
-$hasRent = subscriber_has_rental($subscriber);
-$currentRentDev = $hasRent ? rental_device_by_id($subscriber['rental_device_id'], $settingsRental) : null;
-?>
 <div class="panel glass-panel" id="rental">
     <h2><?php echo e($lang === 'en' ? 'Rental device' : 'جهاز إيجار'); ?></h2>
     <form method="post" id="rentalForm">
@@ -677,7 +730,63 @@ $currentRentDev = $hasRent ? rental_device_by_id($subscriber['rental_device_id']
     <h2><?php echo e($lang === 'en' ? 'Debts' : 'الديون'); ?></h2>
     <div class="soft-tabs">
         <a class="soft-tab<?php echo $debtTab === 'list' ? ' on' : ''; ?>" href="subscriber.php?id=<?php echo (int) $id; ?>&tab=list#debts"><?php echo e(t('debts_list_tab')); ?></a>
+        <a class="soft-tab<?php echo $debtTab === 'pay' ? ' on' : ''; ?>" href="subscriber.php?id=<?php echo (int) $id; ?>&tab=pay#debts"><?php echo e(t('pay_debts')); ?></a>
         <a class="soft-tab<?php echo $debtTab === 'add_debt' ? ' on' : ''; ?>" href="subscriber.php?id=<?php echo (int) $id; ?>&tab=add_debt#debts"><?php echo e(t('add_debts_tab')); ?></a>
+    </div>
+
+    <div class="tab-pane<?php echo $debtTab === 'pay' ? '' : ' hidden'; ?>">
+        <?php if ($unpaid <= 0): ?>
+            <p class="meta" style="margin:0"><?php echo e($lang === 'en' ? 'No unpaid debts.' : 'ماكو ديون غير مسددة.'); ?></p>
+        <?php else: ?>
+        <form method="post" id="payDebtsForm" class="pay-debts-form">
+            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+            <input type="hidden" name="action" value="pay_debts">
+            <div class="pay-total-line">
+                <span><?php echo e($lang === 'en' ? 'Total due' : 'إجمالي المتبقي'); ?></span>
+                <strong><?php echo e(money_format_iqd($unpaid, $config['currency'])); ?></strong>
+            </div>
+            <div class="pay-mode-row">
+                <label class="pay-mode-opt">
+                    <input type="radio" name="pay_mode" value="full" id="payModeFull" checked>
+                    <span><?php echo e(t('pay_full')); ?></span>
+                </label>
+                <label class="pay-mode-opt">
+                    <input type="radio" name="pay_mode" value="partial" id="payModePartial">
+                    <span><?php echo e(t('pay_partial_mode')); ?></span>
+                </label>
+            </div>
+            <div id="payPartialBox" class="hidden" style="margin-top:10px;max-width:280px">
+                <label><?php echo e(t('partial_pay')); ?></label>
+                <input type="number" name="pay_amount" id="payAmountInput" min="1" step="1" max="<?php echo (int) $unpaid; ?>" value="<?php echo (int) $unpaid; ?>">
+            </div>
+            <div class="actions toggle-row" style="margin-top:14px">
+                <label class="toggle">
+                    <input type="checkbox" name="send_whatsapp" value="1" checked>
+                    <span class="toggle-ui"></span>
+                    <span class="toggle-text"><?php echo e($lang === 'en' ? 'Send notice to subscriber' : 'إرسال إشعار للمشترك'); ?></span>
+                </label>
+            </div>
+            <div class="actions" style="margin-top:12px">
+                <button class="btn" type="submit" style="background:#16a34a;border-color:#16a34a"><?php echo e(t('pay_debts')); ?></button>
+            </div>
+        </form>
+        <script>
+        (function () {
+          var full = document.getElementById('payModeFull');
+          var partial = document.getElementById('payModePartial');
+          var box = document.getElementById('payPartialBox');
+          var amt = document.getElementById('payAmountInput');
+          function sync() {
+            var isPartial = partial && partial.checked;
+            if (box) box.classList.toggle('hidden', !isPartial);
+            if (amt) amt.required = !!isPartial;
+          }
+          if (full) full.addEventListener('change', sync);
+          if (partial) partial.addEventListener('change', sync);
+          sync();
+        })();
+        </script>
+        <?php endif; ?>
     </div>
 
     <div class="tab-pane<?php echo $debtTab === 'add_debt' ? '' : ' hidden'; ?>">
@@ -695,7 +804,12 @@ $currentRentDev = $hasRent ? rental_device_by_id($subscriber['rental_device_id']
                             <div>
                                 <label><?php echo e($lang === 'en' ? 'Type' : 'النوع'); ?></label>
                                 <select name="debt_kind[]">
+                                    <?php if ($hasRent): ?>
+                                    <option value="month_rent" selected><?php echo e(t('debt_type_month_rent')); ?></option>
                                     <option value="month"><?php echo e(t('debt_type_month')); ?></option>
+                                    <?php else: ?>
+                                    <option value="month" selected><?php echo e(t('debt_type_month')); ?></option>
+                                    <?php endif; ?>
                                     <option value="item"><?php echo e(t('debt_type_item')); ?></option>
                                 </select>
                             </div>
@@ -705,11 +819,21 @@ $currentRentDev = $hasRent ? rental_device_by_id($subscriber['rental_device_id']
                             </div>
                             <div>
                                 <label><?php echo e($lang === 'en' ? 'Amount' : 'المبلغ'); ?></label>
-                                <input type="number" name="debt_amount[]" min="0" step="1" autocomplete="off">
+                                <input type="number" name="debt_amount[]" min="0" step="1" autocomplete="off"
+                                    value="<?php echo ($hasRent && ($subMonthlyPrice + $rentalFee) > 0) ? (int) round($subMonthlyPrice + $rentalFee) : ''; ?>">
                             </div>
                             <div>
                                 <label><?php echo e(t('debt_notes')); ?></label>
-                                <input name="debt_notes[]" autocomplete="off">
+                                <input name="debt_notes[]" autocomplete="off"
+                                    value="<?php
+                                    if ($hasRent && ($subMonthlyPrice + $rentalFee) > 0) {
+                                        $dn = 'اشتراك ' . (int) $subMonthlyPrice . ' + إيجار ' . (int) $rentalFee;
+                                        if ($currentRentDev && !empty($currentRentDev['name'])) {
+                                            $dn .= ' (' . $currentRentDev['name'] . ')';
+                                        }
+                                        echo e($dn);
+                                    }
+                                    ?>">
                             </div>
                         </div>
                     </div>
@@ -777,26 +901,28 @@ $currentRentDev = $hasRent ? rental_device_by_id($subscriber['rental_device_id']
         </div>
         <?php endif; ?>
         <div class="table-wrap">
-            <table>
+            <table class="table-compact debts-mini-table">
                 <thead>
                 <tr>
                     <th>#</th>
                     <th><?php echo e($lang === 'en' ? 'Month' : 'الشهر'); ?></th>
                     <th><?php echo e($lang === 'en' ? 'Amount' : 'المبلغ'); ?></th>
-                    <th><?php echo e(t('notes')); ?></th>
-                    <th><?php echo e($lang === 'en' ? 'Due' : 'الاستحقاق'); ?></th>
                     <th><?php echo e($lang === 'en' ? 'Status' : 'الحالة'); ?></th>
+                    <th><?php echo e(t('notes')); ?></th>
                     <th></th>
                 </tr>
                 </thead>
                 <tbody>
                 <?php if (!$invoices): ?>
-                    <tr><td colspan="7"><?php echo e($lang === 'en' ? 'No invoices' : 'لا توجد فواتير'); ?></td></tr>
+                    <tr><td colspan="6"><?php echo e($lang === 'en' ? 'No invoices' : 'لا توجد فواتير'); ?></td></tr>
                 <?php endif; ?>
                 <?php $n = 1; foreach ($invoices as $row): ?>
-                    <tr>
+                    <tr class="<?php echo $row['status'] === 'unpaid' ? 'row-unpaid' : 'row-paid'; ?>">
                         <td><?php echo $n++; ?></td>
-                        <td><?php echo e(month_short_label($row['month_label'])); ?></td>
+                        <td>
+                            <strong><?php echo e(month_short_label($row['month_label'])); ?></strong>
+                            <div class="meta"><?php echo e($row['due_date']); ?></div>
+                        </td>
                         <td>
                             <?php if ($row['status'] === 'unpaid'): ?>
                                 <button
@@ -811,13 +937,12 @@ $currentRentDev = $hasRent ? rental_device_by_id($subscriber['rental_device_id']
                                 <?php echo e(money_format_iqd($row['amount'], $config['currency'])); ?>
                             <?php endif; ?>
                         </td>
-                        <td><?php echo e(isset($row['notes']) ? $row['notes'] : ''); ?></td>
-                        <td><?php echo e($row['due_date']); ?></td>
                         <td>
                             <span class="badge <?php echo e($row['status']); ?>">
-                                <?php echo $row['status'] === 'paid' ? 'مسدد' : 'غير مسدد'; ?>
+                                <?php echo $row['status'] === 'paid' ? ($lang === 'en' ? 'Paid' : 'مسدد') : ($lang === 'en' ? 'Unpaid' : 'غير مسدد'); ?>
                             </span>
                         </td>
+                        <td class="notes-cell"><?php echo e(isset($row['notes']) ? $row['notes'] : ''); ?></td>
                         <td>
                             <?php if ($row['status'] === 'unpaid'): ?>
                                 <form method="post" onsubmit="return confirm('حذف هذا الدين؟');" style="display:inline">
@@ -907,6 +1032,10 @@ $currentRentDev = $hasRent ? rental_device_by_id($subscriber['rental_device_id']
 window.DEBT_ENTRY = {
   month: <?php echo json_encode(date('Y-m')); ?>,
   years: <?php echo json_encode(array((int) date('Y') - 1, (int) date('Y'), (int) date('Y') + 1)); ?>,
+  hasRent: <?php echo $hasRent ? 'true' : 'false'; ?>,
+  subPrice: <?php echo json_encode((float) $subMonthlyPrice); ?>,
+  rentFee: <?php echo json_encode((float) $rentalFee); ?>,
+  rentDevice: <?php echo json_encode($currentRentDev && !empty($currentRentDev['name']) ? $currentRentDev['name'] : ''); ?>,
   labels: {
     type: <?php echo json_encode($lang === 'en' ? 'Type' : 'النوع'); ?>,
     month: <?php echo json_encode($lang === 'en' ? 'Month' : 'الشهر'); ?>,
@@ -914,11 +1043,12 @@ window.DEBT_ENTRY = {
     notes: <?php echo json_encode(t('debt_notes')); ?>,
     monthOpt: <?php echo json_encode(t('debt_type_month')); ?>,
     itemOpt: <?php echo json_encode(t('debt_type_item')); ?>,
+    monthRentOpt: <?php echo json_encode(t('debt_type_month_rent')); ?>,
     remove: <?php echo json_encode($lang === 'en' ? 'Remove line' : 'حذف السطر'); ?>
   }
 };
 </script>
-<script src="assets/debt-entry.js?v=3"></script>
+<script src="assets/debt-entry.js?v=5"></script>
 
 <div class="modal-backdrop hidden" id="amountModal">
     <div class="modal-card">

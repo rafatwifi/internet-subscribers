@@ -74,7 +74,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $amount = (float) post('amount', '0');
         $dueDate = (string) post('due_date', date('Y-m-d'));
         $notes = trim((string) post('notes', ''));
-        $debtKind = post('debt_kind', 'month') === 'item' ? 'item' : 'month';
+        $rawKind = (string) post('debt_kind', 'month');
+        if ($rawKind === 'item') {
+            $debtKind = 'item';
+        } elseif ($rawKind === 'month_rent') {
+            $debtKind = 'month_rent';
+        } else {
+            $debtKind = 'month';
+        }
         $monthLabel = trim((string) post('month_label', date('Y-m')));
 
         if ($debtKind === 'item') {
@@ -85,6 +92,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $monthLabel = date('Y-m');
         }
 
+        $subInfo = $pdo->prepare('SELECT * FROM subscribers WHERE id = :id');
+        $subInfo->execute(array(':id' => $subscriberId));
+        $subInfoRow = $subInfo->fetch();
+
+        if ($debtKind === 'month_rent') {
+            if (!$subInfoRow || !subscriber_has_rental($subInfoRow)) {
+                flash('error', 'هذا المشترك ما عنده إيجار');
+                redirect('debts.php');
+            }
+            $settingsNow = settings_load();
+            $rentFee = (float) rental_fee_amount($settingsNow);
+            $subPrice = subscriber_monthly_price($pdo, $subscriberId);
+            if ($amount <= 0) {
+                $amount = $subPrice + $rentFee;
+            }
+            if ($notes === '') {
+                $dev = rental_device_by_id(isset($subInfoRow['rental_device_id']) ? $subInfoRow['rental_device_id'] : '', $settingsNow);
+                $notes = 'اشتراك ' . (int) $subPrice . ' + إيجار ' . (int) $rentFee
+                    . ($dev && !empty($dev['name']) ? (' (' . $dev['name'] . ')') : '');
+            }
+        }
+
         if ($subscriberId <= 0 || $amount <= 0) {
             flash('error', 'بيانات الفاتورة ناقصة');
             redirect('debts.php');
@@ -92,7 +121,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $subscriptionId = null;
         $cost = 0;
-        if ($debtKind === 'month') {
+        if ($debtKind === 'month' || $debtKind === 'month_rent') {
             $sub = $pdo->prepare(
                 'SELECT id, cost_price FROM subscriptions WHERE subscriber_id = :sid ORDER BY id DESC LIMIT 1'
             );
@@ -213,7 +242,15 @@ $stmt->execute($params);
 $rows = $stmt->fetchAll();
 
 $totalDebt = (float) $pdo->query("SELECT COALESCE(SUM(amount),0) FROM invoices WHERE status='unpaid'")->fetchColumn();
-$subscribers = $pdo->query('SELECT id, name FROM subscribers ORDER BY name')->fetchAll();
+$subscribers = $pdo->query(
+    'SELECT id, name, rental_enabled, rental_device_id FROM subscribers ORDER BY name'
+)->fetchAll();
+$settingsDebt = settings_load();
+$rentFeeGlobal = (float) rental_fee_amount($settingsDebt);
+$subPriceMap = array();
+foreach ($subscribers as $s) {
+    $subPriceMap[(int) $s['id']] = subscriber_monthly_price($pdo, (int) $s['id']);
+}
 $filterName = '';
 if ($filterSubscriberId > 0) {
     foreach ($subscribers as $s) {
@@ -252,10 +289,15 @@ render_header(t('debts'), 'debts');
         <div class="form-grid">
             <div>
                 <label><?php echo e(t('subscribers')); ?></label>
-                <select name="subscriber_id" required>
+                <select name="subscriber_id" id="debtSubSelect" required>
                     <option value="">...</option>
                     <?php foreach ($subscribers as $s): ?>
-                        <option value="<?php echo (int) $s['id']; ?>" <?php echo $filterSubscriberId === (int) $s['id'] ? 'selected' : ''; ?>><?php echo e($s['name']); ?></option>
+                        <?php $sid = (int) $s['id']; $sHasRent = !empty($s['rental_enabled']) && !empty($s['rental_device_id']); ?>
+                        <option value="<?php echo $sid; ?>"
+                            data-rent="<?php echo $sHasRent ? '1' : '0'; ?>"
+                            data-subprice="<?php echo (float) (isset($subPriceMap[$sid]) ? $subPriceMap[$sid] : 0); ?>"
+                            data-rentfee="<?php echo (float) $rentFeeGlobal; ?>"
+                            <?php echo $filterSubscriberId === $sid ? 'selected' : ''; ?>><?php echo e($s['name']); ?></option>
                     <?php endforeach; ?>
                 </select>
             </div>
@@ -263,6 +305,7 @@ render_header(t('debts'), 'debts');
                 <label><?php echo e($lang === 'en' ? 'Debt type' : 'نوع الدين'); ?></label>
                 <select name="debt_kind" id="debtKind">
                     <option value="month"><?php echo e(t('debt_type_month')); ?></option>
+                    <option value="month_rent" id="debtKindMonthRent" hidden><?php echo e(t('debt_type_month_rent')); ?></option>
                     <option value="item"><?php echo e(t('debt_type_item')); ?></option>
                 </select>
             </div>
@@ -272,7 +315,7 @@ render_header(t('debts'), 'debts');
             </div>
             <div>
                 <label><?php echo e($lang === 'en' ? 'Amount' : 'المبلغ'); ?></label>
-                <input type="number" name="amount" min="1" step="1" required>
+                <input type="number" name="amount" id="debtAmountInput" min="1" step="1" required>
             </div>
             <div>
                 <label><?php echo e($lang === 'en' ? 'Due date' : 'تاريخ الاستحقاق'); ?></label>
@@ -301,91 +344,76 @@ render_header(t('debts'), 'debts');
         <a class="btn <?php echo $status === 'all' ? '' : 'ghost'; ?>" href="?status=all<?php echo $filterSubscriberId ? '&subscriber_id=' . $filterSubscriberId : ''; ?>"><?php echo e(t('show_all')); ?></a>
     </div>
 
-    <?php if ($status === 'unpaid'): ?>
-        <div class="debt-list" style="margin-top:0.9rem" id="debtList">
+    <div class="table-wrap" style="margin-top:0.9rem">
+        <table id="debtTable" class="table-compact debts-mini-table">
+            <thead>
+            <tr>
+                <th><?php echo e(t('name')); ?></th>
+                <th><?php echo e($lang === 'en' ? 'Month' : 'الشهر'); ?></th>
+                <th><?php echo e($lang === 'en' ? 'Amount' : 'المبلغ'); ?></th>
+                <th><?php echo e(t('notes')); ?></th>
+                <?php if ($status !== 'unpaid'): ?>
+                <th><?php echo e(t('profit')); ?></th>
+                <th><?php echo e($lang === 'en' ? 'Status' : 'الحالة'); ?></th>
+                <?php endif; ?>
+                <th><?php echo e($lang === 'en' ? 'Actions' : 'إجراءات'); ?></th>
+            </tr>
+            </thead>
+            <tbody>
             <?php if (!$rows): ?>
-                <p style="color:var(--muted);margin:0"><?php echo e($lang === 'en' ? 'No debts' : 'لا توجد ديون'); ?></p>
+                <tr><td colspan="7"><?php echo e($lang === 'en' ? 'No debts' : 'لا توجد ديون'); ?></td></tr>
             <?php endif; ?>
             <?php foreach ($rows as $row): ?>
-                <div class="debt-item" data-filter="<?php echo e($row['name'] . ' ' . $row['phone'] . ' ' . (isset($row['notes']) ? $row['notes'] : '') . ' ' . $row['month_label']); ?>">
-                    <div>
-                        <strong><?php echo e($row['name']); ?></strong>
-                        <div class="meta">
-                            <?php echo e(format_phone_display($row['phone'])); ?> —
-                            <?php echo e(month_short_label($row['month_label'])); ?> —
-                            <?php echo e($row['due_date']); ?>
-                        </div>
-                        <?php if (!empty($row['notes'])): ?>
-                            <div class="meta" style="margin-top:4px"><?php echo e($row['notes']); ?></div>
-                        <?php endif; ?>
-                    </div>
-                    <div>
-                        <div class="amount"><?php echo e(money_format_iqd($row['amount'], $config['currency'])); ?></div>
-                        <form method="post" class="pay-partial-form">
+                <tr data-filter="<?php echo e($row['name'] . ' ' . $row['phone'] . ' ' . (isset($row['notes']) ? $row['notes'] : '') . ' ' . $row['month_label']); ?>">
+                    <td>
+                        <a href="subscriber.php?id=<?php echo (int) $row['subscriber_id']; ?>"><strong><?php echo e($row['name']); ?></strong></a>
+                        <div class="meta"><?php echo e(format_phone_display($row['phone'])); ?></div>
+                    </td>
+                    <td>
+                        <strong><?php echo e(month_short_label($row['month_label'])); ?></strong>
+                        <div class="meta"><?php echo e($row['due_date']); ?></div>
+                    </td>
+                    <td><strong><?php echo e(money_format_iqd($row['amount'], $config['currency'])); ?></strong></td>
+                    <td class="notes-cell"><?php echo e(isset($row['notes']) ? $row['notes'] : ''); ?></td>
+                    <?php if ($status !== 'unpaid'): ?>
+                    <td><?php echo e(money_format_iqd(isset($row['profit']) ? $row['profit'] : 0, $config['currency'])); ?></td>
+                    <td><span class="badge <?php echo e($row['status']); ?>"><?php echo $row['status'] === 'paid' ? ($lang === 'en' ? 'Paid' : 'مسدد') : ($lang === 'en' ? 'Unpaid' : 'غير مسدد'); ?></span></td>
+                    <?php endif; ?>
+                    <td>
+                        <?php if ($row['status'] === 'unpaid'): ?>
+                        <form method="post" class="pay-inline-form">
                             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                             <input type="hidden" name="action" value="pay">
                             <input type="hidden" name="id" value="<?php echo (int) $row['id']; ?>">
                             <?php if ($filterSubscriberId > 0): ?>
                                 <input type="hidden" name="return_subscriber" value="<?php echo (int) $filterSubscriberId; ?>">
                             <?php endif; ?>
-                            <div class="pay-amount-row">
-                                <label><?php echo e(t('partial_pay')); ?></label>
-                                <input type="number" name="pay_amount" min="1" step="1" value="<?php echo (int) $row['amount']; ?>" required>
-                            </div>
-                            <div class="quick-pay" style="margin-top:0.45rem">
-                                <button class="btn money" type="submit" name="send_whatsapp" value="1"><?php echo e(t('pay_send')); ?></button>
-                                <button class="btn ghost" type="submit" name="send_whatsapp" value="0"><?php echo e(t('pay_only')); ?></button>
+                            <div class="pay-inline-row">
+                                <input type="number" name="pay_amount" min="1" step="1" value="<?php echo (int) $row['amount']; ?>" required title="<?php echo e(t('partial_pay')); ?>">
+                                <button class="btn money sm" type="submit" name="send_whatsapp" value="1"><?php echo e(t('pay_send')); ?></button>
+                                <button class="btn ghost sm" type="submit" name="send_whatsapp" value="0"><?php echo e(t('pay_only')); ?></button>
                             </div>
                         </form>
-                        <form method="post" style="margin-top:6px;text-align:end">
+                        <form method="post" style="margin-top:4px">
                             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                             <input type="hidden" name="action" value="remind">
                             <input type="hidden" name="id" value="<?php echo (int) $row['id']; ?>">
-                            <button class="btn secondary" type="submit"><?php echo e(t('remind')); ?></button>
+                            <button class="btn secondary sm" type="submit"><?php echo e(t('remind')); ?></button>
                         </form>
-                    </div>
-                </div>
-            <?php endforeach; ?>
-        </div>
-    <?php else: ?>
-        <div class="table-wrap" style="margin-top:0.9rem">
-            <table id="debtTable">
-                <thead>
-                <tr>
-                    <th><?php echo e(t('name')); ?></th>
-                    <th><?php echo e($lang === 'en' ? 'Month' : 'الشهر'); ?></th>
-                    <th><?php echo e($lang === 'en' ? 'Amount' : 'المبلغ'); ?></th>
-                    <th><?php echo e(t('notes')); ?></th>
-                    <th><?php echo e(t('profit')); ?></th>
-                    <th></th>
-                    <th></th>
+                        <?php elseif ($row['status'] === 'paid'): ?>
+                        <form method="post">
+                            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                            <input type="hidden" name="action" value="unpay">
+                            <input type="hidden" name="id" value="<?php echo (int) $row['id']; ?>">
+                            <button class="btn ghost sm" type="submit"><?php echo e($lang === 'en' ? 'Undo pay' : 'إلغاء التسديد'); ?></button>
+                        </form>
+                        <?php endif; ?>
+                    </td>
                 </tr>
-                </thead>
-                <tbody>
-                <?php foreach ($rows as $row): ?>
-                    <tr data-filter="<?php echo e($row['name'] . ' ' . $row['phone']); ?>">
-                        <td><?php echo e($row['name']); ?><br><small><?php echo e(format_phone_display($row['phone'])); ?></small></td>
-                        <td><?php echo e(month_short_label($row['month_label'])); ?></td>
-                        <td><?php echo e(money_format_iqd($row['amount'], $config['currency'])); ?></td>
-                        <td><?php echo e(isset($row['notes']) ? $row['notes'] : ''); ?></td>
-                        <td><?php echo e(money_format_iqd(isset($row['profit']) ? $row['profit'] : 0, $config['currency'])); ?></td>
-                        <td><span class="badge <?php echo e($row['status']); ?>"><?php echo $row['status'] === 'paid' ? ($lang === 'en' ? 'Paid' : 'مسدد') : ($lang === 'en' ? 'Unpaid' : 'غير مسدد'); ?></span></td>
-                        <td>
-                            <?php if ($row['status'] === 'paid'): ?>
-                                <form method="post">
-                                    <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
-                                    <input type="hidden" name="action" value="unpay">
-                                    <input type="hidden" name="id" value="<?php echo (int) $row['id']; ?>">
-                                    <button class="btn ghost" type="submit"><?php echo e($lang === 'en' ? 'Undo pay' : 'إلغاء التسديد'); ?></button>
-                                </form>
-                            <?php endif; ?>
-                        </td>
-                    </tr>
-                <?php endforeach; ?>
-                </tbody>
-            </table>
-        </div>
-    <?php endif; ?>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+    </div>
 </div>
 <script>
 (function () {
@@ -403,6 +431,23 @@ render_header(t('debts'), 'debts');
   var kind = document.getElementById('debtKind');
   var monthInput = document.getElementById('monthLabelInput');
   var monthField = document.getElementById('monthField');
+  var subSelect = document.getElementById('debtSubSelect');
+  var rentOpt = document.getElementById('debtKindMonthRent');
+  var amountInput = document.getElementById('debtAmountInput');
+  function selectedSubOpt() {
+    if (!subSelect) return null;
+    return subSelect.options[subSelect.selectedIndex] || null;
+  }
+  function syncRentOption() {
+    var opt = selectedSubOpt();
+    var hasRent = opt && opt.getAttribute('data-rent') === '1';
+    if (rentOpt) {
+      rentOpt.hidden = !hasRent;
+      if (!hasRent && kind && kind.value === 'month_rent') {
+        kind.value = 'month';
+      }
+    }
+  }
   function syncKind() {
     if (!kind || !monthInput) return;
     if (kind.value === 'item') {
@@ -420,10 +465,20 @@ render_header(t('debts'), 'debts');
         if (lab2) lab2.textContent = <?php echo json_encode($lang === 'en' ? 'Month (YYYY-MM)' : 'الشهر (YYYY-MM)'); ?>;
       }
     }
+    if (kind.value === 'month_rent' && amountInput) {
+      var opt = selectedSubOpt();
+      if (opt) {
+        var sub = parseFloat(opt.getAttribute('data-subprice') || '0') || 0;
+        var rent = parseFloat(opt.getAttribute('data-rentfee') || '0') || 0;
+        var total = Math.round(sub + rent);
+        if (total > 0) amountInput.value = String(total);
+      }
+    }
   }
-  if (kind) {
-    kind.addEventListener('change', syncKind);
-  }
+  if (kind) kind.addEventListener('change', syncKind);
+  if (subSelect) subSelect.addEventListener('change', function () { syncRentOption(); syncKind(); });
+  syncRentOption();
+  syncKind();
 })();
 </script>
 <?php render_footer(); ?>

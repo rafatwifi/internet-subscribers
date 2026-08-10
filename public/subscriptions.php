@@ -70,13 +70,35 @@ $pdo->exec(
      WHERE status = 'active' AND end_date < CURDATE()"
 );
 
-$list = $pdo->query(
-    "SELECT sub.*, s.name, s.phone
-     FROM subscriptions sub
-     JOIN subscribers s ON s.id = sub.subscriber_id
-     ORDER BY sub.id DESC
-     LIMIT 500"
-)->fetchAll();
+$filterSid = isset($_GET['subscriber_id']) ? (int) $_GET['subscriber_id'] : 0;
+$filterName = '';
+if ($filterSid > 0) {
+    $st = $pdo->prepare(
+        "SELECT sub.*, s.name, s.phone
+         FROM subscriptions sub
+         JOIN subscribers s ON s.id = sub.subscriber_id
+         WHERE sub.subscriber_id = :sid
+         ORDER BY sub.id DESC
+         LIMIT 500"
+    );
+    $st->execute(array(':sid' => $filterSid));
+    $list = $st->fetchAll();
+    if ($list) {
+        $filterName = $list[0]['name'];
+    } else {
+        $nm = $pdo->prepare('SELECT name FROM subscribers WHERE id = :id');
+        $nm->execute(array(':id' => $filterSid));
+        $filterName = (string) $nm->fetchColumn();
+    }
+} else {
+    $list = $pdo->query(
+        "SELECT sub.*, s.name, s.phone
+         FROM subscriptions sub
+         JOIN subscribers s ON s.id = sub.subscriber_id
+         ORDER BY sub.id DESC
+         LIMIT 500"
+    )->fetchAll();
+}
 
 render_header(t('movements'), 'subscriptions');
 ?>
@@ -86,11 +108,16 @@ render_header(t('movements'), 'subscriptions');
         <input type="hidden" name="action" value="delete_selected" id="movAction">
         <input type="hidden" name="id" value="0" id="movId">
         <div class="actions actions-tight" style="margin-top:0;margin-bottom:8px">
-            <a class="btn secondary sm" href="activate.php"><?php echo e(t('activate')); ?></a>
+            <a class="btn secondary sm" href="activate.php<?php echo $filterSid > 0 ? ('?subscriber_id=' . $filterSid) : ''; ?>"><?php echo e(t('activate')); ?></a>
+            <?php if ($filterSid > 0): ?>
+                <span class="badge unpaid"><?php echo e($filterName !== '' ? $filterName : ('#' . $filterSid)); ?></span>
+                <a class="btn ghost sm" href="subscriptions.php"><?php echo e(t('show_all')); ?></a>
+                <a class="btn ghost sm" href="subscriber.php?id=<?php echo (int) $filterSid; ?>"><?php echo e($lang === 'en' ? 'Profile' : 'صفحة المشترك'); ?></a>
+            <?php endif; ?>
             <button class="btn ghost sm" type="button" id="selAll"><?php echo e(t('select_all')); ?></button>
             <button class="btn danger sm" type="submit" onclick="return confirm('<?php echo e(t('confirm_delete')); ?>');"><?php echo e(t('delete_selected')); ?></button>
         </div>
-        <h2><?php echo e(t('movements_list')); ?></h2>
+        <h2><?php echo e(t('movements_list')); ?><?php echo $filterName !== '' ? (' — ' . e($filterName)) : ''; ?></h2>
         <div class="table-wrap">
             <table class="table-compact">
                 <thead>

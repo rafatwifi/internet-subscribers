@@ -17,8 +17,66 @@
       notes: L.notes || 'ملاحظات',
       monthOpt: L.monthOpt || 'شهر اشتراك',
       itemOpt: L.itemOpt || 'غرض / حاجة',
+      monthRentOpt: L.monthRentOpt || 'شهر اشتراك + إيجار',
       remove: L.remove || 'حذف السطر'
     };
+  }
+
+  function kindOptionsHtml() {
+    var L = labels();
+    var html = '';
+    if (cfg().hasRent) {
+      html += '<option value="month_rent" selected>' + L.monthRentOpt + '</option>';
+      html += '<option value="month">' + L.monthOpt + '</option>';
+    } else {
+      html += '<option value="month" selected>' + L.monthOpt + '</option>';
+    }
+    html += '<option value="item">' + L.itemOpt + '</option>';
+    return html;
+  }
+
+  function applyMonthRentDefaults(row) {
+    if (!cfg().hasRent || !row) return;
+    var kindSel = row.querySelector('select[name="debt_kind[]"]');
+    if (!kindSel) return;
+    if (kindSel.value !== 'month_rent') {
+      kindSel.value = 'month_rent';
+    }
+    var amt = row.querySelector('input[name="debt_amount[]"]');
+    var notes = row.querySelector('input[name="debt_notes[]"]');
+    var total = monthRentTotal();
+    if (amt && total > 0 && (!amt.value || amt.value === '0')) amt.value = String(total);
+    if (notes && !notes.value) notes.value = monthRentNote();
+  }
+
+  function monthRentTotal() {
+    var sub = parseFloat(cfg().subPrice) || 0;
+    var rent = parseFloat(cfg().rentFee) || 0;
+    return Math.round(sub + rent);
+  }
+
+  function monthRentNote() {
+    var sub = Math.round(parseFloat(cfg().subPrice) || 0);
+    var rent = Math.round(parseFloat(cfg().rentFee) || 0);
+    var dev = cfg().rentDevice || '';
+    var note = 'اشتراك ' + sub + ' + إيجار ' + rent;
+    if (dev) note += ' (' + dev + ')';
+    return note;
+  }
+
+  function bindKindChange(row) {
+    var kindSel = row.querySelector('select[name="debt_kind[]"]');
+    if (!kindSel || kindSel.getAttribute('data-kind-bound') === '1') return;
+    kindSel.setAttribute('data-kind-bound', '1');
+    kindSel.addEventListener('change', function () {
+      var amt = row.querySelector('input[name="debt_amount[]"]');
+      var notes = row.querySelector('input[name="debt_notes[]"]');
+      if (kindSel.value === 'month_rent') {
+        var total = monthRentTotal();
+        if (amt && total > 0) amt.value = String(total);
+        if (notes && !notes.value) notes.value = monthRentNote();
+      }
+    });
   }
 
   function yearsList() {
@@ -117,10 +175,7 @@
 
     grid.innerHTML =
       '<div><label>' + L.type + '</label>' +
-      '<select name="debt_kind[]">' +
-      '<option value="month">' + L.monthOpt + '</option>' +
-      '<option value="item">' + L.itemOpt + '</option>' +
-      '</select></div>' +
+      '<select name="debt_kind[]">' + kindOptionsHtml() + '</select></div>' +
       '<div><label>' + L.month + '</label>' +
       monthPickerHtml(monthVal) + '</div>' +
       '<div><label>' + L.amount + '</label>' +
@@ -154,6 +209,8 @@
     wrap.appendChild(grid);
     wrap.appendChild(actions);
     bindAllYmPickers(wrap);
+    bindKindChange(wrap);
+    applyMonthRentDefaults(wrap);
     return wrap;
   }
 
@@ -195,6 +252,18 @@
       for (var i = 0; i < existing.length; i++) {
         bindRemove(existing[i], box);
         bindAllYmPickers(existing[i]);
+        bindKindChange(existing[i]);
+        // حقن خيار الإيجار للأسطر الموجودة مسبقاً في HTML
+        if (cfg().hasRent) {
+          var ks = existing[i].querySelector('select[name="debt_kind[]"]');
+          if (ks && !ks.querySelector('option[value="month_rent"]')) {
+            var opt = document.createElement('option');
+            opt.value = 'month_rent';
+            opt.textContent = labels().monthRentOpt;
+            ks.insertBefore(opt, ks.options[0] || null);
+          }
+          applyMonthRentDefaults(existing[i]);
+        }
       }
     }
 

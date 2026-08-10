@@ -410,14 +410,15 @@ function render_subscriber_month_cell($row, $lang)
         return '<td class="month-cell"><span style="color:var(--muted)">-</span></td>';
     }
     $monthTitle = implode(' + ', $monthLabels);
+    $detailUrl = 'subscriber.php?id=' . (int) $row['id'] . '&tab=list#debts';
     $html = '<td class="month-cell" title="' . e($monthTitle) . '"><div class="month-chips">';
     $show = array_slice($monthLabels, 0, 2);
     foreach ($show as $lab) {
-        $html .= '<span class="month-chip">' . e($lab) . '</span>';
+        $html .= '<a class="month-chip" href="' . e($detailUrl) . '">' . e($lab) . '</a>';
     }
     $extra = count($monthLabels) - count($show);
     if ($extra > 0) {
-        $html .= '<span class="month-more">+' . (int) $extra . '</span>';
+        $html .= '<a class="month-more" href="' . e($detailUrl) . '">+' . (int) $extra . '</a>';
     }
     $html .= '</div></td>';
     return $html;
@@ -760,7 +761,8 @@ function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
   gap: 3px;
   align-items: center;
 }
-#subsTable .month-chip {
+#subsTable .month-chip,
+#subsTable a.month-chip {
   display: inline-block;
   padding: 1px 6px;
   border-radius: 6px;
@@ -769,11 +771,20 @@ function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
   font-size: 11px;
   font-weight: 800;
   line-height: 1.35;
+  text-decoration: none;
+  cursor: pointer;
 }
-#subsTable .month-more {
+#subsTable a.month-chip:hover,
+#subsTable a.month-more:hover {
+  background: rgba(47, 109, 246, 0.18);
+  text-decoration: underline;
+}
+#subsTable .month-more,
+#subsTable a.month-more {
   font-size: 11px;
   font-weight: 800;
   color: #6b7a88;
+  text-decoration: none;
 }
 #subsTable tbody tr.row-normal:nth-child(even) td {
   background: rgba(28, 36, 48, 0.035);
