@@ -9,6 +9,7 @@ if ($id <= 0) {
     flash('error', 'مشترك غير موجود');
     redirect('subscribers.php');
 }
+require_subscriber_access($pdo, $id);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf(post('csrf'))) {

@@ -112,6 +112,13 @@ try {
 } catch (Throwable $e) {
 }
 try {
+    if (function_exists('ensure_subscriber_agent_column')) {
+        ensure_subscriber_agent_column($pdo);
+    }
+} catch (Exception $e) {
+} catch (Throwable $e) {
+}
+try {
     if (function_exists('ensure_phone_not_unique')) {
         ensure_phone_not_unique($pdo);
     }

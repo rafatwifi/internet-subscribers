@@ -432,16 +432,6 @@ render_header(t('activate'), 'activate');
                 <input type="date" name="start_date" id="startDate" value="<?php echo e(date('Y-m-d')); ?>" required>
             </div>
             <div>
-                <label><?php echo e($lang === 'en' ? 'Remaining days (type manually)' : 'الأيام المتبقية (اكتبها يدوياً)'); ?></label>
-                <input type="number" name="days_left" id="daysLeft" class="days-left-input" min="0" max="3650" step="1"
-                    value="<?php echo e($defaultDaysLeft === '' ? '' : (string) (int) $defaultDaysLeft); ?>"
-                    placeholder="<?php echo e($lang === 'en' ? 'e.g. 15' : 'مثال: 15'); ?>"
-                    <?php echo $preDays > 0 ? 'required' : ''; ?>>
-                <small class="field-hint"><?php echo e($lang === 'en'
-                    ? ('Type days — end date updates from start. Empty = system default (' . ($periodMode === 'calendar_month' ? '1 calendar month' : '30 days') . ').')
-                    : ('اكتب عدد الأيام — النهاية من تاريخ البداية. فاضي = الوضع من الإعدادات (' . ($periodMode === 'calendar_month' ? 'شهر ميلادي' : '30 يوم') . ').')); ?></small>
-            </div>
-            <div>
                 <label><?php echo e(t('to_date')); ?></label>
                 <input type="date" name="end_date" id="endDate" value="<?php echo e($defaultEnd); ?>" required>
                 <small class="field-hint" id="carryEndNote" hidden></small>
@@ -450,6 +440,7 @@ render_header(t('activate'), 'activate');
                 <label><?php echo e(t('message_note')); ?></label>
                 <input name="message_note" placeholder="<?php echo e($lang === 'en' ? 'Optional' : 'اختياري'); ?>">
             </div>
+            <input type="hidden" name="days_left" id="daysLeft" value="<?php echo e($defaultDaysLeft === '' ? '' : (string) (int) $defaultDaysLeft); ?>">
         </div>
 
         <div id="payModeBox" class="pay-mode-box">
@@ -609,16 +600,19 @@ render_header(t('activate'), 'activate');
     if (payBox) payBox.style.display = on ? 'none' : '';
     if (waRow) waRow.style.display = on ? 'none' : '';
     if (waChk && on) waChk.checked = false;
-    if (days) days.required = !!on;
     if (submitBtn) {
       submitBtn.textContent = on
         ? <?php echo json_encode($lang === 'en' ? 'Save days from ledger' : 'حفظ الأيام من الدفتر'); ?>
         : <?php echo json_encode(t('activate')); ?>;
     }
+    // عند نقل الدفتر: نحسب الأيام من تاريخي البداية/النهاية
+    if (on && days && start && end && start.value && end.value) {
+      fromEnd();
+    }
   }
-  if (days) days.addEventListener('input', fromDays);
-  if (days) days.addEventListener('change', fromDays);
-  if (end) end.addEventListener('change', fromEnd);
+  if (end) end.addEventListener('change', function () {
+    fromEnd();
+  });
   if (start) start.addEventListener('change', applyDefaultPeriod);
   if (subSelect) {
     subSelect.addEventListener('change', function () {
@@ -632,9 +626,6 @@ render_header(t('activate'), 'activate');
   }
   syncCarryUi();
   if (subSelect && subSelect.value) applyDefaultPeriod();
-  if (days && days.value === '' && !(ledger && ledger.checked)) {
-    try { days.focus(); } catch (e) {}
-  }
 })();
 </script>
 <?php render_footer(); ?>

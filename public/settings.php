@@ -274,6 +274,7 @@ render_settings_tabs($tab);
         <div><strong><?php echo e(admin_role_label('admin', $lang)); ?></strong> — <?php echo e(admin_role_hint('admin', $lang)); ?></div>
         <div><strong><?php echo e(admin_role_label('manager', $lang)); ?></strong> — <?php echo e(admin_role_hint('manager', $lang)); ?></div>
         <div><strong><?php echo e(admin_role_label('staff', $lang)); ?></strong> — <?php echo e(admin_role_hint('staff', $lang)); ?></div>
+        <div><strong><?php echo e(admin_role_label('agent', $lang)); ?></strong> — <?php echo e(admin_role_hint('agent', $lang)); ?></div>
     </div>
 </div>
 
@@ -299,6 +300,7 @@ render_settings_tabs($tab);
                 <label><?php echo e($lang === 'en' ? 'Role' : 'الصلاحية'); ?></label>
                 <select name="role">
                     <option value="staff"><?php echo e(admin_role_label('staff', $lang)); ?></option>
+                    <option value="agent"><?php echo e(admin_role_label('agent', $lang)); ?></option>
                     <option value="manager"><?php echo e(admin_role_label('manager', $lang)); ?></option>
                     <option value="admin"><?php echo e(admin_role_label('admin', $lang)); ?></option>
                 </select>

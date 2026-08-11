@@ -1,6 +1,6 @@
 <?php
 
-function render_header($title, $active = '', $subtitle = '', $titleAfter = '')
+function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $topToolsHtml = '')
 {
     global $siteName, $lang;
     $flash = get_flash();
@@ -12,6 +12,15 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '')
     $can = function ($p) {
         return function_exists('user_can') ? user_can($p) : true;
     };
+    $userLabel = '';
+    if ($adminNow) {
+        $userLabel = !empty($adminNow['display_name']) ? $adminNow['display_name'] : (isset($adminNow['username']) ? $adminNow['username'] : '');
+    }
+    $qs = $_GET;
+    unset($qs['lang']);
+    $baseQs = http_build_query($qs);
+    $langToggle = ($isEn ? 'ar' : 'en');
+    $langHref = $page . '?' . ($baseQs !== '' ? $baseQs . '&' : '') . 'lang=' . $langToggle;
     ?>
 <!DOCTYPE html>
 <html lang="<?php echo e($lang); ?>" dir="<?php echo $isEn ? 'ltr' : 'rtl'; ?>">
@@ -25,7 +34,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '')
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@500;600;700;800&family=Tajawal:wght@500;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="assets/style.css?v=sas64">
+    <link rel="stylesheet" href="assets/style.css?v=sas76">
 </head>
 <body class="<?php echo $isEn ? 'ltr' : 'rtl'; ?> ios-glass">
 <div class="bg-bubbles" aria-hidden="true">
@@ -43,6 +52,9 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '')
             <?php endif; ?>
             <?php if ($can('subscribers')): ?>
             <a class="<?php echo $active === 'subscribers' ? 'active' : ''; ?>" href="subscribers.php"><?php echo e(t('subscribers')); ?></a>
+            <?php endif; ?>
+            <?php if ($can('agents')): ?>
+            <a class="<?php echo $active === 'agents' ? 'active' : ''; ?>" href="agents.php"><?php echo e($isEn ? 'Agents' : 'الوكلاء'); ?></a>
             <?php endif; ?>
             <?php if ($can('activate')): ?>
             <a class="<?php echo $active === 'activate' ? 'active' : ''; ?>" href="activate.php"><?php echo e(t('activate')); ?></a>
@@ -90,13 +102,31 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '')
 
     <div class="main">
         <div class="main-top">
-            <button class="sidebar-toggle sidebar-toggle-bar" type="button" id="sidebarToggleBar" title="<?php echo e(t('menu')); ?>" aria-label="<?php echo e(t('menu')); ?>">|||</button>
-            <strong class="main-title name-cell">
-                <?php echo e($title); ?>
+            <div class="main-top-start">
+                <button class="sidebar-toggle sidebar-toggle-bar" type="button" id="sidebarToggleBar" title="<?php echo e(t('menu')); ?>" aria-label="<?php echo e(t('menu')); ?>">|||</button>
+                <strong class="main-title name-cell">
+                    <?php echo e($title); ?>
+                </strong>
                 <?php if ($titleAfter !== '' && $titleAfter !== null): ?>
-                    <?php echo $titleAfter; ?>
+                    <div class="main-top-after"><?php echo $titleAfter; ?></div>
                 <?php endif; ?>
-            </strong>
+                <?php if ($topToolsHtml !== '' && $topToolsHtml !== null): ?>
+                    <div class="main-top-tools"><?php echo $topToolsHtml; ?></div>
+                <?php endif; ?>
+            </div>
+            <div class="main-top-end">
+                <a class="top-lang-btn" href="<?php echo e($langHref); ?>" title="<?php echo e(t('language')); ?>">
+                    <span class="top-lang-glyph" aria-hidden="true"><?php echo $isEn ? 'ع' : 'A'; ?></span>
+                </a>
+                <a class="top-profile-btn" href="profile.php" title="<?php echo e($isEn ? 'My profile' : 'بروفايلي'); ?>">
+                    <?php if ($userLabel !== ''): ?>
+                        <span class="top-profile-name"><?php echo e($userLabel); ?></span>
+                    <?php endif; ?>
+                    <span class="top-profile-avatar" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 12a4.5 4.5 0 1 0-4.5-4.5A4.5 4.5 0 0 0 12 12zm0 2.25c-3.6 0-6.75 1.8-6.75 4V20h13.5v-1.75c0-2.2-3.15-4-6.75-4z"/></svg>
+                    </span>
+                </a>
+            </div>
         </div>
         <div id="waConnBar" class="wa-conn-bar wa-conn-checking wa-conn-hidden" role="status" aria-live="polite" hidden>
             <span class="wa-conn-dot" aria-hidden="true"></span>

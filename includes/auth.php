@@ -37,7 +37,7 @@ function admin_password_verify($plain, $hash)
 /** الأدوار المتاحة */
 function admin_roles()
 {
-    return array('admin', 'manager', 'staff');
+    return array('admin', 'manager', 'staff', 'agent');
 }
 
 function admin_role_label($role, $lang = null)
@@ -49,6 +49,7 @@ function admin_role_label($role, $lang = null)
         'admin' => array('ar' => 'مدير', 'en' => 'Admin'),
         'manager' => array('ar' => 'مشرف', 'en' => 'Manager'),
         'staff' => array('ar' => 'موظف', 'en' => 'Staff'),
+        'agent' => array('ar' => 'وكيل', 'en' => 'Agent'),
     );
     if (!isset($map[$role])) {
         return $role;
@@ -71,6 +72,11 @@ function admin_role_hint($role, $lang = null)
             ? 'Daily work + reports + log (no settings/users)'
             : 'الشغل اليومي + تقارير + لوك (بدون إعدادات/مستخدمين)';
     }
+    if ($role === 'agent') {
+        return $lang === 'en'
+            ? 'Only own subscribers + messages (no settings)'
+            : 'مشتركيه فقط + رسائل (بدون إعدادات النظام)';
+    }
     return $lang === 'en'
         ? 'Subscribers, activate, debts, messages, rentals'
         : 'مشتركين، تفعيل، ديون، رسائل، إيجار';
@@ -84,18 +90,144 @@ function role_permissions($role)
         return array(
             'dashboard', 'subscribers', 'activate', 'debts', 'messages', 'rentals',
             'subscriptions', 'reports', 'logs', 'plans',
-            'settings', 'users', 'backup', 'clear_data',
+            'settings', 'users', 'agents', 'backup', 'clear_data',
         );
     }
     if ($role === 'manager') {
         return array(
             'dashboard', 'subscribers', 'activate', 'debts', 'messages', 'rentals',
-            'subscriptions', 'reports', 'logs',
+            'subscriptions', 'reports', 'logs', 'agents',
+        );
+    }
+    if ($role === 'agent') {
+        return array(
+            'dashboard', 'subscribers', 'activate', 'debts', 'messages', 'rentals',
         );
     }
     return array(
         'dashboard', 'subscribers', 'activate', 'debts', 'messages', 'rentals',
     );
+}
+
+function is_agent_user($u = null)
+{
+    if ($u === null) {
+        $u = current_admin();
+    }
+    if (!$u) {
+        return false;
+    }
+    return normalize_admin_role(isset($u['role']) ? $u['role'] : '') === 'agent';
+}
+
+function can_manage_agents()
+{
+    return user_can('agents');
+}
+
+/** عمود تابع إلى + إسناد الموجودين للمدير */
+function ensure_subscriber_agent_column($pdo)
+{
+    static $ready = false;
+    if ($ready) {
+        return;
+    }
+    try {
+        ensure_admin_users_table($pdo);
+        $col = $pdo->query("SHOW COLUMNS FROM subscribers LIKE 'agent_user_id'")->fetch();
+        if (!$col) {
+            $pdo->exec('ALTER TABLE subscribers ADD COLUMN agent_user_id INT UNSIGNED NULL DEFAULT NULL AFTER notes');
+            try {
+                $pdo->exec('CREATE INDEX idx_subscribers_agent ON subscribers (agent_user_id)');
+            } catch (Exception $e) {
+            }
+        }
+        $adminId = (int) $pdo->query(
+            "SELECT id FROM admin_users WHERE role = 'admin' AND is_active = 1 ORDER BY id ASC LIMIT 1"
+        )->fetchColumn();
+        if ($adminId > 0) {
+            $pdo->exec(
+                'UPDATE subscribers SET agent_user_id = ' . $adminId . ' WHERE agent_user_id IS NULL'
+            );
+        }
+        $ready = true;
+    } catch (Exception $e) {
+        $ready = false;
+    }
+}
+
+function default_admin_user_id($pdo)
+{
+    try {
+        return (int) $pdo->query(
+            "SELECT id FROM admin_users WHERE role = 'admin' AND is_active = 1 ORDER BY id ASC LIMIT 1"
+        )->fetchColumn();
+    } catch (Exception $e) {
+        return 0;
+    }
+}
+
+function list_agent_users($pdo, $activeOnly = true)
+{
+    try {
+        ensure_admin_users_table($pdo);
+        $sql = "SELECT id, username, display_name, role, is_active, created_at, updated_at
+                FROM admin_users WHERE role = 'agent'";
+        if ($activeOnly) {
+            $sql .= ' AND is_active = 1';
+        }
+        $sql .= ' ORDER BY display_name ASC, id ASC';
+        return $pdo->query($sql)->fetchAll();
+    } catch (Exception $e) {
+        return array();
+    }
+}
+
+function subscriber_agent_scope_sql($alias = 's')
+{
+    if (!is_agent_user()) {
+        return '';
+    }
+    $u = current_admin();
+    $id = $u ? (int) $u['id'] : 0;
+    if ($id <= 0) {
+        return ' AND 1=0';
+    }
+    return ' AND ' . $alias . '.agent_user_id = ' . $id;
+}
+
+function user_can_access_subscriber($pdo, $subscriberId)
+{
+    $subscriberId = (int) $subscriberId;
+    if ($subscriberId <= 0) {
+        return false;
+    }
+    if (!is_agent_user()) {
+        return true;
+    }
+    $u = current_admin();
+    $uid = $u ? (int) $u['id'] : 0;
+    if ($uid <= 0) {
+        return false;
+    }
+    try {
+        ensure_subscriber_agent_column($pdo);
+        $st = $pdo->prepare('SELECT agent_user_id FROM subscribers WHERE id = :id LIMIT 1');
+        $st->execute(array(':id' => $subscriberId));
+        $aid = $st->fetchColumn();
+        return $aid !== false && (int) $aid === $uid;
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+function require_subscriber_access($pdo, $subscriberId)
+{
+    if (!user_can_access_subscriber($pdo, $subscriberId)) {
+        $lang = isset($GLOBALS['lang']) ? $GLOBALS['lang'] : 'ar';
+        flash('error', $lang === 'en' ? 'No access to this subscriber' : 'ما عندك صلاحية لهذا المشترك');
+        redirect('subscribers.php');
+    }
 }
 
 function normalize_admin_role($role)
