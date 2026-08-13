@@ -1186,6 +1186,19 @@ tr.row-focus {
   padding: 6px 8px;
   font-size: 13px;
 }
+.pay-float-card {
+  width: min(360px, 100%);
+  text-align: center;
+}
+.pay-float-amt {
+  font-size: 26px;
+  font-weight: 900;
+  color: #1c2430;
+  margin: 4px 0 8px;
+}
+.pay-float-card .toggle {
+  justify-content: center;
+}
 
 .carry-days-hint {
   display: block;

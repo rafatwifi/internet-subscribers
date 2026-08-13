@@ -44,6 +44,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = post('action');
     $id = (int) post('id', '0');
 
+    $returnSid = isset($_POST['return_subscriber']) ? (int) $_POST['return_subscriber'] : 0;
+
     if ($action === 'pay') {
         $sendWa = post('send_whatsapp') === '1';
         $payAmount = (float) post('pay_amount', '0');
@@ -54,9 +56,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         list($ok, $msg, $details) = apply_invoice_payment($pdo, $config, $id, $payAmount, $sendWa);
         flash_payment_result($ok, $msg, $details, $sendWa);
-        $sid = isset($_POST['return_subscriber']) ? (int) $_POST['return_subscriber'] : 0;
-        if ($sid > 0) {
-            redirect('debts.php?status=unpaid&subscriber_id=' . $sid);
+        if ($returnSid <= 0 && !empty($details['row']['subscriber_id'])) {
+            $returnSid = (int) $details['row']['subscriber_id'];
+        }
+        if ($returnSid > 0) {
+            redirect('debts.php?status=unpaid&subscriber_id=' . $returnSid);
+        }
+        redirect('debts.php?status=unpaid');
+    }
+
+    if ($action === 'pay_all') {
+        $sid = (int) post('subscriber_id', '0');
+        $sendWa = post('send_whatsapp') === '1';
+        $payAmount = (float) post('pay_amount', '0');
+        if ($sid <= 0) {
+            $stSid = $pdo->prepare('SELECT subscriber_id FROM invoices WHERE id = :id');
+            $stSid->execute(array(':id' => $id));
+            $sid = (int) $stSid->fetchColumn();
+        }
+        if ($payAmount <= 0) {
+            $payAmount = subscriber_unpaid_total($pdo, $sid);
+        }
+        list($ok, $msg, $details) = apply_subscriber_payment($pdo, $config, $sid, $payAmount, $sendWa, 0);
+        flash_payment_result($ok, $msg, $details, $sendWa);
+        $back = $returnSid > 0 ? $returnSid : $sid;
+        if ($back > 0) {
+            redirect('debts.php?status=unpaid&subscriber_id=' . $back);
         }
         redirect('debts.php?status=unpaid');
     }
@@ -203,6 +228,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             flash('error', whatsapp_fail_user_message($result));
         }
+        $backSid = $returnSid > 0 ? $returnSid : (int) $row['subscriber_id'];
+        if ($backSid > 0) {
+            redirect('debts.php?status=unpaid&subscriber_id=' . $backSid);
+        }
         redirect('debts.php?status=unpaid');
     }
 }
@@ -242,6 +271,16 @@ $stmt->execute($params);
 $rows = $stmt->fetchAll();
 
 $totalDebt = (float) $pdo->query("SELECT COALESCE(SUM(amount),0) FROM invoices WHERE status='unpaid'")->fetchColumn();
+$unpaidBySub = array();
+try {
+    $ut = $pdo->query(
+        "SELECT subscriber_id, COALESCE(SUM(amount),0) AS t FROM invoices WHERE status = 'unpaid' GROUP BY subscriber_id"
+    );
+    foreach ($ut->fetchAll() as $u) {
+        $unpaidBySub[(int) $u['subscriber_id']] = (float) $u['t'];
+    }
+} catch (Exception $e) {
+}
 $subscribers = $pdo->query(
     'SELECT id, name, rental_enabled, rental_device_id FROM subscribers ORDER BY name'
 )->fetchAll();
@@ -261,12 +300,26 @@ if ($filterSubscriberId > 0) {
     }
 }
 
+$cardDebt = $totalDebt;
+$cardLabel = t('debts_total');
+$cardHref = 'debts.php?status=unpaid';
+if ($filterSubscriberId > 0) {
+    $cardDebt = isset($unpaidBySub[$filterSubscriberId])
+        ? $unpaidBySub[$filterSubscriberId]
+        : subscriber_unpaid_total($pdo, $filterSubscriberId);
+    $cardLabel = $lang === 'en' ? 'Subscriber debt' : 'ديون المشترك';
+    $cardHref = 'debts.php?status=unpaid&subscriber_id=' . $filterSubscriberId;
+}
+
 render_header(t('debts'), 'debts');
 ?>
 <div class="cards">
-    <a class="card-stat red" href="debts.php?status=unpaid">
-        <div class="label"><?php echo e(t('debts_total')); ?></div>
-        <div class="value"><?php echo e(money_format_iqd($totalDebt, $config['currency'])); ?></div>
+    <a class="card-stat red" href="<?php echo e($cardHref); ?>">
+        <div class="label"><?php echo e($cardLabel); ?></div>
+        <div class="value"><?php echo e(money_format_iqd($cardDebt, $config['currency'])); ?></div>
+        <?php if ($filterSubscriberId > 0 && $filterName !== ''): ?>
+            <div class="meta" style="margin-top:6px;color:inherit;opacity:.85"><?php echo e($filterName); ?></div>
+        <?php endif; ?>
     </a>
 </div>
 
@@ -381,24 +434,39 @@ render_header(t('debts'), 'debts');
                     <?php endif; ?>
                     <td>
                         <?php if ($row['status'] === 'unpaid'): ?>
-                        <form method="post" class="pay-inline-form">
-                            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
-                            <input type="hidden" name="action" value="pay">
-                            <input type="hidden" name="id" value="<?php echo (int) $row['id']; ?>">
-                            <?php if ($filterSubscriberId > 0): ?>
-                                <input type="hidden" name="return_subscriber" value="<?php echo (int) $filterSubscriberId; ?>">
-                            <?php endif; ?>
+                        <?php
+                        $rowSubId = (int) $row['subscriber_id'];
+                        $rowAllDebt = isset($unpaidBySub[$rowSubId]) ? $unpaidBySub[$rowSubId] : (float) $row['amount'];
+                        ?>
+                        <div class="pay-inline-form">
                             <div class="pay-inline-row">
-                                <input type="number" name="pay_amount" min="1" step="1" value="<?php echo (int) $row['amount']; ?>" required title="<?php echo e(t('partial_pay')); ?>">
-                                <button class="btn money sm" type="submit" name="send_whatsapp" value="1"><?php echo e(t('pay_send')); ?></button>
-                                <button class="btn ghost sm" type="submit" name="send_whatsapp" value="0"><?php echo e(t('pay_only')); ?></button>
+                                <input type="number" class="js-pay-amt" min="1" step="1" value="<?php echo (int) $row['amount']; ?>" title="<?php echo e(t('partial_pay')); ?>">
+                                <button type="button" class="btn money sm js-pay-open"
+                                    data-mode="one"
+                                    data-invoice="<?php echo (int) $row['id']; ?>"
+                                    data-sub="<?php echo $rowSubId; ?>"
+                                    data-amount="<?php echo (int) $row['amount']; ?>"
+                                    data-name="<?php echo e($row['name']); ?>">
+                                    <?php echo e($lang === 'en' ? 'This debt' : 'هذا الدين'); ?>
+                                </button>
+                                <button type="button" class="btn secondary sm js-pay-open"
+                                    data-mode="all"
+                                    data-invoice="<?php echo (int) $row['id']; ?>"
+                                    data-sub="<?php echo $rowSubId; ?>"
+                                    data-amount="<?php echo (int) $rowAllDebt; ?>"
+                                    data-name="<?php echo e($row['name']); ?>">
+                                    <?php echo e($lang === 'en' ? 'All debts' : 'كل الديون'); ?>
+                                </button>
                             </div>
-                        </form>
+                        </div>
                         <form method="post" style="margin-top:4px">
                             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                             <input type="hidden" name="action" value="remind">
                             <input type="hidden" name="id" value="<?php echo (int) $row['id']; ?>">
-                            <button class="btn secondary sm" type="submit"><?php echo e(t('remind')); ?></button>
+                            <?php if ($filterSubscriberId > 0): ?>
+                                <input type="hidden" name="return_subscriber" value="<?php echo (int) $filterSubscriberId; ?>">
+                            <?php endif; ?>
+                            <button class="btn ghost sm" type="submit"><?php echo e(t('remind')); ?></button>
                         </form>
                         <?php elseif ($row['status'] === 'paid'): ?>
                         <form method="post">
@@ -479,6 +547,110 @@ render_header(t('debts'), 'debts');
   if (subSelect) subSelect.addEventListener('change', function () { syncRentOption(); syncKind(); });
   syncRentOption();
   syncKind();
+})();
+</script>
+<div class="modal-backdrop hidden" id="payFloat" role="dialog" aria-modal="true">
+    <div class="modal-card pay-float-card">
+        <h3 id="payFloatTitle"><?php echo e($lang === 'en' ? 'Confirm payment' : 'تأكيد التسديد'); ?></h3>
+        <p class="meta" id="payFloatWho" style="margin:0 0 10px"></p>
+        <div class="pay-float-amt" id="payFloatAmt"></div>
+        <label class="toggle" style="margin:14px 0">
+            <input type="checkbox" id="payAutoToggle" checked>
+            <span class="toggle-ui" aria-hidden="true"></span>
+            <span class="toggle-text"><?php echo e($lang === 'en' ? 'Automatic' : 'تلقائي'); ?></span>
+        </label>
+        <p class="meta" style="margin:0 0 12px"><?php echo e($lang === 'en' ? 'On = send WhatsApp' : 'تشغيل = إرسال واتساب'); ?></p>
+        <div class="actions" style="margin-top:0">
+            <button class="btn" type="button" id="payFloatOk"><?php echo e($lang === 'en' ? 'Pay' : 'تسديد'); ?></button>
+            <button class="btn ghost" type="button" id="payFloatCancel"><?php echo e($lang === 'en' ? 'Cancel' : 'إلغاء'); ?></button>
+        </div>
+    </div>
+</div>
+<form method="post" id="payConfirmForm" class="hidden" hidden>
+    <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+    <input type="hidden" name="action" id="payConfirmAction" value="pay">
+    <input type="hidden" name="id" id="payConfirmId" value="">
+    <input type="hidden" name="subscriber_id" id="payConfirmSub" value="">
+    <input type="hidden" name="pay_amount" id="payConfirmAmt" value="">
+    <input type="hidden" name="send_whatsapp" id="payConfirmWa" value="1">
+    <?php if ($filterSubscriberId > 0): ?>
+        <input type="hidden" name="return_subscriber" value="<?php echo (int) $filterSubscriberId; ?>">
+    <?php endif; ?>
+</form>
+<script>
+(function () {
+  var box = document.getElementById('payFloat');
+  var title = document.getElementById('payFloatTitle');
+  var who = document.getElementById('payFloatWho');
+  var amtEl = document.getElementById('payFloatAmt');
+  var tog = document.getElementById('payAutoToggle');
+  var form = document.getElementById('payConfirmForm');
+  var act = document.getElementById('payConfirmAction');
+  var idEl = document.getElementById('payConfirmId');
+  var subEl = document.getElementById('payConfirmSub');
+  var amtIn = document.getElementById('payConfirmAmt');
+  var waEl = document.getElementById('payConfirmWa');
+  var pending = null;
+  var txtOne = <?php echo json_encode($lang === 'en' ? 'Pay this debt' : 'تسديد هذا الدين'); ?>;
+  var txtAll = <?php echo json_encode($lang === 'en' ? 'Pay all debts' : 'تسديد كل الديون'); ?>;
+  var cur = <?php echo json_encode($config['currency']); ?>;
+  function fmt(n) {
+    n = Math.round(Number(n) || 0);
+    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',') + ' ' + cur;
+  }
+  function closePay() {
+    if (box) box.classList.add('hidden');
+    pending = null;
+  }
+  function openPay(btn) {
+    var row = btn.closest('tr');
+    var mode = btn.getAttribute('data-mode');
+    var amtInp = row ? row.querySelector('.js-pay-amt') : null;
+    var amount = mode === 'all'
+      ? (parseFloat(btn.getAttribute('data-amount') || '0') || 0)
+      : (amtInp ? (parseFloat(amtInp.value) || parseFloat(btn.getAttribute('data-amount') || '0') || 0) : 0);
+    pending = {
+      mode: mode,
+      invoice: btn.getAttribute('data-invoice') || '',
+      sub: btn.getAttribute('data-sub') || '',
+      amount: amount,
+      name: btn.getAttribute('data-name') || ''
+    };
+    if (title) title.textContent = mode === 'all' ? txtAll : txtOne;
+    if (who) who.textContent = pending.name;
+    if (amtEl) amtEl.textContent = fmt(amount);
+    if (tog) tog.checked = true;
+    if (box) box.classList.remove('hidden');
+  }
+  document.addEventListener('click', function (e) {
+    var btn = e.target && e.target.closest ? e.target.closest('.js-pay-open') : null;
+    if (btn) {
+      e.preventDefault();
+      openPay(btn);
+    }
+  });
+  var okBtn = document.getElementById('payFloatOk');
+  var cancelBtn = document.getElementById('payFloatCancel');
+  if (okBtn) {
+    okBtn.addEventListener('click', function () {
+      if (!pending || !form) return;
+      act.value = pending.mode === 'all' ? 'pay_all' : 'pay';
+      idEl.value = pending.invoice;
+      subEl.value = pending.sub;
+      amtIn.value = String(pending.amount);
+      waEl.value = (tog && tog.checked) ? '1' : '0';
+      form.submit();
+    });
+  }
+  if (cancelBtn) cancelBtn.addEventListener('click', closePay);
+  if (box) {
+    box.addEventListener('click', function (e) {
+      if (e.target === box) closePay();
+    });
+  }
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') closePay();
+  });
 })();
 </script>
 <?php render_footer(); ?>
