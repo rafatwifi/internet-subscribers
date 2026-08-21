@@ -36,4 +36,20 @@ return [
     'cron_secret' => 'CHANGE_CRON_SECRET',
     'currency' => 'د.ع',
     'timezone' => 'Asia/Baghdad',
+
+    // ربط SAS Radius (NBTel / Snono) — عدّل config.php على السيرفر فقط
+    'sas' => [
+        'enabled' => false,
+        'host' => 'reseller.nbtel.iq',
+        'username' => 'YOUR_SAS_USERNAME',
+        'password' => 'YOUR_SAS_PASSWORD',
+        'parent_id' => 1,
+        'default_password' => '',
+        'activate_units' => 1,
+        // طريقة تست 24 ساعة: reward_points أو credit
+        'extend_method' => 'reward_points',
+        'extend_profile_id' => 0,
+        // warn = التفعيل المحلي ينجح + تحذير | rollback = يلغي التفعيل إذا SAS فشل
+        'on_failure' => 'warn',
+    ],
 ];

@@ -34,6 +34,17 @@ function settings_defaults()
             array('id' => 'litebeam', 'name' => 'لايت بيم', 'icon' => 'LB', 'color' => '#30d158'),
             array('id' => 'nanostation', 'name' => 'نانو ستيشن', 'icon' => 'NS', 'color' => '#ff9f0a'),
         ),
+        'sas_saved' => false,
+        'sas_enabled' => false,
+        'sas_host' => 'reseller.nbtel.iq',
+        'sas_username' => '',
+        'sas_password' => '',
+        'sas_parent_id' => 1,
+        'sas_default_password' => '',
+        'sas_activate_units' => 1,
+        'sas_extend_method' => 'reward_points',
+        'sas_extend_profile_id' => 0,
+        'sas_on_failure' => 'warn',
     );
 }
 
@@ -101,5 +112,34 @@ function apply_settings_to_config($config, $settings)
     $config['expiry_auto_remind_days'] = isset($settings['expiry_auto_remind_days'])
         ? max(0, (int) $settings['expiry_auto_remind_days'])
         : 1;
+
+    if (!isset($config['sas']) || !is_array($config['sas'])) {
+        $config['sas'] = array();
+    }
+    if (!empty($settings['sas_saved'])) {
+        $config['sas']['enabled'] = !empty($settings['sas_enabled']);
+        $config['sas']['host'] = isset($settings['sas_host']) ? trim((string) $settings['sas_host']) : '';
+        $config['sas']['username'] = isset($settings['sas_username']) ? trim((string) $settings['sas_username']) : '';
+        if (isset($settings['sas_password']) && (string) $settings['sas_password'] !== '') {
+            $config['sas']['password'] = (string) $settings['sas_password'];
+        }
+        $config['sas']['parent_id'] = isset($settings['sas_parent_id']) ? (int) $settings['sas_parent_id'] : 1;
+        $config['sas']['default_password'] = isset($settings['sas_default_password'])
+            ? (string) $settings['sas_default_password']
+            : '';
+        $config['sas']['activate_units'] = isset($settings['sas_activate_units'])
+            ? max(1, (int) $settings['sas_activate_units'])
+            : 1;
+        $config['sas']['extend_method'] = (isset($settings['sas_extend_method']) && $settings['sas_extend_method'] === 'credit')
+            ? 'credit'
+            : 'reward_points';
+        $config['sas']['extend_profile_id'] = isset($settings['sas_extend_profile_id'])
+            ? (int) $settings['sas_extend_profile_id']
+            : 0;
+        $config['sas']['on_failure'] = (isset($settings['sas_on_failure']) && $settings['sas_on_failure'] === 'rollback')
+            ? 'rollback'
+            : 'warn';
+    }
+
     return $config;
 }

@@ -66,6 +66,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('subscriber.php?id=' . $id);
     }
 
+    if ($action === 'give_test') {
+        list($ok, $msg) = activate_subscriber_test($pdo, $config, $id);
+        flash($ok ? 'success' : 'error', $msg);
+        redirect('subscriber.php?id=' . $id);
+    }
+
     if ($action === 'update_rental') {
         $enabled = post('rental_enabled') === '1';
         $deviceId = trim((string) post('rental_device_id', ''));
@@ -657,6 +663,11 @@ $isActiveSub = !empty($activeSubCard);
     <a class="btn ghost" href="subscribers.php"><?php echo e($lang === 'en' ? 'Back' : 'رجوع'); ?></a>
     <a class="btn" href="subscriber.php?id=<?php echo (int) $id; ?>&edit=1"><?php echo e(t('edit')); ?></a>
     <a class="btn secondary" href="activate.php?subscriber_id=<?php echo (int) $id; ?>"><?php echo e(t('activate')); ?></a>
+    <form method="post" style="display:inline" onsubmit="return confirm(<?php echo json_encode(t('confirm_give_test')); ?>);">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="action" value="give_test">
+        <button class="btn ghost" type="submit"><?php echo e(t('give_test')); ?></button>
+    </form>
     <a class="btn money" href="subscriber.php?id=<?php echo (int) $id; ?>&tab=add_debt#debts"><?php echo e($lang === 'en' ? 'Add debt' : 'إضافة دين'); ?></a>
     <?php if ($unpaid > 0): ?>
     <a class="btn" style="background:#16a34a;border-color:#16a34a;color:#fff" href="subscriber.php?id=<?php echo (int) $id; ?>&tab=pay#debts"><?php echo e(t('pay_debts')); ?></a>
@@ -827,7 +838,11 @@ if ($activeSubCard) {
             <?php $n = 1; foreach ($subs as $row): ?>
                 <tr>
                     <td><?php echo $n++; ?></td>
-                    <td><?php echo e($row['service_name']); ?></td>
+                    <td><?php echo e($row['service_name']); ?>
+                        <?php if ((float) $row['monthly_price'] <= 0): ?>
+                            <span class="badge" style="background:#f59e0b;color:#111"><?php echo e($lang === 'en' ? 'TEST' : 'تست'); ?></span>
+                        <?php endif; ?>
+                    </td>
                     <td><?php echo e(money_format_iqd($row['monthly_price'], $config['currency'])); ?></td>
                     <td><?php echo e($row['start_date']); ?></td>
                     <td><?php echo e($row['end_date']); ?></td>

@@ -393,6 +393,7 @@ body.ltr .main-top-tools .subs-ops-side { order: 3; margin: 0; margin-inline-sta
 .card-stat.g-slate { background: linear-gradient(145deg, #94a3b8 0%, #475569 100%) !important; }
 .card-stat.g-amber { background: linear-gradient(145deg, #fde047 0%, #ca8a04 100%) !important; color: #422006 !important; }
 .card-stat.g-rose { background: linear-gradient(145deg, #fb7185 0%, #e11d48 100%) !important; }
+.card-stat.g-gold { background: linear-gradient(145deg, #fbbf24 0%, #d97706 100%) !important; color: #3b1f00 !important; }
 .card-stat.g-clock { background: linear-gradient(145deg, rgba(255,255,255,0.85) 0%, rgba(240,244,255,0.9) 100%) !important; color: #1c2430 !important; }
 
 .card-stat.blue, .card-stat.info { background: linear-gradient(145deg, #4f8cff, #2f6df6) !important; }

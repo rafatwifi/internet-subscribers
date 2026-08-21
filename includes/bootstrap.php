@@ -40,6 +40,10 @@ $pdo = db_connect($config);
 require_once __DIR__ . '/invoices.php';
 require_once __DIR__ . '/activity.php';
 require_once __DIR__ . '/rental.php';
+$sasServiceFile = __DIR__ . '/sas_service.php';
+if (is_file($sasServiceFile)) {
+    require_once $sasServiceFile;
+}
 require_once __DIR__ . '/activate_service.php';
 
 $archivesFile = __DIR__ . '/archives.php';
@@ -128,6 +132,13 @@ try {
 try {
     if (function_exists('ensure_name_unique')) {
         ensure_name_unique($pdo);
+    }
+} catch (Exception $e) {
+} catch (Throwable $e) {
+}
+try {
+    if (function_exists('ensure_sas_columns')) {
+        ensure_sas_columns($pdo);
     }
 } catch (Exception $e) {
 } catch (Throwable $e) {

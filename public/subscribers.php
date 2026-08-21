@@ -229,6 +229,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('subscribers.php');
     }
 
+    if ($action === 'give_test') {
+        $id = (int) post('id', '0');
+        require_subscriber_access($pdo, $id);
+        list($ok, $msg) = activate_subscriber_test($pdo, $config, $id);
+        flash($ok ? 'success' : 'error', $msg);
+        redirect('subscribers.php?focus=' . $id . '&per_page=all');
+    }
+
     if ($action === 'delete') {
         $id = (int) post('id', '0');
         require_subscriber_access($pdo, $id);
@@ -580,6 +588,9 @@ function subscribers_list_select_sql()
     (SELECT sub.end_date FROM subscriptions sub
         WHERE sub.subscriber_id = s.id AND sub.status = "active" AND sub.end_date >= CURDATE()
         ORDER BY sub.id DESC LIMIT 1) AS active_end,
+    (SELECT sub.monthly_price FROM subscriptions sub
+        WHERE sub.subscriber_id = s.id AND sub.status = "active" AND sub.end_date >= CURDATE()
+        ORDER BY sub.id DESC LIMIT 1) AS active_price,
     (SELECT sub.start_date FROM subscriptions sub WHERE sub.subscriber_id = s.id ORDER BY sub.id DESC LIMIT 1) AS last_start,
     (SELECT sub.end_date FROM subscriptions sub WHERE sub.subscriber_id = s.id ORDER BY sub.id DESC LIMIT 1) AS last_end,
     (SELECT COUNT(*) FROM subscriptions sub WHERE sub.subscriber_id = s.id) AS sub_count,
@@ -711,7 +722,11 @@ function render_subscriber_table_row($row, $n, $config, $lang)
     $html .= '</td>';
     $phoneDisp = format_phone_display($row['phone']);
     $html .= '<td class="col-phone"><span class="cell-edit phone-edit" tabindex="0" data-edit="phone" data-id="' . (int) $row['id'] . '" data-value="' . e($row['phone']) . '" title="' . e($lang === 'en' ? 'Click to edit' : 'اضغط للتعديل') . '">' . e($phoneDisp) . '</span></td>';
-    $html .= '<td class="col-pkg">' . e($pkgLabel) . '</td>';
+    $html .= '<td class="col-pkg">' . e($pkgLabel);
+    if (!empty($row['active_service']) && isset($row['active_price']) && (float) $row['active_price'] <= 0) {
+        $html .= ' <span class="badge" style="background:#f59e0b;color:#111;font-size:11px;padding:1px 6px">' . e($lang === 'en' ? 'TEST' : 'تست') . '</span>';
+    }
+    $html .= '</td>';
     $html .= '<td class="col-days">';
     if ($daysInfo) {
         $daysLeftVal = (int) $daysInfo['left'];
@@ -1483,6 +1498,7 @@ window.DEBT_ENTRY = {
     <div class="ops-sep" id="opsSep" hidden></div>
     <button type="button" class="ops-item" data-ops="open" id="opsItemOpen" hidden><?php echo e($lang === 'en' ? 'Open' : 'فتح'); ?></button>
     <button type="button" class="ops-item" data-ops="activate" id="opsItemActivate" hidden><?php echo e(t('activate')); ?></button>
+    <button type="button" class="ops-item" data-ops="give_test" id="opsItemGiveTest" hidden><?php echo e(t('give_test')); ?></button>
     <button type="button" class="ops-item" data-ops="bulk_activate" id="opsItemBulkActivate" hidden><?php echo e(t('bulk_activate')); ?></button>
     <button type="button" class="ops-item" data-ops="pay" id="opsItemPay" hidden><?php echo e(t('pay_debt')); ?></button>
     <button type="button" class="ops-item" data-ops="remind_debt" id="opsItemRemind" hidden><?php echo e(t('remind')); ?></button>
@@ -1603,6 +1619,11 @@ window.DEBT_ENTRY = {
     <input type="hidden" name="id" value="">
     <input type="hidden" name="log_id" value="">
 </form>
+<form method="post" id="opsGiveTestForm" class="hidden" hidden>
+    <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+    <input type="hidden" name="action" value="give_test">
+    <input type="hidden" name="id" value="">
+</form>
 <form method="post" id="opsDeleteForm" class="hidden" hidden onsubmit="return confirm(<?php echo json_encode(t('confirm_delete')); ?>);">
     <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
     <input type="hidden" name="action" value="delete">
@@ -1637,6 +1658,7 @@ window.DEBT_ENTRY = {
   var opsList = document.getElementById('opsSelectedList');
   var countLabel = <?php echo json_encode($lang === 'en' ? 'selected' : 'محدد'); ?>;
   var confirmDel = <?php echo json_encode(t('confirm_delete')); ?>;
+  var confirmTest = <?php echo json_encode(t('confirm_give_test')); ?>;
 
   function visibleChecks() {
     return tbody ? Array.prototype.slice.call(tbody.querySelectorAll('input.sub-check')) : [];
@@ -1707,6 +1729,7 @@ window.DEBT_ENTRY = {
     showEl(document.getElementById('opsSep'), n > 0);
     showEl(document.getElementById('opsItemOpen'), !!one);
     showEl(document.getElementById('opsItemActivate'), !!one);
+    showEl(document.getElementById('opsItemGiveTest'), !!one);
     showEl(document.getElementById('opsItemBulkActivate'), n > 1);
     showEl(document.getElementById('opsItemPay'), anyDebt);
     showEl(document.getElementById('opsItemRemind'), anyDebt);
@@ -1809,6 +1832,14 @@ window.DEBT_ENTRY = {
     }
     if (action === 'activate' && one) {
       window.location.href = 'activate.php?subscriber_id=' + encodeURIComponent(one.id);
+      return;
+    }
+    if (action === 'give_test' && one) {
+      if (!window.confirm(confirmTest)) return;
+      var ft = document.getElementById('opsGiveTestForm');
+      var tid = ft && ft.querySelector('input[name="id"]');
+      if (tid) tid.value = one.id;
+      if (ft) ft.submit();
       return;
     }
     if (action === 'bulk_activate') {

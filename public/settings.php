@@ -6,7 +6,7 @@ require_once __DIR__ . '/../includes/settings_tabs.php';
 require_login();
 
 $tab = isset($_GET['tab']) ? (string) $_GET['tab'] : 'general';
-if (!in_array($tab, array('general', 'whatsapp', 'templates', 'rental', 'users', 'plans'), true)) {
+if (!in_array($tab, array('general', 'whatsapp', 'templates', 'rental', 'users', 'plans', 'sas'), true)) {
     $tab = 'general';
 }
 
@@ -26,8 +26,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     $section = post('section', 'general');
     $data = array();
+    $skipSettingsSave = false;
 
-    if ($section === 'clear_data') {
+    if ($section === 'sas_test') {
+        $skipSettingsSave = true;
+        $tab = 'sas';
+    } elseif ($section === 'clear_data') {
         require_perm('clear_data');
         $pass = (string) post('admin_password', '');
         $me = current_admin();
@@ -232,17 +236,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'unpaid_remind_after_days' => $afterDays,
         );
         $tab = 'templates';
-    } else {
+    } elseif ($section === 'sas') {
+        $host = preg_replace('#^https?://#i', '', rtrim(trim((string) post('sas_host', '')), '/'));
+        $pass = (string) post('sas_password', '');
+        if ($pass === '') {
+            $currSas = function_exists('sas_config') ? sas_config($config) : array();
+            $pass = isset($currSas['password']) ? (string) $currSas['password'] : '';
+        }
+        $units = (int) post('sas_activate_units', '1');
+        if ($units < 1) {
+            $units = 1;
+        }
+        $data = array(
+            'sas_saved' => true,
+            'sas_enabled' => post('sas_enabled') === '1',
+            'sas_host' => $host !== '' ? $host : 'reseller.nbtel.iq',
+            'sas_username' => trim((string) post('sas_username', '')),
+            'sas_password' => $pass,
+            'sas_parent_id' => (int) post('sas_parent_id', '1'),
+            'sas_default_password' => (string) post('sas_default_password', ''),
+            'sas_activate_units' => $units,
+            'sas_extend_method' => post('sas_extend_method') === 'credit' ? 'credit' : 'reward_points',
+            'sas_extend_profile_id' => (int) post('sas_extend_profile_id', '0'),
+            'sas_on_failure' => post('sas_on_failure') === 'rollback' ? 'rollback' : 'warn',
+        );
+        $tab = 'sas';
+    } elseif (!$skipSettingsSave) {
         flash('error', 'Unknown section');
         redirect('settings.php');
     }
 
-    if (settings_save($data)) {
-        flash('success', t('saved'));
-    } else {
-        flash('error', 'Cannot write settings.json');
+    if (!$skipSettingsSave) {
+        if (settings_save($data)) {
+            flash('success', t('saved'));
+        } else {
+            flash('error', 'Cannot write settings.json');
+        }
+        redirect('settings.php?tab=' . $tab);
     }
-    redirect('settings.php?tab=' . $tab);
 }
 
 $s = settings_load();
@@ -253,6 +284,50 @@ if ($tab === 'whatsapp') {
     $activeNav = 'templates';
 } elseif ($tab === 'users') {
     $activeNav = 'users';
+}
+
+$sasCfgUi = function_exists('sas_config') ? sas_config($config) : array();
+if (!is_array($sasCfgUi)) {
+    $sasCfgUi = array();
+}
+$sasTestOk = null;
+$sasTestMsg = '';
+$sasProfiles = array();
+$sasManagers = array();
+$sasPlans = array();
+$sasLoadError = '';
+$sasRewardPoints = null;
+if ($tab === 'sas') {
+    try {
+        if (function_exists('ensure_sas_columns')) {
+            ensure_sas_columns($pdo);
+        }
+        $hasSasCol = false;
+        try {
+            $hasSasCol = (bool) $pdo->query("SHOW COLUMNS FROM service_plans LIKE 'sas_profile_id'")->fetch();
+        } catch (Exception $eCol) {
+            $hasSasCol = false;
+        }
+        if ($hasSasCol) {
+            $sasPlans = $pdo->query('SELECT id, name, sas_profile_id FROM service_plans ORDER BY id ASC')->fetchAll();
+        } else {
+            $sasPlans = $pdo->query('SELECT id, name FROM service_plans ORDER BY id ASC')->fetchAll();
+        }
+        if (!is_array($sasPlans)) {
+            $sasPlans = array();
+        }
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'sas_test' && function_exists('sas_test_connection')) {
+            $tres = sas_test_connection($config);
+            $sasTestOk = !empty($tres['ok']);
+            $sasTestMsg = isset($tres['message']) ? $tres['message'] : '';
+            $sasProfiles = isset($tres['profiles']) && is_array($tres['profiles']) ? $tres['profiles'] : array();
+            $sasManagers = isset($tres['managers']) && is_array($tres['managers']) ? $tres['managers'] : array();
+            $sasRewardPoints = array_key_exists('reward_points', $tres) ? $tres['reward_points'] : null;
+        }
+    } catch (Exception $e) {
+        $sasPlans = array();
+        $sasLoadError = $e->getMessage();
+    }
 }
 $rentalDevices = rental_devices_list($s);
 $rentalFee = rental_fee_amount($s);
@@ -849,6 +924,221 @@ function logoutWhatsApp() {
 checkWhatsApp(true);
 setInterval(function () { if (!waBusy) checkWhatsApp(false); }, 10000);
 </script>
+<?php endif; ?>
+
+<?php if ($tab === 'sas'): ?>
+<?php
+$isEn = ($lang === 'en');
+$sasHasPass = !empty($sasCfgUi['password']);
+?>
+<div class="panel">
+    <h2><?php echo e(t('settings_sas')); ?></h2>
+    <p style="color:#6b7a88;font-weight:600;margin-top:0">
+        <?php echo e($isEn
+            ? 'Save NBTel/Snono login here. Activation in this system will create/activate the user on SAS.'
+            : 'احفظ دخول NBTel / سنونو هنا. التفعيل من هذا النظام ينشئ ويفعّل المشترك على SAS.'); ?>
+    </p>
+    <form method="post">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="section" value="sas">
+        <div class="form-grid cols-4">
+            <div>
+                <label><?php echo e($isEn ? 'SAS link' : 'ربط SAS'); ?></label>
+                <select name="sas_enabled">
+                    <option value="1" <?php echo !empty($sasCfgUi['enabled']) ? 'selected' : ''; ?>><?php echo e($isEn ? 'ON' : 'تشغيل'); ?></option>
+                    <option value="0" <?php echo empty($sasCfgUi['enabled']) ? 'selected' : ''; ?>><?php echo e($isEn ? 'OFF' : 'إيقاف'); ?></option>
+                </select>
+            </div>
+            <div>
+                <label>Host</label>
+                <input class="ltr" name="sas_host" required
+                       value="<?php echo e(!empty($sasCfgUi['host']) ? $sasCfgUi['host'] : 'reseller.nbtel.iq'); ?>"
+                       placeholder="reseller.nbtel.iq">
+            </div>
+            <div>
+                <label><?php echo e($isEn ? 'Username' : 'اسم المستخدم'); ?></label>
+                <input class="ltr" name="sas_username" required
+                       value="<?php echo e(isset($sasCfgUi['username']) ? $sasCfgUi['username'] : ''); ?>">
+            </div>
+            <div>
+                <label><?php echo e($isEn ? 'Password' : 'كلمة المرور'); ?></label>
+                <input class="ltr" type="password" name="sas_password" autocomplete="new-password"
+                       placeholder="<?php echo e($sasHasPass
+                           ? ($isEn ? 'Leave blank to keep current' : 'فارغ = إبقاء الحالي')
+                           : ''); ?>">
+            </div>
+            <div>
+                <label>Parent ID</label>
+                <input type="number" name="sas_parent_id" min="1" step="1"
+                       value="<?php echo (int) (isset($sasCfgUi['parent_id']) ? $sasCfgUi['parent_id'] : 1); ?>">
+            </div>
+            <div>
+                <label><?php echo e($isEn ? '24h test / extend method' : 'طريقة تست 24 ساعة'); ?></label>
+                <select name="sas_extend_method">
+                    <option value="reward_points" <?php echo (isset($sasCfgUi['extend_method']) && $sasCfgUi['extend_method'] === 'credit') ? '' : 'selected'; ?>>
+                        <?php echo e($isEn ? 'Reward points (default)' : 'نقاط تشجيعية (افتراضي)'); ?>
+                    </option>
+                    <option value="credit" <?php echo (isset($sasCfgUi['extend_method']) && $sasCfgUi['extend_method'] === 'credit') ? 'selected' : ''; ?>>
+                        <?php echo e($isEn ? 'Manager balance' : 'رصيد المدير'); ?>
+                    </option>
+                </select>
+            </div>
+            <div>
+                <label><?php echo e($isEn ? 'Extend profile ID (optional)' : 'بروفايل التمديد (اختياري)'); ?></label>
+                <input type="number" name="sas_extend_profile_id" min="0" step="1"
+                       value="<?php echo (int) (isset($sasCfgUi['extend_profile_id']) ? $sasCfgUi['extend_profile_id'] : 0); ?>"
+                       placeholder="<?php echo e($isEn ? '0 = auto 24h extension' : '0 = اختيار تلقائي لبروفايل التمديد'); ?>">
+                <div class="hint" style="color:#6b7a88;font-size:12px;margin-top:4px">
+                    <?php echo e($isEn
+                        ? 'Must be an Extension profile ID from SAS, not the monthly plan profile.'
+                        : 'لازم رقم بروفايل Extension من SAS، مو بروفايل الباقة الشهرية. صفر = يختار تست 24 ساعة تلقائياً.'); ?>
+                </div>
+            </div>
+            <div>
+                <label><?php echo e($isEn ? 'Activation units' : 'وحدات التفعيل'); ?></label>
+                <input type="number" name="sas_activate_units" min="1" step="1"
+                       value="<?php echo (int) (isset($sasCfgUi['activate_units']) ? $sasCfgUi['activate_units'] : 1); ?>">
+            </div>
+            <div>
+                <label><?php echo e($isEn ? 'If SAS fails' : 'عند فشل SAS'); ?></label>
+                <select name="sas_on_failure">
+                    <option value="warn" <?php echo (isset($sasCfgUi['on_failure']) && $sasCfgUi['on_failure'] === 'rollback') ? '' : 'selected'; ?>>
+                        <?php echo e($isEn ? 'Keep local activation + warn' : 'تفعيل محلي + تحذير'); ?>
+                    </option>
+                    <option value="rollback" <?php echo (isset($sasCfgUi['on_failure']) && $sasCfgUi['on_failure'] === 'rollback') ? 'selected' : ''; ?>>
+                        <?php echo e($isEn ? 'Cancel local if SAS fails' : 'إلغاء التفعيل إذا فشل SAS'); ?>
+                    </option>
+                </select>
+            </div>
+            <div>
+                <label><?php echo e($isEn ? 'Default SAS user password' : 'باسورد مستخدم SAS الافتراضي'); ?></label>
+                <input class="ltr" name="sas_default_password"
+                       value="<?php echo e(isset($sasCfgUi['default_password']) ? $sasCfgUi['default_password'] : ''); ?>"
+                       placeholder="<?php echo e($isEn ? 'Empty = last 6 digits of phone' : 'فارغ = آخر 6 أرقام من الهاتف'); ?>">
+            </div>
+        </div>
+        <div class="actions">
+            <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
+        </div>
+    </form>
+</div>
+
+<div class="panel">
+    <h2><?php echo e($isEn ? 'Connection & profiles' : 'الاتصال والبروفايلات'); ?></h2>
+    <table class="meta-table" style="margin:0 0 14px">
+        <tr><th><?php echo e($isEn ? 'Status' : 'الحالة'); ?></th>
+            <td><?php echo !empty($sasCfgUi['enabled']) ? ($isEn ? 'Enabled' : 'مفعّل') : ($isEn ? 'Disabled' : 'متوقف'); ?></td></tr>
+        <tr><th>Host</th><td class="ltr"><?php echo e(!empty($sasCfgUi['host']) ? $sasCfgUi['host'] : '—'); ?></td></tr>
+        <tr><th><?php echo e($isEn ? 'User' : 'المستخدم'); ?></th>
+            <td class="ltr"><?php echo e(!empty($sasCfgUi['username']) ? $sasCfgUi['username'] : '—'); ?></td></tr>
+        <tr><th>Parent ID</th><td><?php echo (int) (isset($sasCfgUi['parent_id']) ? $sasCfgUi['parent_id'] : 0); ?></td></tr>
+    </table>
+    <form method="post" style="margin-bottom:14px">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="section" value="sas_test">
+        <button class="btn" type="submit"><?php echo e($isEn ? 'Test connection & load profiles' : 'اختبار الاتصال وجلب البروفايلات'); ?></button>
+        <a class="btn secondary" href="plans.php"><?php echo e($isEn ? 'Map profiles to plans' : 'ربط البروفايلات بالباقات'); ?></a>
+    </form>
+    <?php if ($sasLoadError !== ''): ?>
+        <div class="flash error" style="margin-bottom:12px"><?php echo e($sasLoadError); ?></div>
+    <?php endif; ?>
+    <?php if ($sasTestOk !== null): ?>
+        <div class="flash <?php echo $sasTestOk ? 'success' : 'error'; ?>" style="margin-bottom:12px">
+            <?php echo e($sasTestMsg); ?>
+        </div>
+        <?php if ($sasRewardPoints !== null): ?>
+            <p style="font-weight:700;margin-top:0">
+                Reward Points:
+                <?php echo e(((float) $sasRewardPoints == (int) $sasRewardPoints)
+                    ? number_format((int) $sasRewardPoints)
+                    : number_format((float) $sasRewardPoints, 2)); ?>
+            </p>
+        <?php endif; ?>
+    <?php endif; ?>
+
+    <?php if ($sasProfiles): ?>
+        <h3><?php echo e($isEn ? 'SAS profiles' : 'بروفايلات SAS'); ?></h3>
+        <p style="color:#6b7a88"><?php echo e($isEn
+            ? 'Monthly profiles go on the plan. Extension profiles are for 24h test / extend.'
+            : 'بروفايل الباقة الشهري للباقات. بروفايل Extension (تمديد) يُستخدم للتست 24 ساعة.'); ?></p>
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th>ID</th><th><?php echo e($isEn ? 'Name' : 'الاسم'); ?></th><th><?php echo e($isEn ? 'Type' : 'النوع'); ?></th><th><?php echo e($isEn ? 'Price' : 'السعر'); ?></th></tr></thead>
+                <tbody>
+                <?php foreach ($sasProfiles as $pr): ?>
+                    <?php if (!is_array($pr)) { continue; } ?>
+                    <?php
+                    $ptype = '';
+                    foreach (array('type', 'profile_type', 'service_type', 'profileType') as $tk) {
+                        if (!empty($pr[$tk])) {
+                            $ptype = (string) $pr[$tk];
+                            break;
+                        }
+                    }
+                    ?>
+                    <tr>
+                        <td><strong><?php echo e(function_exists('sas_row_id') ? sas_row_id($pr) : ''); ?></strong></td>
+                        <td><?php echo e(function_exists('sas_row_name') ? sas_row_name($pr) : ''); ?></td>
+                        <td><?php echo e($ptype !== '' ? $ptype : '—'); ?></td>
+                        <td><?php echo e(isset($pr['price']) ? $pr['price'] : ''); ?></td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+    <?php endif; ?>
+
+    <?php if ($sasManagers): ?>
+        <h3 style="margin-top:20px"><?php echo e($isEn ? 'Managers (Parent ID)' : 'المدراء (Parent ID)'); ?></h3>
+        <div class="table-wrap">
+            <table>
+                <thead><tr><th>ID</th><th>Username</th><th><?php echo e($isEn ? 'Name' : 'الاسم'); ?></th><th>Reward Points</th></tr></thead>
+                <tbody>
+                <?php foreach ($sasManagers as $m): ?>
+                    <?php if (!is_array($m)) { continue; } ?>
+                    <tr>
+                        <td><?php echo e(isset($m['id']) ? $m['id'] : ''); ?></td>
+                        <td><?php echo e(isset($m['username']) ? $m['username'] : ''); ?></td>
+                        <td><?php echo e(isset($m['name']) ? $m['name'] : ''); ?></td>
+                        <td><?php
+                            $mp = function_exists('sas_find_reward_points') ? sas_find_reward_points($m) : null;
+                            echo $mp === null ? '—' : e((string) $mp);
+                        ?></td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+    <?php endif; ?>
+</div>
+
+<div class="panel">
+    <h2><?php echo e($isEn ? 'Local plans ↔ SAS' : 'الباقات المحلية ↔ SAS'); ?></h2>
+    <div class="table-wrap">
+        <table>
+            <thead>
+            <tr>
+                <th><?php echo e($isEn ? 'Plan' : 'الباقة'); ?></th>
+                <th>SAS Profile ID</th>
+            </tr>
+            </thead>
+            <tbody>
+            <?php if (!$sasPlans): ?>
+                <tr><td colspan="2"><?php echo e($isEn ? 'No plans yet' : 'لا توجد باقات'); ?></td></tr>
+            <?php endif; ?>
+            <?php foreach ($sasPlans as $pl): ?>
+                <tr>
+                    <td><strong><?php echo e($pl['name']); ?></strong></td>
+                    <td><?php echo !empty($pl['sas_profile_id']) ? (int) $pl['sas_profile_id'] : '—'; ?></td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+    </div>
+    <div class="actions">
+        <a class="btn secondary" href="plans.php"><?php echo e($isEn ? 'Edit plans' : 'تعديل الباقات'); ?></a>
+    </div>
+</div>
 <?php endif; ?>
 
 <?php if ($tab === 'templates'): ?>

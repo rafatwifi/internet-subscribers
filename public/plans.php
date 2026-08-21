@@ -23,6 +23,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $price = (float) post('monthly_price', '0');
         $cost = (float) post('cost_price', '0');
         $sort = (int) post('sort_order', '100');
+        $sasProfile = (int) post('sas_profile_id', '0');
 
         if ($name === '' || $price <= 0) {
             flash('error', 'اسم الباقة وسعر البيع مطلوبان');
@@ -31,13 +32,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if ($action === 'create') {
             $stmt = $pdo->prepare(
-                'INSERT INTO service_plans (name, monthly_price, cost_price, sort_order, is_active)
-                 VALUES (:name, :price, :cost, :sort, 1)'
+                'INSERT INTO service_plans (name, monthly_price, cost_price, sas_profile_id, sort_order, is_active)
+                 VALUES (:name, :price, :cost, :sas_profile, :sort, 1)'
             );
             $stmt->execute(array(
                 ':name' => $name,
                 ':price' => $price,
                 ':cost' => $cost,
+                ':sas_profile' => $sasProfile > 0 ? $sasProfile : null,
                 ':sort' => $sort,
             ));
             flash('success', 'تمت إضافة الباقة');
@@ -48,7 +50,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             $stmt = $pdo->prepare(
                 'UPDATE service_plans
-                 SET name = :name, monthly_price = :price, cost_price = :cost, sort_order = :sort
+                 SET name = :name, monthly_price = :price, cost_price = :cost,
+                     sas_profile_id = :sas_profile, sort_order = :sort
                  WHERE id = :id'
             );
             $stmt->execute(array(
@@ -56,6 +59,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 ':name' => $name,
                 ':price' => $price,
                 ':cost' => $cost,
+                ':sas_profile' => $sasProfile > 0 ? $sasProfile : null,
                 ':sort' => $sort,
             ));
             flash('success', 'تم تعديل الباقة');
@@ -153,6 +157,13 @@ render_settings_tabs('plans');
                        value="<?php echo e($editPlan ? (string) (int) $editPlan['sort_order'] : (string) $nextSort); ?>">
                 <small style="color:#6b7a88;font-weight:600">مثال: MAX=1 ثم NB-2=2 ثم NB-3=3 ثم NB-4=4</small>
             </div>
+            <div>
+                <label>SAS Profile ID</label>
+                <input type="number" name="sas_profile_id" min="0" step="1"
+                       value="<?php echo e($editPlan && !empty($editPlan['sas_profile_id']) ? (string) (int) $editPlan['sas_profile_id'] : ''); ?>"
+                       placeholder="من sas_setup.php">
+                <small style="color:#6b7a88;font-weight:600">رقم البروفايل في SAS — اتركه فارغاً إذا ما تريد ربط</small>
+            </div>
         </div>
         <div class="actions">
             <button class="btn" type="submit"><?php echo $editPlan ? 'حفظ التعديل' : 'حفظ الباقة'; ?></button>
@@ -176,6 +187,7 @@ render_settings_tabs('plans');
                 <th>الباقة</th>
                 <th>سعر البيع</th>
                 <th>التكلفة</th>
+                <th>SAS</th>
                 <th>الربح</th>
                 <th>الحالة</th>
                 <th>إجراءات</th>
@@ -183,7 +195,7 @@ render_settings_tabs('plans');
             </thead>
             <tbody id="plansBody">
             <?php if (!$plans): ?>
-                <tr><td colspan="9">لا توجد باقات بعد</td></tr>
+                <tr><td colspan="10">لا توجد باقات بعد</td></tr>
             <?php endif; ?>
             <?php foreach ($plans as $p): ?>
                 <?php
@@ -198,6 +210,7 @@ render_settings_tabs('plans');
                     <td><strong><?php echo e($p['name']); ?></strong></td>
                     <td><?php echo e(money_format_iqd($sell, $config['currency'])); ?></td>
                     <td><?php echo e(money_format_iqd($cost, $config['currency'])); ?></td>
+                    <td><?php echo !empty($p['sas_profile_id']) ? (int) $p['sas_profile_id'] : '—'; ?></td>
                     <td><?php echo e(money_format_iqd($profit, $config['currency'])); ?></td>
                     <td>
                         <span class="badge <?php echo ((int) $p['is_active'] === 1) ? 'active' : 'expired'; ?>">

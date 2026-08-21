@@ -1,0 +1,7 @@
+-- SAS integration columns
+ALTER TABLE subscribers
+  ADD COLUMN IF NOT EXISTS sas_username VARCHAR(80) NULL DEFAULT NULL AFTER notes,
+  ADD COLUMN IF NOT EXISTS sas_user_id INT UNSIGNED NULL DEFAULT NULL AFTER sas_username;
+
+ALTER TABLE service_plans
+  ADD COLUMN IF NOT EXISTS sas_profile_id INT UNSIGNED NULL DEFAULT NULL AFTER cost_price;

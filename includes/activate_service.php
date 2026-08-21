@@ -360,6 +360,19 @@ function activate_one_subscriber($pdo, $config, $subscriberId, $opts = array())
             }
         }
 
+        $sasOk = null;
+        $sasMsg = '';
+        if (function_exists('sas_sync_on_activate')) {
+            list($sasOk, $sasMsg) = sas_sync_on_activate($pdo, $config, $subscriberRow, $plan, $opts);
+            if (!$sasOk) {
+                $sasCfg = function_exists('sas_config') ? sas_config($config) : array('on_failure' => 'warn');
+                if (isset($sasCfg['on_failure']) && $sasCfg['on_failure'] === 'rollback' && $ownTx && $pdo->inTransaction()) {
+                    $pdo->rollBack();
+                    return array(false, $sasMsg, null);
+                }
+            }
+        }
+
         if ($ownTx) {
             $pdo->commit();
         }
@@ -378,6 +391,13 @@ function activate_one_subscriber($pdo, $config, $subscriberId, $opts = array())
                 $okMsg .= ' — ' . $waMsg;
             }
         }
+        if ($sasMsg !== '') {
+            if ($sasOk) {
+                $okMsg .= ' — ' . $sasMsg;
+            } else {
+                $okMsg .= ' — تحذير: ' . $sasMsg;
+            }
+        }
 
         return array(true, $okMsg, array(
             'subscription_id' => $subscriptionId,
@@ -386,6 +406,8 @@ function activate_one_subscriber($pdo, $config, $subscriberId, $opts = array())
             'carry_days' => $carryDays,
             'pay_mode' => $payMode,
             'whatsapp_ok' => $waOk,
+            'sas_ok' => $sasOk,
+            'sas_message' => $sasMsg,
             'service_name' => $serviceName,
         ));
     } catch (Exception $e) {
@@ -571,5 +593,123 @@ function change_subscriber_plan($pdo, $config, $subscriberId, $planId)
             $pdo->rollBack();
         }
         return array(false, 'فشل تغيير الباقة: ' . $e->getMessage());
+    }
+}
+
+/**
+ * تست 24 ساعة: اشتراك يوم واحد بدون فاتورة + تفعيل تجريبي على SAS
+ * يرجع array($ok, $message)
+ */
+function activate_subscriber_test($pdo, $config, $subscriberId)
+{
+    $subscriberId = (int) $subscriberId;
+    if ($subscriberId <= 0) {
+        return array(false, 'مشترك غير صالح');
+    }
+
+    $subRowSt = $pdo->prepare('SELECT * FROM subscribers WHERE id = :id');
+    $subRowSt->execute(array(':id' => $subscriberId));
+    $subscriberRow = $subRowSt->fetch();
+    if (!$subscriberRow) {
+        return array(false, 'المشترك غير موجود');
+    }
+
+    $plan = resolve_subscriber_plan($pdo, $subscriberId);
+    if (!$plan) {
+        return array(false, 'اختر نوع الاشتراك / الباقة أولاً');
+    }
+
+    $activeSt = $pdo->prepare(
+        'SELECT id, end_date, monthly_price FROM subscriptions
+         WHERE subscriber_id = :id AND status = "active" AND end_date >= CURDATE()
+         ORDER BY end_date DESC LIMIT 1'
+    );
+    $activeSt->execute(array(':id' => $subscriberId));
+    $active = $activeSt->fetch();
+    if ($active) {
+        $left = (int) ceil((strtotime($active['end_date']) - strtotime(date('Y-m-d'))) / 86400);
+        $isTestRow = ((float) $active['monthly_price'] <= 0);
+        if ($left > 1 && !$isTestRow) {
+            return array(false, 'المشترك عنده اشتراك فعال (' . $left . ' يوم) — التست للمنتهين أو الجدد');
+        }
+    }
+
+    $startDate = date('Y-m-d');
+    $endDate = date('Y-m-d', strtotime('+1 day'));
+    $serviceName = $plan['name'];
+    $planIdSaved = isset($plan['id']) ? (int) $plan['id'] : 0;
+
+    $ownTx = !$pdo->inTransaction();
+    if ($ownTx) {
+        $pdo->beginTransaction();
+    }
+    try {
+        $pdo->prepare(
+            'UPDATE subscriptions SET status = "expired"
+             WHERE subscriber_id = :id AND status = "active"'
+        )->execute(array(':id' => $subscriberId));
+
+        $stmt = $pdo->prepare(
+            'INSERT INTO subscriptions
+            (subscriber_id, service_name, monthly_price, cost_price, start_date, end_date, status, activation_msg_sent)
+            VALUES
+            (:subscriber_id, :service_name, 0, 0, :start_date, :end_date, "active", 0)'
+        );
+        $stmt->execute(array(
+            ':subscriber_id' => $subscriberId,
+            ':service_name' => $serviceName,
+            ':start_date' => $startDate,
+            ':end_date' => $endDate,
+        ));
+        $subscriptionId = (int) $pdo->lastInsertId();
+
+        if ($planIdSaved > 0) {
+            ensure_preferred_plan_column($pdo);
+            $pdo->prepare('UPDATE subscribers SET preferred_plan_id = :p WHERE id = :id')
+                ->execute(array(':p' => $planIdSaved, ':id' => $subscriberId));
+        }
+
+        if (function_exists('activity_log')) {
+            activity_log(
+                $pdo,
+                $subscriberId,
+                'subscription',
+                $subscriptionId,
+                'test_24h',
+                'تست 24 ساعة — ' . $serviceName,
+                'من: ' . $startDate . ' إلى: ' . $endDate . "\nبدون فاتورة"
+            );
+        }
+
+        $sasMsg = '';
+        if (function_exists('sas_sync_on_test')) {
+            list($sasOk, $sasMsg) = sas_sync_on_test($pdo, $config, $subscriberRow, $plan);
+            if (!$sasOk) {
+                if ($ownTx && $pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                return array(false, $sasMsg);
+            }
+        } else {
+            if ($ownTx && $pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            return array(false, 'خدمة SAS غير موجودة على السيرفر');
+        }
+
+        if ($ownTx) {
+            $pdo->commit();
+        }
+
+        $okMsg = 'تم إعطاء تست 24 ساعة — ' . $serviceName;
+        if ($sasMsg !== '') {
+            $okMsg .= ' — ' . $sasMsg;
+        }
+        return array(true, $okMsg);
+    } catch (Exception $e) {
+        if ($ownTx && $pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        return array(false, 'فشل التست: ' . $e->getMessage());
     }
 }

@@ -69,6 +69,18 @@ $expireTodayCount = (int) $pdo->query(
     'SELECT COUNT(DISTINCT sub.subscriber_id) FROM subscriptions sub
      WHERE sub.status = "active" AND sub.end_date = CURDATE()'
 )->fetchColumn();
+
+$sasPointsOk = false;
+$sasPointsVal = null;
+if (function_exists('sas_is_ready') && sas_is_ready($config) && function_exists('sas_manager_reward_points')) {
+    list($sasPointsOk, $sasPointsVal) = sas_manager_reward_points($config, $pdo);
+}
+$sasPointsDisp = '—';
+if ($sasPointsOk && $sasPointsVal !== null) {
+    $sasPointsDisp = ((float) $sasPointsVal == (int) $sasPointsVal)
+        ? number_format((int) $sasPointsVal)
+        : number_format((float) $sasPointsVal, 2);
+}
 $expireSoonCount = (int) $pdo->query(
     'SELECT COUNT(DISTINCT sub.subscriber_id) FROM subscriptions sub
      WHERE sub.status = "active"
@@ -148,6 +160,12 @@ render_header(t('dashboard'), 'dashboard', 'ملخص المشتركين والم
         <div class="label"><?php echo e($lang === 'en' ? 'Ends today' : 'ينتهي اليوم'); ?></div>
         <div class="value"><?php echo (int) $expireTodayCount; ?></div>
     </a>
+    <?php if (function_exists('sas_is_ready') && sas_is_ready($config)): ?>
+    <a class="card-stat glass g-gold" href="settings.php?tab=sas" title="<?php echo e($lang === 'en' ? 'Available SAS reward points' : 'النقاط التشجيعية المتوفرة في SAS'); ?>">
+        <div class="label"><?php echo e(t('sas_reward_points')); ?></div>
+        <div class="value"><?php echo e($sasPointsDisp); ?></div>
+    </a>
+    <?php endif; ?>
 </div>
 
 <div class="panel chart-panel glass-panel panel-compact">
