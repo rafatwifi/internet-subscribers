@@ -1286,27 +1286,29 @@ function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
             <div class="subs-ops-anchor" id="opsAnchor">
                 <button type="button" class="btn ops-top-btn" id="openOpsBtn" aria-haspopup="true" aria-expanded="false"><?php echo e(t('operations')); ?></button>
             </div>
-            <div class="subs-tool-icons" role="toolbar" aria-label="<?php echo e($lang === 'en' ? 'Table tools' : 'أدوات الجدول'); ?>">
-                <?php if (can_manage_agents()): ?>
-                <button type="button" class="tool-ico" id="agentFilterBtn" title="<?php echo e($lang === 'en' ? 'Belongs to' : 'تابع إلى'); ?>" aria-haspopup="true">
-                    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 2a3 3 0 1 1 0 6 3 3 0 0 1 0-6zm-7.5 16a3 3 0 1 1 0 6 3 3 0 0 1 0-6zm15 0a3 3 0 1 1 0 6 3 3 0 0 1 0-6zM12 9.5c-2.1 0-4 .9-5.3 2.3L5.2 10.3A8.4 8.4 0 0 1 12 8c2.6 0 5 .1 6.8 2.3l-1.5 1.5A7 7 0 0 0 12 9.5zm-5.8 4.4 1.5 1.5c-.5.7-.8 1.5-.9 2.4H4.9c.2-1.5.8-2.9 1.8-3.9zm11.6 0c1 1 1.6 2.4 1.8 3.9h-1.9c-.1-.9-.4-1.7-.9-2.4l1-1.5z"/></svg>
-                </button>
-                <?php endif; ?>
-                <button type="button" class="tool-ico" id="colsToggleBtn" title="<?php echo e($lang === 'en' ? 'Columns' : 'الأعمدة'); ?>" aria-haspopup="true">
-                    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M4 6h2v2H4V6zm4 0h12v2H8V6zM4 11h2v2H4v-2zm4 0h12v2H8v-2zM4 16h2v2H4v-2zm4 0h12v2H8v-2z"/></svg>
-                </button>
-                <button type="button" class="tool-ico" id="autoRefreshBtn" title="<?php echo e($lang === 'en' ? 'Auto refresh' : 'تحديث تلقائي'); ?>" aria-haspopup="true">
-                    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M8 6h2v12H8V6zm6 0h2v12h-2V6zm5.5 1.5a1 1 0 0 1 1 1V17a4.5 4.5 0 1 1-2.2-3.9V8.5a1 1 0 0 1 1.2-1zm0 6.2a2.5 2.5 0 1 0 .1 0z"/></svg>
-                </button>
-                <button type="button" class="tool-ico" id="filterToggleBtn" title="<?php echo e($lang === 'en' ? 'Filter' : 'فلترة'); ?>" aria-haspopup="true">
-                    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M3 5h18l-7 8v5l-4 2v-7L3 5z"/></svg>
-                </button>
-                <button type="button" class="tool-ico" id="refreshTableBtn" title="<?php echo e($lang === 'en' ? 'Refresh table' : 'تحديث الجدول'); ?>">
-                    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.75 10h-2.1A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
-                </button>
-            </div>
-            <button type="button" class="btn ghost sm" onclick="window.print()"><?php echo e(t('print')); ?></button>
             <span class="meta" id="bulkSelectedCount">0</span>
+        </div>
+        <div class="subs-left-tools">
+        <button type="button" class="btn ghost sm" onclick="window.print()"><?php echo e(t('print')); ?></button>
+        <div class="subs-tool-icons" role="toolbar" aria-label="<?php echo e($lang === 'en' ? 'Table tools' : 'أدوات الجدول'); ?>">
+            <?php if (can_manage_agents()): ?>
+            <button type="button" class="tool-ico" id="agentFilterBtn" title="<?php echo e($lang === 'en' ? 'Belongs to' : 'تابع إلى'); ?>" aria-haspopup="true">
+                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 2a3 3 0 1 1 0 6 3 3 0 0 1 0-6zm-7.5 16a3 3 0 1 1 0 6 3 3 0 0 1 0-6zm15 0a3 3 0 1 1 0 6 3 3 0 0 1 0-6zM12 9.5c-2.1 0-4 .9-5.3 2.3L5.2 10.3A8.4 8.4 0 0 1 12 8c2.6 0 5 .1 6.8 2.3l-1.5 1.5A7 7 0 0 0 12 9.5zm-5.8 4.4 1.5 1.5c-.5.7-.8 1.5-.9 2.4H4.9c.2-1.5.8-2.9 1.8-3.9zm11.6 0c1 1 1.6 2.4 1.8 3.9h-1.9c-.1-.9-.4-1.7-.9-2.4l1-1.5z"/></svg>
+            </button>
+            <?php endif; ?>
+            <button type="button" class="tool-ico" id="colsToggleBtn" title="<?php echo e($lang === 'en' ? 'Columns' : 'الأعمدة'); ?>" aria-haspopup="true">
+                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M4 6h2v2H4V6zm4 0h12v2H8V6zM4 11h2v2H4v-2zm4 0h12v2H8v-2zM4 16h2v2H4v-2zm4 0h12v2H8v-2z"/></svg>
+            </button>
+            <button type="button" class="tool-ico" id="autoRefreshBtn" title="<?php echo e($lang === 'en' ? 'Auto refresh' : 'تحديث تلقائي'); ?>" aria-haspopup="true">
+                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M8 6h2v12H8V6zm6 0h2v12h-2V6zm5.5 1.5a1 1 0 0 1 1 1V17a4.5 4.5 0 1 1-2.2-3.9V8.5a1 1 0 0 1 1.2-1zm0 6.2a2.5 2.5 0 1 0 .1 0z"/></svg>
+            </button>
+            <button type="button" class="tool-ico" id="filterToggleBtn" title="<?php echo e($lang === 'en' ? 'Filter' : 'فلترة'); ?>" aria-haspopup="true">
+                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M3 5h18l-7 8v5l-4 2v-7L3 5z"/></svg>
+            </button>
+            <button type="button" class="tool-ico" id="refreshTableBtn" title="<?php echo e($lang === 'en' ? 'Refresh table' : 'تحديث الجدول'); ?>">
+                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.75 10h-2.1A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+            </button>
+        </div>
         </div>
         <div class="status-legend inline sas-legend">
             <span><i class="status-sq status-active"></i> <?php echo e(t('status_active_short')); ?></span>

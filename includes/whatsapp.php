@@ -469,21 +469,29 @@ function payment_message($row, $config)
         }
     }
     $remaining = isset($row['remaining']) ? money_format_iqd($row['remaining'], $currency) : '';
+    $hasRemaining = array_key_exists('remaining', $row);
     $tpl = '';
     if (isset($config['templates']['payment_ok']) && trim((string) $config['templates']['payment_ok']) !== '') {
         $tpl = $config['templates']['payment_ok'];
     }
     if ($tpl !== '') {
-        return tpl_fill($tpl, array(
+        $msg = tpl_fill($tpl, array(
             'name' => $row['name'],
             'amount' => $amount,
             'month' => $month,
             'debt' => $amount,
             'remaining' => $remaining,
         ));
+        if (strpos($tpl, '{amount}') === false && strpos($tpl, '{debt}') === false) {
+            $msg .= "\nتم استلام مبلغ {$amount}";
+        }
+        if ($hasRemaining && strpos($tpl, '{remaining}') === false) {
+            $msg .= "\nالمتبقي عليك: {$remaining}";
+        }
+        return $msg;
     }
     $msg = "مرحباً {$row['name']}\nتم استلام مبلغ {$amount}\nعن: {$month}";
-    if ($remaining !== '' && isset($row['remaining']) && (float) $row['remaining'] > 0) {
+    if ($hasRemaining) {
         $msg .= "\nالمتبقي عليك: {$remaining}";
     } else {
         $msg .= "\nشكراً لتسديدك.";

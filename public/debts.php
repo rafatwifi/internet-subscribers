@@ -282,7 +282,7 @@ try {
 } catch (Exception $e) {
 }
 $subscribers = $pdo->query(
-    'SELECT id, name, rental_enabled, rental_device_id FROM subscribers ORDER BY name'
+    'SELECT id, name, phone, rental_enabled, rental_device_id FROM subscribers ORDER BY name'
 )->fetchAll();
 $settingsDebt = settings_load();
 $rentFeeGlobal = (float) rental_fee_amount($settingsDebt);
@@ -291,10 +291,12 @@ foreach ($subscribers as $s) {
     $subPriceMap[(int) $s['id']] = subscriber_monthly_price($pdo, (int) $s['id']);
 }
 $filterName = '';
+$filterPhone = '';
 if ($filterSubscriberId > 0) {
     foreach ($subscribers as $s) {
         if ((int) $s['id'] === $filterSubscriberId) {
             $filterName = $s['name'];
+            $filterPhone = format_phone_display(isset($s['phone']) ? $s['phone'] : '');
             break;
         }
     }
@@ -318,7 +320,12 @@ render_header(t('debts'), 'debts');
         <div class="label"><?php echo e($cardLabel); ?></div>
         <div class="value"><?php echo e(money_format_iqd($cardDebt, $config['currency'])); ?></div>
         <?php if ($filterSubscriberId > 0 && $filterName !== ''): ?>
-            <div class="meta" style="margin-top:6px;color:inherit;opacity:.85"><?php echo e($filterName); ?></div>
+            <div class="meta" style="margin-top:6px;color:inherit;opacity:.85">
+                <?php echo e($filterName); ?>
+                <?php if ($filterPhone !== ''): ?>
+                    <span class="ltr" style="display:inline-block;margin-inline-start:8px"><?php echo e($filterPhone); ?></span>
+                <?php endif; ?>
+            </div>
         <?php endif; ?>
     </a>
 </div>
@@ -329,6 +336,16 @@ render_header(t('debts'), 'debts');
         <input id="debtFilter" placeholder="<?php echo e($lang === 'en' ? 'Instant search...' : 'بحث فوري اسم أو رقم...'); ?>" style="max-width:280px" value="<?php echo e($q); ?>">
         <?php if ($filterSubscriberId > 0): ?>
             <span class="badge unpaid"><?php echo e($filterName !== '' ? $filterName : ('#' . $filterSubscriberId)); ?></span>
+            <?php if ($cardDebt > 0 && $status !== 'paid'): ?>
+                <button type="button" class="btn js-pay-open"
+                    data-mode="all"
+                    data-invoice="0"
+                    data-sub="<?php echo (int) $filterSubscriberId; ?>"
+                    data-amount="<?php echo (int) $cardDebt; ?>"
+                    data-name="<?php echo e($filterName); ?>">
+                    <?php echo e(t('pay_all_debts')); ?>
+                </button>
+            <?php endif; ?>
             <a class="btn ghost" href="debts.php?status=unpaid"><?php echo e(t('show_all')); ?></a>
         <?php endif; ?>
     </div>
@@ -436,7 +453,6 @@ render_header(t('debts'), 'debts');
                         <?php if ($row['status'] === 'unpaid'): ?>
                         <?php
                         $rowSubId = (int) $row['subscriber_id'];
-                        $rowAllDebt = isset($unpaidBySub[$rowSubId]) ? $unpaidBySub[$rowSubId] : (float) $row['amount'];
                         ?>
                         <div class="pay-inline-form">
                             <div class="pay-inline-row">
@@ -447,15 +463,7 @@ render_header(t('debts'), 'debts');
                                     data-sub="<?php echo $rowSubId; ?>"
                                     data-amount="<?php echo (int) $row['amount']; ?>"
                                     data-name="<?php echo e($row['name']); ?>">
-                                    <?php echo e($lang === 'en' ? 'This debt' : 'هذا الدين'); ?>
-                                </button>
-                                <button type="button" class="btn secondary sm js-pay-open"
-                                    data-mode="all"
-                                    data-invoice="<?php echo (int) $row['id']; ?>"
-                                    data-sub="<?php echo $rowSubId; ?>"
-                                    data-amount="<?php echo (int) $rowAllDebt; ?>"
-                                    data-name="<?php echo e($row['name']); ?>">
-                                    <?php echo e($lang === 'en' ? 'All debts' : 'كل الديون'); ?>
+                                    <?php echo e(t('pay_this_amount')); ?>
                                 </button>
                             </div>
                         </div>
@@ -591,8 +599,8 @@ render_header(t('debts'), 'debts');
   var amtIn = document.getElementById('payConfirmAmt');
   var waEl = document.getElementById('payConfirmWa');
   var pending = null;
-  var txtOne = <?php echo json_encode($lang === 'en' ? 'Pay this debt' : 'تسديد هذا الدين'); ?>;
-  var txtAll = <?php echo json_encode($lang === 'en' ? 'Pay all debts' : 'تسديد كل الديون'); ?>;
+  var txtOne = <?php echo json_encode(t('pay_this_amount')); ?>;
+  var txtAll = <?php echo json_encode(t('pay_all_debts')); ?>;
   var cur = <?php echo json_encode($config['currency']); ?>;
   function fmt(n) {
     n = Math.round(Number(n) || 0);

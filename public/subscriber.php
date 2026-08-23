@@ -496,8 +496,12 @@ if (isset($_GET['edit_inv']) && (int) $_GET['edit_inv'] > 0) {
 }
 
 $titleAfter = '';
+$phoneDisp = format_phone_display($subscriber['phone']);
+if ($phoneDisp !== '') {
+    $titleAfter .= '<span class="main-title-phone ltr">' . e($phoneDisp) . '</span>';
+}
 if (!$editMode) {
-    $titleAfter = '<a class="edit-icon" href="subscriber.php?id=' . (int) $id . '&edit=1" title="' . e(t('edit')) . '">✎</a>';
+    $titleAfter .= '<a class="edit-icon" href="subscriber.php?id=' . (int) $id . '&edit=1" title="' . e(t('edit')) . '">✎</a>';
 }
 $editInvId = isset($_GET['edit_inv']) ? (int) $_GET['edit_inv'] : 0;
 $editInvoice = null;
@@ -894,14 +898,20 @@ if ($activeSubCard) {
                 <span><?php echo e($lang === 'en' ? 'Total due' : 'إجمالي المتبقي'); ?></span>
                 <strong><?php echo e(money_format_iqd($unpaid, $config['currency'])); ?></strong>
             </div>
-            <div class="pay-mode-row">
-                <label class="pay-mode-opt">
+            <div class="pay-mode-row pay-debts-modes">
+                <label class="pay-mode-opt pay-debts-mode">
                     <input type="radio" name="pay_mode" value="full" id="payModeFull" checked>
-                    <span><?php echo e(t('pay_full')); ?></span>
+                    <span class="pay-debts-mode-card">
+                        <strong><?php echo e(t('pay_full')); ?></strong>
+                        <small><?php echo e($lang === 'en' ? 'Settle every unpaid debt now' : 'يسدد كل الديون غير المسددة دفعة واحدة'); ?></small>
+                    </span>
                 </label>
-                <label class="pay-mode-opt">
+                <label class="pay-mode-opt pay-debts-mode">
                     <input type="radio" name="pay_mode" value="partial" id="payModePartial">
-                    <span><?php echo e(t('pay_partial_mode')); ?></span>
+                    <span class="pay-debts-mode-card">
+                        <strong><?php echo e(t('pay_partial_mode')); ?></strong>
+                        <small><?php echo e($lang === 'en' ? 'Choose one debt and pay all or part of it' : 'تختار دين واحد وتسدد كله أو جزء منه'); ?></small>
+                    </span>
                 </label>
             </div>
             <div id="payPartialBox" class="hidden pay-partial-box">
