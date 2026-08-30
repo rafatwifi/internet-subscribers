@@ -6,6 +6,8 @@ function lang_all()
         'ar' => array(
             'dashboard' => 'الرئيسية',
             'subscribers' => 'المشتركين',
+            'sas' => 'SAS',
+            'offline_data' => 'بيانات أوف لاين',
             'subscriptions' => 'الحركات',
             'movements' => 'الحركات',
             'activate_new' => 'تفعيل اشتراك جديد',
@@ -165,6 +167,8 @@ function lang_all()
         'en' => array(
             'dashboard' => 'Dashboard',
             'subscribers' => 'Subscribers',
+            'sas' => 'SAS',
+            'offline_data' => 'Offline data',
             'subscriptions' => 'Movements',
             'movements' => 'Movements',
             'activate_new' => 'Activate new subscription',

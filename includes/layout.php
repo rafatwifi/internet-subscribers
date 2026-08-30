@@ -34,7 +34,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@500;600;700;800&family=Tajawal:wght@500;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="assets/style.css?v=sas85">
+    <link rel="stylesheet" href="assets/style.css?v=sas86">
 </head>
 <body class="<?php echo $isEn ? 'ltr' : 'rtl'; ?> ios-glass">
 <div class="bg-bubbles" aria-hidden="true">
@@ -51,7 +51,8 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <a class="<?php echo $active === 'dashboard' ? 'active' : ''; ?>" href="index.php"><?php echo e(t('dashboard')); ?></a>
             <?php endif; ?>
             <?php if ($can('subscribers')): ?>
-            <a class="<?php echo $active === 'subscribers' ? 'active' : ''; ?>" href="subscribers.php"><?php echo e(t('subscribers')); ?></a>
+            <a class="<?php echo $active === 'sas' ? 'active' : ''; ?>" href="sas.php"><?php echo e(t('sas')); ?></a>
+            <a class="<?php echo $active === 'subscribers' ? 'active' : ''; ?>" href="subscribers.php"><?php echo e(t('offline_data')); ?></a>
             <?php endif; ?>
             <?php if ($can('agents')): ?>
             <a class="<?php echo $active === 'agents' ? 'active' : ''; ?>" href="agents.php"><?php echo e($isEn ? 'Agents' : 'الوكلاء'); ?></a>

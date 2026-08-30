@@ -487,17 +487,253 @@ class SASConnector
 
     public function getFirstUser()
     {
+        $page = $this->listUsersPage(0, 1, '');
+        if (!empty($page['ok']) && isset($page['rows'][0]) && is_array($page['rows'][0])) {
+            return $page['rows'][0];
+        }
+        return null;
+    }
+
+    /**
+     * قائمة المستخدمين — صيغة SAS الرسمية: page / count / sortBy
+     */
+    public function listUsersPage($start, $length, $search = '')
+    {
         if (!$this->token && !$this->login()) {
-            return null;
+            return array(
+                'ok' => false,
+                'rows' => array(),
+                'total' => 0,
+                'filtered' => 0,
+                'complete' => false,
+                'via' => '',
+                'message' => $this->lastError !== '' ? $this->lastError : 'SAS login failed',
+            );
+        }
+
+        $length = max(10, (int) $length);
+        $page = (int) floor(max(0, (int) $start) / $length) + 1;
+        $payload = array(
+            'page' => $page,
+            'count' => $length,
+            'sortBy' => 'username',
+            'direction' => 'asc',
+            'search' => (string) $search,
+        );
+        $full = $this->decodeApiBody($this->post('index/user', $payload, true), false);
+        if (isset($full['__http_error']) || isset($full['__auth_error']) || isset($full['__curl_error'])
+            || isset($full['__decrypt_error']) || isset($full['__exception']) || isset($full['__json_error'])) {
+            return array(
+                'ok' => false,
+                'rows' => array(),
+                'total' => 0,
+                'filtered' => 0,
+                'complete' => false,
+                'via' => 'post:index/user',
+                'message' => isset($full['message']) ? (string) $full['message'] : 'SAS list failed',
+            );
+        }
+
+        $rows = $this->normalizeUserList($full);
+        $total = count($rows);
+        foreach (array('total', 'recordsTotal') as $k) {
+            if (isset($full[$k]) && is_numeric($full[$k])) {
+                $total = (int) $full[$k];
+                break;
+            }
+        }
+        $lastPage = isset($full['last_page']) ? (int) $full['last_page'] : 0;
+        $current = isset($full['current_page']) ? (int) $full['current_page'] : $page;
+        $perPage = isset($full['per_page']) ? (int) $full['per_page'] : 0;
+        if ($perPage <= 0) {
+            $perPage = count($rows) > 0 ? count($rows) : $length;
+        }
+        if ($lastPage > 0) {
+            $complete = $current >= $lastPage;
+        } elseif ($total > 0) {
+            $complete = (($current - 1) * $perPage + count($rows)) >= $total;
+        } else {
+            $complete = count($rows) === 0 || count($rows) < $perPage;
+        }
+
+        return array(
+            'ok' => true,
+            'rows' => $rows,
+            'total' => $total,
+            'filtered' => $total,
+            'complete' => $complete,
+            'page' => $current,
+            'per_page' => $perPage,
+            'last_page' => $lastPage,
+            'via' => 'post:index/user page=' . $current,
+            'message' => '',
+        );
+    }
+
+    public function updateUser($userId, $fields)
+    {
+        $userId = (int) $userId;
+        if ($userId <= 0 || (!$this->token && !$this->login())) {
+            return array('message' => 'SAS user update failed', 'status' => -1);
+        }
+        if (!is_array($fields)) {
+            $fields = array();
+        }
+        $fields['id'] = $userId;
+        $fields['user_id'] = $userId;
+        $last = array();
+        foreach (array('user/' . $userId, 'user/update', 'user') as $route) {
+            $last = $this->parseApiResponse($this->post($route, $fields, true));
+            if ($this->isActivateOk($last)) {
+                return $last;
+            }
+        }
+        return $last;
+    }
+
+    public function setUserEnabled($userId, $enabled)
+    {
+        $userId = (int) $userId;
+        $on = $enabled ? 1 : 0;
+        $action = $on ? 'enable' : 'disable';
+        $tries = array(
+            array('user/' . $action, array('id' => $userId, 'user_id' => $userId, 'enabled' => $on)),
+            array('user/' . $userId, array('id' => $userId, 'enabled' => $on)),
+        );
+        $last = array();
+        foreach ($tries as $t) {
+            $last = $this->parseApiResponse($this->post($t[0], $t[1], true));
+            if ($this->isActivateOk($last)) {
+                return $last;
+            }
+        }
+        return $this->updateUser($userId, array('enabled' => $on));
+    }
+
+    public function changeUserProfile($userId, $profileId)
+    {
+        $userId = (int) $userId;
+        $profileId = (int) $profileId;
+        $payload = array(
+            'id' => $userId,
+            'user_id' => $userId,
+            'profile_id' => $profileId,
+            'when' => 'immediate',
+        );
+        $last = array();
+        foreach (array('user/changeProfile', 'user/change-profile', 'user/' . $userId . '/changeProfile') as $route) {
+            $last = $this->parseApiResponse($this->post($route, $payload, true));
+            if ($this->isActivateOk($last)) {
+                return $last;
+            }
+        }
+        return $this->updateUser($userId, array('profile_id' => $profileId));
+    }
+
+    public function listUnusedCards($profileId = 0)
+    {
+        if (!$this->token && !$this->login()) {
+            return array();
         }
         $payload = array(
-            'draw' => 1,
-            'start' => 0,
-            'length' => 1,
-            'search' => array('value' => '', 'regex' => false),
+            'page' => 1,
+            'count' => 200,
+            'sortBy' => 'id',
+            'direction' => 'desc',
+            'search' => '',
+            'used' => 0,
         );
-        $rows = $this->normalizeUserList($this->parseApiResponse($this->post('index/user', $payload, true)));
-        return (isset($rows[0]) && is_array($rows[0])) ? $rows[0] : null;
+        if ((int) $profileId > 0) {
+            $payload['profile_id'] = (int) $profileId;
+        }
+        $rows = array();
+        foreach (array('index/card', 'index/cards', 'index/pin') as $route) {
+            $full = $this->decodeApiBody($this->post($route, $payload, true), false);
+            if (isset($full['__http_error']) || isset($full['__auth_error'])) {
+                continue;
+            }
+            $rows = $this->normalizeUserList($full);
+            if ($rows) {
+                break;
+            }
+        }
+        if (!$rows) {
+            $gets = array('list/card/0');
+            if ((int) $profileId > 0) {
+                array_unshift($gets, 'list/card/' . (int) $profileId);
+            }
+            foreach ($gets as $route) {
+                $full = $this->decodeApiBody($this->get($route, true), false);
+                if (isset($full['__http_error']) || isset($full['__auth_error'])) {
+                    continue;
+                }
+                $rows = $this->normalizeUserList($full);
+                if ($rows) {
+                    break;
+                }
+            }
+        }
+        $out = array();
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $used = 0;
+            foreach (array('used', 'is_used', 'used_at', 'user_id') as $k) {
+                if (!empty($row[$k]) && $row[$k] !== '0' && $row[$k] !== 0) {
+                    if ($k === 'user_id' && (int) $row[$k] > 0) {
+                        $used = 1;
+                    } elseif ($k !== 'user_id') {
+                        $used = 1;
+                    }
+                }
+            }
+            if ($used) {
+                continue;
+            }
+            if ((int) $profileId > 0) {
+                $rowPid = isset($row['profile_id']) ? (int) $row['profile_id'] : 0;
+                if ($rowPid > 0 && $rowPid !== (int) $profileId) {
+                    continue;
+                }
+            }
+            $out[] = $row;
+        }
+        return $out;
+    }
+
+    public function activateUserCard($username, $pin, $userId = 0, $cardId = 0)
+    {
+        if (!$this->token && !$this->login()) {
+            return array('__auth_error' => true, 'message' => 'SAS login failed');
+        }
+        $pin = trim((string) $pin);
+        $username = trim((string) $username);
+        $cardId = (int) $cardId;
+        $tries = array(
+            array('user/activate/card', array('username' => $username, 'pin' => $pin, 'serial' => $pin)),
+            array('user/activate/pin', array('username' => $username, 'pin' => $pin)),
+            array('user/activate/card', array('user_id' => (int) $userId, 'card_id' => ($cardId > 0 ? $cardId : $pin), 'pin' => $pin)),
+        );
+        if ($cardId > 0) {
+            $tries[] = array('user/activate/card', array('username' => $username, 'card_id' => $cardId, 'pin' => $pin));
+        }
+        $last = array();
+        foreach ($tries as $t) {
+            $last = $this->parseApiResponse($this->post($t[0], $t[1], true));
+            if ($this->isActivateOk($last)) {
+                return $last;
+            }
+        }
+        return $last;
+    }
+
+    /**
+     * يفك التشفير ويبقي غلاف DataTables (recordsTotal + data)
+     */
+    private function parseApiEnvelope($response)
+    {
+        return $this->decodeApiBody($response, false);
     }
 
     /**
@@ -585,14 +821,14 @@ class SASConnector
 
         $username = (string) $username;
         $payload = array(
-            'draw' => 1,
-            'start' => 0,
-            'length' => 50,
-            'search' => array('value' => $username, 'regex' => false),
-            'order' => array(array('column' => 0, 'dir' => 'desc')),
+            'page' => 1,
+            'count' => 50,
+            'sortBy' => 'username',
+            'direction' => 'asc',
+            'search' => $username,
         );
 
-        $rows = $this->normalizeUserList($this->parseApiResponse($this->post('index/user', $payload, true)));
+        $rows = $this->normalizeUserList($this->decodeApiBody($this->post('index/user', $payload, true), false));
         $found = $this->matchUserRow($rows, $username);
         if ($found) {
             return $found;
@@ -600,8 +836,8 @@ class SASConnector
 
         $digits = preg_replace('/\D+/', '', $username);
         if ($digits !== '' && $digits !== $username) {
-            $payload['search']['value'] = $digits;
-            $rows = $this->normalizeUserList($this->parseApiResponse($this->post('index/user', $payload, true)));
+            $payload['search'] = $digits;
+            $rows = $this->normalizeUserList($this->decodeApiBody($this->post('index/user', $payload, true), false));
             $found = $this->matchUserRow($rows, $username);
             if ($found) {
                 return $found;
@@ -611,9 +847,9 @@ class SASConnector
         return null;
     }
 
-    private function normalizeUserList($rows)
+    private function normalizeUserList($rows, $depth = 0)
     {
-        if (!is_array($rows) || isset($rows['__http_error']) || isset($rows['__exception'])
+        if ($depth > 6 || !is_array($rows) || isset($rows['__http_error']) || isset($rows['__exception'])
             || isset($rows['__auth_error']) || isset($rows['__curl_error'])) {
             return array();
         }
@@ -622,7 +858,7 @@ class SASConnector
         }
         foreach (array('data', 'aaData', 'rows', 'users', 'extensions', 'profiles', 'allowedExtensions', 'items') as $k) {
             if (isset($rows[$k]) && is_array($rows[$k])) {
-                return $this->normalizeUserList($rows[$k]);
+                return $this->normalizeUserList($rows[$k], $depth + 1);
             }
         }
         return array();
@@ -652,6 +888,11 @@ class SASConnector
     }
 
     private function parseApiResponse($response)
+    {
+        return $this->decodeApiBody($response, true);
+    }
+
+    private function decodeApiBody($response, $unwrapList)
     {
         if (is_array($response)) {
             if (isset($response['__http_error'])) {
@@ -723,6 +964,10 @@ class SASConnector
         }
 
         if (isset($data['status']) && is_numeric($data['status']) && (int) $data['status'] !== 200) {
+            return $data;
+        }
+
+        if (!$unwrapList) {
             return $data;
         }
 

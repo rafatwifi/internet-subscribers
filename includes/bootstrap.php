@@ -44,6 +44,10 @@ $sasServiceFile = __DIR__ . '/sas_service.php';
 if (is_file($sasServiceFile)) {
     require_once $sasServiceFile;
 }
+$sasCacheFile = __DIR__ . '/sas_cache.php';
+if (is_file($sasCacheFile)) {
+    require_once $sasCacheFile;
+}
 require_once __DIR__ . '/activate_service.php';
 
 $archivesFile = __DIR__ . '/archives.php';
@@ -139,6 +143,13 @@ try {
 try {
     if (function_exists('ensure_sas_columns')) {
         ensure_sas_columns($pdo);
+    }
+} catch (Exception $e) {
+} catch (Throwable $e) {
+}
+try {
+    if (function_exists('ensure_sas_users_cache_table')) {
+        ensure_sas_users_cache_table($pdo);
     }
 } catch (Exception $e) {
 } catch (Throwable $e) {

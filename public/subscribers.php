@@ -867,9 +867,9 @@ $plansForDays = $pdo->query(
 
 $pageTitle = $showAdd
     ? ($lang === 'en' ? 'Add subscriber' : 'إضافة مشترك')
-    : t('subscribers');
+    : t('offline_data');
 
-render_header($pageTitle, 'subscribers', $showAdd ? '' : 'إضافة وإدارة أرقام المشتركين');
+render_header($pageTitle, 'subscribers', $showAdd ? '' : ($lang === 'en' ? 'Local ledger — debts stay here' : 'الدفتر المحلي — الديون تبقى هنا'));
 
 function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
 {

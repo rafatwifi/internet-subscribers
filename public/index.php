@@ -161,7 +161,7 @@ render_header(t('dashboard'), 'dashboard', 'ملخص المشتركين والم
         <div class="value"><?php echo (int) $expireTodayCount; ?></div>
     </a>
     <?php if (function_exists('sas_is_ready') && sas_is_ready($config)): ?>
-    <a class="card-stat glass g-gold" href="settings.php?tab=sas" title="<?php echo e($lang === 'en' ? 'Available SAS reward points' : 'النقاط التشجيعية المتوفرة في SAS'); ?>">
+    <a class="card-stat glass g-gold" href="sas.php" title="<?php echo e($lang === 'en' ? 'Available SAS reward points' : 'النقاط التشجيعية المتوفرة في SAS'); ?>">
         <div class="label"><?php echo e(t('sas_reward_points')); ?></div>
         <div class="value"><?php echo e($sasPointsDisp); ?></div>
     </a>
