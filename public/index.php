@@ -72,15 +72,7 @@ $expireTodayCount = (int) $pdo->query(
 
 $sasPointsOk = false;
 $sasPointsVal = null;
-if (function_exists('sas_is_ready') && sas_is_ready($config) && function_exists('sas_manager_reward_points')) {
-    list($sasPointsOk, $sasPointsVal) = sas_manager_reward_points($config, $pdo);
-}
 $sasPointsDisp = '—';
-if ($sasPointsOk && $sasPointsVal !== null) {
-    $sasPointsDisp = ((float) $sasPointsVal == (int) $sasPointsVal)
-        ? number_format((int) $sasPointsVal)
-        : number_format((float) $sasPointsVal, 2);
-}
 $expireSoonCount = (int) $pdo->query(
     'SELECT COUNT(DISTINCT sub.subscriber_id) FROM subscriptions sub
      WHERE sub.status = "active"
@@ -103,69 +95,152 @@ for ($m = 1; $m <= 12; $m++) {
 }
 $yearTotal = array_sum($chartValues);
 
-render_header(t('dashboard'), 'dashboard', 'ملخص المشتركين والمبيعات والديون');
+$sasReadyDash = function_exists('sas_is_ready') && sas_is_ready($config);
+$sasCounts = array(
+    'total' => $totalSubscribers,
+    'active' => $activeOnlineCount,
+    'online' => 0,
+    'expired' => $expiredSubsCount,
+    'soon' => $expireSoonCount,
+    'today' => $expireTodayCount,
+    'disabled' => 0,
+);
+$sasCardGroups = array();
+$sasBalanceDisp = '—';
+if ($sasReadyDash) {
+    if (function_exists('sas_dash_user_counts')) {
+        $sasCounts = sas_dash_user_counts($pdo);
+    }
+    $needCards = empty($_SESSION['sas_card_groups_v2']) || !isset($_SESSION['sas_card_groups_v2_at'])
+        || ((time() - (int) $_SESSION['sas_card_groups_v2_at']) > 120);
+    if (isset($_SESSION['sas_card_groups_v2']) && is_array($_SESSION['sas_card_groups_v2']) && !$_SESSION['sas_card_groups_v2']
+        && isset($_SESSION['sas_card_groups_v2_at']) && ((time() - (int) $_SESSION['sas_card_groups_v2_at']) > 20)) {
+        $needCards = true;
+    }
+    if ($needCards && function_exists('sas_page_connector') && function_exists('sas_dash_card_groups')) {
+        try {
+            $apiDash = sas_page_connector($config);
+            if ($apiDash && method_exists($apiDash, 'setTimeout')) {
+                $apiDash->setTimeout(35);
+            }
+            if ($apiDash) {
+                $_SESSION['sas_card_groups_v2'] = sas_dash_card_groups($apiDash);
+                $_SESSION['sas_card_groups_v2_at'] = time();
+            }
+        } catch (Exception $e) {
+        }
+    }
+    if (isset($_SESSION['sas_card_groups_v2']) && is_array($_SESSION['sas_card_groups_v2'])) {
+        $sasCardGroups = $_SESSION['sas_card_groups_v2'];
+    }
+    if (function_exists('sas_manager_reward_points')) {
+        list($ptsOk, $ptsVal) = sas_manager_reward_points($config, $pdo);
+        if ($ptsOk && $ptsVal !== null) {
+            $sasPointsOk = true;
+            $sasPointsVal = $ptsVal;
+            $sasPointsDisp = ((float) $ptsVal == (int) $ptsVal)
+                ? number_format((int) $ptsVal)
+                : number_format((float) $ptsVal, 2);
+        }
+    }
+    if (array_key_exists('sas_balance_disp', $_SESSION) && $_SESSION['sas_balance_disp'] !== '' && $_SESSION['sas_balance_disp'] !== null) {
+        $sasBalanceDisp = (string) $_SESSION['sas_balance_disp'];
+    }
+}
+
+if (!function_exists('dash_sas_box')) {
+    function dash_sas_box($href, $tone, $title, $sub, $value, $ico)
+    {
+        echo '<a class="sas-box ' . e($tone) . '" href="' . e($href) . '">';
+        echo '<div class="sas-box-title">' . e($title) . '</div>';
+        if ($sub !== '') {
+            echo '<div class="sas-box-sub">' . e($sub) . '</div>';
+        }
+        echo '<div class="sas-box-val">' . e($value) . '</div>';
+        echo '<span class="sas-box-ico" aria-hidden="true">' . $ico . '</span>';
+        echo '</a>';
+    }
+}
+
+render_header(t('dashboard'), 'dashboard', '');
 ?>
-<div class="cards cards-dash">
-    <a class="card-stat glass g-blue" href="subscribers.php">
-        <div class="label"><?php echo e(t('all_subscribers')); ?></div>
-        <div class="value"><?php echo $totalSubscribers; ?></div>
-    </a>
-    <a class="card-stat glass g-orange" href="reports.php">
-        <div class="label"><?php echo e(t('collected')); ?></div>
-        <div class="value"><?php echo e(money_format_iqd($receivedMonth, $config['currency'])); ?></div>
-    </a>
-    <a class="card-stat glass g-red" href="debts.php?status=unpaid">
-        <div class="label"><?php echo e(t('debts_total')); ?></div>
-        <div class="value"><?php echo e(money_format_iqd($totalDebt, $config['currency'])); ?></div>
-    </a>
-    <a class="card-stat glass g-violet" href="subscriptions.php">
-        <div class="label"><?php echo e(t('sales_short')); ?></div>
-        <div class="value"><?php echo e(money_format_iqd($salesMonth, $config['currency'])); ?></div>
-    </a>
-    <a class="card-stat glass g-green" href="reports.php">
-        <div class="label"><?php echo e(t('profit')); ?></div>
-        <div class="value"><?php echo e(money_format_iqd($profitMonth, $config['currency'])); ?></div>
-    </a>
-    <a class="card-stat glass g-teal" href="reports.php" title="<?php echo e(t('capital_hint')); ?>">
-        <div class="label"><?php echo e(t('capital')); ?></div>
-        <div class="value"><?php echo e(money_format_iqd($capitalMonth, $config['currency'])); ?></div>
-        <div class="hint"><?php echo e(t('capital_hint')); ?></div>
-    </a>
-    <a class="card-stat glass g-orange" href="rentals.php" title="<?php echo e($lang === 'en' ? 'Total towers \\ still active' : 'كل الأبراج \\ المستمرين'); ?>">
-        <div class="label"><?php echo e($lang === 'en' ? 'Rental towers' : 'أبراج الإيجار'); ?></div>
-        <div class="value ratio-pair">
-            <span><?php echo (int) ($rentalActiveCount + $rentalInactiveCount); ?></span>
-            <span class="ratio-sep">\</span>
-            <span><?php echo (int) $rentalActiveCount; ?></span>
-        </div>
-    </a>
-    <a class="card-stat glass g-cyan" href="subscriptions.php">
-        <div class="label"><?php echo e(t('activations_month')); ?></div>
-        <div class="value"><?php echo $activatedMonth; ?></div>
-    </a>
-    <a class="card-stat glass g-lime" href="subscribers.php?sub=active" title="<?php echo e($lang === 'en' ? 'Active subscriptions' : 'اشتراكهم شغّال حالياً'); ?>">
-        <div class="label"><?php echo e($lang === 'en' ? 'Active' : 'الفعالين'); ?></div>
-        <div class="value"><?php echo (int) $activeOnlineCount; ?></div>
-    </a>
-    <a class="card-stat glass g-slate" href="subscribers.php?sub=expired" title="<?php echo e($lang === 'en' ? 'No active subscription' : 'ما عندهم اشتراك شغّال (منتهي أو ما انفعل)'); ?>">
-        <div class="label"><?php echo e($lang === 'en' ? 'Expired' : 'المنتهية'); ?></div>
-        <div class="value"><?php echo (int) $expiredSubsCount; ?></div>
-    </a>
-    <a class="card-stat glass g-amber" href="subscribers.php?sub=soon" title="<?php echo e($lang === 'en' ? 'Ends within next 3 days' : 'ينتهي خلال الأيام الثلاثة المقبلة'); ?>">
-        <div class="label"><?php echo e($lang === 'en' ? 'Expiring soon' : 'على وشك الانتهاء'); ?></div>
-        <div class="value"><?php echo (int) $expireSoonCount; ?></div>
-        <div class="hint"><?php echo e($lang === 'en' ? 'Next 3 days' : 'خلال 3 أيام'); ?></div>
-    </a>
-    <a class="card-stat glass g-rose" href="subscribers.php?sub=today" title="<?php echo e($lang === 'en' ? 'Ends today' : 'ينتهي اليوم'); ?>">
-        <div class="label"><?php echo e($lang === 'en' ? 'Ends today' : 'ينتهي اليوم'); ?></div>
-        <div class="value"><?php echo (int) $expireTodayCount; ?></div>
-    </a>
-    <?php if (function_exists('sas_is_ready') && sas_is_ready($config)): ?>
-    <a class="card-stat glass g-gold" href="sas.php" title="<?php echo e($lang === 'en' ? 'Available SAS reward points' : 'النقاط التشجيعية المتوفرة في SAS'); ?>">
-        <div class="label"><?php echo e(t('sas_reward_points')); ?></div>
-        <div class="value"><?php echo e($sasPointsDisp); ?></div>
-    </a>
-    <?php endif; ?>
+<style>
+.sas-dash { font-family: inherit; }
+.sas-dash .sas-boxes {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0 0 16px;
+}
+@media (max-width: 1100px) { .sas-dash .sas-boxes { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .sas-dash .sas-boxes { grid-template-columns: 1fr; } }
+.sas-box {
+  position: relative; overflow: hidden; display: block; color: #fff !important;
+  text-decoration: none !important; border-radius: 4px; min-height: 90px;
+  padding: 10px 10px 10px 10px; box-shadow: 0 1px 1px rgba(0,0,0,.1);
+}
+.sas-box:hover { color: #fff !important; filter: brightness(1.05); }
+.sas-box-title { font-size: 15px; font-weight: 700; line-height: 1.3; }
+.sas-box-sub { font-size: 13px; font-weight: 400; opacity: .92; margin-top: 2px; }
+.sas-box-val { font-size: 26px; font-weight: 400; margin-top: 8px; line-height: 1; }
+.sas-box-ico {
+  position: absolute; inset-inline-end: 10px; top: 50%; transform: translateY(-50%);
+  font-size: 46px; opacity: .22; pointer-events: none;
+}
+.sas-box.tone-blue { background: linear-gradient(180deg, #5c9fd6 0%, #3c8dbc 58%); }
+.sas-box.tone-green { background: linear-gradient(180deg, #2ecc71 0%, #00a65a 58%); }
+.sas-box.tone-aqua { background: linear-gradient(180deg, #4dd3f5 0%, #00c0ef 58%); }
+.sas-box.tone-red { background: linear-gradient(180deg, #e74c3c 0%, #dd4b39 58%); }
+.sas-box.tone-yellow { background: linear-gradient(180deg, #f6c15b 0%, #f39c12 58%); }
+.sas-box.tone-teal { background: linear-gradient(180deg, #5dced4 0%, #39cccc 58%); }
+.sas-box.tone-purple { background: linear-gradient(180deg, #8e7cc3 0%, #605ca8 58%); }
+.sas-box.tone-lime { background: linear-gradient(180deg, #9ccc65 0%, #7cb342 58%); }
+.sas-box.tone-navy { background: linear-gradient(180deg, #4a6785 0%, #3c4b64 58%); }
+.sas-box.tone-maroon { background: linear-gradient(180deg, #e4728a 0%, #d81b60 58%); }
+.sas-dash h2.sas-sec { font-size: 15px; margin: 6px 0 10px; color: #444; }
+</style>
+<div class="sas-dash">
+<div class="sas-boxes">
+<?php
+$usersHome = 'sas.php';
+$en = ($lang === 'en');
+dash_sas_box($usersHome, 'tone-blue', $en ? 'Total users' : 'كل المشتركين', $en ? 'Registered users' : '', (string) (int) $sasCounts['total'], '👤');
+dash_sas_box('sas.php?sub=active', 'tone-green', $en ? 'Active users' : 'فعال', '', (string) (int) $sasCounts['active'], '☺');
+dash_sas_box('sas.php?sub=online', 'tone-aqua', $en ? 'Online users' : 'متصل حاليا', $en ? 'Connected' : '', (string) (int) $sasCounts['online'], '💡');
+dash_sas_box('sas.php?sub=expired', 'tone-red', $en ? 'Expired users' : 'منتهي', '', (string) (int) $sasCounts['expired'], '☹');
+dash_sas_box('sas.php?sub=soon', 'tone-yellow', $en ? 'About to expire' : 'على وشك الانتهاء', $en ? 'In 3 days' : '', (string) (int) $sasCounts['soon'], '📅');
+dash_sas_box('sas.php?sub=today', 'tone-teal', $en ? 'Expiring today' : 'ينتهي اليوم', '', (string) (int) $sasCounts['today'], '📅');
+if ($sasReadyDash) {
+    dash_sas_box('sas.php', 'tone-lime', $en ? 'Reward points' : 'نقاط تشجيعية', '', (string) $sasPointsDisp, '🎁');
+    dash_sas_box('sas.php', 'tone-navy', $en ? 'Balance' : 'الرصيد', '', (string) $sasBalanceDisp, '💵');
+}
+?>
+</div>
+
+<div class="sas-boxes">
+<?php
+dash_sas_box('reports.php', 'tone-yellow', $en ? 'Collected' : 'المقبوض', '', money_format_iqd($receivedMonth, $config['currency']), '💵');
+dash_sas_box('debts.php?status=unpaid', 'tone-red', $en ? 'Debts' : 'الديون', '', money_format_iqd($totalDebt, $config['currency']), '📄');
+dash_sas_box('reports.php', 'tone-green', $en ? 'Profit' : 'الربح', '', money_format_iqd($profitMonth, $config['currency']), '📈');
+dash_sas_box('reports.php', 'tone-teal', $en ? 'Capital' : 'رأس المال', '', money_format_iqd($capitalMonth, $config['currency']), '🏦');
+dash_sas_box('subscriptions.php', 'tone-purple', $en ? 'Sales' : 'المبيعات', '', money_format_iqd($salesMonth, $config['currency']), '🧾');
+dash_sas_box('subscriptions.php', 'tone-aqua', $en ? 'Activations' : 'تفعيلات الشهر', '', (string) (int) $activatedMonth, '⚡');
+dash_sas_box('rentals.php', 'tone-navy', $en ? 'Rental towers' : 'أبراج الإيجار', ((int) ($rentalActiveCount + $rentalInactiveCount)) . ' \\ ' . (int) $rentalActiveCount, (string) (int) $rentalActiveCount, '📡');
+if ($sasReadyDash) {
+    $cardTotal = 0;
+    $cardSub = $en ? 'Unused' : 'شاغرة';
+    if ($sasCardGroups) {
+        foreach ($sasCardGroups as $g) {
+            $cardTotal += isset($g['count']) ? (int) $g['count'] : 0;
+        }
+        if (count($sasCardGroups) === 1 && !empty($sasCardGroups[0]['name'])) {
+            $cardSub = (string) $sasCardGroups[0]['name'];
+        }
+    }
+    dash_sas_box('sas.php', 'tone-navy', $en ? 'Cards' : 'الكروت', $cardSub, (string) (int) $cardTotal, '🃏');
+}
+?>
+</div>
 </div>
 
 <div class="panel chart-panel glass-panel panel-compact">

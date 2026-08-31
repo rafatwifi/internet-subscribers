@@ -25,7 +25,6 @@ function render_settings_tabs($current = 'general')
     <a class="<?php echo $current === 'rental' ? 'on' : ''; ?>" href="settings.php?tab=rental"><?php echo e($isEn ? 'Rental devices' : 'أجهزة الإيجار'); ?></a>
     <a class="<?php echo $current === 'whatsapp' ? 'on' : ''; ?>" href="settings.php?tab=whatsapp"><?php echo e(t('settings_whatsapp')); ?></a>
     <a class="<?php echo $current === 'sas' ? 'on' : ''; ?>" href="settings.php?tab=sas"><?php echo e(t('settings_sas')); ?></a>
-    <a class="<?php echo $current === 'templates' ? 'on' : ''; ?>" href="settings.php?tab=templates"><?php echo e(t('settings_templates')); ?></a>
     <?php endif; ?>
     <?php if ($can('backup')): ?>
     <a class="<?php echo $current === 'backup' ? 'on' : ''; ?>" href="backup.php"><?php echo e(t('backup')); ?></a>

@@ -2,7 +2,7 @@
   "site_name": "WiFi-Net-SALES",
   "language": "ar",
   "currency": "د.ع",
-  "grace_days": 2,
+  "grace_days": 3,
   "whatsapp_enabled": true,
   "whatsapp_provider": "local",
   "whatsapp_local_url": "http://172.16.16.13:3001",

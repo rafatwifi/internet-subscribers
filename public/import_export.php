@@ -74,35 +74,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 if (isset($_GET['export']) && $_GET['export'] === 'subscribers') {
-    $exportSql = 'SELECT s.*,
-        (SELECT COALESCE(SUM(amount),0) FROM invoices i WHERE i.subscriber_id = s.id AND i.status = "unpaid") AS debt,
-        (SELECT sub.service_name FROM subscriptions sub
-            WHERE sub.subscriber_id = s.id AND sub.status = "active"
-            ORDER BY sub.id DESC LIMIT 1) AS active_service,
-        (SELECT sub.start_date FROM subscriptions sub
-            WHERE sub.subscriber_id = s.id AND sub.status = "active"
-            ORDER BY sub.id DESC LIMIT 1) AS active_start
-     FROM subscribers s
-     ORDER BY s.id DESC';
-    $exportRows = $pdo->query($exportSql)->fetchAll();
-    $csvData = array();
-    foreach ($exportRows as $er) {
-        $monthYm = !empty($er['active_start']) ? date('Y-m', strtotime($er['active_start'])) : '';
-        $csvData[] = array(
-            $er['name'],
-            format_phone_display($er['phone']),
-            isset($er['active_service']) ? $er['active_service'] : '',
-            $monthYm !== '' ? month_short_label($monthYm) : '',
-            (float) $er['debt'],
-            isset($er['address']) ? $er['address'] : '',
-            isset($er['notes']) ? $er['notes'] : '',
-        );
+    if (function_exists('export_offline_subscribers_full')) {
+        export_offline_subscribers_full($pdo);
     }
-    export_csv(
-        'subscribers.csv',
-        array('الاسم', 'الهاتف', 'الباقة', 'الشهر', 'الدين', 'العنوان', 'ملاحظات'),
-        $csvData
-    );
+    flash('error', 'التصدير غير متوفر');
+    redirect('import_export.php');
 }
 
 if ($canReports && isset($_GET['export']) && $_GET['export'] === 'report') {
@@ -170,14 +146,14 @@ render_header($pageTitle, 'import_export', $lang === 'en' ? 'CSV import/export t
 </div>
 
 <div class="panel">
-    <h2><?php echo e($lang === 'en' ? 'Export subscribers' : 'تصدير المشتركين'); ?></h2>
+    <h2><?php echo e($lang === 'en' ? 'Export local debts & subscriptions' : 'تصدير الديون والاشتراكات المحلية'); ?></h2>
     <p class="meta" style="margin:0 0 14px">
         <?php echo e($lang === 'en'
-            ? 'Download all subscribers as CSV (name, phone, package, month, debt, address, notes).'
-            : 'تنزيل كل المشتركين كملف CSV (الاسم، الهاتف، الباقة، الشهر، الدين، العنوان، الملاحظات).'); ?>
+            ? 'Backup of local invoices/debts, subscriptions, WhatsApp logs, and activity.'
+            : 'نسخة من الفواتير/الديون والاشتراكات المحلية وسجل الرسائل والحركات.'); ?>
     </p>
     <div class="actions" style="margin-top:0">
-        <a class="btn secondary" href="import_export.php?export=subscribers"><?php echo e($lang === 'en' ? 'Download CSV' : 'تنزيل CSV'); ?></a>
+        <a class="btn secondary" href="import_export.php?export=subscribers"><?php echo e($lang === 'en' ? 'Download full backup' : 'تنزيل النسخة الكاملة'); ?></a>
     </div>
 </div>
 

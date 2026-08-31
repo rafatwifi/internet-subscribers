@@ -113,6 +113,13 @@ try {
 } catch (Throwable $e) {
 }
 try {
+    if (function_exists('ensure_subscriber_grace_days_column')) {
+        ensure_subscriber_grace_days_column($pdo);
+    }
+} catch (Exception $e) {
+} catch (Throwable $e) {
+}
+try {
     if (function_exists('ensure_preferred_plan_column')) {
         ensure_preferred_plan_column($pdo);
     }

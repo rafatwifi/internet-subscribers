@@ -7,7 +7,7 @@ require_login();
 $id = isset($_GET['id']) ? (int) $_GET['id'] : 0;
 if ($id <= 0) {
     flash('error', 'مشترك غير موجود');
-    redirect('subscribers.php');
+    redirect('sas.php');
 }
 require_subscriber_access($pdo, $id);
 
@@ -219,6 +219,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if ($action === 'add_debts') {
+        if (!user_can_edit_debts()) {
+            flash('error', debt_edit_denied_message());
+            redirect('subscriber.php?id=' . $id . '#debts');
+        }
         $debtInfo = insert_opening_debts($pdo, $id, $_POST);
         $debtCount = is_array($debtInfo) ? (int) $debtInfo['count'] : (int) $debtInfo;
         if ($debtCount > 0) {
@@ -259,6 +263,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if ($action === 'update_invoice') {
+        if (!user_can_edit_debts()) {
+            flash('error', debt_edit_denied_message());
+            redirect('subscriber.php?id=' . $id . '#debts');
+        }
         $invId = (int) post('invoice_id', '0');
         $monthLabel = trim((string) post('month_label', ''));
         $amount = (float) post('amount', '0');
@@ -269,70 +277,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             redirect('subscriber.php?id=' . $id . '&tab=list#debts');
         }
 
-        $oldSt = $pdo->prepare(
-            'SELECT * FROM invoices WHERE id = :id AND subscriber_id = :sid AND status = "unpaid"'
-        );
-        $oldSt->execute(array(':id' => $invId, ':sid' => $id));
-        $oldInv = $oldSt->fetch();
-        if (!$oldInv) {
-            flash('error', 'تعذر تعديل الدين (ربما مسدد أو محذوف)');
+        list($ok, $msg) = apply_unpaid_invoice_update($pdo, $invId, $id, array(
+            'amount' => $amount,
+            'month_label' => $monthLabel,
+            'due_date' => $dueDate,
+            'notes' => $notes,
+        ));
+        if (!$ok) {
+            flash('error', $msg);
             redirect('subscriber.php?id=' . $id . '&tab=list#debts');
         }
 
-        $st = $pdo->prepare(
-            'UPDATE invoices
-             SET month_label = :month_label, amount = :amount, due_date = :due_date, notes = :notes
-             WHERE id = :id AND subscriber_id = :sid AND status = "unpaid"'
-        );
-        $st->execute(array(
-            ':month_label' => $monthLabel,
-            ':amount' => $amount,
-            ':due_date' => $dueDate,
-            ':notes' => ($notes !== '' ? $notes : null),
-            ':id' => $invId,
-            ':sid' => $id,
-        ));
-
-        $diffLines = array();
-        $d1 = activity_diff_line('الشهر', $oldInv['month_label'], $monthLabel);
-        $d2 = activity_diff_line('المبلغ', $oldInv['amount'], $amount);
-        $d3 = activity_diff_line('الاستحقاق', $oldInv['due_date'], $dueDate);
-        $oldNotes = isset($oldInv['notes']) ? $oldInv['notes'] : '';
-        $d4 = activity_diff_line('الملاحظات', $oldNotes, $notes);
-        if ($d1 !== '') {
-            $diffLines[] = $d1;
-        }
-        if ($d2 !== '') {
-            $diffLines[] = $d2;
-        }
-        if ($d3 !== '') {
-            $diffLines[] = $d3;
-        }
-        if ($d4 !== '') {
-            $diffLines[] = $d4;
-        }
-        if (!$diffLines) {
-            $diffLines[] = 'حفظ بدون تغيير ظاهر';
-        }
-        activity_log(
-            $pdo,
-            $id,
-            'invoice',
-            $invId,
-            'update',
-            'تعديل دين #' . $invId,
-            implode("\n", $diffLines)
-        );
-
-        $sendWa = post('send_whatsapp') === '1';
         $waNote = '';
+        $sendWa = post('send_whatsapp') === '1';
         if ($sendWa) {
             $info = $pdo->prepare('SELECT name, phone FROM subscribers WHERE id = :id');
             $info->execute(array(':id' => $id));
             $subRow = $info->fetch();
             if ($subRow) {
                 $debtTotal = subscriber_unpaid_total($pdo, $id);
-                $msg = reminder_message(array(
+                $waMsg = reminder_message(array(
                     'name' => $subRow['name'],
                     'phone' => $subRow['phone'],
                     'month_label' => $monthLabel,
@@ -340,23 +304,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'debt_total' => $debtTotal,
                     'notes' => $notes,
                 ), $config);
-                $result = whatsapp_send($config, $subRow['phone'], $msg, 'debt_updated');
+                $result = whatsapp_send($config, $subRow['phone'], $waMsg, 'debt_updated');
                 log_message($pdo, $id, $result);
                 $waNote = !empty($result['success'])
                     ? ' وتم إرسال إشعار'
                     : (' لكن ' . whatsapp_fail_user_message($result));
-                activity_log(
-                    $pdo,
-                    $id,
-                    'invoice',
-                    $invId,
-                    'notify',
-                    'إشعار تعديل دين #' . $invId,
-                    !empty($result['success']) ? 'تم إرسال واتساب' : whatsapp_fail_user_message($result)
-                );
+                if (function_exists('activity_log')) {
+                    activity_log(
+                        $pdo,
+                        $id,
+                        'invoice',
+                        $invId,
+                        'notify',
+                        'إشعار تعديل دين #' . $invId,
+                        !empty($result['success']) ? 'تم إرسال واتساب' : whatsapp_fail_user_message($result)
+                    );
+                }
             }
         }
-        flash('success', 'تم تعديل الدين' . $waNote);
+        flash('success', $msg . $waNote);
         redirect('subscriber.php?id=' . $id . '&tab=list#debts');
     }
 
@@ -369,64 +335,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if ($action === 'update_invoice_amount') {
+        if (!user_can_edit_debts()) {
+            flash('error', debt_edit_denied_message());
+            redirect('subscriber.php?id=' . $id . '#debts');
+        }
         $invId = (int) post('invoice_id', '0');
         $amount = (float) post('amount', '0');
         if ($invId <= 0 || $amount <= 0) {
             flash('error', 'مبلغ غير صالح');
             redirect('subscriber.php?id=' . $id . '&tab=list#debts');
         }
-        $oldSt = $pdo->prepare(
-            'SELECT * FROM invoices WHERE id = :id AND subscriber_id = :sid AND status = "unpaid"'
-        );
-        $oldSt->execute(array(':id' => $invId, ':sid' => $id));
-        $oldInv = $oldSt->fetch();
-        if (!$oldInv) {
-            flash('error', 'تعذر التعديل (الدين مسدد أو محذوف)');
-            redirect('subscriber.php?id=' . $id . '&tab=list#debts');
-        }
-        $pdo->prepare(
-            'UPDATE invoices SET amount = :amount WHERE id = :id AND subscriber_id = :sid AND status = "unpaid"'
-        )->execute(array(
-            ':amount' => $amount,
-            ':id' => $invId,
-            ':sid' => $id,
-        ));
-        $diff = activity_diff_line('المبلغ', $oldInv['amount'], $amount);
-        activity_log(
-            $pdo,
-            $id,
-            'invoice',
-            $invId,
-            'update',
-            'تعديل مبلغ دين #' . $invId,
-            $diff !== '' ? $diff : ('المبلغ: ' . $amount)
-        );
-        flash('success', 'تم تعديل المبلغ');
+        list($ok, $msg) = apply_unpaid_invoice_update($pdo, $invId, $id, array('amount' => $amount));
+        flash($ok ? 'success' : 'error', $msg);
         redirect('subscriber.php?id=' . $id . '&tab=list#debts');
     }
 
     if ($action === 'delete_invoice') {
-        $invId = (int) post('invoice_id', '0');
-        $oldSt = $pdo->prepare(
-            'SELECT * FROM invoices WHERE id = :id AND subscriber_id = :sid AND status = "unpaid"'
-        );
-        $oldSt->execute(array(':id' => $invId, ':sid' => $id));
-        $oldInv = $oldSt->fetch();
-        $pdo->prepare(
-            'DELETE FROM invoices WHERE id = :id AND subscriber_id = :sid AND status = "unpaid"'
-        )->execute(array(':id' => $invId, ':sid' => $id));
-        if ($oldInv) {
-            activity_log(
-                $pdo,
-                $id,
-                'invoice',
-                $invId,
-                'delete',
-                'حذف دين #' . $invId,
-                'الشهر: ' . $oldInv['month_label'] . "\nالمبلغ: " . $oldInv['amount']
-            );
+        if (!user_can_edit_debts()) {
+            flash('error', debt_edit_denied_message());
+            redirect('subscriber.php?id=' . $id . '#debts');
         }
-        flash('success', 'تم حذف الدين');
+        $invId = (int) post('invoice_id', '0');
+        list($ok, $msg) = apply_unpaid_invoice_delete($pdo, $invId, $id);
+        flash($ok ? 'success' : 'error', $msg);
         redirect('subscriber.php?id=' . $id . '#debts');
     }
 
@@ -446,7 +377,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $max = (int) $pdo->query('SELECT COALESCE(MAX(id),0) FROM subscribers')->fetchColumn();
         $pdo->exec('ALTER TABLE subscribers AUTO_INCREMENT = ' . ($max + 1));
         flash('success', 'تم حذف المشترك');
-        redirect('subscribers.php');
+        redirect('sas.php');
     }
 }
 
@@ -456,7 +387,7 @@ $subscriber = $stmt->fetch();
 
 if (!$subscriber) {
     flash('error', 'مشترك غير موجود');
-    redirect('subscribers.php');
+    redirect('sas.php');
 }
 
 $st = $pdo->prepare('SELECT COALESCE(SUM(amount),0) FROM invoices WHERE subscriber_id = :id AND status = "unpaid"');
@@ -482,6 +413,7 @@ $st->execute(array(':id' => $id));
 $msgLogs = $st->fetchAll();
 $lastMsg = $msgLogs ? $msgLogs[0] : null;
 $activityLogs = fetch_subscriber_activity($pdo, $id, 150);
+$canEditDebts = function_exists('user_can_edit_debts') ? user_can_edit_debts() : false;
 
 $editMode = isset($_GET['edit']) && $_GET['edit'] === '1';
 $debtTab = 'list';
@@ -490,6 +422,9 @@ if (isset($_GET['tab'])) {
     if ($tabGet === 'add_debt' || $tabGet === 'pay' || $tabGet === 'list') {
         $debtTab = $tabGet;
     }
+}
+if (!$canEditDebts && $debtTab === 'add_debt') {
+    $debtTab = 'list';
 }
 if (isset($_GET['edit_inv']) && (int) $_GET['edit_inv'] > 0) {
     $debtTab = 'list';
@@ -505,7 +440,7 @@ if (!$editMode) {
 }
 $editInvId = isset($_GET['edit_inv']) ? (int) $_GET['edit_inv'] : 0;
 $editInvoice = null;
-if ($editInvId > 0) {
+if ($canEditDebts && $editInvId > 0) {
     foreach ($invoices as $invRow) {
         if ((int) $invRow['id'] === $editInvId && $invRow['status'] === 'unpaid') {
             $editInvoice = $invRow;
@@ -664,7 +599,7 @@ $isActiveSub = !empty($activeSubCard);
 </div>
 
 <div class="actions sub-toolbar">
-    <a class="btn ghost" href="subscribers.php"><?php echo e($lang === 'en' ? 'Back' : 'رجوع'); ?></a>
+    <a class="btn ghost" href="<?php echo e((!empty($subscriber['sas_username']) && function_exists('sas_user_url')) ? sas_user_url($subscriber['sas_username']) : 'sas.php'); ?>"><?php echo e($lang === 'en' ? 'Back' : 'رجوع'); ?></a>
     <a class="btn" href="subscriber.php?id=<?php echo (int) $id; ?>&edit=1"><?php echo e(t('edit')); ?></a>
     <a class="btn secondary" href="activate.php?subscriber_id=<?php echo (int) $id; ?>"><?php echo e(t('activate')); ?></a>
     <form method="post" style="display:inline" onsubmit="return confirm(<?php echo json_encode(t('confirm_give_test')); ?>);">
@@ -672,7 +607,9 @@ $isActiveSub = !empty($activeSubCard);
         <input type="hidden" name="action" value="give_test">
         <button class="btn ghost" type="submit"><?php echo e(t('give_test')); ?></button>
     </form>
+    <?php if ($canEditDebts): ?>
     <a class="btn money" href="subscriber.php?id=<?php echo (int) $id; ?>&tab=add_debt#debts"><?php echo e($lang === 'en' ? 'Add debt' : 'إضافة دين'); ?></a>
+    <?php endif; ?>
     <?php if ($unpaid > 0): ?>
     <a class="btn" style="background:#16a34a;border-color:#16a34a;color:#fff" href="subscriber.php?id=<?php echo (int) $id; ?>&tab=pay#debts"><?php echo e(t('pay_debts')); ?></a>
     <?php endif; ?>
@@ -867,7 +804,9 @@ if ($activeSubCard) {
     <div class="soft-tabs">
         <a class="soft-tab<?php echo $debtTab === 'list' ? ' on' : ''; ?>" href="subscriber.php?id=<?php echo (int) $id; ?>&tab=list#debts"><?php echo e(t('debts_list_tab')); ?></a>
         <a class="soft-tab<?php echo $debtTab === 'pay' ? ' on' : ''; ?>" href="subscriber.php?id=<?php echo (int) $id; ?>&tab=pay#debts"><?php echo e(t('pay_debts')); ?></a>
+        <?php if ($canEditDebts): ?>
         <a class="soft-tab<?php echo $debtTab === 'add_debt' ? ' on' : ''; ?>" href="subscriber.php?id=<?php echo (int) $id; ?>&tab=add_debt#debts"><?php echo e(t('add_debts_tab')); ?></a>
+        <?php endif; ?>
     </div>
 
     <div class="tab-pane<?php echo $debtTab === 'pay' ? '' : ' hidden'; ?>">
@@ -986,6 +925,7 @@ if ($activeSubCard) {
         <?php endif; ?>
     </div>
 
+    <?php if ($canEditDebts): ?>
     <div class="tab-pane<?php echo $debtTab === 'add_debt' ? '' : ' hidden'; ?>">
         <form method="post" id="addDebtsForm">
             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
@@ -1056,6 +996,7 @@ if ($activeSubCard) {
             </div>
         </form>
     </div>
+    <?php endif; ?>
 
     <div class="tab-pane<?php echo $debtTab === 'list' ? '' : ' hidden'; ?>">
         <?php if ($editInvoice): ?>
@@ -1121,7 +1062,7 @@ if ($activeSubCard) {
                             <div class="meta"><?php echo e($row['due_date']); ?></div>
                         </td>
                         <td>
-                            <?php if ($row['status'] === 'unpaid'): ?>
+                            <?php if ($row['status'] === 'unpaid' && $canEditDebts): ?>
                                 <button
                                     type="button"
                                     class="amount-edit-btn"
@@ -1141,7 +1082,8 @@ if ($activeSubCard) {
                         </td>
                         <td class="notes-cell"><?php echo e(isset($row['notes']) ? $row['notes'] : ''); ?></td>
                         <td>
-                            <?php if ($row['status'] === 'unpaid'): ?>
+                            <?php if ($row['status'] === 'unpaid' && $canEditDebts): ?>
+                                <a class="btn ghost sm" href="subscriber.php?id=<?php echo (int) $id; ?>&edit_inv=<?php echo (int) $row['id']; ?>&tab=list#debts"><?php echo e(t('edit')); ?></a>
                                 <form method="post" onsubmit="return confirm('حذف هذا الدين؟');" style="display:inline">
                                     <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                                     <input type="hidden" name="action" value="delete_invoice">
@@ -1258,6 +1200,7 @@ window.DEBT_ENTRY = {
 </script>
 <script src="assets/debt-entry.js?v=5"></script>
 
+<?php if ($canEditDebts): ?>
 <div class="modal-backdrop hidden" id="amountModal">
     <div class="modal-card">
         <h3 id="amountModalTitle"><?php echo e($lang === 'en' ? 'Edit amount' : 'تعديل المبلغ'); ?></h3>
@@ -1274,6 +1217,7 @@ window.DEBT_ENTRY = {
         </form>
     </div>
 </div>
+<?php endif; ?>
 
 <div class="modal-backdrop hidden" id="daysModal">
     <div class="modal-card">

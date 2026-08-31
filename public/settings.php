@@ -5,8 +5,45 @@ require_once __DIR__ . '/../includes/layout.php';
 require_once __DIR__ . '/../includes/settings_tabs.php';
 require_login();
 
+function settings_verify_wipe_password($pdo, $config, $pass)
+{
+    $pass = (string) $pass;
+    $me = current_admin();
+    if ($me && isset($me['id']) && (int) $me['id'] > 0) {
+        if (verify_user_password($pdo, (int) $me['id'], $pass)) {
+            return true;
+        }
+    }
+    if (isset($config['admin_password']) && hash_equals((string) $config['admin_password'], $pass)) {
+        return true;
+    }
+    return false;
+}
+
+function settings_unlink_sas_locals($pdo)
+{
+    try {
+        $pdo->exec('UPDATE sas_users_cache SET local_subscriber_id = NULL');
+    } catch (Exception $e) {
+    }
+}
+
+function settings_wipe_offline_tables($pdo)
+{
+    $pdo->exec('SET FOREIGN_KEY_CHECKS=0');
+    $pdo->exec('TRUNCATE TABLE message_logs');
+    $pdo->exec('TRUNCATE TABLE invoices');
+    $pdo->exec('TRUNCATE TABLE subscriptions');
+    $pdo->exec('TRUNCATE TABLE subscribers');
+    $pdo->exec('SET FOREIGN_KEY_CHECKS=1');
+    settings_unlink_sas_locals($pdo);
+}
+
 $tab = isset($_GET['tab']) ? (string) $_GET['tab'] : 'general';
-if (!in_array($tab, array('general', 'whatsapp', 'templates', 'rental', 'users', 'plans', 'sas'), true)) {
+if ($tab === 'templates') {
+    redirect('messages.php?mode=templates');
+}
+if (!in_array($tab, array('general', 'whatsapp', 'rental', 'users', 'plans', 'sas'), true)) {
     $tab = 'general';
 }
 
@@ -31,30 +68,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($section === 'sas_test') {
         $skipSettingsSave = true;
         $tab = 'sas';
-    } elseif ($section === 'clear_data') {
+    } elseif ($section === 'clear_data' || $section === 'clear_logs' || $section === 'clear_offline') {
         require_perm('clear_data');
         $pass = (string) post('admin_password', '');
-        $me = current_admin();
-        $okPass = false;
-        if ($me && $me['id'] > 0) {
-            $okPass = verify_user_password($pdo, $me['id'], $pass);
-        }
-        if (!$okPass && isset($config['admin_password']) && hash_equals((string) $config['admin_password'], $pass)) {
-            $okPass = true;
-        }
-        if (!$okPass) {
+        if (!settings_verify_wipe_password($pdo, $config, $pass)) {
             flash('error', $lang === 'en' ? 'Wrong password' : 'كلمة المرور غير صحيحة');
             redirect('settings.php?tab=general');
         }
         try {
-            $pdo->exec('SET FOREIGN_KEY_CHECKS=0');
-            $pdo->exec('TRUNCATE TABLE message_logs');
-            $pdo->exec('TRUNCATE TABLE invoices');
-            $pdo->exec('TRUNCATE TABLE subscriptions');
-            $pdo->exec('TRUNCATE TABLE subscribers');
-            $pdo->exec('SET FOREIGN_KEY_CHECKS=1');
-            activity_log($pdo, null, 'system', null, 'clear_data', 'مسح كل البيانات', '');
-            flash('success', $lang === 'en' ? 'All data cleared' : 'تم مسح كل البيانات');
+            if ($section === 'clear_logs') {
+                $pdo->exec('TRUNCATE TABLE activity_logs');
+                flash('success', $lang === 'en' ? 'Activity log cleared' : 'تم مسح اللوك');
+            } elseif ($section === 'clear_offline') {
+                settings_wipe_offline_tables($pdo);
+                flash('success', $lang === 'en'
+                    ? 'Local debts and subscriptions cleared. SAS users stay.'
+                    : 'تم مسح الديون والاشتراكات المحلية. مشتركين SAS بقوا.');
+            } else {
+                settings_wipe_offline_tables($pdo);
+                flash('success', $lang === 'en' ? 'All data cleared' : 'تم مسح كل البيانات');
+            }
         } catch (Exception $e) {
             flash('error', 'Clear failed: ' . $e->getMessage());
         }
@@ -147,7 +180,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'site_name' => (string) post('site_name', 'WiFi-Net-SALES'),
             'language' => post('language') === 'en' ? 'en' : 'ar',
             'currency' => (string) post('currency', 'د.ع'),
-            'grace_days' => (int) post('grace_days', '2'),
+            'grace_days' => (int) post('grace_days', '3'),
             'subscription_period_mode' => $periodMode,
         );
         set_lang_preference($data['language']);
@@ -215,7 +248,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'whatsapp_sender_note' => (string) post('whatsapp_sender_note', ''),
             'expiry_auto_remind_enabled' => post('expiry_auto_remind_enabled') === '1',
             'expiry_auto_remind_days' => $expDays,
-            'tpl_expiry_soon' => (string) post('tpl_expiry_soon', ''),
         );
         $tab = 'whatsapp';
     } elseif ($section === 'templates') {
@@ -235,7 +267,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'tpl_unpaid_overdue' => (string) post('tpl_unpaid_overdue', ''),
             'unpaid_remind_after_days' => $afterDays,
         );
-        $tab = 'templates';
+        if (settings_save($data)) {
+            flash('success', t('saved'));
+        } else {
+            flash('error', 'Cannot write settings.json');
+        }
+        redirect('messages.php?mode=templates');
     } elseif ($section === 'sas') {
         $host = preg_replace('#^https?://#i', '', rtrim(trim((string) post('sas_host', '')), '/'));
         $pass = (string) post('sas_password', '');
@@ -280,8 +317,6 @@ $s = settings_load();
 $activeNav = 'settings';
 if ($tab === 'whatsapp') {
     $activeNav = 'whatsapp';
-} elseif ($tab === 'templates') {
-    $activeNav = 'templates';
 } elseif ($tab === 'users') {
     $activeNav = 'users';
 }
@@ -546,8 +581,9 @@ $ramTone = ($sys['ram']['source'] === 'host')
                 <input name="currency" value="<?php echo e($s['currency']); ?>">
             </div>
             <div>
-                <label><?php echo e($lang === 'en' ? 'Grace days' : 'أيام السماح'); ?></label>
+                <label><?php echo e($lang === 'en' ? 'Default grace days' : 'أيام السماح الافتراضية'); ?></label>
                 <input type="number" min="0" name="grace_days" value="<?php echo (int) $s['grace_days']; ?>">
+                <small style="color:#6b7a88;font-weight:600"><?php echo e($lang === 'en' ? 'Default 3 days after activation. Can be changed per subscriber.' : 'الافتراضي 3 أيام بعد التفعيل. قابل للتعديل لكل مشترك.'); ?></small>
             </div>
             <div>
                 <label><?php echo e($lang === 'en' ? 'Subscription period' : 'مدة الاشتراك'); ?></label>
@@ -570,15 +606,64 @@ $ramTone = ($sys['ram']['source'] === 'host')
 
 <?php if (user_can('clear_data')): ?>
 <div class="panel">
-    <h2><?php echo e(t('clear_data')); ?></h2>
+    <h2><?php echo e($lang === 'en' ? 'Reset / wipe' : 'تصفير النظام ومسح المحتويات'); ?></h2>
     <p style="color:#6b7a88;font-weight:600">
         <?php echo e($lang === 'en'
-            ? 'Deletes all subscribers, movements, invoices and message logs. Packages stay.'
-            : 'يحذف كل المشتركين والحركات والفواتير وسجل الرسائل. الباقات تبقى.'); ?>
+            ? 'Debts stay in this system (not SAS). SAS cache is a snapshot only.'
+            : 'الديون تُحفظ هنا بالنظام — مو بالساس. كاش SAS لقطة حماية فقط.'); ?>
     </p>
+
+    <form method="post" onsubmit="return confirm(<?php echo json_encode(t('confirm_clear_logs')); ?>);" style="margin-top:14px">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="section" value="clear_logs">
+        <p style="margin:0 0 8px;font-weight:700"><?php echo e(t('clear_logs')); ?></p>
+        <p style="color:#6b7a88;margin:0 0 10px">
+            <?php echo e($lang === 'en' ? 'Deletes activity log only.' : 'يحذف حركات اللوك فقط.'); ?>
+        </p>
+        <div class="form-grid cols-2">
+            <div>
+                <label><?php echo e(t('password')); ?></label>
+                <input type="password" name="admin_password" required placeholder="<?php echo e($lang === 'en' ? 'Your password' : 'رمزك'); ?>">
+            </div>
+        </div>
+        <div class="actions">
+            <button class="btn danger" type="submit"><?php echo e(t('clear_logs')); ?></button>
+        </div>
+    </form>
+
+    <hr style="border:0;border-top:1px solid #e5e7eb;margin:18px 0">
+
+    <form method="post" onsubmit="return confirm(<?php echo json_encode(t('confirm_clear_offline')); ?>);">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="section" value="clear_offline">
+        <p style="margin:0 0 8px;font-weight:700"><?php echo e(t('clear_offline')); ?></p>
+        <p style="color:#6b7a88;margin:0 0 10px">
+            <?php echo e($lang === 'en'
+                ? 'Deletes local debts, subscriptions and WhatsApp logs. SAS user list stays.'
+                : 'يحذف الديون والاشتراكات المحلية وسجل الرسائل. قائمة مشتركين SAS تبقى.'); ?>
+        </p>
+        <div class="form-grid cols-2">
+            <div>
+                <label><?php echo e(t('password')); ?></label>
+                <input type="password" name="admin_password" required placeholder="<?php echo e($lang === 'en' ? 'Your password' : 'رمزك'); ?>">
+            </div>
+        </div>
+        <div class="actions">
+            <button class="btn danger" type="submit"><?php echo e(t('clear_offline')); ?></button>
+        </div>
+    </form>
+
+    <hr style="border:0;border-top:1px solid #e5e7eb;margin:18px 0">
+
     <form method="post" onsubmit="return confirm('<?php echo e(t('confirm_clear')); ?>');">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="section" value="clear_data">
+        <p style="margin:0 0 8px;font-weight:700"><?php echo e(t('clear_data')); ?></p>
+        <p style="color:#6b7a88;margin:0 0 10px">
+            <?php echo e($lang === 'en'
+                ? 'Deletes all subscribers, movements, invoices and message logs. Packages stay.'
+                : 'يحذف كل المشتركين والحركات والفواتير وسجل الرسائل. الباقات تبقى.'); ?>
+        </p>
         <div class="form-grid cols-2">
             <div>
                 <label><?php echo e(t('password')); ?></label>
@@ -702,10 +787,10 @@ $ramTone = ($sys['ram']['source'] === 'host')
                     <input type="number" min="0" max="60" name="expiry_auto_remind_days"
                         value="<?php echo (int) (isset($s['expiry_auto_remind_days']) ? $s['expiry_auto_remind_days'] : 1); ?>">
                 </div>
-                <div class="settings-field">
-                    <label><?php echo e($lang === 'en' ? 'Reminder message' : 'نص رسالة التذكير'); ?></label>
-                    <textarea name="tpl_expiry_soon" rows="4"><?php echo e(isset($s['tpl_expiry_soon']) ? $s['tpl_expiry_soon'] : ''); ?></textarea>
-                </div>
+                <p class="meta" style="margin:0">
+                    <?php echo e($lang === 'en' ? 'Message text:' : 'نص الرسالة:'); ?>
+                    <a href="messages.php?mode=templates"><?php echo e(t('templates')); ?></a>
+                </p>
             </div>
         </div>
 
@@ -1141,47 +1226,4 @@ $sasHasPass = !empty($sasCfgUi['password']);
 </div>
 <?php endif; ?>
 
-<?php if ($tab === 'templates'): ?>
-<div class="panel">
-    <h2><?php echo e(t('settings_templates')); ?></h2>
-    <form method="post" class="settings-templates-form">
-        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
-        <input type="hidden" name="section" value="templates">
-        <div class="settings-stack">
-            <div class="settings-field">
-                <label><?php echo e(t('msg_debt_remind')); ?></label>
-                <textarea name="tpl_debt_remind" rows="3"><?php echo e($s['tpl_debt_remind']); ?></textarea>
-            </div>
-            <div class="settings-field">
-                <label><?php echo e($lang === 'en' ? 'Days-left reminder' : 'رسالة الأيام المتبقية'); ?></label>
-                <textarea name="tpl_days_left" rows="3"><?php echo e(isset($s['tpl_days_left']) ? $s['tpl_days_left'] : ''); ?></textarea>
-            </div>
-            <div class="settings-field settings-field-sm">
-                <label><?php echo e($lang === 'en' ? 'Unpaid after (days)' : 'تنبيه عدم التسديد بعد (يوم)'); ?></label>
-                <input type="number" name="unpaid_remind_after_days" min="1" max="365"
-                    value="<?php echo (int) (isset($s['unpaid_remind_after_days']) ? $s['unpaid_remind_after_days'] : 7); ?>">
-            </div>
-            <div class="settings-field">
-                <label><?php echo e($lang === 'en' ? 'Unpaid / cut warning message' : 'رسالة المتأخرين (تفعيل بدون تسديد)'); ?></label>
-                <textarea name="tpl_unpaid_overdue" rows="4"><?php echo e(isset($s['tpl_unpaid_overdue']) ? $s['tpl_unpaid_overdue'] : ''); ?></textarea>
-            </div>
-            <div class="settings-field">
-                <label><?php echo e(t('msg_debt_created')); ?></label>
-                <textarea name="tpl_debt_created" rows="4"><?php echo e(isset($s['tpl_debt_created']) ? $s['tpl_debt_created'] : ''); ?></textarea>
-            </div>
-            <div class="settings-field">
-                <label><?php echo e(t('msg_payment_ok')); ?></label>
-                <textarea name="tpl_payment_ok" rows="4"><?php echo e($s['tpl_payment_ok']); ?></textarea>
-            </div>
-            <div class="settings-field">
-                <label><?php echo e(t('msg_activation')); ?></label>
-                <textarea name="tpl_activation" rows="4"><?php echo e($s['tpl_activation']); ?></textarea>
-            </div>
-        </div>
-        <div class="actions">
-            <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
-        </div>
-    </form>
-</div>
-<?php endif; ?>
 <?php render_footer(); ?>

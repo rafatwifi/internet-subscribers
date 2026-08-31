@@ -44,11 +44,16 @@ $where = '(s.rental_enabled = 1 OR s.rental_enabled = "1")
  AND s.rental_device_id IS NOT NULL
  AND TRIM(s.rental_device_id) <> ""';
 if ($q !== '') {
-    $where .= ' AND (s.name LIKE :q OR s.phone LIKE :q)';
+    $where .= ' AND (s.name LIKE :q OR s.phone LIKE :q OR s.sas_username LIKE :q
+        OR c.username LIKE :q OR c.firstname LIKE :q OR c.display_name LIKE :q
+        OR cu.username LIKE :q OR cu.firstname LIKE :q OR cu.display_name LIKE :q)';
     $params[':q'] = '%' . $q . '%';
 }
 
 $sql = 'SELECT s.*,
+  COALESCE(c.username, cu.username) AS sas_username_live,
+  COALESCE(c.expire_at, cu.expire_at) AS sas_expire_at,
+  COALESCE(c.enabled, cu.enabled) AS sas_enabled,
   (SELECT COALESCE(SUM(amount),0) FROM invoices i WHERE i.subscriber_id = s.id AND i.status = "unpaid") AS debt,
   (SELECT sub.end_date FROM subscriptions sub WHERE sub.subscriber_id = s.id ORDER BY sub.id DESC LIMIT 1) AS last_end,
   (SELECT sub.end_date FROM subscriptions sub
@@ -57,8 +62,12 @@ $sql = 'SELECT s.*,
   CASE WHEN EXISTS (
      SELECT 1 FROM subscriptions sub
      WHERE sub.subscriber_id = s.id AND sub.status = "active" AND sub.end_date >= CURDATE()
-   ) THEN 1 ELSE 0 END AS is_rent_active
+   ) OR (COALESCE(c.enabled, cu.enabled) = 1 AND COALESCE(c.expire_at, cu.expire_at) IS NOT NULL
+        AND COALESCE(c.expire_at, cu.expire_at) >= NOW()) THEN 1 ELSE 0 END AS is_rent_active
  FROM subscribers s
+ LEFT JOIN sas_users_cache c ON c.local_subscriber_id = s.id
+ LEFT JOIN sas_users_cache cu ON CONVERT(cu.username USING utf8mb4) COLLATE utf8mb4_unicode_ci
+    = CONVERT(s.sas_username USING utf8mb4) COLLATE utf8mb4_unicode_ci
  WHERE ' . $where . '
  ORDER BY is_rent_active ASC, s.name ASC';
 $stmt = $pdo->prepare($sql);
@@ -189,6 +198,7 @@ render_header($lang === 'en' ? 'Rentals' : 'الإيجار', 'rentals');
             <tr>
                 <th class="seq-col">#</th>
                 <th><?php echo e(t('name')); ?></th>
+                <th><?php echo e($lang === 'en' ? 'Username' : 'اسم الدخول'); ?></th>
                 <th><?php echo e(t('phone')); ?></th>
                 <th><?php echo e($lang === 'en' ? 'Device' : 'الجهاز'); ?></th>
                 <th><?php echo e($lang === 'en' ? 'Status' : 'الحالة'); ?></th>
@@ -199,22 +209,32 @@ render_header($lang === 'en' ? 'Rentals' : 'الإيجار', 'rentals');
             </thead>
             <tbody>
             <?php if (!$rows): ?>
-                <tr><td colspan="8"><?php echo e($lang === 'en' ? 'No rental subscribers' : 'ماكو مشتركين بإيجار'); ?></td></tr>
+                <tr><td colspan="9"><?php echo e($lang === 'en' ? 'No rental subscribers' : 'ماكو مشتركين بإيجار'); ?></td></tr>
             <?php endif; ?>
             <?php $n = 1; foreach ($rows as $row):
                 $dev = rental_device_by_id($row['rental_device_id'], $settingsRental);
                 $isActive = !empty($row['is_rent_active']) || !empty($row['active_end']);
-                $endShow = !empty($row['active_end']) ? $row['active_end'] : (!empty($row['last_end']) ? $row['last_end'] : '-');
+                $endShow = !empty($row['active_end']) ? $row['active_end'] : (!empty($row['sas_expire_at']) ? $row['sas_expire_at'] : (!empty($row['last_end']) ? $row['last_end'] : '-'));
                 $debtAmt = (float) $row['debt'];
+                $sasUser = '';
+                if (!empty($row['sas_username_live'])) {
+                    $sasUser = (string) $row['sas_username_live'];
+                } elseif (!empty($row['sas_username'])) {
+                    $sasUser = (string) $row['sas_username'];
+                }
+                $openHref = $sasUser !== ''
+                    ? ('sas_user.php?u=' . rawurlencode($sasUser) . '#rental')
+                    : ('subscriber.php?id=' . (int) $row['id'] . '#rental');
                 ?>
                 <tr class="<?php echo $isActive ? 'rent-row-on' : 'rent-row-off rent-ended-alert'; ?>">
                     <td class="seq-col"><?php echo $n++; ?></td>
                     <td>
-                        <a class="sub-name" href="subscriber.php?id=<?php echo (int) $row['id']; ?>">
+                        <a class="sub-name" href="<?php echo e($openHref); ?>">
                             <?php echo e($row['name']); ?>
                         </a>
                         <?php echo rental_badge_html($row, $settingsRental); ?>
                     </td>
+                    <td><?php echo $sasUser !== '' ? e($sasUser) : '—'; ?></td>
                     <td><?php echo e(format_phone_display($row['phone'])); ?></td>
                     <td><?php echo e($dev ? $dev['name'] : $row['rental_device_id']); ?></td>
                     <td>
@@ -232,7 +252,7 @@ render_header($lang === 'en' ? 'Rentals' : 'الإيجار', 'rentals');
                     </td>
                     <td class="no-print">
                         <div class="row-actions">
-                            <a class="link-act act-blue" href="subscriber.php?id=<?php echo (int) $row['id']; ?>#rental"><?php echo e($lang === 'en' ? 'Open' : 'فتح'); ?></a>
+                            <a class="link-act act-blue" href="<?php echo e($openHref); ?>"><?php echo e($lang === 'en' ? 'Open' : 'فتح'); ?></a>
                             <?php if (!$isActive): ?>
                                 <a class="link-act act-green" href="activate.php?subscriber_id=<?php echo (int) $row['id']; ?>"><?php echo e($lang === 'en' ? 'Renew' : 'تجديد الاشتراك'); ?></a>
                                 <form method="post" style="display:inline" onsubmit="return confirm(<?php echo json_encode($lang === 'en' ? 'Send return notice via WhatsApp?' : 'تبليغ استرجاع عبر واتساب؟'); ?>);">

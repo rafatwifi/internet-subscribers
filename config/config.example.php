@@ -32,7 +32,7 @@ return [
         'activation_template' => '',
     ],
 
-    'grace_days' => 2,
+    'grace_days' => 3,
     'cron_secret' => 'CHANGE_CRON_SECRET',
     'currency' => 'د.ع',
     'timezone' => 'Asia/Baghdad',

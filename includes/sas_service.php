@@ -178,10 +178,12 @@ function sas_response_success($res)
     }
     if (isset($res['status'])) {
         $st = $res['status'];
-        if (is_numeric($st) && (int) $st !== 200) {
-            return false;
-        }
-        if (in_array(strtolower((string) $st), array('error', 'fail', 'failed'), true)) {
+        if (is_numeric($st)) {
+            $n = (int) $st;
+            if ($n >= 100 && $n !== 200) {
+                return false;
+            }
+        } elseif (in_array(strtolower((string) $st), array('error', 'fail', 'failed'), true)) {
             return false;
         }
     }
@@ -289,6 +291,9 @@ function sas_ensure_user($api, $config, $subscriberRow, $profileId)
  */
 function sas_sync_on_activate($pdo, $config, $subscriberRow, $plan, $opts = array())
 {
+    if (!empty($opts['skip_sas'])) {
+        return array(true, '');
+    }
     if (!sas_is_ready($config)) {
         return array(true, '');
     }
@@ -325,6 +330,17 @@ function sas_sync_on_activate($pdo, $config, $subscriberRow, $plan, $opts = arra
 
         sas_save_subscriber_link($pdo, $subscriberRow, $username, $existing, $activateRes);
 
+        $graceNote = '';
+        $graceDays = function_exists('subscriber_grace_days')
+            ? subscriber_grace_days($subscriberRow, $config)
+            : 0;
+        if ($graceDays > 0 && function_exists('sas_extend_days')) {
+            list($gOk, $gMsg) = sas_extend_days($pdo, $config, $username, $graceDays, false);
+            if ($gMsg !== '') {
+                $graceNote = ' — ' . $gMsg;
+            }
+        }
+
         if (function_exists('activity_log')) {
             activity_log(
                 $pdo,
@@ -337,7 +353,7 @@ function sas_sync_on_activate($pdo, $config, $subscriberRow, $plan, $opts = arra
             );
         }
 
-        return array(true, 'SAS: تم التفعيل (' . $username . ')');
+        return array(true, 'SAS: تم التفعيل (' . $username . ')' . $graceNote);
     } catch (Exception $e) {
         return array(false, 'SAS: ' . $e->getMessage());
     }
@@ -390,57 +406,11 @@ function sas_sync_on_test($pdo, $config, $subscriberRow, $plan)
             return array(false, 'SAS: ماكو رقم مستخدم (user_id) — ما يقدر يتمدّد');
         }
 
-        $s = sas_config($config);
-        $method = $s['extend_method'];
-        $userProfileId = 0;
-        if (is_array($existing)) {
-            if (!empty($existing['profile_id'])) {
-                $userProfileId = (int) $existing['profile_id'];
-            } elseif (!empty($existing['profileId'])) {
-                $userProfileId = (int) $existing['profileId'];
-            }
+        list($okExt, $msgExt) = sas_extend_one_day($pdo, $config, $username);
+        if (!$okExt) {
+            return array(false, $msgExt);
         }
-        if ($userProfileId <= 0) {
-            $full = $api->getUserById($userId);
-            if (is_array($full)) {
-                if (!empty($full['profile_id'])) {
-                    $userProfileId = (int) $full['profile_id'];
-                } elseif (isset($full['profile']) && is_array($full['profile']) && !empty($full['profile']['id'])) {
-                    $userProfileId = (int) $full['profile']['id'];
-                }
-            }
-        }
-        if ($userProfileId <= 0) {
-            $userProfileId = $profileId;
-        }
-
-        $allowed = $api->getAllowedExtensions($userProfileId);
-        $extData = $api->getExtensionData($userId);
-        if (is_array($extData)) {
-            foreach (array('allowedExtensions', 'extensions', 'profiles', 'data') as $ek) {
-                if (isset($extData[$ek]) && is_array($extData[$ek]) && isset($extData[$ek][0])) {
-                    $allowed = $extData[$ek];
-                    break;
-                }
-            }
-        }
-        $extendProfile = sas_pick_extend_profile($allowed, $s['extend_profile_id'], $api->getProfiles());
-        if ($extendProfile <= 0) {
-            return array(false, 'SAS: ماكو بروفايل تمديد (Extension) مرتبط بهذه الباقة. من SAS أنشئ بروفايل نوعه Extension (مثلاً 24 ساعة) واربطه، أو حط رقمه في إعدادات «بروفايل التمديد». كود -12 = بروفايل غير صالح للتمديد.');
-        }
-
-        $testRes = $api->extendUserService($userId, $extendProfile, $method);
-        if (!sas_response_success($testRes)) {
-            $msg = sas_response_message($testRes);
-            if (strpos($msg, 'invalid_profile') !== false || strpos($msg, '-12') !== false) {
-                $msg .= ' — كود SAS -12 يعني البروفايل مو صالح للتمديد (لازم Extension مو باقة شهرية)';
-            }
-            return array(false, 'SAS: فشل التست — ' . $msg);
-        }
-
-        sas_save_subscriber_link($pdo, $subscriberRow, $username, $existing, $testRes);
-
-        $methodLabel = ($method === 'credit') ? 'رصيد' : 'نقاط تشجيعية';
+        sas_save_subscriber_link($pdo, $subscriberRow, $username, $existing, array());
         if (function_exists('activity_log')) {
             activity_log(
                 $pdo,
@@ -448,12 +418,11 @@ function sas_sync_on_test($pdo, $config, $subscriberRow, $plan)
                 'subscriber',
                 (int) $subscriberRow['id'],
                 'sas_test',
-                'تست SAS 24 ساعة — ' . $username,
-                'تمديد عبر ' . $methodLabel . ' extend_profile_id=' . $extendProfile
+                'تست SAS +1 يوم — ' . $username,
+                $msgExt
             );
         }
-
-        return array(true, 'SAS: تم التست عبر ' . $methodLabel . ' (' . $username . ')');
+        return array(true, $msgExt);
     } catch (Exception $e) {
         return array(false, 'SAS: ' . $e->getMessage());
     }
@@ -519,10 +488,11 @@ function sas_profile_is_extension($row)
     return false;
 }
 
-function sas_pick_extend_profile($allowed, $configured, $allProfiles = array())
+function sas_pick_extend_profile($allowed, $configured, $allProfiles = array(), $excludeId = 0)
 {
     $configured = (int) $configured;
-    if ($configured > 0) {
+    $excludeId = (int) $excludeId;
+    if ($configured > 0 && $configured !== $excludeId) {
         return $configured;
     }
 
@@ -540,20 +510,19 @@ function sas_pick_extend_profile($allowed, $configured, $allProfiles = array())
         if ($extOnly) {
             $lists[] = $extOnly;
         }
+        $lists[] = $allProfiles;
     }
 
-    $first = 0;
+    $bestId = 0;
+    $bestScore = -1;
     foreach ($lists as $list) {
         foreach ($list as $p) {
             if (!is_array($p)) {
                 continue;
             }
             $id = (int) sas_row_id($p);
-            if ($id <= 0) {
+            if ($id <= 0 || $id === $excludeId) {
                 continue;
-            }
-            if ($first <= 0) {
-                $first = $id;
             }
             $name = strtolower(sas_row_name($p));
             $amt = 0;
@@ -564,23 +533,195 @@ function sas_pick_extend_profile($allowed, $configured, $allProfiles = array())
             }
             $unit = isset($p['expiration_unit']) ? $p['expiration_unit'] : (isset($p['expire_unit']) ? $p['expire_unit'] : '');
             $unitS = is_numeric($unit) ? (int) $unit : strtolower((string) $unit);
-            if (strpos($name, '24') !== false || strpos($name, 'test') !== false
-                || strpos($name, 'تست') !== false || strpos($name, 'trial') !== false) {
-                return $id;
+            $score = 0;
+            if ($name === 'test' || $name === 'تست') {
+                $score = 100;
+            } elseif (strpos($name, 'test') !== false || strpos($name, 'تست') !== false || strpos($name, 'trial') !== false) {
+                $score = 90;
+            } elseif (strpos($name, '1') !== false && (strpos($name, 'day') !== false || strpos($name, 'يوم') !== false)) {
+                $score = 88;
+            } elseif (strpos($name, '24') !== false) {
+                $score = 80;
+            } elseif (($unitS === 2 || $unitS === 'days' || $unitS === 'day' || $unitS === 'd') && $amt === 1) {
+                $score = 85;
+            } elseif (($unitS === 1 || $unitS === 'hours' || $unitS === 'hour' || $unitS === 'h') && $amt === 24) {
+                $score = 82;
+            } elseif (sas_profile_is_extension($p)) {
+                $score = 50;
+            } else {
+                continue;
             }
-            if (($unitS === 1 || $unitS === 'hours' || $unitS === 'hour' || $unitS === 'h') && $amt === 24) {
-                return $id;
-            }
-            if (($unitS === 2 || $unitS === 'days' || $unitS === 'day' || $unitS === 'd') && $amt === 1) {
-                return $id;
+            if ($score > $bestScore) {
+                $bestScore = $score;
+                $bestId = $id;
             }
         }
-        if ($first > 0) {
-            return $first;
+        if ($bestId > 0 && $bestScore >= 80) {
+            return $bestId;
         }
     }
 
+    return $bestId;
+}
+
+function sas_user_expire_ts($row)
+{
+    if (!is_array($row)) {
+        return 0;
+    }
+    $at = function_exists('sas_cache_expire_at') ? sas_cache_expire_at($row) : '';
+    if ($at) {
+        $t = strtotime($at);
+        return $t ? $t : 0;
+    }
     return 0;
+}
+
+/**
+ * إضافة يوم تست على الساس مباشرة (بروفايل Test + نقاط تشجيعية) بدون شاشة SAS
+ */
+function sas_extend_days($pdo, $config, $username, $days, $sendWa = false)
+{
+    $days = (int) $days;
+    if ($days <= 0) {
+        return array(true, '');
+    }
+    $okN = 0;
+    $lastFail = '';
+    for ($i = 0; $i < $days; $i++) {
+        list($ok, $msg) = sas_extend_one_day($pdo, $config, $username, $sendWa && ($i === $days - 1));
+        if (!$ok) {
+            $lastFail = $msg;
+            break;
+        }
+        $okN++;
+    }
+    if ($okN <= 0) {
+        return array(false, $lastFail !== '' ? $lastFail : 'تعذر إضافة أيام السماح');
+    }
+    $out = 'تم إضافة ' . $okN . ' يوم سماح';
+    if ($okN < $days && $lastFail !== '') {
+        $out .= ' — الباقي فشل: ' . $lastFail;
+    }
+    return array(true, $out);
+}
+
+function sas_extend_one_day($pdo, $config, $username, $sendWa = true)
+{
+    $username = trim((string) $username);
+    if ($username === '') {
+        return array(false, 'ماكو يوزرنيم');
+    }
+    if (!sas_is_ready($config) || !class_exists('SASConnector')) {
+        return array(false, 'فعّل ربط SAS من الإعدادات أولاً');
+    }
+    try {
+        $api = sas_make_connector($config);
+        if (!$api || !$api->login()) {
+            return array(false, 'SAS: فشل تسجيل الدخول');
+        }
+        $cache = function_exists('sas_cache_get') ? sas_cache_get($pdo, $username) : null;
+        $userId = ($cache && !empty($cache['sas_user_id'])) ? (int) $cache['sas_user_id'] : 0;
+        $found = $api->findUserByUsername($username);
+        if (is_array($found)) {
+            if ($userId <= 0) {
+                $userId = sas_extract_user_id($found);
+            }
+        }
+        if ($userId <= 0) {
+            return array(false, 'SAS: ماكو رقم مستخدم لهذا اليوزرنيم');
+        }
+        $full = $api->getUserById($userId);
+        if (!is_array($full) || (function_exists('sas_response_is_error') && sas_response_is_error($full))) {
+            $full = is_array($found) ? $found : array();
+        }
+        if (isset($full['data']) && is_array($full['data']) && !isset($full['username'])) {
+            $full = $full['data'];
+        }
+        $beforeTs = sas_user_expire_ts($full);
+        $userProfileId = 0;
+        if (!empty($full['profile_id'])) {
+            $userProfileId = (int) $full['profile_id'];
+        } elseif ($cache && !empty($cache['profile_id'])) {
+            $userProfileId = (int) $cache['profile_id'];
+        }
+        $s = sas_config($config);
+        $allowed = ($userProfileId > 0) ? $api->getAllowedExtensions($userProfileId) : array();
+        $extData = $api->getExtensionData($userId);
+        if (is_array($extData)) {
+            foreach (array('allowedExtensions', 'extensions', 'profiles', 'data') as $ek) {
+                if (isset($extData[$ek]) && is_array($extData[$ek]) && isset($extData[$ek][0])) {
+                    $allowed = $extData[$ek];
+                    break;
+                }
+            }
+        }
+        $extendProfile = sas_pick_extend_profile($allowed, $s['extend_profile_id'], $api->getProfiles(), $userProfileId);
+        if ($extendProfile <= 0) {
+            return array(false, 'SAS: ماكو بروفايل تست/تمديد يوم واحد مرتبط بهذه الباقة');
+        }
+        list($ptsOk, $ptsVal) = function_exists('sas_manager_reward_points')
+            ? sas_manager_reward_points($config, $pdo)
+            : array(false, null, '');
+        if ($ptsOk && $ptsVal !== null && (float) $ptsVal < 1) {
+            return array(false, 'النقاط التشجيعية غير كافية (المتوفر: ' . $ptsVal . ')');
+        }
+        $testRes = method_exists($api, 'extendUserService')
+            ? $api->extendUserService($userId, $extendProfile, 'reward_points')
+            : array();
+        $after = $api->getUserById($userId);
+        if (isset($after['data']) && is_array($after['data']) && !isset($after['username'])) {
+            $after = $after['data'];
+        }
+        $afterTs = sas_user_expire_ts($after);
+        if ($afterTs <= $beforeTs && method_exists($api, 'findUserByUsername')) {
+            $foundAfter = $api->findUserByUsername($username);
+            $foundTs = sas_user_expire_ts($foundAfter);
+            if ($foundTs > $afterTs) {
+                $after = $foundAfter;
+                $afterTs = $foundTs;
+            }
+        }
+        if ($afterTs <= $beforeTs) {
+            $hint = function_exists('sas_response_message') ? sas_response_message(is_array($testRes) ? $testRes : array()) : '';
+            $st = (is_array($testRes) && isset($testRes['status'])) ? (int) $testRes['status'] : 0;
+            $low = strtolower($hint);
+            if ($ptsOk && $ptsVal !== null && (float) $ptsVal < 1) {
+                return array(false, 'النقاط التشجيعية غير كافية (المتوفر: ' . $ptsVal . ')');
+            }
+            if ($st === 405 || strpos($hint, '405') !== false
+                || strpos($low, 'point') !== false || strpos($low, 'reward') !== false
+                || strpos($hint, 'نقاط') !== false || strpos($low, 'insufficient') !== false
+                || strpos($low, 'not enough') !== false) {
+                $have = ($ptsOk && $ptsVal !== null) ? (' (المتوفر: ' . $ptsVal . ')') : '';
+                return array(false, 'النقاط التشجيعية غير كافية أو التمديد غير مسموح' . $have);
+            }
+            return array(false, 'SAS: التمديد ما تغيّر تاريخ الانتهاء' . ($hint !== '' ? (' — ' . $hint) : ''));
+        }
+        if (function_exists('sas_cache_upsert_row') && is_array($after) && !empty($after)) {
+            if (empty($after['username'])) {
+                $after['username'] = $username;
+            }
+            sas_cache_upsert_row($pdo, $after);
+        }
+        if (function_exists('sas_cache_patch')) {
+            sas_cache_patch($pdo, $username, array('is_online' => 0));
+        }
+        unset($_SESSION['sas_points_val']);
+        unset($_SESSION['sas_points_at']);
+        $okMsg = 'تم إضافة +1 يوم للمشترك (' . $username . ')';
+        if ($sendWa && function_exists('sas_notify_plus_day_whatsapp')) {
+            $waErr = sas_notify_plus_day_whatsapp($pdo, $config, $username, $afterTs);
+            if ($waErr === '') {
+                $okMsg .= ' — تم إرسال إشعار واتساب';
+            } else {
+                $okMsg .= ' — واتساب: ' . $waErr;
+            }
+        }
+        return array(true, $okMsg);
+    } catch (Exception $e) {
+        return array(false, 'SAS: ' . $e->getMessage());
+    }
 }
 
 function sas_row_name($row)
@@ -654,33 +795,77 @@ function sas_test_connection($config)
     }
 }
 
+function sas_reward_points_number($v)
+{
+    if ($v === '' || $v === null || is_array($v)) {
+        return null;
+    }
+    if (is_string($v)) {
+        $v = str_replace(array(',', ' '), '', trim($v));
+    }
+    if (!is_numeric($v)) {
+        return null;
+    }
+    return (float) $v;
+}
+
 function sas_row_reward_points($row)
 {
     return sas_find_reward_points($row);
 }
 
-function sas_find_reward_points($node, $depth = 0)
+function sas_find_reward_points($node, $depth = 0, $wantUser = '', $wantId = 0)
 {
-    if ($depth > 7 || !is_array($node)) {
+    if ($depth > 6 || !is_array($node)) {
         return null;
     }
     if (isset($node['__http_error']) || isset($node['__auth_error']) || isset($node['__curl_error'])) {
         return null;
     }
 
+    $wantUser = strtolower(trim((string) $wantUser));
+    $wantId = (int) $wantId;
+    $u = isset($node['username']) ? strtolower(trim((string) $node['username'])) : '';
+    $id = (isset($node['id']) && is_numeric($node['id'])) ? (int) $node['id'] : 0;
+    if ($u !== '' && $wantUser !== '' && $u !== $wantUser) {
+        return null;
+    }
+    if ($id > 0 && $wantId > 0 && $u === '' && $id !== $wantId
+        && (isset($node['username']) || isset($node['parent_id']) || isset($node['enabled']))) {
+        return null;
+    }
+
+    foreach (array(
+        'reward_points',
+        'rewardPoints',
+        'RewardPoints',
+        'reward_point',
+        'reward_points_balance',
+        'available_reward_points',
+    ) as $k) {
+        if (!array_key_exists($k, $node)) {
+            continue;
+        }
+        $num = sas_reward_points_number($node[$k]);
+        if ($num !== null) {
+            return $num;
+        }
+    }
+
     foreach ($node as $k => $v) {
-        if (!is_numeric($v) || $v === '') {
+        if (is_array($v) || $v === '' || $v === null) {
             continue;
         }
         $lk = strtolower(preg_replace('/[^a-z0-9]+/i', '', (string) $k));
-        if ($lk === '') {
+        if ($lk === '' || strpos($lk, 'rewardpoint') === false) {
             continue;
         }
-        if (strpos($lk, 'awarded') !== false) {
+        if (strpos($lk, 'awarded') !== false || strpos($lk, 'max') !== false || strpos($lk, 'limit') !== false) {
             continue;
         }
-        if (strpos($lk, 'rewardpoint') !== false || $lk === 'rewardpoints' || $lk === 'rewardpointsbalance') {
-            return (float) $v;
+        $num = sas_reward_points_number($v);
+        if ($num !== null) {
+            return $num;
         }
     }
 
@@ -689,10 +874,76 @@ function sas_find_reward_points($node, $depth = 0)
             continue;
         }
         $lk = strtolower((string) $k);
-        if ($lk === 'token' || $lk === 'payload' || $lk === 'profiles') {
+        if ($lk === 'token' || $lk === 'payload' || $lk === 'profiles' || $lk === 'users'
+            || $lk === 'parent' || $lk === 'children' || $lk === 'managers' || $lk === 'cards'
+            || $lk === 'traffic' || $lk === 'permissions' || $lk === 'group') {
             continue;
         }
-        $found = sas_find_reward_points($v, $depth + 1);
+        $found = sas_find_reward_points($v, $depth + 1, $wantUser, $wantId);
+        if ($found !== null) {
+            return $found;
+        }
+    }
+    return null;
+}
+
+function sas_find_manager_balance($node, $depth = 0)
+{
+    if ($depth > 6 || !is_array($node)) {
+        return null;
+    }
+    if (isset($node['__http_error']) || isset($node['__auth_error']) || isset($node['__curl_error'])) {
+        return null;
+    }
+    foreach (array(
+        'balance', 'Balance', 'available_balance', 'availableBalance',
+        'credit', 'Credit', 'manager_balance', 'managerBalance',
+        'credit_balance', 'creditBalance', 'wallet', 'money',
+        'available_credit', 'availableCredit', 'manager_credit', 'managerCredit',
+    ) as $k) {
+        if (!array_key_exists($k, $node) || is_array($node[$k])) {
+            continue;
+        }
+        $lk = strtolower(preg_replace('/[^a-z0-9]+/i', '', (string) $k));
+        if (strpos($lk, 'reward') !== false || strpos($lk, 'point') !== false) {
+            continue;
+        }
+        $num = function_exists('sas_reward_points_number')
+            ? sas_reward_points_number($node[$k])
+            : (is_numeric($node[$k]) ? (float) $node[$k] : null);
+        if ($num !== null) {
+            return $num;
+        }
+    }
+    foreach ($node as $k => $v) {
+        if (is_array($v) || $v === '' || $v === null) {
+            continue;
+        }
+        $lk = strtolower(preg_replace('/[^a-z0-9]+/i', '', (string) $k));
+        if ($lk === '' || (strpos($lk, 'balance') === false && $lk !== 'credit' && $lk !== 'wallet' && $lk !== 'money')) {
+            continue;
+        }
+        if (strpos($lk, 'reward') !== false || strpos($lk, 'point') !== false) {
+            continue;
+        }
+        $num = function_exists('sas_reward_points_number')
+            ? sas_reward_points_number($v)
+            : (is_numeric($v) ? (float) $v : null);
+        if ($num !== null) {
+            return $num;
+        }
+    }
+    foreach ($node as $k => $v) {
+        if (!is_array($v)) {
+            continue;
+        }
+        $lk = strtolower((string) $k);
+        if ($lk === 'token' || $lk === 'payload' || $lk === 'profiles' || $lk === 'users'
+            || $lk === 'parent' || $lk === 'children' || $lk === 'cards'
+            || $lk === 'traffic' || $lk === 'permissions' || $lk === 'group') {
+            continue;
+        }
+        $found = sas_find_manager_balance($v, $depth + 1);
         if ($found !== null) {
             return $found;
         }
@@ -706,10 +957,11 @@ function sas_find_reward_points($node, $depth = 0)
  */
 function sas_manager_reward_points($config, $pdo = null)
 {
-    $cachedAt = isset($_SESSION['sas_points_at']) ? (int) $_SESSION['sas_points_at'] : 0;
-    if ($cachedAt > 0 && (time() - $cachedAt) < 45 && array_key_exists('sas_points_val', $_SESSION)
-        && $_SESSION['sas_points_val'] !== null) {
-        return array(true, $_SESSION['sas_points_val'], '');
+    $cachedAt = isset($_SESSION['sas_rp_at']) ? (int) $_SESSION['sas_rp_at'] : 0;
+    $haveBal = array_key_exists('sas_balance_disp', $_SESSION);
+    if ($cachedAt > 0 && (time() - $cachedAt) < 15 && array_key_exists('sas_rp_val', $_SESSION)
+        && $_SESSION['sas_rp_val'] !== null && $haveBal) {
+        return array(true, $_SESSION['sas_rp_val'], '');
     }
 
     if (!sas_is_ready($config) || !class_exists('SASConnector')) {
@@ -726,77 +978,91 @@ function sas_manager_reward_points($config, $pdo = null)
             return array(false, null, $api->getLastError());
         }
 
-        $check = function ($row) {
-            return sas_find_reward_points($row);
-        };
-
-        $points = $check($api->getLoginUser());
-        if ($points === null) {
-            $points = $check($api->getJwtPayload());
+        $s = sas_config($config);
+        $want = strtolower(trim((string) $s['username']));
+        $wantId = 0;
+        $login = method_exists($api, 'getLoginUser') ? $api->getLoginUser() : null;
+        if (is_array($login)) {
+            if (isset($login['user']) && is_array($login['user'])) {
+                $login = $login['user'];
+            } elseif (isset($login['manager']) && is_array($login['manager'])) {
+                $login = $login['manager'];
+            }
+            if ($want === '' && !empty($login['username'])) {
+                $want = strtolower(trim((string) $login['username']));
+            }
+            if (isset($login['id']) && is_numeric($login['id'])) {
+                $wantId = (int) $login['id'];
+            }
         }
 
-        $login = $api->getLoginUser();
-        $mid = sas_extract_user_id($login);
-        if ($mid <= 0) {
-            $mid = sas_extract_user_id($api->getJwtPayload());
+        $points = null;
+        $balance = null;
+        if (method_exists($api, 'getFinanceDashboard')) {
+            $fin = $api->getFinanceDashboard();
+            if (is_array($fin)) {
+                $points = sas_find_reward_points($fin);
+                $balance = function_exists('sas_find_manager_balance') ? sas_find_manager_balance($fin) : null;
+            }
         }
-        if ($points === null && $mid > 0) {
-            $points = $check($api->getManagerById($mid));
+        $rows = array();
+        if (method_exists($api, 'getCurrentManagerLive')) {
+            $rows = $api->getCurrentManagerLive();
         }
-        if ($points === null) {
-            $points = $check($api->getDashboardManager());
+        if (!is_array($rows)) {
+            $rows = array();
         }
 
         if ($points === null) {
-            $s = sas_config($config);
-            $managers = $api->getManagers();
-            if (is_array($managers) && !sas_response_is_error($managers)) {
-                if (!isset($managers[0]) && isset($managers['data']) && is_array($managers['data'])) {
-                    $managers = $managers['data'];
+            foreach ($rows as $row) {
+                if (!is_array($row)) {
+                    continue;
                 }
-                $want = strtolower($s['username']);
-                foreach ($managers as $mgr) {
-                    if (!is_array($mgr)) {
-                        continue;
-                    }
-                    $points = $check($mgr);
-                    if ($points !== null) {
-                        break;
-                    }
-                    $u = isset($mgr['username']) ? strtolower((string) $mgr['username']) : '';
-                    if ($u === $want) {
-                        $mid2 = sas_extract_user_id($mgr);
-                        if ($mid2 > 0) {
-                            $points = $check($api->getManagerById($mid2));
-                            if ($points !== null) {
-                                break;
-                            }
-                        }
-                    }
+                $got = sas_find_reward_points($row, 0, $want, $wantId);
+                if ($got === null) {
+                    continue;
                 }
+                $points = $got;
+                $bal = function_exists('sas_find_manager_balance') ? sas_find_manager_balance($row) : null;
+                if ($bal !== null) {
+                    $balance = $bal;
+                }
+                break;
             }
         }
 
-        if ($points === null) {
-            $sampleUserId = 0;
-            if ($pdo) {
-                try {
-                    $sampleUserId = (int) $pdo->query(
-                        'SELECT sas_user_id FROM subscribers WHERE sas_user_id IS NOT NULL AND sas_user_id > 0 LIMIT 1'
-                    )->fetchColumn();
-                } catch (Exception $e) {
-                    $sampleUserId = 0;
+        if ($points === null && is_array($login)) {
+            $points = sas_find_reward_points($login, 0, $want, $wantId);
+        }
+
+        if ($balance === null && $rows) {
+            foreach ($rows as $row) {
+                if (!is_array($row)) {
+                    continue;
+                }
+                $bal = function_exists('sas_find_manager_balance') ? sas_find_manager_balance($row) : null;
+                if ($bal !== null) {
+                    $balance = $bal;
+                    break;
                 }
             }
-            if ($sampleUserId <= 0) {
-                $sampleUserId = sas_extract_user_id($api->getFirstUser());
-            }
-            if ($sampleUserId > 0) {
-                $points = $check($api->getActivationData($sampleUserId));
-            }
+        }
+        if ($balance === null && is_array($login)) {
+            $balance = function_exists('sas_find_manager_balance') ? sas_find_manager_balance($login) : null;
+        }
+
+        if ($balance !== null) {
+            $disp = ((float) $balance == (int) $balance)
+                ? number_format((int) $balance)
+                : number_format((float) $balance, 2);
+            $_SESSION['sas_balance_disp'] = $disp;
+        } elseif ($points !== null) {
+            $_SESSION['sas_balance_disp'] = '0';
         }
 
         if ($points !== null) {
+            $_SESSION['sas_rp_val'] = $points;
+            $_SESSION['sas_rp_at'] = time();
             $_SESSION['sas_points_val'] = $points;
             $_SESSION['sas_points_at'] = time();
             return array(true, $points, '');

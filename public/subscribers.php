@@ -3,6 +3,7 @@
 require_once __DIR__ . '/../includes/bootstrap.php';
 require_once __DIR__ . '/../includes/layout.php';
 require_login();
+redirect('sas.php');
 
 $pdo->exec("UPDATE subscriptions SET status = 'expired' WHERE status = 'active' AND end_date < CURDATE()");
 
@@ -34,7 +35,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $address = post('address');
         $notes = post('notes');
         $planId = (int) post('plan_id', '0');
-        $addDebts = post('add_debts') === '1';
+        $addDebts = post('add_debts') === '1' && user_can_edit_debts();
         $sendDebtWa = post('send_debt_whatsapp') === '1';
 
         if ($name === '' || $phone === '') {
@@ -300,6 +301,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
+    if ($action === 'inline_update_debt') {
+        header('Content-Type: application/json; charset=utf-8');
+        $sid = (int) post('id', '0');
+        $amount = (float) post('amount', '0');
+        if ($sid <= 0 || !user_can_access_subscriber($pdo, $sid)) {
+            echo json_encode(array('ok' => false, 'message' => 'forbidden'));
+            exit;
+        }
+        if (!function_exists('apply_subscriber_unpaid_total_update')) {
+            echo json_encode(array('ok' => false, 'message' => 'ملف الديون غير مكتمل'));
+            exit;
+        }
+        list($ok, $msg, $total) = apply_subscriber_unpaid_total_update($pdo, $sid, $amount);
+        $currency = isset($config['currency']) ? $config['currency'] : 'IQD';
+        echo json_encode(array(
+            'ok' => $ok,
+            'message' => $msg,
+            'debt' => $total,
+            'debt_text' => function_exists('money_format_iqd') ? money_format_iqd($total, $currency) : (string) (int) $total,
+        ));
+        exit;
+    }
+
     if ($action === 'assign_agent') {
         if (!can_manage_agents()) {
             flash('error', $lang === 'en' ? 'No permission' : 'ما عندك صلاحية');
@@ -474,6 +498,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('subscribers.php');
     }
 
+}
+
+if (isset($_GET['export']) && $_GET['export'] === 'offline') {
+    if (function_exists('export_offline_subscribers_full')) {
+        export_offline_subscribers_full($pdo);
+    }
+    flash('error', $lang === 'en' ? 'Export is not available' : 'التصدير غير متوفر');
+    redirect('subscribers.php');
 }
 
 $q = isset($_GET['q']) ? trim((string) $_GET['q']) : '';
@@ -739,7 +771,14 @@ function render_subscriber_table_row($row, $n, $config, $lang)
     }
     $html .= '</td>';
     $html .= '<td class="debt-cell col-debt">';
-    if ($debt > 0) {
+    $canEditDebt = function_exists('user_can_edit_debts') && user_can_edit_debts();
+    if (function_exists('debt_amount_cell_html')) {
+        $html .= debt_amount_cell_html($debt, $config, $lang, array(
+            'can_edit' => $canEditDebt,
+            'subscriber_id' => (int) $row['id'],
+            'href' => $debt > 0 ? ('debts.php?status=unpaid&subscriber_id=' . (int) $row['id']) : '',
+        ));
+    } elseif ($debt > 0) {
         $html .= '<span class="debt-amt debt-due">' . e(money_format_iqd($debt, $config['currency'])) . '</span>';
     } else {
         $html .= '<span class="debt-amt debt-zero">' . e(money_format_iqd(0, $config['currency'])) . '</span>';
@@ -898,13 +937,13 @@ function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
 #subsTable.table-compact th,
 #subsTable.table-compact td {
   padding: 7px 8px !important;
-  font-size: 13px !important;
-  line-height: 1.3 !important;
+  font-size: 14px !important;
+  line-height: 1.428 !important;
   height: 38px !important;
   white-space: nowrap;
   vertical-align: middle !important;
 }
-#subsTable.table-compact th { height: 30px !important; font-size: 12px !important; }
+#subsTable.table-compact th { height: 32px !important; font-size: 13px !important; }
 #subsTable .th-sort {
   color: inherit;
   text-decoration: none;
@@ -954,8 +993,8 @@ function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
   background: transparent !important;
   box-shadow: none !important;
   outline: 0 !important;
-  font-size: 12px !important;
-  font-weight: 800 !important;
+  font-size: 14px !important;
+  font-weight: 700 !important;
   line-height: 1.3 !important;
   white-space: nowrap !important;
 }
@@ -971,6 +1010,24 @@ function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
 }
 #subsTable .debt-cell {
   background-clip: padding-box;
+}
+#subsTable .debt-edit-btn {
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  font: inherit;
+  font-weight: 700;
+  padding: 0;
+}
+#subsTable .debt-edit-btn:hover { text-decoration: underline; }
+#subsTable .debt-edit-btn.editing {
+  border: 1px solid #94a3b8 !important;
+  background: #fff !important;
+  padding: 2px 6px !important;
+  min-width: 4.5rem;
+  border-radius: 4px;
+  outline: none;
+  text-decoration: none !important;
 }
 #subsTable {
   table-layout: auto;
@@ -1223,6 +1280,7 @@ function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
                 <?php endif; ?>
             </div>
 
+            <?php if (user_can_edit_debts()): ?>
             <div class="settings-block" style="margin-top:14px">
                 <label class="toggle" for="addDebtsToggle">
                     <input type="checkbox" name="add_debts" value="1" id="addDebtsToggle">
@@ -1269,6 +1327,7 @@ function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
                     </label>
                 </div>
             </div>
+            <?php endif; ?>
 
             <div class="actions" style="margin-top:16px">
                 <button class="btn" type="submit"><?php echo e($lang === 'en' ? 'Add' : 'إضافة'); ?></button>
@@ -1289,6 +1348,7 @@ function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
             <span class="meta" id="bulkSelectedCount">0</span>
         </div>
         <div class="subs-left-tools">
+        <a class="btn ghost sm" href="subscribers.php?export=offline"><?php echo e($lang === 'en' ? 'Export all' : 'تصدير الكل'); ?></a>
         <button type="button" class="btn ghost sm" onclick="window.print()"><?php echo e(t('print')); ?></button>
         <div class="subs-tool-icons" role="toolbar" aria-label="<?php echo e($lang === 'en' ? 'Table tools' : 'أدوات الجدول'); ?>">
             <?php if (can_manage_agents()): ?>
@@ -2227,7 +2287,81 @@ window.DEBT_ENTRY = {
       };
       el.onblur = function () { finish(true); };
     }
+    function beginDebtEdit(btn) {
+      if (!btn || btn.classList.contains('editing')) return;
+      var current = btn.getAttribute('data-amount') || '0';
+      var snap = btn.textContent;
+      var id = btn.getAttribute('data-sub') || '';
+      btn.classList.add('editing');
+      btn.contentEditable = 'true';
+      btn.textContent = current;
+      btn.focus();
+      try {
+        var range = document.createRange();
+        range.selectNodeContents(btn);
+        var sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      } catch (err) {}
+      var done = false;
+      function finish(ok) {
+        if (done || !btn.classList.contains('editing')) return;
+        done = true;
+        btn.classList.remove('editing');
+        btn.contentEditable = 'false';
+        var raw = String(btn.textContent || '').replace(/[^\d]/g, '');
+        var n = parseInt(raw, 10);
+        if (!ok || !raw) {
+          btn.textContent = snap;
+          return;
+        }
+        if (String(n) === String(current)) {
+          btn.textContent = snap;
+          return;
+        }
+        if (!(n > 0)) {
+          alert(<?php echo json_encode($lang === 'en' ? 'Enter a valid amount' : 'أدخل مبلغ صحيح'); ?>);
+          btn.textContent = snap;
+          return;
+        }
+        var body = new FormData();
+        body.append('csrf', csrf);
+        body.append('action', 'inline_update_debt');
+        body.append('id', id);
+        body.append('amount', String(n));
+        fetch('subscribers.php', { method: 'POST', body: body, credentials: 'same-origin' })
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            if (!data || !data.ok) {
+              alert((data && data.message) ? data.message : <?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>);
+              btn.textContent = snap;
+              return;
+            }
+            btn.textContent = data.debt_text || String(n);
+            btn.setAttribute('data-amount', String(Math.round(Number(data.debt) || n)));
+            btn.className = (Number(data.debt) > 0 ? 'debt-amt debt-due' : 'debt-amt debt-zero') + ' debt-edit-btn';
+            var tr = btn.closest('tr');
+            if (tr) tr.setAttribute('data-debt', Number(data.debt) > 0 ? '1' : '0');
+          })
+          .catch(function () {
+            alert(<?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>);
+            btn.textContent = snap;
+          });
+      }
+      btn.onkeydown = function (ev) {
+        if (ev.key === 'Enter') { ev.preventDefault(); finish(true); }
+        if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
+      };
+      btn.onblur = function () { finish(true); };
+    }
     document.addEventListener('click', function (e) {
+      var debtBtn = e.target && e.target.closest ? e.target.closest('.debt-edit-btn') : null;
+      if (debtBtn && !debtBtn.classList.contains('editing')) {
+        e.preventDefault();
+        e.stopPropagation();
+        beginDebtEdit(debtBtn);
+        return;
+      }
       var phone = e.target && e.target.closest ? e.target.closest('.phone-edit') : null;
       if (phone) {
         e.preventDefault();

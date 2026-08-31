@@ -5,7 +5,7 @@ require_once __DIR__ . '/../includes/layout.php';
 require_login();
 
 $mode = isset($_GET['mode']) ? (string) $_GET['mode'] : 'overdue';
-if (!in_array($mode, array('debt', 'days', 'overdue', 'log'), true)) {
+if (!in_array($mode, array('debt', 'days', 'overdue', 'log', 'templates'), true)) {
     $mode = 'overdue';
 }
 
@@ -60,6 +60,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     $action = post('action');
+
+    if ($action === 'save_templates') {
+        $afterDaysSave = (int) post('unpaid_remind_after_days', '7');
+        if ($afterDaysSave < 1) {
+            $afterDaysSave = 1;
+        }
+        if ($afterDaysSave > 365) {
+            $afterDaysSave = 365;
+        }
+        $okSave = settings_save(array(
+            'tpl_debt_remind' => (string) post('tpl_debt_remind', ''),
+            'tpl_payment_ok' => (string) post('tpl_payment_ok', ''),
+            'tpl_debt_created' => (string) post('tpl_debt_created', ''),
+            'tpl_activation' => (string) post('tpl_activation', ''),
+            'tpl_days_left' => (string) post('tpl_days_left', ''),
+            'tpl_unpaid_overdue' => (string) post('tpl_unpaid_overdue', ''),
+            'tpl_expiry_soon' => (string) post('tpl_expiry_soon', ''),
+            'unpaid_remind_after_days' => $afterDaysSave
+        ));
+        flash($okSave ? 'success' : 'error', $okSave ? t('saved') : 'Cannot write settings.json');
+        redirect('messages.php?mode=templates');
+    }
+
     $modePost = post('mode', 'overdue');
     if (!in_array($modePost, array('debt', 'days', 'overdue'), true)) {
         $modePost = 'overdue';
@@ -305,6 +328,8 @@ if ($mode === 'log') {
     $st->execute($params);
     $logRows = $st->fetchAll();
     $logResolvedMap = message_logs_resolved_map($pdo, $logRows);
+} elseif ($mode === 'templates') {
+    $sTpl = settings_load();
 } elseif ($mode === 'debt') {
     $filtered = $pdo->query(
         "SELECT s.id, s.name, s.phone,
@@ -356,7 +381,7 @@ if ($mode === 'log') {
     usort($filtered, function ($a, $b) {
         return (int) $b['_days_passed'] - (int) $a['_days_passed'];
     });
-} else {
+} elseif ($mode === 'days') {
     $candidates = $pdo->query(
         "SELECT sub.*, s.name, s.phone
          FROM subscriptions sub
@@ -379,13 +404,91 @@ render_header(t('messages'), 'messages');
 <div class="panel panel-compact">
     <h2><?php echo e(t('messages')); ?></h2>
     <div class="actions actions-tight" style="margin-top:0;margin-bottom:8px">
+        <a class="btn sm <?php echo $mode === 'templates' ? '' : 'ghost'; ?>" href="messages.php?mode=templates"><?php echo e(t('templates')); ?></a>
         <a class="btn sm <?php echo $mode === 'overdue' ? '' : 'ghost'; ?>" href="messages.php?mode=overdue"><?php echo e($lang === 'en' ? 'Late payers' : 'المتأخرين بالتسديد'); ?></a>
         <a class="btn sm <?php echo $mode === 'debt' ? '' : 'ghost'; ?>" href="messages.php?mode=debt"><?php echo e(t('msg_mode_debt')); ?></a>
         <a class="btn sm <?php echo $mode === 'days' ? '' : 'ghost'; ?>" href="messages.php?mode=days&days=<?php echo (int) $daysMax; ?>"><?php echo e(t('msg_mode_days')); ?></a>
         <a class="btn sm <?php echo $mode === 'log' ? '' : 'ghost'; ?>" href="messages.php?mode=log"><?php echo e($lang === 'en' ? 'Sent log' : 'سجل الرسائل'); ?></a>
     </div>
 
-<?php if ($mode === 'log'): ?>
+<?php if ($mode === 'templates'): ?>
+    <?php
+    if (!isset($sTpl) || !is_array($sTpl)) {
+        $sTpl = settings_load();
+    }
+    $isEnMsg = ($lang === 'en');
+    ?>
+    <p class="meta tpl-lead">
+        <?php echo e($isEnMsg
+            ? 'Edit WhatsApp texts here. Placeholders are replaced when sending.'
+            : 'عدّل نصوص واتساب هنا. الكلمات بين الأقواس تتعوّض عند الإرسال.'); ?>
+    </p>
+    <form method="post" class="tpl-form">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="action" value="save_templates">
+        <div class="tpl-grid">
+            <article class="tpl-card">
+                <header class="tpl-card-head">
+                    <h3><?php echo e(t('msg_activation')); ?></h3>
+                    <span class="tpl-vars">{name} {package} {from} {to} {amount}</span>
+                </header>
+                <textarea name="tpl_activation" rows="4"><?php echo e(isset($sTpl['tpl_activation']) ? $sTpl['tpl_activation'] : ''); ?></textarea>
+            </article>
+            <article class="tpl-card">
+                <header class="tpl-card-head">
+                    <h3><?php echo e(t('msg_debt_created')); ?></h3>
+                    <span class="tpl-vars">{name} {amount} {month} {notes}</span>
+                </header>
+                <textarea name="tpl_debt_created" rows="4"><?php echo e(isset($sTpl['tpl_debt_created']) ? $sTpl['tpl_debt_created'] : ''); ?></textarea>
+            </article>
+            <article class="tpl-card">
+                <header class="tpl-card-head">
+                    <h3><?php echo e(t('msg_payment_ok')); ?></h3>
+                    <span class="tpl-vars">{name} {amount} {month} {remaining}</span>
+                </header>
+                <textarea name="tpl_payment_ok" rows="4"><?php echo e(isset($sTpl['tpl_payment_ok']) ? $sTpl['tpl_payment_ok'] : ''); ?></textarea>
+            </article>
+            <article class="tpl-card">
+                <header class="tpl-card-head">
+                    <h3><?php echo e(t('msg_debt_remind')); ?></h3>
+                    <span class="tpl-vars">{name} {debt} {amount} {month}</span>
+                </header>
+                <textarea name="tpl_debt_remind" rows="4"><?php echo e(isset($sTpl['tpl_debt_remind']) ? $sTpl['tpl_debt_remind'] : ''); ?></textarea>
+            </article>
+            <article class="tpl-card">
+                <header class="tpl-card-head">
+                    <h3><?php echo e($isEnMsg ? 'Days-left reminder' : 'رسالة الأيام المتبقية'); ?></h3>
+                    <span class="tpl-vars">{name} {days} {package} {from} {to} {debt}</span>
+                </header>
+                <textarea name="tpl_days_left" rows="4"><?php echo e(isset($sTpl['tpl_days_left']) ? $sTpl['tpl_days_left'] : ''); ?></textarea>
+            </article>
+            <article class="tpl-card">
+                <header class="tpl-card-head">
+                    <h3><?php echo e($isEnMsg ? 'Expiry auto reminder' : 'تذكير قرب الانتهاء (تلقائي)'); ?></h3>
+                    <span class="tpl-vars">{name} {days} {package} {to}</span>
+                </header>
+                <textarea name="tpl_expiry_soon" rows="4"><?php echo e(isset($sTpl['tpl_expiry_soon']) ? $sTpl['tpl_expiry_soon'] : ''); ?></textarea>
+            </article>
+            <article class="tpl-card">
+                <header class="tpl-card-head">
+                    <h3><?php echo e($isEnMsg ? 'Unpaid / cut warning' : 'رسالة المتأخرين (تفعيل بدون تسديد)'); ?></h3>
+                    <span class="tpl-vars">{name} {days_passed} {debt} {package}</span>
+                </header>
+                <div class="tpl-inline">
+                    <label><?php echo e($isEnMsg ? 'Warn after (days)' : 'تنبيه بعد (يوم)'); ?>
+                        <input type="number" name="unpaid_remind_after_days" min="1" max="365"
+                            value="<?php echo (int) (isset($sTpl['unpaid_remind_after_days']) ? $sTpl['unpaid_remind_after_days'] : 7); ?>">
+                    </label>
+                </div>
+                <textarea name="tpl_unpaid_overdue" rows="4"><?php echo e(isset($sTpl['tpl_unpaid_overdue']) ? $sTpl['tpl_unpaid_overdue'] : ''); ?></textarea>
+            </article>
+        </div>
+        <div class="tpl-save">
+            <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
+        </div>
+    </form>
+
+<?php elseif ($mode === 'log'): ?>
     <form method="get" class="actions actions-tight" style="margin-bottom:10px">
         <input type="hidden" name="mode" value="log">
         <input name="q" value="<?php echo e($logQ); ?>" placeholder="<?php echo e($lang === 'en' ? 'Search message text, name, phone…' : 'بحث بنص الرسالة أو الاسم أو الرقم…'); ?>" style="max-width:340px;flex:1">
@@ -512,8 +615,8 @@ render_header(t('messages'), 'messages');
     <?php elseif ($mode === 'overdue'): ?>
         <p class="meta" style="margin-top:0">
             <?php echo e($lang === 'en'
-                ? ('Active + unpaid for ' . $afterDays . '+ days since activation. Uncheck to exclude. Change days/text in Settings → Templates.')
-                : ('مفعّل وعليه دين ومضى ' . $afterDays . '+ يوم من التفعيل. شيل الجك بوكس للاستثناء. الأيام والنص من الإعدادات → القوالب.')); ?>
+                ? ('Active + unpaid for ' . $afterDays . '+ days since activation. Uncheck to exclude. Change days/text in Messages → Templates.')
+                : ('مفعّل وعليه دين ومضى ' . $afterDays . '+ يوم من التفعيل. شيل الجك بوكس للاستثناء. الأيام والنص من الرسائل ← القوالب.')); ?>
         </p>
     <?php else: ?>
         <p class="meta" style="margin-top:0">

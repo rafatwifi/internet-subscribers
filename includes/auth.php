@@ -88,7 +88,7 @@ function role_permissions($role)
     $role = normalize_admin_role($role);
     if ($role === 'admin') {
         return array(
-            'dashboard', 'subscribers', 'activate', 'debts', 'messages', 'rentals',
+            'dashboard', 'subscribers', 'activate', 'debts', 'edit_debts', 'messages', 'rentals',
             'subscriptions', 'reports', 'logs', 'plans',
             'settings', 'users', 'agents', 'backup', 'clear_data',
         );
@@ -118,6 +118,22 @@ function is_agent_user($u = null)
         return false;
     }
     return normalize_admin_role(isset($u['role']) ? $u['role'] : '') === 'agent';
+}
+
+function is_admin_user($u = null)
+{
+    if ($u === null) {
+        $u = current_admin();
+    }
+    if (!$u) {
+        return false;
+    }
+    return normalize_admin_role(isset($u['role']) ? $u['role'] : '') === 'admin';
+}
+
+function user_can_edit_debts()
+{
+    return user_can('edit_debts');
 }
 
 function can_manage_agents()
@@ -226,7 +242,7 @@ function require_subscriber_access($pdo, $subscriberId)
     if (!user_can_access_subscriber($pdo, $subscriberId)) {
         $lang = isset($GLOBALS['lang']) ? $GLOBALS['lang'] : 'ar';
         flash('error', $lang === 'en' ? 'No access to this subscriber' : 'ما عندك صلاحية لهذا المشترك');
-        redirect('subscribers.php');
+        redirect('sas.php');
     }
 }
 

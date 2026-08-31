@@ -196,6 +196,14 @@ function activate_one_subscriber($pdo, $config, $subscriberId, $opts = array())
         }
     }
 
+    $graceDays = 0;
+    if ($daysLeftPost < 0 && function_exists('subscriber_grace_days')) {
+        $graceDays = subscriber_grace_days($subscriberRow, $config);
+        if ($graceDays > 0) {
+            $endDate = date('Y-m-d', strtotime($endDate . ' +' . $graceDays . ' days'));
+        }
+    }
+
     $oldDebtLines = array();
     $oldDebtSum = 0.0;
     if ($sendOldDebts) {
@@ -302,6 +310,7 @@ function activate_one_subscriber($pdo, $config, $subscriberId, $opts = array())
                 . 'المبلغ: ' . $chargeTotal . "\n"
                 . 'من: ' . $startDate . ' إلى: ' . $endDate . "\n"
                 . ($carryDays > 0 ? ('أيام محمولة: ' . $carryDays . "\n") : '')
+                . ($graceDays > 0 ? ('أيام سماح: ' . $graceDays . "\n") : '')
                 . 'فاتورة #' . $invoiceId
             );
         }
@@ -362,7 +371,7 @@ function activate_one_subscriber($pdo, $config, $subscriberId, $opts = array())
 
         $sasOk = null;
         $sasMsg = '';
-        if (function_exists('sas_sync_on_activate')) {
+        if (empty($opts['skip_sas']) && function_exists('sas_sync_on_activate')) {
             list($sasOk, $sasMsg) = sas_sync_on_activate($pdo, $config, $subscriberRow, $plan, $opts);
             if (!$sasOk) {
                 $sasCfg = function_exists('sas_config') ? sas_config($config) : array('on_failure' => 'warn');
@@ -383,6 +392,9 @@ function activate_one_subscriber($pdo, $config, $subscriberId, $opts = array())
         }
         if ($carryDays > 0) {
             $okMsg .= ' — أُضيف +' . $carryDays . ' يوم';
+        }
+        if ($graceDays > 0) {
+            $okMsg .= ' — سماح +' . $graceDays . ' يوم';
         }
         if ($sendWhatsapp) {
             if ($waOk) {

@@ -93,6 +93,238 @@ function subscriber_has_rental($sub)
     return !empty($sub['rental_enabled']) && !empty($sub['rental_device_id']);
 }
 
+function rental_device_ids_matching_query($q, $settings = null)
+{
+    $q = trim((string) $q);
+    if ($q === '') {
+        return array();
+    }
+    $ql = function_exists('mb_strtolower') ? mb_strtolower($q, 'UTF-8') : strtolower($q);
+    $ids = array();
+    foreach (rental_devices_list($settings) as $d) {
+        $hay = $d['id'] . ' ' . $d['name'] . ' ' . (isset($d['icon']) ? $d['icon'] : '');
+        $hayl = function_exists('mb_strtolower') ? mb_strtolower($hay, 'UTF-8') : strtolower($hay);
+        if (strpos($hayl, $ql) !== false) {
+            $ids[] = $d['id'];
+        }
+    }
+    return $ids;
+}
+
+function sas_user_is_live($cacheRow)
+{
+    if (!$cacheRow || !is_array($cacheRow)) {
+        return false;
+    }
+    $enabled = isset($cacheRow['enabled']) ? (int) $cacheRow['enabled'] : 0;
+    $expireAt = !empty($cacheRow['expire_at']) ? $cacheRow['expire_at'] : '';
+    return $enabled === 1 && $expireAt !== '' && strtotime($expireAt) >= time();
+}
+
+/**
+ * حفظ إيجار مشترك SAS في قاعدة السيرفر (subscribers) — مو في كومنت الساس
+ * يرجع array($ok, $message, $extra)
+ */
+function sas_save_user_rental($pdo, $config, $username, $enabled, $deviceId)
+{
+    $username = trim((string) $username);
+    if ($username === '') {
+        return array(false, 'مشترك غير محدد', array());
+    }
+    if (!function_exists('sas_cache_get') || !function_exists('sas_cache_ensure_local')) {
+        return array(false, 'ملف SAS غير مكتمل', array());
+    }
+    $cache = sas_cache_get($pdo, $username);
+    if (!$cache) {
+        return array(false, 'المشترك مو موجود بكاش SAS — حدّث القائمة', array());
+    }
+    $enabled = (bool) $enabled;
+    $deviceId = trim((string) $deviceId);
+    if ($enabled && $deviceId === '') {
+        return array(false, 'اختر نوع الجهاز', array());
+    }
+    if ($enabled && !rental_device_by_id($deviceId)) {
+        return array(false, 'نوع الجهاز غير معروف — أضفه من الإعدادات', array());
+    }
+    if (!$enabled) {
+        $deviceId = null;
+    }
+
+    list($localId, $err) = sas_cache_ensure_local($pdo, $config, $cache);
+    if ($localId <= 0) {
+        return array(false, ($err !== '' ? $err : 'تعذر ربط المشترك محلياً'), array());
+    }
+
+    $oldSt = $pdo->prepare('SELECT rental_enabled, rental_device_id FROM subscribers WHERE id = :id');
+    $oldSt->execute(array(':id' => $localId));
+    $oldRent = $oldSt->fetch();
+    $wasOn = $oldRent ? subscriber_has_rental($oldRent) : false;
+
+    $pdo->prepare(
+        'UPDATE subscribers SET rental_enabled = :en, rental_device_id = :dev WHERE id = :id'
+    )->execute(array(
+        ':en' => $enabled ? 1 : 0,
+        ':dev' => $deviceId,
+        ':id' => $localId,
+    ));
+
+    $dev = $enabled ? rental_device_by_id($deviceId) : null;
+    if (function_exists('activity_log')) {
+        activity_log(
+            $pdo,
+            $localId,
+            'subscriber',
+            $localId,
+            $enabled ? 'rental_on' : 'rental_off',
+            $enabled ? ('تفعيل إيجار: ' . ($dev ? $dev['name'] : $deviceId)) : 'إيقاف جهاز الإيجار',
+            'اليوزرنيم: ' . $username . "\n"
+            . ($enabled ? ('الرسوم الشهرية: ' . rental_fee_amount()) : 'بدون جهاز')
+        );
+    }
+
+    $msg = $enabled ? 'تم حفظ جهاز الإيجار' : 'تم إيقاف جهاز الإيجار';
+    $isLive = sas_user_is_live($cache);
+    if (!$isLive && function_exists('subscriber_is_active')) {
+        $isLive = subscriber_is_active($pdo, $localId);
+    }
+    if ($enabled && !$wasOn && $isLive) {
+        list($debtOk, $debtVal) = add_immediate_rental_debt($pdo, $localId, $deviceId);
+        if ($debtOk) {
+            $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
+            $msg .= ' — أُضيف دين إيجار ' . money_format_iqd($debtVal, $currency) . ' للحساب';
+        }
+    }
+
+    $subNow = array(
+        'rental_enabled' => $enabled ? 1 : 0,
+        'rental_device_id' => $deviceId,
+    );
+    $lang = isset($GLOBALS['lang']) ? $GLOBALS['lang'] : 'ar';
+    $debt = function_exists('subscriber_unpaid_total') ? subscriber_unpaid_total($pdo, $localId) : 0.0;
+    $currency = isset($config['currency']) ? $config['currency'] : 'IQD';
+    return array(true, $msg, array(
+        'local_id' => $localId,
+        'rental_enabled' => $enabled ? 1 : 0,
+        'rental_device_id' => $deviceId ? $deviceId : '',
+        'device_name' => $dev ? $dev['name'] : '',
+        'cell_html' => rental_cell_html($subNow, $username, $lang),
+        'badge_html' => rental_badge_html($subNow),
+        'debt' => $debt,
+        'debt_text' => function_exists('money_format_iqd') ? money_format_iqd($debt, $currency) : (string) $debt,
+    ));
+}
+
+function sas_save_user_local_details($pdo, $config, $username, $address, $notes)
+{
+    $username = trim((string) $username);
+    if ($username === '' || !function_exists('sas_cache_get') || !function_exists('sas_cache_ensure_local')) {
+        return array(false, 'مشترك غير محدد');
+    }
+    $cache = sas_cache_get($pdo, $username);
+    if (!$cache) {
+        return array(false, 'المشترك مو موجود بكاش SAS — حدّث القائمة');
+    }
+    list($localId, $err) = sas_cache_ensure_local($pdo, $config, $cache);
+    if ($localId <= 0) {
+        return array(false, ($err !== '' ? $err : 'تعذر ربط المشترك محلياً'));
+    }
+    $address = trim((string) $address);
+    $notes = trim((string) $notes);
+    $oldSt = $pdo->prepare('SELECT address, notes FROM subscribers WHERE id = :id');
+    $oldSt->execute(array(':id' => $localId));
+    $old = $oldSt->fetch();
+    $pdo->prepare(
+        'UPDATE subscribers SET address = :a, notes = :n WHERE id = :id'
+    )->execute(array(
+        ':a' => ($address !== '' ? $address : null),
+        ':n' => ($notes !== '' ? $notes : null),
+        ':id' => $localId,
+    ));
+    if (function_exists('activity_log')) {
+        $lines = array('اليوزرنيم: ' . $username);
+        if (function_exists('activity_diff_line')) {
+            $d1 = activity_diff_line('العنوان', $old && isset($old['address']) ? $old['address'] : '', $address);
+            $d2 = activity_diff_line('الملاحظات', $old && isset($old['notes']) ? $old['notes'] : '', $notes);
+            if ($d1 !== '') {
+                $lines[] = $d1;
+            }
+            if ($d2 !== '') {
+                $lines[] = $d2;
+            }
+        }
+        activity_log(
+            $pdo,
+            $localId,
+            'subscriber',
+            $localId,
+            'update',
+            'تعديل تفاصيل محلية (SAS)',
+            implode("\n", $lines)
+        );
+    }
+    return array(true, 'تم حفظ التفاصيل');
+}
+
+function sas_save_user_grace_days($pdo, $config, $username, $days)
+{
+    $username = trim((string) $username);
+    if ($username === '' || !function_exists('sas_cache_get') || !function_exists('sas_cache_ensure_local')) {
+        return array(false, 'مشترك غير محدد', 3);
+    }
+    $days = (int) $days;
+    if ($days < 0) {
+        $days = 0;
+    }
+    if ($days > 30) {
+        $days = 30;
+    }
+    $cache = sas_cache_get($pdo, $username);
+    if (!$cache) {
+        return array(false, 'المشترك مو موجود بكاش SAS — حدّث القائمة', $days);
+    }
+    list($localId, $err) = sas_cache_ensure_local($pdo, $config, $cache);
+    if ($localId <= 0) {
+        return array(false, ($err !== '' ? $err : 'تعذر ربط المشترك محلياً'), $days);
+    }
+    if (function_exists('ensure_subscriber_grace_days_column')) {
+        ensure_subscriber_grace_days_column($pdo);
+    }
+    $oldSt = $pdo->prepare('SELECT grace_days FROM subscribers WHERE id = :id');
+    $oldSt->execute(array(':id' => $localId));
+    $old = (int) $oldSt->fetchColumn();
+    $pdo->prepare('UPDATE subscribers SET grace_days = :g WHERE id = :id')
+        ->execute(array(':g' => $days, ':id' => $localId));
+    if (function_exists('activity_log')) {
+        activity_log(
+            $pdo,
+            $localId,
+            'subscriber',
+            $localId,
+            'update',
+            'تعديل أيام السماح',
+            'اليوزرنيم: ' . $username . "\nمن: " . $old . ' إلى: ' . $days
+        );
+    }
+    return array(true, 'تم حفظ أيام السماح', $days);
+}
+
+function rental_cell_html($sub, $username, $lang = 'ar', $settings = null)
+{
+    $has = subscriber_has_rental($sub);
+    $devId = $has ? (string) $sub['rental_device_id'] : '';
+    $badge = $has ? rental_badge_html($sub, $settings) : '';
+    if ($has) {
+        $dev = rental_device_by_id($devId, $settings);
+        $label = $dev ? $dev['name'] : $devId;
+    } else {
+        $label = $lang === 'en' ? '+ Rent' : '+ إيجار';
+    }
+    $cls = 'rent-cell-edit' . ($has ? '' : ' rent-cell-empty');
+    $tip = $lang === 'en' ? 'Click to set rental device' : 'اضغط لاختيار جهاز الإيجار';
+    return '<button type="button" class="' . $cls . '" data-id="' . e($username) . '" data-device="' . e($devId) . '" title="' . e($tip) . '">'
+        . $badge . '<span class="rent-cell-label">' . e($label) . '</span></button>';
+}
+
 /**
  * هل للمشترك اشتراك نشط حالياً؟
  */

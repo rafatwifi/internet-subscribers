@@ -57,7 +57,7 @@ class SASConnector
         return $this->base_url;
     }
 
-    public function post($route, $payload, $withAuth = true)
+    public function post($route, $payload, $withAuth = true, $httpMethod = 'POST')
     {
         $json = json_encode(
             $payload,
@@ -94,7 +94,7 @@ class SASConnector
         }
 
         $bodyJson = json_encode(array('payload' => $e_json));
-        $res = $this->curlRequest('POST', $this->base_url . $route, $bodyJson, $headers);
+        $res = $this->curlRequest($httpMethod, $this->base_url . $route, $bodyJson, $headers);
 
         if (isset($res['__curl_error'])) {
             return $res;
@@ -115,8 +115,12 @@ class SASConnector
 
     public function get($route, $withAuth = true)
     {
+        $origin = 'https://' . $this->host;
         $headers = array(
-            'Accept: application/json',
+            'Accept: application/json, text/plain, */*',
+            'Accept-Language: en-US,en;q=0.9',
+            'Origin: ' . $origin,
+            'Referer: ' . $origin . '/',
             'User-Agent: Mozilla/5.0 (compatible; WiFi-Net-SALES/1.0)',
         );
 
@@ -173,8 +177,12 @@ class SASConnector
         }
         curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
 
-        if (strtoupper($method) === 'POST') {
+        $methodUp = strtoupper((string) $method);
+        if ($methodUp === 'POST') {
             curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+        } elseif ($methodUp === 'PUT' || $methodUp === 'PATCH') {
+            curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $methodUp);
             curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
         }
 
@@ -485,6 +493,120 @@ class SASConnector
         return $this->parseApiResponse($this->post('dashboardManager', array(), true));
     }
 
+    public function getFinanceDashboard()
+    {
+        if (!$this->token && !$this->login()) {
+            return array();
+        }
+        foreach (array('advancedDashboard/finance', 'advancedDashboard/Finance') as $route) {
+            foreach (array('get', 'post') as $how) {
+                if ($how === 'get') {
+                    $full = $this->decodeApiBody($this->get($route, true), false);
+                } else {
+                    $full = $this->decodeApiBody($this->post($route, array(), true), false);
+                }
+                if (!is_array($full) || isset($full['__http_error']) || isset($full['__auth_error'])
+                    || isset($full['__curl_error'])) {
+                    continue;
+                }
+                return $full;
+            }
+        }
+        return array();
+    }
+
+    public function getCurrentManagerLive()
+    {
+        if (!$this->token && !$this->login()) {
+            return array();
+        }
+        $login = is_array($this->loginUser) ? $this->loginUser : array();
+        if (isset($login['user']) && is_array($login['user'])) {
+            $login = $login['user'];
+        } elseif (isset($login['manager']) && is_array($login['manager'])) {
+            $login = $login['manager'];
+        }
+        $mid = 0;
+        if (isset($login['id']) && is_numeric($login['id'])) {
+            $mid = (int) $login['id'];
+        }
+        $uname = '';
+        if (!empty($login['username'])) {
+            $uname = trim((string) $login['username']);
+        }
+        if ($uname === '') {
+            $uname = trim((string) $this->username);
+        }
+        $out = array();
+        $want = strtolower($uname);
+
+        if (method_exists($this, 'getFinanceDashboard')) {
+            $fin = $this->getFinanceDashboard();
+            if (is_array($fin) && $fin) {
+                array_unshift($out, $fin);
+                if (isset($fin['data']) && is_array($fin['data']) && !isset($fin['data'][0])) {
+                    array_unshift($out, $fin['data']);
+                }
+            }
+        }
+
+        $push = function ($full) use (&$out) {
+            if (!is_array($full) || isset($full['__http_error']) || isset($full['__auth_error'])
+                || isset($full['__curl_error'])) {
+                return;
+            }
+            $out[] = $full;
+            if (isset($full['data']) && is_array($full['data'])) {
+                if (!isset($full['data'][0])) {
+                    $out[] = $full['data'];
+                } elseif (is_array($full['data'][0])) {
+                    $out[] = $full['data'][0];
+                }
+            }
+            if (isset($full['manager']) && is_array($full['manager'])) {
+                $out[] = $full['manager'];
+            }
+            if (isset($full['user']) && is_array($full['user']) && !isset($full['user'][0])) {
+                $out[] = $full['user'];
+            }
+            if (isset($full['data']['manager']) && is_array($full['data']['manager'])) {
+                $out[] = $full['data']['manager'];
+            }
+        };
+
+        if ($mid > 0) {
+            foreach (array('manager/' . $mid, 'manager/overview/' . $mid, 'manager/show/' . $mid) as $route) {
+                $push($this->decodeApiBody($this->get($route, true), false));
+                $push($this->decodeApiBody($this->post($route, array(), true), false));
+            }
+        }
+
+        $payload = array(
+            'page' => 1,
+            'count' => 50,
+            'sortBy' => 'username',
+            'direction' => 'asc',
+            'search' => $uname,
+        );
+        $idx = $this->decodeApiBody($this->post('index/manager', $payload, true), false);
+        $rows = $this->normalizeUserList($idx);
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $u = isset($row['username']) ? strtolower(trim((string) $row['username'])) : '';
+            $rid = (isset($row['id']) && is_numeric($row['id'])) ? (int) $row['id'] : 0;
+            if (($want !== '' && $u === $want) || ($mid > 0 && $rid === $mid)) {
+                $out[] = $row;
+            }
+        }
+
+        $dash = $this->decodeApiBody($this->post('dashboardManager', array(), true), false);
+        $push($dash);
+
+        return $out;
+    }
+
     public function getFirstUser()
     {
         $page = $this->listUsersPage(0, 1, '');
@@ -519,6 +641,8 @@ class SASConnector
             'sortBy' => 'username',
             'direction' => 'asc',
             'search' => (string) $search,
+            'status' => '',
+            'with_traffic' => 1,
         );
         $full = $this->decodeApiBody($this->post('index/user', $payload, true), false);
         if (isset($full['__http_error']) || isset($full['__auth_error']) || isset($full['__curl_error'])
@@ -535,25 +659,37 @@ class SASConnector
         }
 
         $rows = $this->normalizeUserList($full);
-        $total = count($rows);
-        foreach (array('total', 'recordsTotal') as $k) {
-            if (isset($full[$k]) && is_numeric($full[$k])) {
-                $total = (int) $full[$k];
+        $meta = $full;
+        if (isset($full['meta']) && is_array($full['meta'])) {
+            $meta = array_merge($full, $full['meta']);
+        }
+        $total = 0;
+        foreach (array('total', 'recordsTotal', 'recordsFiltered') as $k) {
+            if (isset($meta[$k]) && is_numeric($meta[$k])) {
+                $total = (int) $meta[$k];
                 break;
             }
         }
-        $lastPage = isset($full['last_page']) ? (int) $full['last_page'] : 0;
-        $current = isset($full['current_page']) ? (int) $full['current_page'] : $page;
-        $perPage = isset($full['per_page']) ? (int) $full['per_page'] : 0;
+        $lastPage = isset($meta['last_page']) ? (int) $meta['last_page'] : 0;
+        $current = isset($meta['current_page']) ? (int) $meta['current_page'] : $page;
+        $perPage = isset($meta['per_page']) ? (int) $meta['per_page'] : 0;
         if ($perPage <= 0) {
             $perPage = count($rows) > 0 ? count($rows) : $length;
         }
-        if ($lastPage > 0) {
+        if ($total <= 0) {
+            $total = ($lastPage > 0) ? ($lastPage * $perPage) : count($rows);
+        }
+        if ($lastPage > 1) {
             $complete = $current >= $lastPage;
-        } elseif ($total > 0) {
+        } elseif ($lastPage === 1) {
+            $complete = true;
+        } elseif ($total > $perPage) {
             $complete = (($current - 1) * $perPage + count($rows)) >= $total;
         } else {
             $complete = count($rows) === 0 || count($rows) < $perPage;
+        }
+        if ($current <= 1 && count($rows) >= $perPage && $lastPage <= 1 && $total <= count($rows)) {
+            $complete = false;
         }
 
         return array(
@@ -579,16 +715,70 @@ class SASConnector
         if (!is_array($fields)) {
             $fields = array();
         }
+        $current = $this->getUserById($userId);
+        if (is_array($current) && !isset($current['__http_error']) && !isset($current['__auth_error'])) {
+            if (isset($current['data']) && is_array($current['data']) && !isset($current['username'])) {
+                $current = $current['data'];
+            }
+            $keep = array(
+                'username', 'firstname', 'lastname', 'phone', 'email', 'city', 'company',
+                'enabled', 'profile_id', 'parent_id',
+            );
+            foreach ($keep as $k) {
+                if (!array_key_exists($k, $fields) && isset($current[$k]) && !is_array($current[$k])) {
+                    $fields[$k] = $current[$k];
+                }
+            }
+        }
         $fields['id'] = $userId;
         $fields['user_id'] = $userId;
         $last = array();
-        foreach (array('user/' . $userId, 'user/update', 'user') as $route) {
-            $last = $this->parseApiResponse($this->post($route, $fields, true));
+        $tries = array(
+            array('user/' . $userId, 'PUT'),
+            array('user/' . $userId, 'POST'),
+            array('user/update', 'POST'),
+            array('user', 'POST'),
+        );
+        foreach ($tries as $t) {
+            $payload = $fields;
+            if ($t[1] === 'POST' && strpos($t[0], 'user/') === 0) {
+                $payload['_method'] = 'PUT';
+            }
+            $last = $this->parseApiResponse($this->post($t[0], $payload, true, $t[1]));
             if ($this->isActivateOk($last)) {
                 return $last;
             }
         }
         return $last;
+    }
+
+    public function renameUser($userId, $oldUsername, $newUsername)
+    {
+        $userId = (int) $userId;
+        $oldUsername = trim((string) $oldUsername);
+        $newUsername = trim((string) $newUsername);
+        if ($userId <= 0 || $newUsername === '' || (!$this->token && !$this->login())) {
+            return array('message' => 'SAS rename failed', 'status' => -1);
+        }
+        if ($oldUsername === $newUsername || $oldUsername === '') {
+            return array('success' => true);
+        }
+        $payload = array(
+            'id' => $userId,
+            'user_id' => $userId,
+            'username' => $oldUsername,
+            'old_username' => $oldUsername,
+            'new_username' => $newUsername,
+            'newUsername' => $newUsername,
+        );
+        $last = array();
+        foreach (array('user/rename', 'user/changeUsername', 'user/' . $userId . '/rename') as $route) {
+            $last = $this->parseApiResponse($this->post($route, $payload, true));
+            if ($this->isActivateOk($last)) {
+                return $last;
+            }
+        }
+        return $this->updateUser($userId, array('username' => $newUsername));
     }
 
     public function setUserEnabled($userId, $enabled)
@@ -630,26 +820,692 @@ class SASConnector
         return $this->updateUser($userId, array('profile_id' => $profileId));
     }
 
-    public function listUnusedCards($profileId = 0)
+    private function sasCardPinValue($row)
+    {
+        if (!is_array($row)) {
+            return '';
+        }
+        foreach (array('pin', 'pincode', 'pin_code', 'card_number', 'serialnumber', 'serial_number', 'card_pin') as $k) {
+            if (!empty($row[$k]) && !is_array($row[$k])) {
+                $v = trim((string) $row[$k]);
+                if ($v === '' || strpos($v, '-') !== false) {
+                    continue;
+                }
+                if (preg_match('/^\d{6,16}$/', $v) || ($k === 'pin' && preg_match('/^[A-Za-z0-9]{6,20}$/', $v))) {
+                    return $v;
+                }
+            }
+        }
+        return '';
+    }
+
+    private function sasCardLooksLikeSeries($row)
+    {
+        if (!is_array($row)) {
+            return false;
+        }
+        if (isset($row['quantity']) || isset($row['qty']) || isset($row['unused_count']) || isset($row['count_unused'])) {
+            return true;
+        }
+        $pin = $this->sasCardPinValue($row);
+        if ($pin === '' && (!empty($row['name']) || !empty($row['title']))) {
+            return true;
+        }
+        return false;
+    }
+
+    private function sasLooksLikeRecordRow($row)
+    {
+        if (!is_array($row) || isset($row[0]) || isset($row['current_page']) || isset($row['last_page'])
+            || isset($row['recordsTotal']) || isset($row['per_page'])) {
+            return false;
+        }
+        return isset($row['id']) || isset($row['pin']) || isset($row['username'])
+            || isset($row['quantity']) || isset($row['series']);
+    }
+
+    private function sasCardRowsFromDecoded($full)
+    {
+        if (!is_array($full) || isset($full['__http_error']) || isset($full['__auth_error'])
+            || isset($full['__curl_error'])) {
+            return array();
+        }
+        foreach (array('pins', 'cards', 'unused', 'items') as $k) {
+            if (isset($full[$k]) && is_array($full[$k]) && isset($full[$k][0])) {
+                return $full[$k];
+            }
+        }
+        $got = $this->normalizeUserList($full);
+        if ($got) {
+            return $got;
+        }
+        if ($this->sasCardPinValue($full) !== '' || $this->sasLooksLikeRecordRow($full)) {
+            return array($full);
+        }
+        return array();
+    }
+
+    private function sasCardIsUsed($row)
+    {
+        if (!is_array($row)) {
+            return true;
+        }
+        if (!empty($row['qty']) || !empty($row['quantity'])) {
+            return false;
+        }
+        if (isset($row['used']) && is_array($row['used']) && $row['used']) {
+            return true;
+        }
+        if (isset($row['used']) && !is_array($row['used']) && $row['used'] !== '' && $row['used'] !== null) {
+            if ($row['used'] === 1 || $row['used'] === '1' || $row['used'] === true) {
+                return true;
+            }
+            if (is_numeric($row['used']) && (int) $row['used'] > 0) {
+                return true;
+            }
+            if (!is_numeric($row['used']) && $row['used'] !== '0' && $row['used'] !== false) {
+                return true;
+            }
+        }
+        if (isset($row['is_used']) && ($row['is_used'] === 1 || $row['is_used'] === '1' || $row['is_used'] === true)) {
+            return true;
+        }
+        foreach (array('used_at', 'usedAt', 'used_date', 'date_used', 'activated_at', 'used_time') as $k) {
+            if (empty($row[$k]) || is_array($row[$k])) {
+                continue;
+            }
+            $usedAt = trim((string) $row[$k]);
+            if ($usedAt !== '' && $usedAt !== '0' && $usedAt !== '0000-00-00' && $usedAt !== '0000-00-00 00:00:00') {
+                return true;
+            }
+        }
+        foreach (array('used_by', 'usedBy', 'used_username', 'used_user') as $k) {
+            if (!empty($row[$k]) && !is_array($row[$k])) {
+                return true;
+            }
+        }
+        if (isset($row['user_details']) && is_array($row['user_details'])) {
+            if (!empty($row['user_details']['username']) && !is_array($row['user_details']['username'])) {
+                return true;
+            }
+            if (isset($row['user_details']['id']) && is_numeric($row['user_details']['id'])
+                && (int) $row['user_details']['id'] > 0) {
+                return true;
+            }
+        }
+        if (isset($row['user']) && is_array($row['user']) && !empty($row['user']['username'])
+            && !is_array($row['user']['username'])) {
+            return true;
+        }
+        if (!empty($row['username']) && !is_array($row['username'])) {
+            $u = trim((string) $row['username']);
+            if ($u !== '' && strpos($u, '@') === false) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private function sasCardFetchList($routes, $payload)
+    {
+        $rows = array();
+        foreach ($routes as $route) {
+            $full = $this->decodeApiBody($this->post($route, $payload, true), false);
+            if (isset($full['__http_error']) || isset($full['__auth_error']) || isset($full['__curl_error'])) {
+                continue;
+            }
+            $got = $this->sasCardRowsFromDecoded($full);
+            if ($got) {
+                return $got;
+            }
+        }
+        return $rows;
+    }
+
+    private function sasCardListMeta($full)
+    {
+        $meta = is_array($full) ? $full : array();
+        if (isset($full['meta']) && is_array($full['meta'])) {
+            $meta = array_merge($meta, $full['meta']);
+        }
+        if (isset($full['data']) && is_array($full['data']) && !isset($full['data'][0])
+            && (isset($full['data']['current_page']) || isset($full['data']['last_page']) || isset($full['data']['total']))) {
+            $meta = array_merge($meta, $full['data']);
+        }
+        return $meta;
+    }
+
+    private function sasCardFetchPaged($routes, $payload, $maxPages = 20)
+    {
+        $all = array();
+        if (!is_array($payload)) {
+            $payload = array();
+        }
+        if (!isset($payload['count'])) {
+            $payload['count'] = 100;
+        }
+        $maxPages = max(1, (int) $maxPages);
+        foreach ($routes as $route) {
+            $payload['page'] = 1;
+            $full = $this->decodeApiBody($this->post($route, $payload, true), false);
+            if (isset($full['__http_error']) || isset($full['__auth_error']) || isset($full['__curl_error'])) {
+                continue;
+            }
+            $got = $this->sasCardRowsFromDecoded($full);
+            if (!$got) {
+                continue;
+            }
+            $all = $got;
+            $meta = $this->sasCardListMeta($full);
+            $total = 0;
+            foreach (array('total', 'recordsTotal', 'recordsFiltered') as $k) {
+                if (isset($meta[$k]) && is_numeric($meta[$k])) {
+                    $total = (int) $meta[$k];
+                    break;
+                }
+            }
+            $lastPage = isset($meta['last_page']) ? (int) $meta['last_page'] : 0;
+            $perPage = isset($meta['per_page']) ? (int) $meta['per_page'] : 0;
+            if ($perPage <= 0) {
+                $perPage = count($got) > 0 ? count($got) : (int) $payload['count'];
+            }
+            if ($lastPage < 1 && $total > 0 && $perPage > 0) {
+                $lastPage = (int) ceil($total / $perPage);
+            }
+            $page = 2;
+            while ($page <= $maxPages) {
+                if ($lastPage > 0 && $page > $lastPage) {
+                    break;
+                }
+                if ($total > 0 && count($all) >= $total) {
+                    break;
+                }
+                if ($lastPage < 2 && $total <= count($all) && count($got) < $perPage) {
+                    break;
+                }
+                $payload['page'] = $page;
+                $full2 = $this->decodeApiBody($this->post($route, $payload, true), false);
+                $got2 = $this->sasCardRowsFromDecoded($full2);
+                if (!$got2) {
+                    break;
+                }
+                $all = array_merge($all, $got2);
+                if (count($got2) < $perPage) {
+                    break;
+                }
+                $page++;
+            }
+            if ($all) {
+                return $all;
+            }
+        }
+        return $all;
+    }
+
+    private function sasCardPinsFromSeries($seriesId, $profileId = 0, $seriesCode = '')
+    {
+        $seriesId = (int) $seriesId;
+        $seriesCode = trim((string) $seriesCode);
+        if ($seriesId <= 0 && $seriesCode === '') {
+            return array();
+        }
+        $page = array(
+            'page' => 1,
+            'count' => 50,
+            'sortBy' => 'id',
+            'direction' => 'desc',
+            'search' => '',
+        );
+        $pageUnused = $page;
+        $pageUnused['used'] = 0;
+        $routes = array();
+        if ($seriesCode !== '' && $this->sasLooksLikeSeriesCode($seriesCode)) {
+            $routes[] = 'index/card/' . $seriesCode;
+        }
+        if ($seriesId > 0) {
+            $routes[] = 'index/card/' . $seriesId;
+        }
+        foreach (array($pageUnused, $page) as $payload) {
+            if ($routes) {
+                $paged = $this->sasCardFetchPaged($routes, $payload, 2);
+                if ($this->sasCardListHasPin($paged)) {
+                    return $paged;
+                }
+            }
+        }
+        $tries = array();
+        if ($seriesCode !== '' && $this->sasLooksLikeSeriesCode($seriesCode)) {
+            $tries[] = array('index/card/' . $seriesCode, $pageUnused);
+        }
+        if ($seriesId > 0) {
+            $tries[] = array('index/card/' . $seriesId, $pageUnused);
+            $tries[] = array('list/card/' . $seriesId, $pageUnused);
+        }
+        foreach ($tries as $t) {
+            $full = $this->decodeApiBody($this->post($t[0], $t[1], true), false);
+            $got = $this->sasCardRowsFromDecoded($full);
+            if ($this->sasCardListHasPin($got)) {
+                return $got;
+            }
+        }
+        return array();
+    }
+
+    private function sasCardListHasPin($rows)
+    {
+        if (!is_array($rows) || !$rows) {
+            return false;
+        }
+        foreach ($rows as $row) {
+            if (is_array($row) && $this->sasCardPinValue($row) !== '') {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private function sasCardSeriesProfileId($row)
+    {
+        if (!is_array($row)) {
+            return 0;
+        }
+        if (isset($row['profile_id']) && is_numeric($row['profile_id'])) {
+            return (int) $row['profile_id'];
+        }
+        if (isset($row['profile_details']['id']) && is_numeric($row['profile_details']['id'])) {
+            return (int) $row['profile_details']['id'];
+        }
+        if (isset($row['profile']) && is_numeric($row['profile']) && !is_array($row['profile'])) {
+            return (int) $row['profile'];
+        }
+        if (isset($row['profile']['id']) && is_numeric($row['profile']['id'])) {
+            return (int) $row['profile']['id'];
+        }
+        return 0;
+    }
+
+    private function sasCardSeriesName($row)
+    {
+        return $this->sasRowProfileName($row);
+    }
+
+    private function sasRowProfileName($row)
+    {
+        if (!is_array($row)) {
+            return '';
+        }
+        foreach (array('profile_name', 'profileName', 'tariff_name', 'package_name') as $k) {
+            if (!empty($row[$k]) && !is_array($row[$k])) {
+                $v = trim((string) $row[$k]);
+                if ($v !== '') {
+                    return $v;
+                }
+            }
+        }
+        if (isset($row['profile_details']) && is_array($row['profile_details'])) {
+            if (!empty($row['profile_details']['name']) && !is_array($row['profile_details']['name'])) {
+                return trim((string) $row['profile_details']['name']);
+            }
+        }
+        if (isset($row['profile'])) {
+            if (is_array($row['profile']) && !empty($row['profile']['name']) && !is_array($row['profile']['name'])) {
+                return trim((string) $row['profile']['name']);
+            }
+            if (!is_array($row['profile'])) {
+                $v = trim((string) $row['profile']);
+                if ($v !== '' && !is_numeric($v)) {
+                    return $v;
+                }
+            }
+        }
+        return '';
+    }
+
+    private function sasLooksLikeSeriesCode($v)
+    {
+        $v = trim((string) $v);
+        if ($v === '' || strpos($v, ' ') !== false) {
+            return false;
+        }
+        if (preg_match('/^\d{4}-\d+$/', $v) || preg_match('/^\d+$/', $v)) {
+            return true;
+        }
+        if (preg_match('/^[A-Za-z0-9._-]+-\d+$/', $v) && strlen($v) <= 40) {
+            return true;
+        }
+        return false;
+    }
+
+    private function sasCardSeriesCode($row)
+    {
+        if (!is_array($row)) {
+            return '';
+        }
+        foreach (array('series', 'series_name', 'series_code', 'seriesCode') as $k) {
+            if (!empty($row[$k]) && !is_array($row[$k])) {
+                $v = trim((string) $row[$k]);
+                if ($this->sasLooksLikeSeriesCode($v)) {
+                    return $v;
+                }
+            }
+        }
+        return '';
+    }
+
+    private function sasCardSeriesUnusedCount($row)
+    {
+        if (!is_array($row)) {
+            return -1;
+        }
+        $total = null;
+        $used = null;
+        if (isset($row['qty']) && is_numeric($row['qty'])) {
+            $total = (int) $row['qty'];
+        } elseif (isset($row['quantity']) && is_numeric($row['quantity'])) {
+            $total = (int) $row['quantity'];
+        }
+        if (array_key_exists('used', $row)) {
+            if ($row['used'] === '' || $row['used'] === null || $row['used'] === false) {
+                $used = 0;
+            } elseif (is_numeric($row['used'])) {
+                $used = (int) $row['used'];
+            } elseif (is_array($row['used']) && !$row['used']) {
+                $used = 0;
+            }
+        } elseif (isset($row['used_count']) && is_numeric($row['used_count'])) {
+            $used = (int) $row['used_count'];
+        }
+        if ($total !== null && $used !== null) {
+            return max(0, $total - $used);
+        }
+        return -1;
+    }
+
+    private function sasSeriesMatchesProfile($row, $profileId, $profileName)
+    {
+        $profileId = (int) $profileId;
+        $profileName = trim((string) $profileName);
+        if ($profileId <= 0 && $profileName === '') {
+            return true;
+        }
+        $sPid = $this->sasCardSeriesProfileId($row);
+        if ($profileId > 0 && $sPid === $profileId) {
+            return true;
+        }
+        if ($profileName === '') {
+            return false;
+        }
+        $names = array();
+        $pn = $this->sasRowProfileName($row);
+        if ($pn !== '') {
+            $names[] = $pn;
+        }
+        $want = strtolower($profileName);
+        foreach ($names as $n) {
+            $have = strtolower($n);
+            if ($have === $want || strpos($have, $want) !== false || strpos($want, $have) !== false) {
+                return true;
+            }
+        }
+        $val = null;
+        if (isset($row['value']) && is_numeric($row['value'])) {
+            $val = (float) $row['value'];
+        } elseif (isset($row['price']) && is_numeric($row['price'])) {
+            $val = (float) $row['price'];
+        }
+        if ($val !== null) {
+            if ((strpos($want, 'max') !== false || strpos($want, '1.5') !== false || strpos($want, '1,5') !== false)
+                && abs($val - 1.5) < 0.06) {
+                return true;
+            }
+            if ((strpos($want, 'nb2') !== false || strpos($want, 'nb-2') !== false) && abs($val - 2) < 0.06) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public function listUnusedCards($profileId = 0, $profileName = '')
+    {
+        if (!$this->token && !$this->login()) {
+            return array();
+        }
+        $profileId = (int) $profileId;
+        $profileName = trim((string) $profileName);
+        $hasFilter = ($profileId > 0 || $profileName !== '');
+        $routes = array('index/series');
+        $payload = array(
+            'page' => 1,
+            'count' => 200,
+            'sortBy' => 'series_date',
+            'direction' => 'desc',
+            'search' => '',
+        );
+        $series = $this->sasCardFetchPaged($routes, $payload, 8);
+
+        $unused = array();
+        foreach ($series as $srow) {
+            if (!is_array($srow)) {
+                continue;
+            }
+            if (!empty($srow['suspended']) && (string) $srow['suspended'] === '1') {
+                continue;
+            }
+            $unusedHint = $this->sasCardSeriesUnusedCount($srow);
+            if ($unusedHint <= 0) {
+                continue;
+            }
+            $usedCnt = -1;
+            if (array_key_exists('used', $srow)) {
+                if ($srow['used'] === '' || $srow['used'] === null || $srow['used'] === false
+                    || (is_array($srow['used']) && !$srow['used'])) {
+                    $usedCnt = 0;
+                } elseif (is_numeric($srow['used'])) {
+                    $usedCnt = (int) $srow['used'];
+                }
+            } elseif (isset($srow['used_count']) && is_numeric($srow['used_count'])) {
+                $usedCnt = (int) $srow['used_count'];
+            }
+            if ($usedCnt !== 0) {
+                continue;
+            }
+            $srow['_unused_hint'] = $unusedHint;
+            $unused[] = $srow;
+        }
+        $prefer = array();
+        $rest = array();
+        foreach ($unused as $srow) {
+            if ($this->sasSeriesMatchesProfile($srow, $profileId, $profileName)) {
+                $prefer[] = $srow;
+            } else {
+                $rest[] = $srow;
+            }
+        }
+        $ordered = $hasFilter ? array_merge($prefer, $rest) : array_merge($prefer, $rest);
+        if ($hasFilter && $prefer) {
+            $ordered = $prefer;
+        }
+        usort($ordered, function ($a, $b) {
+            $ua = isset($a['_unused_hint']) ? (int) $a['_unused_hint'] : 0;
+            $ub = isset($b['_unused_hint']) ? (int) $b['_unused_hint'] : 0;
+            $qa = 0;
+            $qb = 0;
+            if (isset($a['qty']) && is_numeric($a['qty'])) {
+                $qa = (int) $a['qty'];
+            } elseif (isset($a['quantity']) && is_numeric($a['quantity'])) {
+                $qa = (int) $a['quantity'];
+            }
+            if (isset($b['qty']) && is_numeric($b['qty'])) {
+                $qb = (int) $b['qty'];
+            } elseif (isset($b['quantity']) && is_numeric($b['quantity'])) {
+                $qb = (int) $b['quantity'];
+            }
+            $fa = ($qa > 0 && $ua === $qa) ? 0 : 1;
+            $fb = ($qb > 0 && $ub === $qb) ? 0 : 1;
+            if ($fa !== $fb) {
+                return ($fa < $fb) ? -1 : 1;
+            }
+            if ($ua !== $ub) {
+                return ($ua < $ub) ? -1 : 1;
+            }
+            return 0;
+        });
+
+        $rows = array();
+        $seriesTried = 0;
+        foreach ($ordered as $srow) {
+            $sPid = $this->sasCardSeriesProfileId($srow);
+            $sName = $this->sasRowProfileName($srow);
+            if ($sName === '' && $profileName !== '') {
+                $sName = $profileName;
+            }
+            $sid = (isset($srow['id']) && is_numeric($srow['id'])) ? (int) $srow['id'] : 0;
+            $scode = $this->sasCardSeriesCode($srow);
+            $nested = array();
+            foreach (array('pins', 'cards', 'unused', 'items') as $nk) {
+                if (isset($srow[$nk]) && is_array($srow[$nk]) && isset($srow[$nk][0])) {
+                    $nested = $srow[$nk];
+                    break;
+                }
+            }
+            if (!$nested && ($sid > 0 || $scode !== '') && $seriesTried < 8) {
+                $seriesTried++;
+                $nested = $this->sasCardPinsFromSeries($sid, $sPid > 0 ? $sPid : $profileId, $scode);
+            }
+            $taken = 0;
+            $limit = isset($srow['_unused_hint']) ? (int) $srow['_unused_hint'] : 0;
+            foreach ($nested as $pinRow) {
+                if (!is_array($pinRow) || $this->sasCardPinValue($pinRow) === '' || $this->sasCardIsUsed($pinRow)) {
+                    continue;
+                }
+                if ($limit > 0 && $taken >= $limit) {
+                    break;
+                }
+                if (empty($pinRow['profile_name']) && $sName !== '') {
+                    $pinRow['profile_name'] = $sName;
+                }
+                if ((empty($pinRow['profile_id']) || !is_numeric($pinRow['profile_id'])) && $sPid > 0) {
+                    $pinRow['profile_id'] = $sPid;
+                }
+                $pinRow['_from_matched_series'] = 1;
+                $rows[] = $pinRow;
+                $taken++;
+            }
+        }
+
+        $out = array();
+        $seen = array();
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            if (!empty($row['qty']) || !empty($row['quantity'])) {
+                continue;
+            }
+            $pin = $this->sasCardPinValue($row);
+            if ($pin === '' || $this->sasCardIsUsed($row)) {
+                continue;
+            }
+            $fromMatched = !empty($row['_from_matched_series']);
+            if ($hasFilter && !$fromMatched && !$this->sasSeriesMatchesProfile($row, $profileId, $profileName)) {
+                $rowPid = $this->sasCardSeriesProfileId($row);
+                if ($rowPid > 0 && $profileId > 0 && $rowPid !== $profileId) {
+                    continue;
+                }
+                if ($rowPid > 0 || $this->sasCardSeriesName($row) !== '') {
+                    continue;
+                }
+            }
+            $key = strtolower($pin);
+            if (isset($seen[$key])) {
+                continue;
+            }
+            $seen[$key] = 1;
+            $out[] = $row;
+        }
+        usort($out, function ($a, $b) {
+            $ia = isset($a['id']) ? (int) $a['id'] : 0;
+            $ib = isset($b['id']) ? (int) $b['id'] : 0;
+            if ($ia === $ib) {
+                return 0;
+            }
+            return ($ia > $ib) ? -1 : 1;
+        });
+        return $out;
+    }
+
+    public function listCardSeriesSummary()
     {
         if (!$this->token && !$this->login()) {
             return array();
         }
         $payload = array(
             'page' => 1,
-            'count' => 200,
-            'sortBy' => 'id',
+            'count' => 100,
+            'sortBy' => 'series_date',
             'direction' => 'desc',
             'search' => '',
-            'used' => 0,
         );
-        if ((int) $profileId > 0) {
-            $payload['profile_id'] = (int) $profileId;
+        $series = $this->sasCardFetchPaged(array('index/series', 'index/card', 'index/cards', 'index/cardSeries'), $payload, 20);
+        $grouped = array();
+        foreach ($series as $srow) {
+            if (!is_array($srow)) {
+                continue;
+            }
+            $name = $this->sasRowProfileName($srow);
+            if ($name === '' && !empty($srow['profile']['name']) && !is_array($srow['profile']['name'])) {
+                $name = trim((string) $srow['profile']['name']);
+            }
+            if ($name === '') {
+                $pid = $this->sasCardSeriesProfileId($srow);
+                $name = $pid > 0 ? ('#' . $pid) : '';
+            }
+            if ($name === '') {
+                $name = $this->sasCardSeriesCode($srow);
+            }
+            if ($name === '') {
+                $name = 'كروت';
+            }
+            if (!empty($srow['suspended']) && (string) $srow['suspended'] === '1') {
+                continue;
+            }
+            $count = $this->sasCardSeriesUnusedCount($srow);
+            if ($count <= 0) {
+                continue;
+            }
+            $key = strtolower($name);
+            if (!isset($grouped[$key])) {
+                $grouped[$key] = array(
+                    'name' => $name,
+                    'count' => 0,
+                    'profile_id' => $this->sasCardSeriesProfileId($srow),
+                );
+            }
+            $grouped[$key]['count'] += $count;
         }
+        $out = array_values($grouped);
+        usort($out, function ($a, $b) {
+            return strcasecmp($a['name'], $b['name']);
+        });
+        return $out;
+    }
+
+    public function listOnlineUsers()
+    {
+        if (!$this->token && !$this->login()) {
+            return array();
+        }
+        $payload = array(
+            'page' => 1,
+            'count' => 500,
+            'sortBy' => 'username',
+            'direction' => 'asc',
+            'search' => '',
+        );
         $rows = array();
-        foreach (array('index/card', 'index/cards', 'index/pin') as $route) {
+        foreach (array('index/online', 'index/onlineUser', 'index/session') as $route) {
             $full = $this->decodeApiBody($this->post($route, $payload, true), false);
-            if (isset($full['__http_error']) || isset($full['__auth_error'])) {
+            if (isset($full['__http_error']) || isset($full['__auth_error']) || isset($full['__curl_error'])) {
                 continue;
             }
             $rows = $this->normalizeUserList($full);
@@ -657,49 +1513,7 @@ class SASConnector
                 break;
             }
         }
-        if (!$rows) {
-            $gets = array('list/card/0');
-            if ((int) $profileId > 0) {
-                array_unshift($gets, 'list/card/' . (int) $profileId);
-            }
-            foreach ($gets as $route) {
-                $full = $this->decodeApiBody($this->get($route, true), false);
-                if (isset($full['__http_error']) || isset($full['__auth_error'])) {
-                    continue;
-                }
-                $rows = $this->normalizeUserList($full);
-                if ($rows) {
-                    break;
-                }
-            }
-        }
-        $out = array();
-        foreach ($rows as $row) {
-            if (!is_array($row)) {
-                continue;
-            }
-            $used = 0;
-            foreach (array('used', 'is_used', 'used_at', 'user_id') as $k) {
-                if (!empty($row[$k]) && $row[$k] !== '0' && $row[$k] !== 0) {
-                    if ($k === 'user_id' && (int) $row[$k] > 0) {
-                        $used = 1;
-                    } elseif ($k !== 'user_id') {
-                        $used = 1;
-                    }
-                }
-            }
-            if ($used) {
-                continue;
-            }
-            if ((int) $profileId > 0) {
-                $rowPid = isset($row['profile_id']) ? (int) $row['profile_id'] : 0;
-                if ($rowPid > 0 && $rowPid !== (int) $profileId) {
-                    continue;
-                }
-            }
-            $out[] = $row;
-        }
-        return $out;
+        return is_array($rows) ? $rows : array();
     }
 
     public function activateUserCard($username, $pin, $userId = 0, $cardId = 0)
@@ -761,21 +1575,23 @@ class SASConnector
             'method' => $method,
             'transaction_id' => uniqid('ext', true),
         );
-        $raw = $this->post('user/extend', $payload, true);
-        $res = $this->parseApiResponse($raw);
-        if ($this->isActivateOk($res)) {
-            return $res;
+        $last = array();
+        foreach (array('user/extend', 'user/extendService', 'user/activate/test') as $route) {
+            $raw = $this->post($route, $payload, true);
+            $last = $this->parseApiResponse($raw);
+            if ($this->isActivateOk($last)) {
+                return $last;
+            }
         }
-        if (!is_array($res)) {
-            $res = array('message' => 'SAS extend failed');
+        if (!is_array($last)) {
+            $last = array('message' => 'SAS extend failed');
         }
-        $base = isset($res['message']) ? trim((string) $res['message']) : '';
-        $res['message'] = ($base !== '' ? ($base . ' — ') : '')
-            . 'user/extend method=' . $method
+        $base = isset($last['message']) ? trim((string) $last['message']) : '';
+        $last['message'] = ($base !== '' ? ($base . ' — ') : '')
+            . 'extend method=' . $method
             . ' user_id=' . $userId
-            . ' profile_id=' . $extendProfileId
-            . $this->httpTag($raw, $res);
-        return $res;
+            . ' profile_id=' . $extendProfileId;
+        return $last;
     }
 
     private function httpTag($raw, $res)
@@ -803,10 +1619,12 @@ class SASConnector
         }
         if (isset($res['status'])) {
             $st = $res['status'];
-            if (is_numeric($st) && (int) $st !== 200) {
-                return false;
-            }
-            if (in_array(strtolower((string) $st), array('error', 'fail', 'failed'), true)) {
+            if (is_numeric($st)) {
+                $n = (int) $st;
+                if ($n >= 100 && $n !== 200) {
+                    return false;
+                }
+            } elseif (in_array(strtolower((string) $st), array('error', 'fail', 'failed'), true)) {
                 return false;
             }
         }
@@ -856,10 +1674,13 @@ class SASConnector
         if (isset($rows[0]) && is_array($rows[0])) {
             return $rows;
         }
-        foreach (array('data', 'aaData', 'rows', 'users', 'extensions', 'profiles', 'allowedExtensions', 'items') as $k) {
+        foreach (array('data', 'aaData', 'rows', 'users', 'extensions', 'profiles', 'allowedExtensions', 'items', 'cards', 'pins', 'series', 'list', 'result', 'records') as $k) {
             if (isset($rows[$k]) && is_array($rows[$k])) {
                 return $this->normalizeUserList($rows[$k], $depth + 1);
             }
+        }
+        if ($this->sasLooksLikeRecordRow($rows)) {
+            return array($rows);
         }
         return array();
     }
@@ -924,6 +1745,8 @@ class SASConnector
                         $hint .= ' — ماكو صلاحية تست في حساب SAS';
                     } elseif ($st === 404) {
                         $hint .= ' — المسار غير موجود';
+                    } elseif ($st === 405) {
+                        $hint .= ' — التمديد غير مسموح أو النقاط غير كافية';
                     } elseif ($st === 400 || $st === 422) {
                         $hint .= ' — طلب مرفوض (رصيد تست صفر أو بيانات ناقصة)';
                     }

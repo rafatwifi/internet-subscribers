@@ -147,7 +147,7 @@ render_header($isEn ? 'Agents' : 'الوكلاء', 'agents');
                         </td>
                         <td><?php echo e($a['username']); ?></td>
                         <td>
-                            <a href="subscribers.php?agent=<?php echo $aid; ?>">
+                            <a href="sas.php">
                                 <?php echo isset($counts[$aid]) ? (int) $counts[$aid] : 0; ?>
                             </a>
                         </td>

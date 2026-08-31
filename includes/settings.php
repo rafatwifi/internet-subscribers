@@ -11,7 +11,7 @@ function settings_defaults()
         'site_name' => 'WiFi-Net-SALES',
         'language' => 'ar',
         'currency' => 'د.ع',
-        'grace_days' => 2,
+        'grace_days' => 3,
         'subscription_period_mode' => 'days_30',
         'whatsapp_enabled' => true,
         'whatsapp_provider' => 'local',

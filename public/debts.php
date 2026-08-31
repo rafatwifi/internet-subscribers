@@ -4,6 +4,23 @@ require_once __DIR__ . '/../includes/bootstrap.php';
 require_once __DIR__ . '/../includes/layout.php';
 require_login();
 
+if (isset($_GET['sas_user'])) {
+    $sasUser = trim((string) $_GET['sas_user']);
+    if ($sasUser !== '' && function_exists('sas_cache_get')) {
+        $cacheRow = sas_cache_get($pdo, $sasUser);
+        if ($cacheRow && function_exists('sas_cache_ensure_local')) {
+            list($localSid, $localErr) = sas_cache_ensure_local($pdo, $config, $cacheRow);
+            if ($localSid > 0) {
+                redirect('debts.php?status=unpaid&subscriber_id=' . $localSid);
+            }
+            flash('error', $localErr !== '' ? $localErr : 'تعذر فتح ديون المشترك');
+        } else {
+            flash('error', 'المشترك مو موجود بكاش SAS — حدّث القائمة');
+        }
+    }
+    redirect('debts.php?status=unpaid');
+}
+
 function flash_payment_result($ok, $errMsg, $details, $sendWa)
 {
     global $config;
@@ -37,6 +54,11 @@ if (isset($_GET['pay_id']) && $_SERVER['REQUEST_METHOD'] !== 'POST') {
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf(post('csrf'))) {
+        if (post('ajax') === '1') {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(array('ok' => false, 'message' => 'طلب غير صالح'));
+            exit;
+        }
         flash('error', 'طلب غير صالح');
         redirect('debts.php');
     }
@@ -87,14 +109,65 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if ($action === 'unpay') {
-        $pdo->prepare(
-            'UPDATE invoices SET status = "unpaid", paid_at = NULL, profit = 0 WHERE id = :id'
-        )->execute(array(':id' => $id));
-        flash('success', 'تم إرجاع الفاتورة لغير مسدد');
+        if (!user_can_edit_debts()) {
+            flash('error', debt_edit_denied_message());
+            redirect('debts.php?status=paid');
+        }
+        list($ok, $msg, $sidOut) = apply_invoice_unpay($pdo, $id);
+        flash($ok ? 'success' : 'error', $msg);
+        if ($ok && $sidOut) {
+            redirect('debts.php?status=unpaid&subscriber_id=' . (int) $sidOut);
+        }
         redirect('debts.php?status=paid');
     }
 
+    if ($action === 'update_invoice_amount') {
+        $wantJson = post('ajax') === '1';
+        if (!user_can_edit_debts()) {
+            if ($wantJson) {
+                header('Content-Type: application/json; charset=utf-8');
+                echo json_encode(array('ok' => false, 'message' => debt_edit_denied_message()));
+                exit;
+            }
+            flash('error', debt_edit_denied_message());
+            redirect('debts.php');
+        }
+        $invId = (int) post('invoice_id', '0');
+        if ($invId <= 0) {
+            $invId = $id;
+        }
+        $amount = (float) post('amount', '0');
+        $sid = (int) post('subscriber_id', '0');
+        if ($sid <= 0 && $invId > 0) {
+            $stSid = $pdo->prepare('SELECT subscriber_id FROM invoices WHERE id = :id');
+            $stSid->execute(array(':id' => $invId));
+            $sid = (int) $stSid->fetchColumn();
+        }
+        list($ok, $msg) = apply_unpaid_invoice_update($pdo, $invId, $sid, array('amount' => $amount));
+        $total = ($ok && $sid > 0 && function_exists('subscriber_unpaid_total'))
+            ? subscriber_unpaid_total($pdo, $sid)
+            : $amount;
+        $currency = isset($config['currency']) ? $config['currency'] : 'IQD';
+        if ($wantJson) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(array(
+                'ok' => $ok,
+                'message' => $msg,
+                'debt' => $amount,
+                'debt_text' => function_exists('money_format_iqd') ? money_format_iqd($amount, $currency) : (string) (int) $amount,
+                'total' => $total,
+            ));
+            exit;
+        }
+        flash($ok ? 'success' : 'error', $msg);
+        redirect('debts.php?status=unpaid' . ($sid > 0 ? ('&subscriber_id=' . $sid) : ''));
+    }
+
     if ($action === 'add_invoice') {
+        if (!user_can_edit_debts()) {
+            flash('error', debt_edit_denied_message());
+            redirect('debts.php');
+        }
         $subscriberId = (int) post('subscriber_id', '0');
         $amount = (float) post('amount', '0');
         $dueDate = (string) post('due_date', date('Y-m-d'));
@@ -171,6 +244,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ':due_date' => $dueDate,
             ':notes' => ($notes !== '' ? $notes : null),
         ));
+        $newInvId = (int) $pdo->lastInsertId();
+        if (function_exists('log_invoice_accounts')) {
+            log_invoice_accounts(
+                $pdo,
+                $subscriberId,
+                $newInvId,
+                'create',
+                'إضافة دين #' . $newInvId . ' — ' . $monthLabel . ' / ' . $amount,
+                'النوع: ' . $debtKind . "\nالشهر: " . $monthLabel . "\nالمبلغ: " . $amount
+                . "\nملاحظات: " . ($notes !== '' ? $notes : '-')
+            );
+        }
 
         $sendWa = post('send_whatsapp') === '1';
         if ($sendWa) {
@@ -313,18 +398,31 @@ if ($filterSubscriberId > 0) {
     $cardHref = 'debts.php?status=unpaid&subscriber_id=' . $filterSubscriberId;
 }
 
+$canEditDebts = function_exists('user_can_edit_debts') ? user_can_edit_debts() : false;
+if (!$canEditDebts) {
+    $showAdd = false;
+}
+
 render_header(t('debts'), 'debts');
 ?>
-<div class="cards">
+<?php if ($filterSubscriberId > 0): ?>
+<div class="page-head">
+    <h1><?php echo e($lang === 'en' ? 'Subscriber debts' : 'ديون المشترك'); ?></h1>
+    <p>
+        <?php echo e($filterName !== '' ? $filterName : ('#' . $filterSubscriberId)); ?>
+        <?php if ($filterPhone !== ''): ?>
+            <span class="ltr"> · <?php echo e($filterPhone); ?></span>
+        <?php endif; ?>
+    </p>
+</div>
+<?php endif; ?>
+<div class="cards"<?php echo $filterSubscriberId > 0 ? ' style="grid-template-columns:minmax(0,420px)"' : ''; ?>>
     <a class="card-stat red" href="<?php echo e($cardHref); ?>">
         <div class="label"><?php echo e($cardLabel); ?></div>
         <div class="value"><?php echo e(money_format_iqd($cardDebt, $config['currency'])); ?></div>
         <?php if ($filterSubscriberId > 0 && $filterName !== ''): ?>
             <div class="meta" style="margin-top:6px;color:inherit;opacity:.85">
-                <?php echo e($filterName); ?>
-                <?php if ($filterPhone !== ''): ?>
-                    <span class="ltr" style="display:inline-block;margin-inline-start:8px"><?php echo e($filterPhone); ?></span>
-                <?php endif; ?>
+                <?php echo e($lang === 'en' ? 'Total unpaid' : 'مجموع غير المسدد'); ?>
             </div>
         <?php endif; ?>
     </a>
@@ -332,7 +430,9 @@ render_header(t('debts'), 'debts');
 
 <div class="panel">
     <div class="actions" style="margin-top:0">
+        <?php if ($canEditDebts): ?>
         <button class="btn secondary" type="button" onclick="document.getElementById('addDebtBox').classList.toggle('hidden')"><?php echo e($lang === 'en' ? 'Add debt' : 'إضافة دين'); ?></button>
+        <?php endif; ?>
         <input id="debtFilter" placeholder="<?php echo e($lang === 'en' ? 'Instant search...' : 'بحث فوري اسم أو رقم...'); ?>" style="max-width:280px" value="<?php echo e($q); ?>">
         <?php if ($filterSubscriberId > 0): ?>
             <span class="badge unpaid"><?php echo e($filterName !== '' ? $filterName : ('#' . $filterSubscriberId)); ?></span>
@@ -351,6 +451,7 @@ render_header(t('debts'), 'debts');
     </div>
 </div>
 
+<?php if ($canEditDebts): ?>
 <div class="panel collapse-box<?php echo $showAdd ? '' : ' hidden'; ?>" id="addDebtBox">
     <h2><?php echo e($lang === 'en' ? 'Add invoice / debt' : 'إضافة فاتورة / دين'); ?></h2>
     <form method="post">
@@ -406,6 +507,7 @@ render_header(t('debts'), 'debts');
         </div>
     </form>
 </div>
+<?php endif; ?>
 
 <div class="panel">
     <div class="actions" style="margin-top:0">
@@ -443,7 +545,18 @@ render_header(t('debts'), 'debts');
                         <strong><?php echo e(month_short_label($row['month_label'])); ?></strong>
                         <div class="meta"><?php echo e($row['due_date']); ?></div>
                     </td>
-                    <td><strong><?php echo e(money_format_iqd($row['amount'], $config['currency'])); ?></strong></td>
+                    <td>
+                        <?php if ($row['status'] === 'unpaid' && !empty($canEditDebts)): ?>
+                            <button type="button" class="debt-amt debt-due debt-edit-btn"
+                                data-invoice="<?php echo (int) $row['id']; ?>"
+                                data-sub="<?php echo (int) $row['subscriber_id']; ?>"
+                                data-amount="<?php echo (int) round((float) $row['amount']); ?>"
+                                title="<?php echo e($lang === 'en' ? 'Click to edit debt' : 'اضغط لتعديل الدين'); ?>"
+                            ><?php echo e(money_format_iqd($row['amount'], $config['currency'])); ?></button>
+                        <?php else: ?>
+                            <strong><?php echo e(money_format_iqd($row['amount'], $config['currency'])); ?></strong>
+                        <?php endif; ?>
+                    </td>
                     <td class="notes-cell"><?php echo e(isset($row['notes']) ? $row['notes'] : ''); ?></td>
                     <?php if ($status !== 'unpaid'): ?>
                     <td><?php echo e(money_format_iqd(isset($row['profit']) ? $row['profit'] : 0, $config['currency'])); ?></td>
@@ -476,7 +589,7 @@ render_header(t('debts'), 'debts');
                             <?php endif; ?>
                             <button class="btn ghost sm" type="submit"><?php echo e(t('remind')); ?></button>
                         </form>
-                        <?php elseif ($row['status'] === 'paid'): ?>
+                        <?php elseif ($row['status'] === 'paid' && $canEditDebts): ?>
                         <form method="post">
                             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                             <input type="hidden" name="action" value="unpay">
@@ -491,6 +604,84 @@ render_header(t('debts'), 'debts');
         </table>
     </div>
 </div>
+<script>
+(function () {
+  var csrf = <?php echo json_encode(csrf_token()); ?>;
+  document.addEventListener('click', function (e) {
+    var btn = e.target && e.target.closest ? e.target.closest('.debt-edit-btn') : null;
+    if (!btn || btn.classList.contains('editing')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    var current = btn.getAttribute('data-amount') || '0';
+    var snap = btn.textContent;
+    btn.classList.add('editing');
+    btn.contentEditable = 'true';
+    btn.textContent = current;
+    btn.focus();
+    try {
+      var range = document.createRange();
+      range.selectNodeContents(btn);
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    } catch (err) {}
+    var done = false;
+    function finish(ok) {
+      if (done || !btn.classList.contains('editing')) return;
+      done = true;
+      btn.classList.remove('editing');
+      btn.contentEditable = 'false';
+      var raw = String(btn.textContent || '').replace(/[^\d]/g, '');
+      var n = parseInt(raw, 10);
+      if (!ok || !raw) {
+        btn.textContent = snap;
+        return;
+      }
+      if (String(n) === String(current)) {
+        btn.textContent = snap;
+        return;
+      }
+      if (!(n > 0)) {
+        alert(<?php echo json_encode($lang === 'en' ? 'Enter a valid amount' : 'أدخل مبلغ صحيح'); ?>);
+        btn.textContent = snap;
+        return;
+      }
+      var body = new FormData();
+      body.append('csrf', csrf);
+      body.append('action', 'update_invoice_amount');
+      body.append('ajax', '1');
+      body.append('invoice_id', btn.getAttribute('data-invoice') || '');
+      body.append('subscriber_id', btn.getAttribute('data-sub') || '');
+      body.append('amount', String(n));
+      fetch('debts.php', { method: 'POST', body: body, credentials: 'same-origin' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!data || !data.ok) {
+            alert((data && data.message) ? data.message : <?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>);
+            btn.textContent = snap;
+            return;
+          }
+          btn.textContent = data.debt_text || String(n);
+          btn.setAttribute('data-amount', String(Math.round(Number(data.debt) || n)));
+          var row = btn.closest('tr');
+          var payInp = row ? row.querySelector('.js-pay-amt') : null;
+          if (payInp) payInp.value = String(Math.round(Number(data.debt) || n));
+          var payBtn = row ? row.querySelector('.js-pay-open') : null;
+          if (payBtn) payBtn.setAttribute('data-amount', String(Math.round(Number(data.debt) || n)));
+        })
+        .catch(function () {
+          alert(<?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>);
+          btn.textContent = snap;
+        });
+    }
+    btn.onkeydown = function (ev) {
+      if (ev.key === 'Enter') { ev.preventDefault(); finish(true); }
+      if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
+    };
+    btn.onblur = function () { finish(true); };
+  });
+})();
+</script>
 <script>
 (function () {
   var input = document.getElementById('debtFilter');

@@ -62,7 +62,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 : max(0, (int) ceil((strtotime($endDate) - strtotime(date('Y-m-d'))) / 86400));
             list($ok, $msg) = apply_subscriber_days_left($pdo, $subscriberId, $daysForLedger, $planId);
             flash($ok ? 'success' : 'error', $msg);
-            redirect($ok ? 'subscribers.php' : ('activate.php?subscriber_id=' . $subscriberId . '&days=' . $daysForLedger));
+            redirect($ok ? 'sas.php' : ('activate.php?subscriber_id=' . $subscriberId . '&days=' . $daysForLedger));
         }
 
         list($ok, $msg, $details) = activate_one_subscriber($pdo, $config, $subscriberId, array(
@@ -87,7 +87,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             flash('error', $msg);
             redirect('activate.php?subscriber_id=' . $subscriberId);
         }
-        redirect('subscribers.php');
+        redirect('sas.php');
     }
 }
 

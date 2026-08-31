@@ -593,3 +593,303 @@ function ensure_name_unique($pdo)
         // تجاهل إن فشل (مكررات موجودة أو صلاحيات)
     }
 }
+
+function csv_blob_from_assoc_rows($rows)
+{
+    if (!is_array($rows) || !$rows) {
+        return '';
+    }
+    $headers = array_keys($rows[0]);
+    $fp = fopen('php://temp', 'r+');
+    fwrite($fp, "\xEF\xBB\xBF");
+    fputcsv($fp, $headers);
+    foreach ($rows as $row) {
+        $line = array();
+        foreach ($headers as $h) {
+            $v = isset($row[$h]) ? $row[$h] : '';
+            if (is_array($v) || is_object($v)) {
+                $v = json_encode($v);
+            }
+            $line[] = ($v === null) ? '' : $v;
+        }
+        fputcsv($fp, $line);
+    }
+    rewind($fp);
+    $out = stream_get_contents($fp);
+    fclose($fp);
+    return $out;
+}
+
+function csv_blob_from_matrix($headers, $rows)
+{
+    $fp = fopen('php://temp', 'r+');
+    fwrite($fp, "\xEF\xBB\xBF");
+    fputcsv($fp, $headers);
+    foreach ($rows as $row) {
+        $line = array();
+        if (!is_array($row)) {
+            continue;
+        }
+        foreach ($row as $v) {
+            if (is_array($v) || is_object($v)) {
+                $v = json_encode($v);
+            }
+            $line[] = ($v === null) ? '' : $v;
+        }
+        fputcsv($fp, $line);
+    }
+    rewind($fp);
+    $out = stream_get_contents($fp);
+    fclose($fp);
+    return $out;
+}
+
+function export_table_assoc($pdo, $sql)
+{
+    try {
+        $st = $pdo->query($sql);
+        if (!$st) {
+            return array();
+        }
+        $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+        return is_array($rows) ? $rows : array();
+    } catch (Exception $e) {
+        return array();
+    }
+}
+
+/**
+ * تصدير كامل لدفتر الأوفلاين: مشتركين + ديون + اشتراكات + رسائل + حركات
+ */
+function export_offline_subscribers_full($pdo)
+{
+    $stamp = date('Y-m-d');
+    $subs = export_table_assoc($pdo, 'SELECT * FROM subscribers ORDER BY name ASC, id ASC');
+    $invoices = export_table_assoc(
+        $pdo,
+        'SELECT i.*, s.name AS subscriber_name, s.phone AS subscriber_phone
+         FROM invoices i
+         JOIN subscribers s ON s.id = i.subscriber_id
+         ORDER BY s.name ASC, i.due_date ASC, i.id ASC'
+    );
+    $subscriptions = export_table_assoc(
+        $pdo,
+        'SELECT sub.*, s.name AS subscriber_name, s.phone AS subscriber_phone
+         FROM subscriptions sub
+         JOIN subscribers s ON s.id = sub.subscriber_id
+         ORDER BY s.name ASC, sub.id DESC'
+    );
+    $messages = export_table_assoc(
+        $pdo,
+        'SELECT m.*, s.name AS subscriber_name
+         FROM message_logs m
+         LEFT JOIN subscribers s ON s.id = m.subscriber_id
+         ORDER BY m.id DESC'
+    );
+    $activity = export_table_assoc(
+        $pdo,
+        'SELECT a.*, s.name AS subscriber_name
+         FROM activity_logs a
+         LEFT JOIN subscribers s ON s.id = a.subscriber_id
+         WHERE a.subscriber_id IS NOT NULL
+         ORDER BY a.id DESC'
+    );
+
+    $lastPkg = array();
+    $activeSub = array();
+    foreach ($subscriptions as $sub) {
+        $sid = isset($sub['subscriber_id']) ? (int) $sub['subscriber_id'] : 0;
+        if ($sid <= 0) {
+            continue;
+        }
+        if (!isset($lastPkg[$sid]) && !empty($sub['service_name'])) {
+            $lastPkg[$sid] = $sub['service_name'];
+        }
+        if (!isset($activeSub[$sid]) && isset($sub['status']) && $sub['status'] === 'active') {
+            $activeSub[$sid] = $sub;
+        }
+    }
+    $unpaidTotal = array();
+    $unpaidBySub = array();
+    foreach ($invoices as $inv) {
+        if (!isset($inv['status']) || $inv['status'] !== 'unpaid') {
+            continue;
+        }
+        $sid = isset($inv['subscriber_id']) ? (int) $inv['subscriber_id'] : 0;
+        if ($sid <= 0) {
+            continue;
+        }
+        if (!isset($unpaidTotal[$sid])) {
+            $unpaidTotal[$sid] = 0;
+            $unpaidBySub[$sid] = array();
+        }
+        $unpaidTotal[$sid] += isset($inv['amount']) ? (float) $inv['amount'] : 0;
+        $lab = isset($inv['month_label']) ? $inv['month_label'] : '';
+        if ($lab !== '' && function_exists('month_short_label')) {
+            $lab = month_short_label($lab);
+        }
+        $amt = isset($inv['amount']) ? $inv['amount'] : 0;
+        $note = isset($inv['notes']) ? $inv['notes'] : '';
+        $unpaidBySub[$sid][] = $lab . ': ' . $amt . ($note !== '' ? (' (' . $note . ')') : '');
+    }
+    $subsById = array();
+    foreach ($subs as $k => $row) {
+        $sid = isset($row['id']) ? (int) $row['id'] : 0;
+        $subs[$k]['phone_display'] = isset($row['phone']) && function_exists('format_phone_display')
+            ? format_phone_display($row['phone'])
+            : (isset($row['phone']) ? $row['phone'] : '');
+        $subs[$k]['last_package'] = isset($lastPkg[$sid]) ? $lastPkg[$sid] : '';
+        $subs[$k]['active_start'] = (isset($activeSub[$sid]) && !empty($activeSub[$sid]['start_date']))
+            ? $activeSub[$sid]['start_date'] : '';
+        $subs[$k]['active_end'] = (isset($activeSub[$sid]) && !empty($activeSub[$sid]['end_date']))
+            ? $activeSub[$sid]['end_date'] : '';
+        $subs[$k]['unpaid_total'] = isset($unpaidTotal[$sid]) ? $unpaidTotal[$sid] : 0;
+        $subsById[$sid] = $subs[$k];
+    }
+
+    $unpaidRows = array();
+    $unpaidHeaders = array(
+        'الاسم', 'الهاتف', 'عنوان', 'ملاحظات المشترك', 'يوزرنيم SAS',
+        'الشهر', 'المبلغ', 'حالة الفاتورة', 'تاريخ الاستحقاق', 'ملاحظات الدين',
+        'الباقة الحالية', 'من', 'إلى', 'إجمالي الدين غير المسدد',
+    );
+    foreach ($invoices as $inv) {
+        if (!isset($inv['status']) || $inv['status'] !== 'unpaid') {
+            continue;
+        }
+        $sid = isset($inv['subscriber_id']) ? (int) $inv['subscriber_id'] : 0;
+        $subRow = isset($subsById[$sid]) ? $subsById[$sid] : null;
+        $phone = '';
+        if ($subRow && isset($subRow['phone_display'])) {
+            $phone = $subRow['phone_display'];
+        } elseif (isset($inv['subscriber_phone'])) {
+            $phone = function_exists('format_phone_display')
+                ? format_phone_display($inv['subscriber_phone'])
+                : $inv['subscriber_phone'];
+        }
+        $monthLab = isset($inv['month_label']) ? $inv['month_label'] : '';
+        if ($monthLab !== '' && function_exists('month_short_label')) {
+            $monthLab = month_short_label($monthLab);
+        }
+        $unpaidRows[] = array(
+            isset($inv['subscriber_name']) ? $inv['subscriber_name'] : '',
+            $phone,
+            ($subRow && isset($subRow['address'])) ? $subRow['address'] : '',
+            ($subRow && isset($subRow['notes'])) ? $subRow['notes'] : '',
+            ($subRow && isset($subRow['sas_username'])) ? $subRow['sas_username'] : '',
+            $monthLab,
+            isset($inv['amount']) ? $inv['amount'] : 0,
+            isset($inv['status']) ? $inv['status'] : '',
+            isset($inv['due_date']) ? $inv['due_date'] : '',
+            isset($inv['notes']) ? $inv['notes'] : '',
+            ($subRow && isset($subRow['last_package'])) ? $subRow['last_package'] : '',
+            ($subRow && isset($subRow['active_start'])) ? $subRow['active_start'] : '',
+            ($subRow && isset($subRow['active_end'])) ? $subRow['active_end'] : '',
+            ($subRow && isset($subRow['unpaid_total'])) ? $subRow['unpaid_total'] : '',
+        );
+    }
+    $overviewHeaders = array(
+        'الاسم', 'الهاتف', 'العنوان', 'ملاحظات', 'يوزرنيم SAS', 'الباقة', 'من', 'إلى',
+        'إجمالي الدين', 'تفاصيل الديون غير المسددة',
+    );
+    $overviewRows = array();
+    foreach ($subs as $s) {
+        $sid = isset($s['id']) ? (int) $s['id'] : 0;
+        $phone = isset($s['phone_display']) ? $s['phone_display'] : (isset($s['phone']) ? $s['phone'] : '');
+        $detail = isset($unpaidBySub[$sid]) ? implode(' | ', $unpaidBySub[$sid]) : '';
+        $overviewRows[] = array(
+            isset($s['name']) ? $s['name'] : '',
+            $phone,
+            isset($s['address']) ? $s['address'] : '',
+            isset($s['notes']) ? $s['notes'] : '',
+            isset($s['sas_username']) ? $s['sas_username'] : '',
+            isset($s['last_package']) ? $s['last_package'] : '',
+            isset($s['active_start']) ? $s['active_start'] : '',
+            isset($s['active_end']) ? $s['active_end'] : '',
+            isset($s['unpaid_total']) ? $s['unpaid_total'] : 0,
+            $detail,
+        );
+    }
+
+    $files = array(
+        '00-README.txt' => "تصدير دفتر الأوفلاين — " . $stamp . "\r\n"
+            . "احفظ هذا الأرشيف قبل حذف المشتركين الأوفلاين.\r\n\r\n"
+            . "01-subscribers.csv = كل المشتركين\r\n"
+            . "02-invoices.csv = كل الفواتير (مسدد وغير مسدد)\r\n"
+            . "03-subscriptions.csv = الاشتراكات\r\n"
+            . "04-messages.csv = سجل الرسائل\r\n"
+            . "05-activity.csv = سجل الحركات\r\n"
+            . "06-unpaid-debts.csv = الديون غير المسددة لإعادة الإدخال\r\n"
+            . "07-overview.csv = ملخص لكل مشترك مع تفاصيل الدين\r\n",
+        '01-subscribers.csv' => csv_blob_from_assoc_rows($subs),
+        '02-invoices.csv' => csv_blob_from_assoc_rows($invoices),
+        '03-subscriptions.csv' => csv_blob_from_assoc_rows($subscriptions),
+        '04-messages.csv' => csv_blob_from_assoc_rows($messages),
+        '05-activity.csv' => csv_blob_from_assoc_rows($activity),
+        '06-unpaid-debts.csv' => csv_blob_from_matrix($unpaidHeaders, $unpaidRows),
+        '07-overview.csv' => csv_blob_from_matrix($overviewHeaders, $overviewRows),
+    );
+
+    if (class_exists('ZipArchive')) {
+        $tmp = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'offline-' . uniqid('', true) . '.zip';
+        $zip = new ZipArchive();
+        if ($zip->open($tmp, ZipArchive::CREATE) === true) {
+            foreach ($files as $name => $body) {
+                $zip->addFromString($name, $body !== '' ? $body : "\xEF\xBB\xBF");
+            }
+            $zip->close();
+            $zipName = 'offline-subscribers-' . $stamp . '.zip';
+            header('Content-Type: application/zip');
+            header('Content-Disposition: attachment; filename="' . $zipName . '"');
+            header('Content-Length: ' . (string) filesize($tmp));
+            readfile($tmp);
+            @unlink($tmp);
+            exit;
+        }
+        @unlink($tmp);
+    }
+
+    export_csv(
+        'offline-unpaid-debts-' . $stamp . '.csv',
+        $unpaidHeaders,
+        $unpaidRows
+    );
+}
+
+function ensure_subscriber_grace_days_column($pdo)
+{
+    static $done = false;
+    if ($done) {
+        return;
+    }
+    $done = true;
+    try {
+        $col = $pdo->query("SHOW COLUMNS FROM subscribers LIKE 'grace_days'")->fetch();
+        if (!$col) {
+            $pdo->exec(
+                'ALTER TABLE subscribers
+                 ADD COLUMN grace_days INT NOT NULL DEFAULT 3 AFTER notes'
+            );
+        }
+    } catch (Exception $e) {
+    }
+}
+
+function subscriber_default_grace_days($config = null)
+{
+    if (!is_array($config) && isset($GLOBALS['config']) && is_array($GLOBALS['config'])) {
+        $config = $GLOBALS['config'];
+    }
+    if (is_array($config) && isset($config['grace_days'])) {
+        return max(0, (int) $config['grace_days']);
+    }
+    return 3;
+}
+
+function subscriber_grace_days($row, $config = null)
+{
+    if (is_array($row) && isset($row['grace_days']) && $row['grace_days'] !== null && $row['grace_days'] !== '') {
+        return max(0, (int) $row['grace_days']);
+    }
+    return subscriber_default_grace_days($config);
+}

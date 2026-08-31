@@ -39,8 +39,8 @@ $isEn = ($lang === 'en');
     <link rel="apple-touch-icon" href="assets/apple-touch-icon.png?v=2">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@500;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="assets/style.css?v=sas56">
+    <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="assets/style.css?v=sas101">
 </head>
 <body class="<?php echo $isEn ? 'ltr' : 'rtl'; ?>">
 <div class="login-wrap">

@@ -345,6 +345,9 @@ function apply_subscriber_payment($pdo, $config, $subscriberId, $payAmount, $sen
  */
 function insert_opening_debts($pdo, $subscriberId, $post)
 {
+    if (function_exists('user_can_edit_debts') && !user_can_edit_debts()) {
+        return array('count' => 0, 'sum' => 0.0);
+    }
     $amounts = isset($post['debt_amount']) && is_array($post['debt_amount']) ? $post['debt_amount'] : array();
     $months = isset($post['debt_month']) && is_array($post['debt_month']) ? $post['debt_month'] : array();
     $kinds = isset($post['debt_kind']) && is_array($post['debt_kind']) ? $post['debt_kind'] : array();
@@ -431,11 +434,19 @@ function insert_opening_debts($pdo, $subscriberId, $post)
             ':notes' => ($dnote !== '' ? $dnote : null),
         ));
         $newId = (int) $pdo->lastInsertId();
-        if (function_exists('activity_log')) {
-            $details = 'النوع: ' . $kind . "\n"
+        if (function_exists('log_invoice_accounts')) {
+            log_invoice_accounts(
+                $pdo,
+                (int) $subscriberId,
+                $newId,
+                'create',
+                'إضافة دين #' . $newId . ' — ' . month_short_label($month) . ' / ' . $amt,
+                'النوع: ' . $kind . "\n"
                 . 'الشهر: ' . $month . "\n"
                 . 'المبلغ: ' . $amt . "\n"
-                . 'ملاحظات: ' . ($dnote !== '' ? $dnote : '-');
+                . 'ملاحظات: ' . ($dnote !== '' ? $dnote : '-')
+            );
+        } elseif (function_exists('activity_log')) {
             activity_log(
                 $pdo,
                 (int) $subscriberId,
@@ -443,11 +454,374 @@ function insert_opening_debts($pdo, $subscriberId, $post)
                 $newId,
                 'create',
                 'إضافة دين #' . $newId . ' — ' . month_short_label($month) . ' / ' . $amt,
-                $details
+                'النوع: ' . $kind . "\nالشهر: " . $month . "\nالمبلغ: " . $amt
             );
         }
         $debtCount++;
         $debtSum += $amt;
     }
     return array('count' => $debtCount, 'sum' => $debtSum);
+}
+
+function debt_edit_denied_message()
+{
+    $lang = isset($GLOBALS['lang']) ? $GLOBALS['lang'] : 'ar';
+    return $lang === 'en' ? 'Only the admin can add or change debts' : 'إضافة وتعديل الديون للمدير فقط';
+}
+
+function system_unpaid_debt_total($pdo)
+{
+    try {
+        return (float) $pdo->query("SELECT COALESCE(SUM(amount),0) FROM invoices WHERE status = 'unpaid'")->fetchColumn();
+    } catch (Exception $e) {
+        return 0.0;
+    }
+}
+
+function subscriber_paid_total($pdo, $subscriberId)
+{
+    $st = $pdo->prepare(
+        'SELECT COALESCE(SUM(amount),0) FROM invoices WHERE subscriber_id = :id AND status = "paid"'
+    );
+    $st->execute(array(':id' => (int) $subscriberId));
+    return (float) $st->fetchColumn();
+}
+
+function invoice_scaled_cost($oldAmount, $oldCost, $newAmount)
+{
+    $oldAmount = (float) $oldAmount;
+    $oldCost = (float) $oldCost;
+    $newAmount = (float) $newAmount;
+    if ($oldAmount > 0 && $oldCost > 0 && abs($newAmount - $oldAmount) > 0.0001) {
+        return round($oldCost * ($newAmount / $oldAmount));
+    }
+    return $oldCost;
+}
+
+function log_invoice_accounts($pdo, $subscriberId, $invoiceId, $action, $summary, $details)
+{
+    if (!function_exists('activity_log')) {
+        return;
+    }
+    $sid = (int) $subscriberId;
+    $subUnpaid = function_exists('subscriber_unpaid_total') ? subscriber_unpaid_total($pdo, $sid) : 0;
+    $subPaid = subscriber_paid_total($pdo, $sid);
+    $sysUnpaid = system_unpaid_debt_total($pdo);
+    $details = trim((string) $details);
+    if ($details !== '') {
+        $details .= "\n";
+    }
+    $details .= 'دين المشترك غير المسدد: ' . $subUnpaid . "\n"
+        . 'مسدد للمشترك: ' . $subPaid . "\n"
+        . 'إجمالي ديون النظام: ' . $sysUnpaid;
+    activity_log($pdo, $sid, 'invoice', (int) $invoiceId, $action, $summary, $details);
+}
+
+/**
+ * تعديل دين غير مسدد — يحدّث المبلغ والتكلفة حتى تتغير حسابات النظام
+ * $fields: amount, month_label, due_date, notes
+ * يرجع array($ok, $message)
+ */
+function apply_unpaid_invoice_update($pdo, $invoiceId, $subscriberId, $fields)
+{
+    if (function_exists('user_can_edit_debts') && !user_can_edit_debts()) {
+        return array(false, debt_edit_denied_message());
+    }
+    $invoiceId = (int) $invoiceId;
+    $subscriberId = (int) $subscriberId;
+    if ($invoiceId <= 0 || $subscriberId <= 0) {
+        return array(false, 'دين غير صالح');
+    }
+    $st = $pdo->prepare(
+        'SELECT * FROM invoices WHERE id = :id AND subscriber_id = :sid AND status = "unpaid"'
+    );
+    $st->execute(array(':id' => $invoiceId, ':sid' => $subscriberId));
+    $old = $st->fetch();
+    if (!$old) {
+        return array(false, 'تعذر تعديل الدين (ربما مسدد أو محذوف)');
+    }
+
+    $newAmount = array_key_exists('amount', $fields) ? (float) $fields['amount'] : (float) $old['amount'];
+    if ($newAmount <= 0) {
+        return array(false, 'مبلغ غير صالح');
+    }
+    $monthLabel = array_key_exists('month_label', $fields)
+        ? trim((string) $fields['month_label'])
+        : (string) $old['month_label'];
+    if ($monthLabel === '') {
+        $monthLabel = (string) $old['month_label'];
+    }
+    $dueDate = array_key_exists('due_date', $fields)
+        ? trim((string) $fields['due_date'])
+        : (string) $old['due_date'];
+    if ($dueDate === '') {
+        $dueDate = (string) $old['due_date'];
+    }
+    $notes = array_key_exists('notes', $fields)
+        ? trim((string) $fields['notes'])
+        : (isset($old['notes']) ? (string) $old['notes'] : '');
+
+    $newCost = invoice_scaled_cost($old['amount'], isset($old['cost_price']) ? $old['cost_price'] : 0, $newAmount);
+
+    $upd = $pdo->prepare(
+        'UPDATE invoices
+         SET month_label = :month_label, amount = :amount, cost_price = :cost, profit = 0,
+             due_date = :due_date, notes = :notes
+         WHERE id = :id AND subscriber_id = :sid AND status = "unpaid"'
+    );
+    $upd->execute(array(
+        ':month_label' => $monthLabel,
+        ':amount' => $newAmount,
+        ':cost' => $newCost,
+        ':due_date' => $dueDate,
+        ':notes' => ($notes !== '' ? $notes : null),
+        ':id' => $invoiceId,
+        ':sid' => $subscriberId,
+    ));
+
+    $lines = array();
+    if (function_exists('activity_diff_line')) {
+        $d1 = activity_diff_line('الشهر', $old['month_label'], $monthLabel);
+        $d2 = activity_diff_line('المبلغ', $old['amount'], $newAmount);
+        $d3 = activity_diff_line('التكلفة', isset($old['cost_price']) ? $old['cost_price'] : 0, $newCost);
+        $d4 = activity_diff_line('الاستحقاق', $old['due_date'], $dueDate);
+        $d5 = activity_diff_line('الملاحظات', isset($old['notes']) ? $old['notes'] : '', $notes);
+        if ($d1 !== '') {
+            $lines[] = $d1;
+        }
+        if ($d2 !== '') {
+            $lines[] = $d2;
+        }
+        if ($d3 !== '') {
+            $lines[] = $d3;
+        }
+        if ($d4 !== '') {
+            $lines[] = $d4;
+        }
+        if ($d5 !== '') {
+            $lines[] = $d5;
+        }
+    }
+    if (!$lines) {
+        $lines[] = 'حفظ بدون تغيير ظاهر';
+    }
+    log_invoice_accounts(
+        $pdo,
+        $subscriberId,
+        $invoiceId,
+        'update',
+        'تعديل دين #' . $invoiceId,
+        implode("\n", $lines)
+    );
+    return array(true, 'تم تعديل الدين');
+}
+
+function apply_unpaid_invoice_delete($pdo, $invoiceId, $subscriberId)
+{
+    if (function_exists('user_can_edit_debts') && !user_can_edit_debts()) {
+        return array(false, debt_edit_denied_message());
+    }
+    $invoiceId = (int) $invoiceId;
+    $subscriberId = (int) $subscriberId;
+    $st = $pdo->prepare(
+        'SELECT * FROM invoices WHERE id = :id AND subscriber_id = :sid AND status = "unpaid"'
+    );
+    $st->execute(array(':id' => $invoiceId, ':sid' => $subscriberId));
+    $old = $st->fetch();
+    if (!$old) {
+        return array(false, 'تعذر حذف الدين (ربما مسدد أو محذوف)');
+    }
+    $pdo->prepare(
+        'DELETE FROM invoices WHERE id = :id AND subscriber_id = :sid AND status = "unpaid"'
+    )->execute(array(':id' => $invoiceId, ':sid' => $subscriberId));
+    log_invoice_accounts(
+        $pdo,
+        $subscriberId,
+        $invoiceId,
+        'delete',
+        'حذف دين #' . $invoiceId,
+        'الشهر: ' . $old['month_label'] . "\nالمبلغ: " . $old['amount']
+    );
+    return array(true, 'تم حذف الدين');
+}
+
+function apply_invoice_unpay($pdo, $invoiceId)
+{
+    if (function_exists('user_can_edit_debts') && !user_can_edit_debts()) {
+        return array(false, debt_edit_denied_message(), 0);
+    }
+    $invoiceId = (int) $invoiceId;
+    $st = $pdo->prepare('SELECT * FROM invoices WHERE id = :id AND status = "paid"');
+    $st->execute(array(':id' => $invoiceId));
+    $old = $st->fetch();
+    if (!$old) {
+        return array(false, 'الفاتورة غير موجودة أو غير مسددة', 0);
+    }
+    $pdo->prepare(
+        'UPDATE invoices SET status = "unpaid", paid_at = NULL, profit = 0 WHERE id = :id AND status = "paid"'
+    )->execute(array(':id' => $invoiceId));
+    $sid = (int) $old['subscriber_id'];
+    log_invoice_accounts(
+        $pdo,
+        $sid,
+        $invoiceId,
+        'unpay',
+        'إلغاء تسديد دين #' . $invoiceId,
+        'الشهر: ' . $old['month_label'] . "\nالمبلغ الراجع للدين: " . $old['amount']
+        . "\nالربح السابق: " . (isset($old['profit']) ? $old['profit'] : 0)
+    );
+    return array(true, 'تم إرجاع الفاتورة لغير مسدد', $sid);
+}
+
+/**
+ * تعديل إجمالي الديون غير المسددة لمشترك (من الجدول).
+ * يرجع array($ok, $message, $newTotal)
+ */
+function apply_subscriber_unpaid_total_update($pdo, $subscriberId, $newAmount)
+{
+    if (function_exists('user_can_edit_debts') && !user_can_edit_debts()) {
+        return array(false, debt_edit_denied_message(), 0);
+    }
+    $subscriberId = (int) $subscriberId;
+    $newAmount = (float) $newAmount;
+    if ($subscriberId <= 0) {
+        return array(false, 'مشترك غير صالح', 0);
+    }
+    if ($newAmount <= 0) {
+        return array(false, 'مبلغ غير صالح', 0);
+    }
+    $newAmount = round($newAmount);
+    if ($newAmount <= 0) {
+        return array(false, 'مبلغ غير صالح', 0);
+    }
+
+    $st = $pdo->prepare(
+        'SELECT * FROM invoices WHERE subscriber_id = :sid AND status = "unpaid" ORDER BY id ASC'
+    );
+    $st->execute(array(':sid' => $subscriberId));
+    $rows = $st->fetchAll();
+    $oldTotal = 0.0;
+    foreach ($rows as $r) {
+        $oldTotal += (float) $r['amount'];
+    }
+
+    if (!$rows) {
+        $ins = $pdo->prepare(
+            'INSERT INTO invoices
+                (subscription_id, subscriber_id, month_label, amount, cost_price, due_date, status, notes)
+             VALUES
+                (NULL, :sid, :month, :amount, 0, :due, "unpaid", :notes)'
+        );
+        $ins->execute(array(
+            ':sid' => $subscriberId,
+            ':month' => date('Y-m'),
+            ':amount' => $newAmount,
+            ':due' => date('Y-m-d'),
+            ':notes' => 'تعديل من الجدول',
+        ));
+        $newId = (int) $pdo->lastInsertId();
+        if (function_exists('log_invoice_accounts')) {
+            log_invoice_accounts(
+                $pdo,
+                $subscriberId,
+                $newId,
+                'create',
+                'إضافة دين من الجدول #' . $newId,
+                'المبلغ: ' . $newAmount
+            );
+        }
+        return array(true, 'تم إضافة الدين', $newAmount);
+    }
+
+    if (count($rows) === 1) {
+        list($ok, $msg) = apply_unpaid_invoice_update(
+            $pdo,
+            (int) $rows[0]['id'],
+            $subscriberId,
+            array('amount' => $newAmount)
+        );
+        $total = function_exists('subscriber_unpaid_total')
+            ? subscriber_unpaid_total($pdo, $subscriberId)
+            : $newAmount;
+        return array($ok, $msg, $total);
+    }
+
+    $n = count($rows);
+    $allocated = 0.0;
+    $upd = $pdo->prepare(
+        'UPDATE invoices
+         SET amount = :amount, cost_price = :cost, profit = 0
+         WHERE id = :id AND subscriber_id = :sid AND status = "unpaid"'
+    );
+    foreach ($rows as $i => $r) {
+        if ($i === ($n - 1)) {
+            $amt = $newAmount - $allocated;
+            if ($amt < 1) {
+                $amt = 1;
+            }
+        } else {
+            $share = $oldTotal > 0 ? (((float) $r['amount'] / $oldTotal) * $newAmount) : 0;
+            $amt = round($share);
+            if ($amt < 1) {
+                $amt = 1;
+            }
+            if (($allocated + $amt) >= $newAmount) {
+                $amt = 1;
+            }
+        }
+        $allocated += $amt;
+        $newCost = invoice_scaled_cost(
+            $r['amount'],
+            isset($r['cost_price']) ? $r['cost_price'] : 0,
+            $amt
+        );
+        $upd->execute(array(
+            ':amount' => $amt,
+            ':cost' => $newCost,
+            ':id' => (int) $r['id'],
+            ':sid' => $subscriberId,
+        ));
+    }
+
+    if (function_exists('log_invoice_accounts')) {
+        log_invoice_accounts(
+            $pdo,
+            $subscriberId,
+            (int) $rows[0]['id'],
+            'update',
+            'تعديل إجمالي الدين من الجدول',
+            'من: ' . $oldTotal . "\nإلى: " . $newAmount . "\nعدد الفواتير: " . $n
+        );
+    }
+    $total = function_exists('subscriber_unpaid_total')
+        ? subscriber_unpaid_total($pdo, $subscriberId)
+        : $newAmount;
+    return array(true, 'تم تعديل الدين', $total);
+}
+
+function debt_amount_cell_html($debt, $config, $lang, $opts)
+{
+    $canEdit = !empty($opts['can_edit']);
+    $subId = isset($opts['subscriber_id']) ? (int) $opts['subscriber_id'] : 0;
+    $username = isset($opts['username']) ? (string) $opts['username'] : '';
+    $href = isset($opts['href']) ? (string) $opts['href'] : '';
+    $currency = isset($config['currency']) ? $config['currency'] : 'IQD';
+    $txt = function_exists('money_format_iqd')
+        ? money_format_iqd($debt, $currency)
+        : (string) (int) round((float) $debt);
+    $raw = (string) (int) round((float) $debt);
+    $cls = ((float) $debt > 0) ? 'debt-amt debt-due' : 'debt-amt debt-zero';
+    if ($canEdit) {
+        $tip = $lang === 'en' ? 'Click to edit debt' : 'اضغط لتعديل الدين';
+        return '<button type="button" class="' . $cls . ' debt-edit-btn"'
+            . ' data-sub="' . $subId . '"'
+            . ' data-username="' . e($username) . '"'
+            . ' data-amount="' . e($raw) . '"'
+            . ' title="' . e($tip) . '">' . e($txt) . '</button>';
+    }
+    if ($href !== '') {
+        $tip = $lang === 'en' ? 'Open debts' : 'فتح الديون';
+        return '<a class="' . $cls . '" href="' . e($href) . '" title="' . e($tip) . '">' . e($txt) . '</a>';
+    }
+    return '<span class="' . $cls . '">' . e($txt) . '</span>';
 }
