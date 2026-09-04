@@ -1479,6 +1479,163 @@ function sas_notify_plus_day_whatsapp($pdo, $config, $username, $endTs = 0)
         : 'فشل إرسال واتساب';
 }
 
+function sas_unwrap_user_row($got)
+{
+    if (!is_array($got) || (function_exists('sas_response_is_error') && sas_response_is_error($got))) {
+        return null;
+    }
+    if (isset($got['username']) && !is_array($got['username'])) {
+        return $got;
+    }
+    if (isset($got['expiration']) || isset($got['expire_at']) || isset($got['expiry'])) {
+        return $got;
+    }
+    foreach (array('data', 'user', 'record', 'result') as $k) {
+        if (!isset($got[$k]) || !is_array($got[$k])) {
+            continue;
+        }
+        $inner = sas_unwrap_user_row($got[$k]);
+        if ($inner) {
+            return $inner;
+        }
+    }
+    if (isset($got[0]) && is_array($got[0])) {
+        return sas_unwrap_user_row($got[0]);
+    }
+    if (!empty($got['id']) && is_numeric($got['id'])) {
+        return $got;
+    }
+    return null;
+}
+
+function sas_live_user_row($api, $username, $sasUserId = 0)
+{
+    $found = null;
+    $sasUserId = (int) $sasUserId;
+    if ($sasUserId > 0 && $api && method_exists($api, 'getUserById')) {
+        $found = sas_unwrap_user_row($api->getUserById($sasUserId));
+    }
+    if (!$found && $username !== '' && $api && method_exists($api, 'findUserByUsername')) {
+        $found = sas_unwrap_user_row($api->findUserByUsername($username));
+    }
+    return is_array($found) ? $found : null;
+}
+
+function sas_row_expire_ts($row)
+{
+    if (!is_array($row)) {
+        return 0;
+    }
+    $sql = function_exists('sas_cache_expire_at') ? sas_cache_expire_at($row) : null;
+    if (!$sql) {
+        return 0;
+    }
+    $ts = strtotime((string) $sql);
+    return $ts ? (int) $ts : 0;
+}
+
+function sas_activate_may_force_expire($res)
+{
+    if (!is_array($res)) {
+        return true;
+    }
+    if (!empty($res['__auth_error'])) {
+        return false;
+    }
+    $msg = '';
+    if (function_exists('sas_response_message')) {
+        $msg = strtolower(sas_response_message($res));
+    } elseif (isset($res['message'])) {
+        $msg = strtolower((string) $res['message']);
+    }
+    if ($msg === '') {
+        return true;
+    }
+    $block = array(
+        'insufficient', 'not enough', 'no balance', 'no credit',
+        'permission', 'forbidden', 'unauthorized',
+        'ماكو رصيد', 'رصيد غير', 'غير كاف', 'ماكو صلاح',
+    );
+    foreach ($block as $n) {
+        if (strpos($msg, $n) !== false) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function sas_activation_took_effect($beforeTs, $afterRow)
+{
+    $afterTs = sas_row_expire_ts($afterRow);
+    if ($afterTs <= 0) {
+        return false;
+    }
+    $beforeTs = (int) $beforeTs;
+    if ($beforeTs <= 0) {
+        return $afterTs > (time() - 3600);
+    }
+    return ($afterTs - $beforeTs) >= (8 * 3600);
+}
+
+function sas_next_expire_sql($beforeTs, $units, $config)
+{
+    $units = max(1, (int) $units);
+    $beforeTs = (int) $beforeTs;
+    $startTs = ($beforeTs > time()) ? $beforeTs : time();
+    $startDate = date('Y-m-d', $startTs);
+    $endDate = $startDate;
+    $i = 0;
+    while ($i < $units) {
+        if (function_exists('subscription_period_end')) {
+            $endDate = subscription_period_end($endDate, $config);
+        } else {
+            $endDate = date('Y-m-d', strtotime($endDate . ' +30 days'));
+        }
+        $i++;
+    }
+    $tod = date('H:i:s', $startTs);
+    if ($tod === '00:00:00') {
+        $tod = date('H:i:s');
+    }
+    return $endDate . ' ' . $tod;
+}
+
+function sas_force_activation_expire($api, $username, $sasUserId, $beforeTs, $profileId, $units, $config)
+{
+    $sasUserId = (int) $sasUserId;
+    if ($sasUserId <= 0 && $api && method_exists($api, 'findUserByUsername')) {
+        $found = $api->findUserByUsername($username);
+        if (function_exists('sas_extract_user_id')) {
+            $sasUserId = sas_extract_user_id($found);
+        } elseif (is_array($found) && !empty($found['id'])) {
+            $sasUserId = (int) $found['id'];
+        }
+    }
+    if ($sasUserId <= 0 || !$api || !method_exists($api, 'setUserExpiration')) {
+        return array(false, null);
+    }
+    $expireSql = sas_next_expire_sql($beforeTs, $units, $config);
+    $api->setUserExpiration($sasUserId, $expireSql, (int) $profileId);
+    return sas_confirm_live_activation($api, $username, $sasUserId, $beforeTs);
+}
+
+function sas_confirm_live_activation($api, $username, $sasUserId, $beforeTs)
+{
+    $after = null;
+    $try = 0;
+    while ($try < 3) {
+        if ($try > 0) {
+            usleep(400000);
+        }
+        $after = sas_live_user_row($api, $username, $sasUserId);
+        if (sas_activation_took_effect($beforeTs, $after)) {
+            return array(true, $after);
+        }
+        $try++;
+    }
+    return array(false, $after);
+}
+
 function sas_finish_local_activation($pdo, $config, $username, $fields, $okMsg)
 {
     $payMode = (isset($fields['pay_mode']) && $fields['pay_mode'] === 'credit') ? 'credit' : 'cash';
@@ -1834,11 +1991,40 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
         if ($units <= 0) {
             $units = 1;
         }
-        $res = $api->activateUserCredit($username, $profileId, $units);
-        if (function_exists('sas_response_success') && !sas_response_success($res)) {
-            return array(false, 'SAS: ' . (function_exists('sas_response_message') ? sas_response_message($res) : 'فشل التفعيل بالرصيد'), array());
+        $beforeTs = ($cache && !empty($cache['expire_at'])) ? strtotime((string) $cache['expire_at']) : 0;
+        if ($beforeTs <= 0) {
+            $beforeTs = sas_row_expire_ts(sas_live_user_row($api, $username, $sasUserId));
         }
-        sas_cache_refresh_one($pdo, $config, $username, $sasUserId);
+        $res = $api->activateUserCredit($username, $profileId, $units, $sasUserId);
+        if (is_array($res) && !empty($res['__auth_error'])) {
+            return array(false, 'SAS: ' . (function_exists('sas_response_message') ? sas_response_message($res) : 'فشل الدخول'), array());
+        }
+        list($confirmed, $afterRow) = sas_confirm_live_activation($api, $username, $sasUserId, $beforeTs);
+        if (!$confirmed && sas_activate_may_force_expire($res)) {
+            list($confirmed, $afterRow) = sas_force_activation_expire(
+                $api,
+                $username,
+                $sasUserId,
+                $beforeTs,
+                $profileId,
+                $units,
+                $config
+            );
+        }
+        if (!$confirmed) {
+            $afterSql = $afterRow ? sas_cache_expire_at($afterRow) : '';
+            $beforeSql = $beforeTs > 0 ? date('Y-m-d H:i', $beforeTs) : '-';
+            return array(
+                false,
+                'الساس ما فعّل المشترك (التاريخ ما تغير: ' . $beforeSql . ' → ' . ($afterSql ? $afterSql : '-') . '). ما تم تسجيل المبلغ.',
+                array()
+            );
+        }
+        if ($afterRow) {
+            sas_cache_upsert_row($pdo, $afterRow);
+        } else {
+            sas_cache_refresh_one($pdo, $config, $username, $sasUserId);
+        }
         sas_clear_unused_card_cache();
         $okMsg = 'تم التفعيل بالرصيد على الساس';
         $okMsg = sas_finish_local_activation($pdo, $config, $username, $fields, $okMsg);
@@ -1851,13 +2037,52 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
         if ($pin === '' && $cardId <= 0) {
             return array(false, 'اختر كرت غير مستخدم', array());
         }
-        $res = $api->activateUserCard($username, $pin !== '' ? $pin : (string) $cardId, $sasUserId, $cardId);
-        if (function_exists('sas_response_success') && !sas_response_success($res)) {
-            return array(false, 'SAS: ' . (function_exists('sas_response_message') ? sas_response_message($res) : 'فشل التفعيل بالكرت'), array());
+        $profileId = isset($fields['profile_id']) ? (int) $fields['profile_id'] : 0;
+        $beforeTs = ($cache && !empty($cache['expire_at'])) ? strtotime((string) $cache['expire_at']) : 0;
+        if ($beforeTs <= 0) {
+            $beforeTs = sas_row_expire_ts(sas_live_user_row($api, $username, $sasUserId));
         }
-        sas_cache_refresh_one($pdo, $config, $username, $sasUserId);
+        $res = $api->activateUserCard(
+            $username,
+            $pin !== '' ? $pin : (string) $cardId,
+            $sasUserId,
+            $cardId,
+            $profileId
+        );
+        if (is_array($res) && !empty($res['__auth_error'])) {
+            return array(false, 'SAS: ' . (function_exists('sas_response_message') ? sas_response_message($res) : 'فشل الدخول'), array());
+        }
+        list($confirmed, $afterRow) = sas_confirm_live_activation($api, $username, $sasUserId, $beforeTs);
+        if (!$confirmed && sas_activate_may_force_expire($res)) {
+            list($confirmed, $afterRow) = sas_force_activation_expire(
+                $api,
+                $username,
+                $sasUserId,
+                $beforeTs,
+                $profileId,
+                1,
+                $config
+            );
+        }
+        if (!$confirmed) {
+            $afterSql = $afterRow ? sas_cache_expire_at($afterRow) : '';
+            $beforeSql = $beforeTs > 0 ? date('Y-m-d H:i', $beforeTs) : '-';
+            return array(
+                false,
+                'الساس ما فعّل المشترك (التاريخ ما تغير: ' . $beforeSql . ' → ' . ($afterSql ? $afterSql : '-') . '). ما تم تسجيل المبلغ.',
+                array()
+            );
+        }
+        if ($afterRow) {
+            sas_cache_upsert_row($pdo, $afterRow);
+        } else {
+            sas_cache_refresh_one($pdo, $config, $username, $sasUserId);
+        }
         sas_clear_unused_card_cache();
         $okMsg = 'تم التفعيل بالكرت على الساس';
+        if (isset($res['_via']) && strpos((string) $res['_via'], 'credit') !== false) {
+            $okMsg = 'تم التفعيل برصيد المدير — مسار الكرت غير متوفر على هذا الساس';
+        }
         $okMsg = sas_finish_local_activation($pdo, $config, $username, $fields, $okMsg);
         return array(true, $okMsg, array());
     }

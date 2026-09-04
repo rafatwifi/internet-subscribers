@@ -388,19 +388,130 @@ class SASConnector
         return $this->parseApiResponse($this->post('user', $payload, true));
     }
 
-    public function activateUserCredit($username, $profileId, $units = 1)
+    public function activateUserCredit($username, $profileId, $units = 1, $userId = 0)
     {
         if (!$this->token && !$this->login()) {
             return array('__auth_error' => true, 'message' => 'SAS login failed');
         }
 
-        $payload = array(
-            'username' => (string) $username,
-            'profile_id' => (int) $profileId,
-            'units' => max(1, (int) $units),
+        $username = (string) $username;
+        $profileId = (int) $profileId;
+        $units = max(1, (int) $units);
+        $userId = (int) $userId;
+        if ($userId <= 0) {
+            $userId = $this->connectorUserId($this->findUserByUsername($username));
+        }
+
+        $beforeTs = $this->liveExpireTs($userId, $username);
+        if ($userId > 0 && method_exists($this, 'getActivationData')) {
+            $this->getActivationData($userId);
+        }
+        $payloads = array();
+        if ($userId > 0) {
+            $payloads[] = array(
+                'id' => $userId,
+                'user_id' => $userId,
+                'username' => $username,
+                'profile_id' => $profileId,
+                'units' => $units,
+                'from_expiration' => 0,
+                'method' => 'credit',
+            );
+            $payloads[] = array(
+                'id' => $userId,
+                'user_id' => $userId,
+                'username' => $username,
+                'profile_id' => $profileId,
+                'units' => $units,
+                'from_expiration' => 1,
+                'from_expire' => 1,
+                'method' => 'credit',
+            );
+            $payloads[] = array(
+                'id' => $userId,
+                'user_id' => $userId,
+                'username' => $username,
+                'profile_id' => $profileId,
+                'units' => $units,
+                'from_expiration' => 1,
+                'method' => 'manager_balance',
+            );
+            $payloads[] = array(
+                'id' => $userId,
+                'user_id' => $userId,
+                'username' => $username,
+                'profile_id' => $profileId,
+                'units' => $units,
+            );
+            $payloads[] = array(
+                'user_id' => $userId,
+                'profile_id' => $profileId,
+                'units' => $units,
+                'from_expiration' => 1,
+            );
+            $payloads[] = array(
+                'id' => $userId,
+                'profile_id' => $profileId,
+                'units' => $units,
+            );
+        }
+        $payloads[] = array(
+            'username' => $username,
+            'profile_id' => $profileId,
+            'units' => $units,
+            'from_expiration' => 1,
+        );
+        $payloads[] = array(
+            'username' => $username,
+            'profile_id' => $profileId,
+            'units' => $units,
         );
 
-        return $this->parseApiResponse($this->post('user/activate/credit', $payload, true));
+        $routes = array(
+            'user/activate/credit',
+            'user/activate/managerBalance',
+            'user/activate/manager_balance',
+            'user/renew',
+            'user/purchase',
+        );
+        if ($userId > 0) {
+            $routes[] = 'user/' . $userId . '/activate/credit';
+            $routes[] = 'user/' . $userId . '/renew';
+        }
+
+        $last = array();
+        foreach ($routes as $route) {
+            foreach ($payloads as $payload) {
+                $last = $this->postActivate($route, $payload);
+                if ($this->isRouteMissing($last) || $this->isMethodNotAllowed($last)) {
+                    break;
+                }
+                if ($this->isHardActivateFail($last)) {
+                    return $last;
+                }
+                if ($this->isActivateOk($last)) {
+                    $afterTs = $this->liveExpireTs($userId, $username);
+                    if ($this->expireMoved($beforeTs, $afterTs)) {
+                        $last['_verified'] = 1;
+                        return $last;
+                    }
+                    continue;
+                }
+                $msg = isset($last['message']) ? strtolower((string) $last['message']) : '';
+                if ($msg !== '' && strpos($msg, 'missing') === false && strpos($msg, 'required') === false
+                    && strpos($msg, 'ناقص') === false) {
+                    continue;
+                }
+            }
+        }
+        if (!is_array($last) || count($last) === 0) {
+            $last = array();
+        }
+        $last['success'] = false;
+        $hint = isset($last['message']) ? trim((string) $last['message']) : '';
+        $last['message'] = ($hint !== '' ? ($hint . ' — ') : '')
+            . 'الساس ما غيّر تاريخ الانتهاء بعد طلب التفعيل';
+        return $last;
     }
 
     public function setTimeout($seconds)
@@ -750,6 +861,105 @@ class SASConnector
             }
         }
         return $last;
+    }
+
+    public function setUserExpiration($userId, $expireSql, $profileId = 0)
+    {
+        $userId = (int) $userId;
+        $expireSql = trim((string) $expireSql);
+        $profileId = (int) $profileId;
+        if ($userId <= 0 || $expireSql === '') {
+            return array('success' => false, 'message' => 'ماكو تاريخ تفعيل');
+        }
+        $beforeTs = $this->liveExpireTs($userId, '');
+        $wantTs = strtotime($expireSql);
+        $dateOnly = substr($expireSql, 0, 10);
+        $ts = $wantTs ? $wantTs : 0;
+        $payloads = array(
+            array(
+                'id' => $userId,
+                'user_id' => $userId,
+                'expiration' => $expireSql,
+                'enabled' => 1,
+            ),
+            array(
+                'id' => $userId,
+                'user_id' => $userId,
+                'expiration' => $dateOnly,
+                'enabled' => 1,
+            ),
+            array(
+                'id' => $userId,
+                'expiration' => $expireSql,
+                'expire_at' => $expireSql,
+                'expiry' => $expireSql,
+                'expiration_date' => $dateOnly,
+                'acctexpiration' => $expireSql,
+                'enabled' => 1,
+            ),
+        );
+        if ($ts) {
+            $payloads[] = array(
+                'id' => $userId,
+                'user_id' => $userId,
+                'expiration' => $ts,
+                'enabled' => 1,
+            );
+        }
+        if ($profileId > 0) {
+            $withProfile = array();
+            foreach ($payloads as $p) {
+                $p['profile_id'] = $profileId;
+                $withProfile[] = $p;
+            }
+            $payloads = array_merge($withProfile, $payloads);
+        }
+        $routes = array(
+            array('user/' . $userId, 'PUT'),
+            array('user/' . $userId, 'PATCH'),
+            array('user/update', 'POST'),
+            array('user/' . $userId . '/expiration', 'PUT'),
+            array('user/expiration', 'POST'),
+            array('user/changeExpiration', 'POST'),
+            array('user/setExpiration', 'POST'),
+        );
+        $last = array();
+        foreach ($routes as $t) {
+            foreach ($payloads as $payload) {
+                $last = $this->parseApiResponse($this->post($t[0], $payload, true, $t[1]));
+                if ($this->isRouteMissing($last) || $this->isMethodNotAllowed($last)) {
+                    break;
+                }
+                $afterTs = $this->liveExpireTs($userId, '');
+                if ($this->expireMoved($beforeTs, $afterTs)
+                    || ($wantTs && $afterTs > 0 && abs($afterTs - $wantTs) < 120)) {
+                    if (!is_array($last)) {
+                        $last = array();
+                    }
+                    $last['_verified'] = 1;
+                    return $last;
+                }
+            }
+        }
+        $merged = $this->updateUser($userId, array(
+            'expiration' => $expireSql,
+            'enabled' => 1,
+            'profile_id' => $profileId,
+        ));
+        $afterTs = $this->liveExpireTs($userId, '');
+        if ($this->expireMoved($beforeTs, $afterTs)
+            || ($wantTs && $afterTs > 0 && abs($afterTs - $wantTs) < 120)) {
+            if (!is_array($merged)) {
+                $merged = array();
+            }
+            $merged['_verified'] = 1;
+            return $merged;
+        }
+        return array(
+            'success' => false,
+            'message' => 'تعديل تاريخ الانتهاء بالساس ما نجح',
+            'status' => -1,
+        );
     }
 
     public function renameUser($userId, $oldUsername, $newUsername)
@@ -1516,29 +1726,212 @@ class SASConnector
         return is_array($rows) ? $rows : array();
     }
 
-    public function activateUserCard($username, $pin, $userId = 0, $cardId = 0)
+    public function activateUserCard($username, $pin, $userId = 0, $cardId = 0, $profileId = 0)
     {
         if (!$this->token && !$this->login()) {
             return array('__auth_error' => true, 'message' => 'SAS login failed');
         }
         $pin = trim((string) $pin);
         $username = trim((string) $username);
+        $userId = (int) $userId;
         $cardId = (int) $cardId;
-        $tries = array(
-            array('user/activate/card', array('username' => $username, 'pin' => $pin, 'serial' => $pin)),
-            array('user/activate/pin', array('username' => $username, 'pin' => $pin)),
-            array('user/activate/card', array('user_id' => (int) $userId, 'card_id' => ($cardId > 0 ? $cardId : $pin), 'pin' => $pin)),
-        );
-        if ($cardId > 0) {
-            $tries[] = array('user/activate/card', array('username' => $username, 'card_id' => $cardId, 'pin' => $pin));
+        $profileId = (int) $profileId;
+        if ($pin === '' && $cardId > 0) {
+            $pin = (string) $cardId;
         }
+        if ($pin === '') {
+            return array('message' => 'ماكو رقم كرت', 'status' => -1);
+        }
+
+        $beforeTs = $this->liveExpireTs($userId, $username);
+        $cardPayloads = array();
+        if ($userId > 0) {
+            $cardPayloads[] = array('id' => $userId, 'pin' => $pin);
+            $cardPayloads[] = array('id' => $userId, 'user_id' => $userId, 'pin' => $pin, 'username' => $username);
+            $cardPayloads[] = array('user_id' => $userId, 'pin' => $pin, 'username' => $username);
+        }
+        $cardPayloads[] = array('username' => $username, 'pin' => $pin);
+        $cardPayloads[] = array('username' => $username, 'pin' => $pin, 'serial' => $pin, 'voucher' => $pin);
+        if ($cardId > 0) {
+            $cardPayloads[] = array('username' => $username, 'card_id' => $cardId, 'pin' => $pin);
+        }
+        if ($profileId > 0) {
+            $withProfile = array();
+            foreach ($cardPayloads as $p) {
+                $p['profile_id'] = $profileId;
+                $p['units'] = 1;
+                $withProfile[] = $p;
+            }
+            $cardPayloads = array_merge($withProfile, $cardPayloads);
+        }
+
+        $genericPayloads = array(
+            array(
+                'username' => $username,
+                'pin' => $pin,
+                'method' => 'card',
+                'profile_id' => $profileId,
+                'units' => 1,
+            ),
+            array(
+                'username' => $username,
+                'pin' => $pin,
+                'method' => 'voucher',
+                'profile_id' => $profileId,
+                'units' => 1,
+            ),
+        );
+        if ($userId > 0) {
+            $genericPayloads[] = array(
+                'id' => $userId,
+                'user_id' => $userId,
+                'pin' => $pin,
+                'method' => 'card',
+                'profile_id' => $profileId,
+                'units' => 1,
+            );
+        }
+
+        $refillPayloads = array(
+            array('username' => $username, 'pin' => $pin),
+            array('username' => $username, 'pin' => $pin, 'serial' => $pin),
+        );
+        if ($userId > 0) {
+            $refillPayloads[] = array('user_id' => $userId, 'pin' => $pin, 'username' => $username);
+        }
+
+        $groups = array(
+            array(
+                'routes' => array(
+                    'user/activate/pin',
+                    'user/activate/voucher',
+                    'user/activateCard',
+                    'user/activate/card',
+                ),
+                'payloads' => $cardPayloads,
+                'kind' => 'activate',
+            ),
+            array(
+                'routes' => array('user/activate'),
+                'payloads' => $genericPayloads,
+                'kind' => 'activate',
+            ),
+            array(
+                'routes' => array(
+                    'user/useCard',
+                    'user/usePin',
+                    'user/refill',
+                    'user/redeem',
+                    'user/redeemVoucher',
+                    'card/use',
+                    'card/redeem',
+                ),
+                'payloads' => $refillPayloads,
+                'kind' => 'refill',
+            ),
+        );
+
+        $oldTimeout = $this->timeout;
+        $this->setTimeout(10);
+
         $last = array();
-        foreach ($tries as $t) {
-            $last = $this->parseApiResponse($this->post($t[0], $t[1], true));
-            if ($this->isActivateOk($last)) {
-                return $last;
+        $lastBusiness = null;
+        $refillOk = null;
+
+        foreach ($groups as $group) {
+            foreach ($group['routes'] as $route) {
+                foreach ($group['payloads'] as $payload) {
+                    $last = $this->postActivate($route, $payload);
+                    if ($this->isActivateOk($last)) {
+                        $afterTs = $this->liveExpireTs($userId, $username);
+                        if ($this->expireMoved($beforeTs, $afterTs)) {
+                            $this->setTimeout($oldTimeout);
+                            $last['_verified'] = 1;
+                            return $last;
+                        }
+                        if ($group['kind'] === 'refill') {
+                            $refillOk = $last;
+                            break 3;
+                        }
+                        continue;
+                    }
+                    if ($this->isRouteMissing($last)) {
+                        break;
+                    }
+                    $lastBusiness = $last;
+                    $msg = isset($last['message']) ? strtolower((string) $last['message']) : '';
+                    if (strpos($msg, 'missing') === false && strpos($msg, 'required') === false
+                        && strpos($msg, 'ناقص') === false) {
+                        break;
+                    }
+                }
             }
         }
+
+        if (is_array($refillOk)) {
+            $balPayloads = array(
+                array('username' => $username, 'profile_id' => $profileId, 'units' => 1, 'pin' => $pin),
+            );
+            if ($userId > 0) {
+                $balPayloads[] = array(
+                    'user_id' => $userId,
+                    'username' => $username,
+                    'profile_id' => $profileId,
+                    'units' => 1,
+                );
+            }
+            foreach (array('user/activate/userBalance', 'user/activate/user_balance', 'user/activate/balance') as $broute) {
+                foreach ($balPayloads as $bp) {
+                    $last = $this->postActivate($broute, $bp);
+                    if ($this->isActivateOk($last)) {
+                        $afterTs = $this->liveExpireTs($userId, $username);
+                        if ($this->expireMoved($beforeTs, $afterTs)) {
+                            $this->setTimeout($oldTimeout);
+                            $last['_verified'] = 1;
+                            return $last;
+                        }
+                    }
+                    if ($this->isRouteMissing($last)) {
+                        break;
+                    }
+                    $lastBusiness = $last;
+                }
+            }
+            $this->setTimeout($oldTimeout);
+            if ($profileId > 0) {
+                $credit = $this->activateUserCredit($username, $profileId, 1, $userId);
+                if ($this->isActivateOk($credit)) {
+                    $credit['_via'] = 'credit_after_refill';
+                    return $credit;
+                }
+            }
+            return array(
+                'success' => false,
+                'status' => -1,
+                'message' => 'الكرت انشحن أو انقبل، لكن تفعيل الاشتراك على الساس ما اكتمل. ما تم تسجيل المبلغ.',
+            );
+        }
+
+        $this->setTimeout($oldTimeout);
+        if ($profileId > 0) {
+            $credit = $this->activateUserCredit($username, $profileId, 1, $userId);
+            if ($this->isActivateOk($credit)) {
+                $credit['_via'] = 'credit_fallback';
+                return $credit;
+            }
+            if (is_array($credit) && !$this->isRouteMissing($credit)) {
+                return $credit;
+            }
+        }
+        if (is_array($lastBusiness)) {
+            return $lastBusiness;
+        }
+        if (!is_array($last)) {
+            $last = array();
+        }
+        $hint = isset($last['message']) ? trim((string) $last['message']) : '';
+        $last['message'] = ($hint !== '' ? ($hint . ' — ') : '')
+            . 'ماكو مسار تفعيل كرت على هذا الساس، وتفعيل رصيد المدير فشل أيضاً.';
         return $last;
     }
 
@@ -1605,9 +1998,54 @@ class SASConnector
         return '';
     }
 
-    private function isActivateOk($res)
+    private function isMethodNotAllowed($res)
     {
         if (!is_array($res)) {
+            return false;
+        }
+        $st = isset($res['status']) ? (int) $res['status'] : 0;
+        if ($st === 405) {
+            return true;
+        }
+        $msg = isset($res['message']) ? strtolower((string) $res['message']) : '';
+        if ($msg === '') {
+            return false;
+        }
+        return (strpos($msg, 'method is not supported') !== false
+            || strpos($msg, 'supported methods') !== false
+            || strpos($msg, 'method not allowed') !== false);
+    }
+
+    private function postActivate($route, $payload)
+    {
+        $payload = is_array($payload) ? $payload : array();
+        $last = $this->parseApiResponse($this->post($route, $payload, true, 'POST'));
+        if ($this->isActivateOk($last) || !$this->isMethodNotAllowed($last)) {
+            return $last;
+        }
+        foreach (array('PUT', 'PATCH') as $m) {
+            $last = $this->parseApiResponse($this->post($route, $payload, true, $m));
+            if ($this->isActivateOk($last) || !$this->isMethodNotAllowed($last)) {
+                return $last;
+            }
+        }
+        return $this->parseApiResponse(
+            $this->post($route, array_merge($payload, array('_method' => 'PUT')), true, 'POST')
+        );
+    }
+
+    private function isRouteMissing($res)
+    {
+        if (!is_array($res) || empty($res['__http_error'])) {
+            return false;
+        }
+        $st = isset($res['status']) ? (int) $res['status'] : 0;
+        return ($st === 404 || $st === 405);
+    }
+
+    private function isActivateOk($res)
+    {
+        if (!is_array($res) || count($res) === 0) {
             return false;
         }
         if (isset($res['__http_error']) || isset($res['__exception']) || isset($res['__auth_error'])
@@ -1628,7 +2066,99 @@ class SASConnector
                 return false;
             }
         }
+        $msg = isset($res['message']) ? strtolower((string) $res['message']) : '';
+        if ($msg !== '' && $this->isHardActivateFail($res)) {
+            return false;
+        }
         return true;
+    }
+
+    private function isHardActivateFail($res)
+    {
+        if (!is_array($res)) {
+            return false;
+        }
+        $msg = isset($res['message']) ? strtolower((string) $res['message']) : '';
+        if ($msg === '') {
+            return false;
+        }
+        $needles = array(
+            'insufficient', 'not enough', 'no balance', 'no credit',
+            'permission', 'forbidden', 'unauthorized',
+            'ماكو رصيد', 'رصيد غير', 'غير كاف', 'ماكو صلاح',
+        );
+        foreach ($needles as $n) {
+            if (strpos($msg, $n) !== false) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private function connectorUserId($row)
+    {
+        if (function_exists('sas_extract_user_id')) {
+            return (int) sas_extract_user_id($row);
+        }
+        if (!is_array($row)) {
+            return 0;
+        }
+        foreach (array('id', 'user_id', 'userid', 'userId') as $k) {
+            if (isset($row[$k]) && is_numeric($row[$k]) && (int) $row[$k] > 0) {
+                return (int) $row[$k];
+            }
+        }
+        return 0;
+    }
+
+    private function expireTsFromRow($row)
+    {
+        if (function_exists('sas_unwrap_user_row')) {
+            $inner = sas_unwrap_user_row($row);
+            if (is_array($inner)) {
+                $row = $inner;
+            }
+        }
+        if (function_exists('sas_row_expire_ts')) {
+            return (int) sas_row_expire_ts($row);
+        }
+        if (function_exists('sas_cache_expire_at')) {
+            $sql = sas_cache_expire_at($row);
+            if ($sql) {
+                $ts = strtotime((string) $sql);
+                return $ts ? (int) $ts : 0;
+            }
+        }
+        return 0;
+    }
+
+    private function liveExpireTs($userId, $username)
+    {
+        $userId = (int) $userId;
+        if ($userId > 0) {
+            $ts = $this->expireTsFromRow($this->getUserById($userId));
+            if ($ts > 0) {
+                return $ts;
+            }
+        }
+        $username = trim((string) $username);
+        if ($username !== '') {
+            return $this->expireTsFromRow($this->findUserByUsername($username));
+        }
+        return 0;
+    }
+
+    private function expireMoved($beforeTs, $afterTs)
+    {
+        $afterTs = (int) $afterTs;
+        if ($afterTs <= 0) {
+            return false;
+        }
+        $beforeTs = (int) $beforeTs;
+        if ($beforeTs <= 0) {
+            return $afterTs > (time() - 3600);
+        }
+        return ($afterTs - $beforeTs) >= (8 * 3600);
     }
 
     public function findUserByUsername($username)
@@ -1787,6 +2317,10 @@ class SASConnector
         }
 
         if (isset($data['status']) && is_numeric($data['status']) && (int) $data['status'] !== 200) {
+            return $data;
+        }
+
+        if (isset($data['success']) && ($data['success'] === false || $data['success'] === 0 || $data['success'] === '0')) {
             return $data;
         }
 

@@ -1065,6 +1065,7 @@ render_header(t('sas'), 'sas', '');
 .sas-radius-page #sasActModal .sas-seg {
   display: flex;
   flex-direction: row;
+  flex-wrap: nowrap;
   align-items: stretch;
   width: 100%;
   box-sizing: border-box;
@@ -1082,6 +1083,8 @@ render_header(t('sas'), 'sas', '');
   min-width: 0;
   min-height: 0;
   font-size: inherit;
+  font-weight: inherit;
+  color: inherit;
   cursor: pointer;
 }
 .sas-radius-page #sasActModal .sas-seg-opt input {
@@ -1096,63 +1099,25 @@ render_header(t('sas'), 'sas', '');
   align-items: center;
   justify-content: center;
   width: 100%;
+  height: 36px;
   min-height: 36px;
   padding: 0 8px;
   border-radius: 8px;
   font-size: 13px;
   font-weight: 800;
-  color: #64748b;
-  background: transparent;
-  line-height: 1.2;
+  color: #475569;
   text-align: center;
-  transition: background .15s, color .15s, box-shadow .15s;
 }
 .sas-radius-page #sasActModal .sas-seg-opt input:checked + span {
   background: #fff;
   color: #0f172a;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, .12);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
 }
 .sas-radius-page #sasActModal .pay-mode-box {
-  margin: 0 0 8px;
-  padding: 8px;
-}
-.sas-radius-page #sasActModal .pay-mode-label {
-  margin-bottom: 6px;
-  font-size: 12px;
+  margin: 10px 0 8px;
 }
 .sas-radius-page #sasActModal .pay-mode-row {
-  display: flex !important;
-  flex-direction: row !important;
-  flex-wrap: nowrap !important;
-  align-items: stretch;
-  gap: 8px;
-  margin-top: 0;
-}
-.sas-radius-page #sasActModal .pay-mode-option {
-  flex: 1 1 0;
-  display: block !important;
-  margin: 0 !important;
-  min-width: 0;
-  min-height: 0;
-  width: auto !important;
-}
-.sas-radius-page #sasActModal .pay-mode-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  min-height: 58px;
-  height: 100%;
-  padding: 8px 6px;
-  gap: 2px;
-  box-sizing: border-box;
-  text-align: center;
-}
-.sas-radius-page #sasActModal .pay-mode-card strong { font-size: 15px; }
-.sas-radius-page #sasActModal .pay-mode-card small {
-  display: block;
-  font-size: 11px;
-  line-height: 1.3;
+  margin-top: 6px;
 }
 .sas-radius-page #sasActModal #sasActCardBox { margin: 0 0 8px; }
 .sas-radius-page #sasActModal #sasActCardBox select { margin-top: 0; }
@@ -1210,7 +1175,9 @@ render_header(t('sas'), 'sas', '');
   padding: 10px;
   overflow: hidden;
 }
+#sasActModal .ops-modal-card.sas-act-card,
 .sas-radius-page #sasActModal .ops-modal-card.sas-act-card {
+  position: relative;
   display: flex;
   flex-direction: column;
   max-width: 400px;
@@ -1221,6 +1188,44 @@ render_header(t('sas'), 'sas', '');
   overflow: hidden;
   box-sizing: border-box;
   border-radius: 14px;
+}
+#sasActLock {
+  display: none !important;
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 80;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: rgba(15, 23, 42, 0.55);
+  border-radius: inherit;
+  pointer-events: auto;
+}
+#sasActModal.is-locking #sasActLock {
+  display: flex !important;
+}
+#sasActModal.is-locking .sas-act-card > *:not(#sasActLock) {
+  pointer-events: none !important;
+}
+#sasActLock .sas-act-lock-spin {
+  width: 38px;
+  height: 38px;
+  border: 3px solid rgba(255,255,255,0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: sasActSpin .7s linear infinite;
+}
+#sasActLock .sas-act-lock-txt {
+  color: #fff;
+  font-size: 15px;
+  font-weight: 800;
+}
+@keyframes sasActSpin {
+  to { transform: rotate(360deg); }
 }
 .sas-radius-page #sasActModal .ops-modal-head {
   margin-bottom: 10px;
@@ -1240,14 +1245,80 @@ render_header(t('sas'), 'sas', '');
   border-top: 1px solid #e2e8f0;
   background: #fff;
 }
-.sas-radius-page #sasActModal .sas-act-foot .btn {
+.sas-radius-page #sasActModal .sas-act-foot .btn,
+.sas-radius-page #sasActModal #sasActSubmit {
   width: 100%;
   margin: 0;
   height: 42px;
   border-radius: 10px;
   font-weight: 800;
+  background: #2563eb;
+  color: #fff;
+  border: 0;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.22);
+  transition: background .12s ease, transform .12s ease, box-shadow .12s ease;
+}
+.sas-radius-page #sasActModal #sasActSubmit:hover:not(:disabled):not(.is-busy) {
+  background: #1d4ed8;
+}
+.sas-radius-page #sasActModal #sasActSubmit:active,
+.sas-radius-page #sasActModal #sasActSubmit.is-pressed,
+.sas-radius-page #sasActModal #sasActSubmit.is-busy,
+.sas-radius-page #sasActModal #sasActSubmit:disabled {
+  background: #15803d !important;
+  color: #fff !important;
+  opacity: 1;
+  transform: scale(0.985);
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.18);
 }
 .sas-radius-page #sasActModal .sas-modal-err:empty { display: none; margin: 0; }
+.sas-radius-page #sasActResultModal {
+  z-index: 120;
+}
+.sas-radius-page #sasActResultModal .sas-act-result-card {
+  width: min(400px, 100%);
+  text-align: center;
+  padding: 22px 20px 18px;
+}
+.sas-radius-page #sasActResultModal .sas-act-result-card.is-ok h3 { color: #166534; }
+.sas-radius-page #sasActResultModal .sas-act-result-card.is-error h3 { color: #b91c1c; }
+.sas-radius-page #sasActResultModal .sas-act-result-ico {
+  width: 52px;
+  height: 52px;
+  margin: 0 auto 10px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  font-weight: 800;
+  line-height: 1;
+}
+.sas-radius-page #sasActResultModal .sas-act-result-card.is-ok .sas-act-result-ico {
+  background: #dcfce7;
+  color: #166534;
+}
+.sas-radius-page #sasActResultModal .sas-act-result-card.is-error .sas-act-result-ico {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+.sas-radius-page #sasActResultModal h3 {
+  margin: 0 0 8px;
+  font-size: 20px;
+}
+.sas-radius-page #sasActResultModal p {
+  margin: 0 0 16px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #334155;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+.sas-radius-page #sasActResultModal .btn {
+  width: 100%;
+  height: 42px;
+  font-weight: 800;
+}
 .sas-radius-page #sasProfModal .ops-modal-card {
   max-width: 360px;
   width: calc(100% - 32px);
@@ -1264,6 +1335,15 @@ render_header(t('sas'), 'sas', '');
   .sas-radius-page #sasProfModal {
     padding: 8px;
     align-items: flex-end;
+  }
+  .sas-radius-page #sasActModal .sas-seg {
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
+  }
+  .sas-radius-page #sasActModal .sas-seg-opt span {
+    font-size: 12px;
+    height: 34px;
+    min-height: 34px;
   }
   .sas-radius-page #sasActModal .ops-modal-card.sas-act-card {
     max-width: 100%;
@@ -1471,18 +1551,21 @@ render_header(t('sas'), 'sas', '');
   top: 18px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 9999;
+  z-index: 10050;
   background: #166534;
   color: #fff;
-  padding: 10px 20px;
-  border-radius: 10px;
+  padding: 14px 22px;
+  border-radius: 12px;
   font-weight: 800;
-  font-size: 14px;
-  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.22);
+  font-size: 15px;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.28);
   cursor: pointer;
-  max-width: calc(100% - 24px);
+  max-width: min(520px, calc(100% - 24px));
   text-align: center;
+  line-height: 1.45;
 }
+.sas-toast.is-ok { background: #166534; }
+.sas-toast.is-error { background: #b91c1c; }
 .sas-radius-page #subsTable tbody tr:nth-child(even) td { background: #fcfcfc; }
 .sas-radius-page #subsTable tbody tr:hover td { background: #eef7fb; }
 .sas-radius-page #subsTable tbody tr.row-status-expired td { background: #fff8dc !important; }
@@ -2047,11 +2130,11 @@ render_header(t('sas'), 'sas', '');
         <div class="sas-seg" role="radiogroup" aria-label="<?php echo e($lang === 'en' ? 'Activation source' : 'مصدر التفعيل'); ?>">
             <label class="sas-seg-opt">
                 <input type="radio" name="sas_act_mode" value="card" checked>
-                <span><?php echo e($lang === 'en' ? 'Refill card' : 'بطاقة تعبئة'); ?></span>
+                <span><?php echo e($lang === 'en' ? 'By card' : 'تفعيل بالبطاقة'); ?></span>
             </label>
             <label class="sas-seg-opt">
                 <input type="radio" name="sas_act_mode" value="credit">
-                <span><?php echo e($lang === 'en' ? 'Manager credit' : 'رصيد المدير'); ?></span>
+                <span><?php echo e($lang === 'en' ? 'By balance' : 'تفعيل بالرصيد'); ?></span>
             </label>
         </div>
         <div id="sasActCardBox">
@@ -2059,9 +2142,7 @@ render_header(t('sas'), 'sas', '');
             <div class="sas-sync-note" id="sasActCardHint"><?php echo e($lang === 'en' ? 'Unused cards' : 'الكروت الشاغرة'); ?></div>
         </div>
         <div id="sasActCreditBox" class="hidden">
-            <label class="sas-act-field"><?php echo e($lang === 'en' ? 'Units' : 'عدد الوحدات'); ?>
-                <input type="number" id="sasActUnits" min="1" value="1">
-            </label>
+            <input type="hidden" id="sasActUnits" value="1">
         </div>
         <div class="pay-mode-box">
             <div class="pay-mode-label"><?php echo e(t('pay_mode')); ?></div>
@@ -2111,6 +2192,10 @@ render_header(t('sas'), 'sas', '');
         </div>
         <div class="sas-act-foot">
             <button type="button" class="btn" id="sasActSubmit"><?php echo e($lang === 'en' ? 'Activate' : 'تفعيل'); ?></button>
+        </div>
+        <div class="sas-act-lock hidden" id="sasActLock" aria-hidden="true">
+            <div class="sas-act-lock-spin"></div>
+            <div class="sas-act-lock-txt"><?php echo e($lang === 'en' ? 'Activating…' : 'جاري التفعيل...'); ?></div>
         </div>
     </div>
 </div>
@@ -2520,6 +2605,30 @@ render_header(t('sas'), 'sas', '');
     if (bulkModal) bulkModal.classList.add('hidden');
   });
 
+  function showAppToast(msg, kind) {
+    var b = document.getElementById('sasSyncOkBanner');
+    var text = String(msg || '');
+    if (!b) {
+      if (text) window.alert(text);
+      return;
+    }
+    b.textContent = text;
+    b.classList.remove('is-error', 'is-ok');
+    b.classList.add(kind === 'error' ? 'is-error' : 'is-ok');
+    b.hidden = false;
+    if (window._sasToastT) clearTimeout(window._sasToastT);
+    window._sasToastT = setTimeout(function () {
+      b.hidden = true;
+    }, kind === 'error' ? 8000 : 5000);
+  }
+  function rememberActFlash(msg, kind) {
+    try {
+      sessionStorage.setItem('sas_flash', JSON.stringify({
+        t: String(msg || ''),
+        k: kind === 'error' ? 'error' : 'ok'
+      }));
+    } catch (e) {}
+  }
   function postSas(action, fields) {
     var body = new FormData();
     body.append('csrf', csrf);
@@ -2695,15 +2804,20 @@ render_header(t('sas'), 'sas', '');
     }
   }
   function currentActMode() {
-    var on = document.querySelector('input[name="sas_act_mode"]:checked');
-    return on ? on.value : 'card';
+    var on = document.querySelector('#sasActModal input[name="sas_act_mode"]:checked');
+    return (on && on.value === 'card') ? 'card' : 'credit';
+  }
+  function setActMode(mode) {
+    var want = (mode === 'card') ? 'card' : 'credit';
+    document.querySelectorAll('#sasActModal input[name="sas_act_mode"]').forEach(function (el) {
+      el.checked = el.value === want;
+    });
+    toggleActMode();
   }
   function toggleActMode() {
     var card = currentActMode() === 'card';
     var boxC = document.getElementById('sasActCardBox');
-    var boxR = document.getElementById('sasActCreditBox');
     if (boxC) boxC.classList.toggle('hidden', !card);
-    if (boxR) boxR.classList.toggle('hidden', card);
   }
   function openActModal(row) {
     actUser = row;
@@ -2716,7 +2830,15 @@ render_header(t('sas'), 'sas', '');
     if (nameEl) nameEl.textContent = row.firstname || row.name || row.id || '';
     if (userEl) userEl.textContent = row.username || row.id || '';
     if (err) err.textContent = '';
-    if (modal) modal.classList.remove('hidden');
+    if (modal) {
+      modal.classList.remove('hidden', 'is-locking');
+    }
+    var lockEl = document.getElementById('sasActLock');
+    if (lockEl) {
+      lockEl.classList.add('hidden');
+      lockEl.setAttribute('aria-hidden', 'true');
+    }
+    setActMode('card');
     loadQuote(row.id, row.profileId);
     var ready = cardsForProfile(row.profileId, row.profileName);
     if (cardsCacheAll) {
@@ -2803,8 +2925,8 @@ render_header(t('sas'), 'sas', '');
       fillSelect(document.getElementById('sasProfSelect'), ps, row.profileId);
     });
   }
-  document.querySelectorAll('input[name="sas_act_mode"]').forEach(function (r) {
-    r.addEventListener('change', toggleActMode);
+  document.querySelectorAll('#sasActModal input[name="sas_act_mode"]').forEach(function (el) {
+    el.addEventListener('change', toggleActMode);
   });
   var actProf = document.getElementById('sasActProfile');
   if (actProf) {
@@ -2822,6 +2944,7 @@ render_header(t('sas'), 'sas', '');
   var actClose = document.getElementById('sasActClose');
   if (actClose) actClose.addEventListener('click', function () {
     var m = document.getElementById('sasActModal');
+    if (m && m.classList.contains('is-locking')) return;
     if (m) m.classList.add('hidden');
   });
   var actCopy = document.getElementById('sasActCopy');
@@ -2857,6 +2980,51 @@ render_header(t('sas'), 'sas', '');
   if (profCancel) profCancel.addEventListener('click', closeProfModal);
   var actSubmit = document.getElementById('sasActSubmit');
   if (actSubmit) {
+    var actSubmitLabel = actSubmit.textContent;
+    var actBusyText = <?php echo json_encode($lang === 'en' ? 'Activating…' : 'جاري التفعيل...'); ?>;
+    function setActBusy(on) {
+      var modal = document.getElementById('sasActModal');
+      var lock = document.getElementById('sasActLock');
+      on = !!on;
+      if (modal) {
+        if (on) modal.classList.add('is-locking');
+        else modal.classList.remove('is-locking');
+        modal.querySelectorAll('input, select, textarea, button').forEach(function (el) {
+          el.disabled = on;
+        });
+      }
+      actSubmit.disabled = on;
+      if (actClose) actClose.disabled = on;
+      if (on) {
+        actSubmit.classList.add('is-busy', 'is-pressed');
+        actSubmit.textContent = actSubmitLabel;
+        if (lock) {
+          lock.classList.remove('hidden');
+          lock.setAttribute('aria-hidden', 'false');
+        }
+      } else {
+        actSubmit.classList.remove('is-busy', 'is-pressed');
+        actSubmit.textContent = actSubmitLabel;
+        if (lock) {
+          lock.classList.add('hidden');
+          lock.setAttribute('aria-hidden', 'true');
+        }
+      }
+    }
+    function markActPressed() {
+      actSubmit.classList.add('is-pressed');
+    }
+    function clearActPressed() {
+      if (!actSubmit.classList.contains('is-busy')) {
+        actSubmit.classList.remove('is-pressed');
+      }
+    }
+    actSubmit.addEventListener('pointerdown', markActPressed);
+    actSubmit.addEventListener('mousedown', markActPressed);
+    actSubmit.addEventListener('pointerup', clearActPressed);
+    actSubmit.addEventListener('mouseup', clearActPressed);
+    actSubmit.addEventListener('pointerleave', clearActPressed);
+    actSubmit.addEventListener('mouseleave', clearActPressed);
     actSubmit.addEventListener('click', function () {
       if (!actUser) return;
       var err = document.getElementById('sasActErr');
@@ -2866,16 +3034,16 @@ render_header(t('sas'), 'sas', '');
       var profileName = selectedProfileName(profileSel);
       var sendWa = document.getElementById('sasActSendWa');
       var sendOld = document.getElementById('sasActOldDebts');
-      var payModeEl = document.querySelector('input[name="sas_pay_mode"]:checked');
+      var payModeEl = document.querySelector('#sasActModal input[name="sas_pay_mode"]:checked');
       var waFields = {
         send_whatsapp: (sendWa && sendWa.checked) ? '1' : '0',
         send_old_debts: (sendWa && sendWa.checked && sendOld && sendOld.checked) ? '1' : '0',
         pay_mode: (payModeEl && payModeEl.value === 'credit') ? 'credit' : 'cash'
       };
-      actSubmit.disabled = true;
       var req;
       if (currentActMode() === 'credit') {
         var units = document.getElementById('sasActUnits');
+        setActBusy(true);
         req = postSas('sas_activate_credit', {
           id: actUser.id,
           profile_id: profileId,
@@ -2894,9 +3062,10 @@ render_header(t('sas'), 'sas', '');
         }
         if (!pin) {
           if (err) err.textContent = <?php echo json_encode($lang === 'en' ? 'No unused cards' : 'ماكو كروت شاغرة'); ?>;
-          actSubmit.disabled = false;
+          setActBusy(false);
           return;
         }
+        setActBusy(true);
         req = postSas('sas_activate_card', {
           id: actUser.id,
           pin: pin,
@@ -2909,15 +3078,20 @@ render_header(t('sas'), 'sas', '');
         });
       }
       req.then(function (d) {
-        actSubmit.disabled = false;
         if (!d || !d.ok) {
-          if (err) err.textContent = (d && d.message) || <?php echo json_encode($lang === 'en' ? 'Activate failed' : 'فشل التفعيل'); ?>;
+          setActBusy(false);
+          var failMsg = (d && d.message) || <?php echo json_encode($lang === 'en' ? 'Activate failed' : 'فشل التفعيل'); ?>;
+          if (err) err.textContent = failMsg;
+          showAppToast(failMsg, 'error');
           return;
         }
+        rememberActFlash((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Subscriber activated' : 'تم تفعيل المشترك'); ?>, 'ok');
         window.location.reload();
       }).catch(function () {
-        actSubmit.disabled = false;
-        if (err) err.textContent = <?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>;
+        setActBusy(false);
+        var netMsg = <?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>;
+        if (err) err.textContent = netMsg;
+        showAppToast(netMsg, 'error');
       });
     });
   }
@@ -3222,14 +3396,8 @@ render_header(t('sas'), 'sas', '');
     }
   }
   function showSyncOkBanner() {
-    var b = document.getElementById('sasSyncOkBanner');
-    if (!b) return;
     setOfflineBanner(false);
-    b.hidden = false;
-    if (window._sasToastT) clearTimeout(window._sasToastT);
-    window._sasToastT = setTimeout(function () {
-      b.hidden = true;
-    }, 4000);
+    showAppToast(<?php echo json_encode($lang === 'en' ? 'Synced successfully' : 'تمت المزامنة بنجاح'); ?>, 'ok');
   }
   var toastEl = document.getElementById('sasSyncOkBanner');
   if (toastEl) {
@@ -3239,7 +3407,14 @@ render_header(t('sas'), 'sas', '');
     });
   }
   try {
-    if (sessionStorage.getItem('sas_sync_ok') === '1') {
+    var flashRaw = sessionStorage.getItem('sas_flash');
+    if (flashRaw) {
+      sessionStorage.removeItem('sas_flash');
+      var flashObj = JSON.parse(flashRaw);
+      if (flashObj && flashObj.t) {
+        showAppToast(flashObj.t, flashObj.k === 'error' ? 'error' : 'ok');
+      }
+    } else if (sessionStorage.getItem('sas_sync_ok') === '1') {
       sessionStorage.removeItem('sas_sync_ok');
       showSyncOkBanner();
     }
