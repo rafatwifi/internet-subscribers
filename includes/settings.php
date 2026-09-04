@@ -45,7 +45,197 @@ function settings_defaults()
         'sas_extend_method' => 'reward_points',
         'sas_extend_profile_id' => 0,
         'sas_on_failure' => 'warn',
+        'login_bg' => '',
+        'login_bg_color' => '#1b2a38',
+        'bg_mode' => 'color',
+        'brand_icon' => '',
     );
+}
+
+function login_uploads_dir()
+{
+    return dirname(__DIR__) . '/public/uploads';
+}
+
+function login_bg_color($settings)
+{
+    $c = isset($settings['login_bg_color']) ? trim((string) $settings['login_bg_color']) : '';
+    if (!preg_match('/^#[0-9A-Fa-f]{6}$/', $c)) {
+        return '#1b2a38';
+    }
+    return strtolower($c);
+}
+
+function login_bg_filename($settings)
+{
+    $file = isset($settings['login_bg']) ? basename(str_replace('\\', '/', (string) $settings['login_bg'])) : '';
+    if ($file === '' || $file === '.' || $file === '..') {
+        return '';
+    }
+    if (!preg_match('/^login-bg\.(jpe?g|png|gif|webp)$/i', $file)) {
+        return '';
+    }
+    return $file;
+}
+
+function login_bg_url($settings)
+{
+    $file = login_bg_filename($settings);
+    if ($file === '') {
+        return '';
+    }
+    $path = login_uploads_dir() . DIRECTORY_SEPARATOR . $file;
+    if (!is_file($path)) {
+        return '';
+    }
+    return 'uploads/' . rawurlencode($file) . '?v=' . (string) filemtime($path);
+}
+
+function login_bg_delete_files()
+{
+    $dir = login_uploads_dir();
+    if (!is_dir($dir)) {
+        return;
+    }
+    $list = glob($dir . DIRECTORY_SEPARATOR . 'login-bg.*');
+    if (!is_array($list)) {
+        return;
+    }
+    foreach ($list as $old) {
+        if (is_file($old)) {
+            @unlink($old);
+        }
+    }
+}
+
+function login_bg_store_upload($fileInfo)
+{
+    if (!is_array($fileInfo) || empty($fileInfo['tmp_name']) || !is_uploaded_file($fileInfo['tmp_name'])) {
+        return false;
+    }
+    if (!empty($fileInfo['error']) && (int) $fileInfo['error'] !== 0) {
+        return false;
+    }
+    if ((int) $fileInfo['size'] > 5 * 1024 * 1024) {
+        return false;
+    }
+    $info = @getimagesize($fileInfo['tmp_name']);
+    if (!is_array($info) || empty($info[2])) {
+        return false;
+    }
+    $map = array(
+        IMAGETYPE_JPEG => 'jpg',
+        IMAGETYPE_PNG => 'png',
+        IMAGETYPE_GIF => 'gif',
+    );
+    if (defined('IMAGETYPE_WEBP')) {
+        $map[IMAGETYPE_WEBP] = 'webp';
+    }
+    $type = (int) $info[2];
+    if (!isset($map[$type])) {
+        return false;
+    }
+    $dir = login_uploads_dir();
+    if (!is_dir($dir) && !@mkdir($dir, 0755, true)) {
+        return false;
+    }
+    login_bg_delete_files();
+    $name = 'login-bg.' . $map[$type];
+    $dest = $dir . DIRECTORY_SEPARATOR . $name;
+    if (!@move_uploaded_file($fileInfo['tmp_name'], $dest)) {
+        return false;
+    }
+    @chmod($dest, 0644);
+    return $name;
+}
+
+function app_bg_mode($settings)
+{
+    $m = isset($settings['bg_mode']) ? (string) $settings['bg_mode'] : 'color';
+    return $m === 'image' ? 'image' : 'color';
+}
+
+function brand_icon_filename($settings)
+{
+    $file = isset($settings['brand_icon']) ? basename(str_replace('\\', '/', (string) $settings['brand_icon'])) : '';
+    if ($file === '' || $file === '.' || $file === '..') {
+        return '';
+    }
+    if (!preg_match('/^brand-icon\.(jpe?g|png|gif|webp)$/i', $file)) {
+        return '';
+    }
+    return $file;
+}
+
+function brand_icon_url($settings)
+{
+    $file = brand_icon_filename($settings);
+    if ($file === '') {
+        return '';
+    }
+    $path = login_uploads_dir() . DIRECTORY_SEPARATOR . $file;
+    if (!is_file($path)) {
+        return '';
+    }
+    return 'uploads/' . rawurlencode($file) . '?v=' . (string) filemtime($path);
+}
+
+function brand_icon_delete_files()
+{
+    $dir = login_uploads_dir();
+    if (!is_dir($dir)) {
+        return;
+    }
+    $list = glob($dir . DIRECTORY_SEPARATOR . 'brand-icon.*');
+    if (!is_array($list)) {
+        return;
+    }
+    foreach ($list as $old) {
+        if (is_file($old)) {
+            @unlink($old);
+        }
+    }
+}
+
+function brand_icon_store_upload($fileInfo)
+{
+    if (!is_array($fileInfo) || empty($fileInfo['tmp_name']) || !is_uploaded_file($fileInfo['tmp_name'])) {
+        return false;
+    }
+    if (!empty($fileInfo['error']) && (int) $fileInfo['error'] !== 0) {
+        return false;
+    }
+    if ((int) $fileInfo['size'] > 2 * 1024 * 1024) {
+        return false;
+    }
+    $info = @getimagesize($fileInfo['tmp_name']);
+    if (!is_array($info) || empty($info[2])) {
+        return false;
+    }
+    $map = array(
+        IMAGETYPE_JPEG => 'jpg',
+        IMAGETYPE_PNG => 'png',
+        IMAGETYPE_GIF => 'gif',
+    );
+    if (defined('IMAGETYPE_WEBP')) {
+        $map[IMAGETYPE_WEBP] = 'webp';
+    }
+    $type = (int) $info[2];
+    if (!isset($map[$type])) {
+        return false;
+    }
+    $dir = login_uploads_dir();
+    if (!is_dir($dir) && !@mkdir($dir, 0755, true)) {
+        return false;
+    }
+    brand_icon_delete_files();
+    $name = 'brand-icon.' . $map[$type];
+    $dest = $dir . DIRECTORY_SEPARATOR . $name;
+    if (!@move_uploaded_file($fileInfo['tmp_name'], $dest)) {
+        return false;
+    }
+    @chmod($dest, 0644);
+    return $name;
 }
 
 function settings_load()

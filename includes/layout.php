@@ -2,7 +2,7 @@
 
 function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $topToolsHtml = '')
 {
-    global $siteName, $lang;
+    global $siteName, $lang, $settings;
     $flash = get_flash();
     $name = isset($siteName) ? $siteName : 'WiFi-Net-SALES';
     $page = isset($_SERVER['PHP_SELF']) ? basename($_SERVER['PHP_SELF']) : 'index.php';
@@ -21,6 +21,15 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     $baseQs = http_build_query($qs);
     $langToggle = ($isEn ? 'ar' : 'en');
     $langHref = $page . '?' . ($baseQs !== '' ? $baseQs . '&' : '') . 'lang=' . $langToggle;
+    $bgMode = (function_exists('app_bg_mode') && is_array($settings)) ? app_bg_mode($settings) : 'color';
+    $bgColor = (function_exists('login_bg_color') && is_array($settings)) ? login_bg_color($settings) : '#1b2a38';
+    $bgUrl = (function_exists('login_bg_url') && is_array($settings)) ? login_bg_url($settings) : '';
+    if ($bgMode === 'image' && $bgUrl === '') {
+        $bgMode = 'color';
+    }
+    $brandIcon = ($active === 'dashboard' && function_exists('brand_icon_url') && is_array($settings))
+        ? brand_icon_url($settings)
+        : '';
     ?>
 <!DOCTYPE html>
 <html lang="<?php echo e($lang); ?>" dir="<?php echo $isEn ? 'ltr' : 'rtl'; ?>">
@@ -34,9 +43,24 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="assets/style.css?v=sas105">
+    <link rel="stylesheet" href="assets/style.css?v=ui3">
+    <style>
+        <?php if ($bgMode === 'image' && $bgUrl !== ''): ?>
+        body.app-bg-image {
+            background-color: <?php echo e($bgColor); ?> !important;
+            background-image: url("<?php echo e($bgUrl); ?>") !important;
+            background-size: cover !important;
+            background-position: center center !important;
+            background-repeat: no-repeat !important;
+            background-attachment: fixed !important;
+        }
+        body.app-bg-image .bg-bubbles { display: none; }
+        body.app-bg-image .app { background: transparent; }
+        body.app-bg-image .main { background: transparent; }
+        <?php endif; ?>
+    </style>
 </head>
-<body class="<?php echo $isEn ? 'ltr' : 'rtl'; ?> ios-glass">
+<body class="<?php echo $isEn ? 'ltr' : 'rtl'; ?> ios-glass<?php echo ($bgMode === 'image' && $bgUrl !== '') ? ' app-bg-image' : ''; ?>">
 <div class="bg-bubbles" aria-hidden="true">
     <span></span><span></span><span></span><span></span><span></span>
 </div>
@@ -108,6 +132,9 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <div class="main-top-start">
                 <button class="sidebar-toggle sidebar-toggle-bar" type="button" id="sidebarToggleBar" title="<?php echo e(t('menu')); ?>" aria-label="<?php echo e(t('menu')); ?>">|||</button>
                 <strong class="main-title name-cell">
+                    <?php if ($brandIcon !== ''): ?>
+                        <img class="dash-brand-ico" src="<?php echo e($brandIcon); ?>" alt="" width="28" height="28">
+                    <?php endif; ?>
                     <?php echo e($title); ?>
                 </strong>
                 <?php if ($titleAfter !== '' && $titleAfter !== null): ?>
@@ -118,17 +145,19 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
                 <?php endif; ?>
             </div>
             <div class="main-top-end">
-                <a class="top-lang-btn" href="<?php echo e($langHref); ?>" title="<?php echo e(t('language')); ?>">
-                    <span class="top-lang-glyph" aria-hidden="true"><?php echo $isEn ? 'ع' : 'A'; ?></span>
-                </a>
-                <a class="top-profile-btn" href="profile.php" title="<?php echo e($isEn ? 'My profile' : 'بروفايلي'); ?>">
-                    <?php if ($userLabel !== ''): ?>
-                        <span class="top-profile-name"><?php echo e($userLabel); ?></span>
-                    <?php endif; ?>
-                    <span class="top-profile-avatar" aria-hidden="true">
-                        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 12a4.5 4.5 0 1 0-4.5-4.5A4.5 4.5 0 0 0 12 12zm0 2.25c-3.6 0-6.75 1.8-6.75 4V20h13.5v-1.75c0-2.2-3.15-4-6.75-4z"/></svg>
-                    </span>
-                </a>
+                <div class="top-user-cluster">
+                    <a class="top-profile-btn" href="profile.php" title="<?php echo e($isEn ? 'My profile' : 'بروفايلي'); ?>">
+                        <span class="top-profile-avatar" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 12a4.5 4.5 0 1 0-4.5-4.5A4.5 4.5 0 0 0 12 12zm0 2.25c-3.6 0-6.75 1.8-6.75 4V20h13.5v-1.75c0-2.2-3.15-4-6.75-4z"/></svg>
+                        </span>
+                        <?php if ($userLabel !== ''): ?>
+                            <span class="top-profile-name"><?php echo e($userLabel); ?></span>
+                        <?php endif; ?>
+                    </a>
+                    <a class="top-lang-btn" href="<?php echo e($langHref); ?>" title="<?php echo e(t('language')); ?>">
+                        <span class="top-lang-glyph" aria-hidden="true"><?php echo $isEn ? 'ع' : 'A'; ?></span>
+                    </a>
+                </div>
             </div>
         </div>
         <div id="waConnBar" class="wa-conn-bar wa-conn-checking wa-conn-hidden" role="status" aria-live="polite" hidden>

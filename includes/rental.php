@@ -317,7 +317,7 @@ function rental_cell_html($sub, $username, $lang = 'ar', $settings = null)
         $dev = rental_device_by_id($devId, $settings);
         $label = $dev ? $dev['name'] : $devId;
     } else {
-        $label = $lang === 'en' ? '+ Rent' : '+ إيجار';
+        $label = '';
     }
     $cls = 'rent-cell-edit' . ($has ? '' : ' rent-cell-empty');
     $tip = $lang === 'en' ? 'Click to set rental device' : 'اضغط لاختيار جهاز الإيجار';

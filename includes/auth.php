@@ -303,6 +303,13 @@ function ensure_admin_users_table($pdo, $config = null)
             }
         } catch (Exception $e) {
         }
+        try {
+            $col = $pdo->query("SHOW COLUMNS FROM admin_users LIKE 'ui_prefs'")->fetch();
+            if (!$col) {
+                $pdo->exec('ALTER TABLE admin_users ADD COLUMN ui_prefs TEXT NULL');
+            }
+        } catch (Exception $e) {
+        }
 
         $count = (int) $pdo->query('SELECT COUNT(*) FROM admin_users')->fetchColumn();
         if ($count === 0) {
@@ -367,6 +374,54 @@ function current_admin_label()
     return $u['username'];
 }
 
+function admin_ui_prefs_load($pdo)
+{
+    if (!empty($_SESSION['ui_prefs']) && is_array($_SESSION['ui_prefs'])) {
+        return $_SESSION['ui_prefs'];
+    }
+    $u = current_admin();
+    $uid = $u ? (int) $u['id'] : 0;
+    $data = array();
+    if ($uid > 0) {
+        try {
+            $st = $pdo->prepare('SELECT ui_prefs FROM admin_users WHERE id = :id LIMIT 1');
+            $st->execute(array(':id' => $uid));
+            $raw = $st->fetchColumn();
+            if (is_string($raw) && $raw !== '') {
+                $decoded = json_decode($raw, true);
+                if (is_array($decoded)) {
+                    $data = $decoded;
+                }
+            }
+        } catch (Exception $e) {
+        }
+    }
+    $_SESSION['ui_prefs'] = $data;
+    return $data;
+}
+
+function admin_ui_prefs_save($pdo, $key, $value)
+{
+    $prefs = admin_ui_prefs_load($pdo);
+    $prefs[$key] = $value;
+    $_SESSION['ui_prefs'] = $prefs;
+    $u = current_admin();
+    $uid = $u ? (int) $u['id'] : 0;
+    if ($uid <= 0) {
+        return true;
+    }
+    try {
+        $st = $pdo->prepare('UPDATE admin_users SET ui_prefs = :p, updated_at = NOW() WHERE id = :id');
+        $st->execute(array(
+            ':p' => json_encode($prefs),
+            ':id' => $uid,
+        ));
+        return true;
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
 function set_admin_session_from_row($row)
 {
     $_SESSION['admin_logged_in'] = true;
@@ -374,6 +429,7 @@ function set_admin_session_from_row($row)
     $_SESSION['admin_username'] = $row['username'];
     $_SESSION['admin_display_name'] = $row['display_name'];
     $_SESSION['admin_role'] = normalize_admin_role(isset($row['role']) ? $row['role'] : 'staff');
+    unset($_SESSION['ui_prefs']);
 }
 
 function attempt_login($pdo, $config, $username, $password)
@@ -398,6 +454,9 @@ function attempt_login($pdo, $config, $username, $password)
             $row = $stmt->fetch();
             if ($row && !empty($row['password_hash']) && admin_password_verify($password, $row['password_hash'])) {
                 set_admin_session_from_row($row);
+                if (function_exists('app_session_refresh_cookie')) {
+                    app_session_refresh_cookie();
+                }
                 return true;
             }
         } catch (Exception $e) {
@@ -413,6 +472,7 @@ function attempt_login($pdo, $config, $username, $password)
         $_SESSION['admin_username'] = 'admin';
         $_SESSION['admin_display_name'] = 'Admin';
         $_SESSION['admin_role'] = 'admin';
+        unset($_SESSION['ui_prefs']);
         try {
             $stmt = $pdo->prepare('SELECT * FROM admin_users WHERE username = "admin" LIMIT 1');
             $stmt->execute();
@@ -427,6 +487,9 @@ function attempt_login($pdo, $config, $username, $password)
                 $_SESSION['admin_role'] = 'admin';
             }
         } catch (Exception $e) {
+        }
+        if (function_exists('app_session_refresh_cookie')) {
+            app_session_refresh_cookie();
         }
         return true;
     }

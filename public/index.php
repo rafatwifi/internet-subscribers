@@ -165,15 +165,25 @@ if (!function_exists('dash_sas_box')) {
 render_header(t('dashboard'), 'dashboard', '');
 ?>
 <style>
-.sas-dash { font-family: inherit; }
+.sas-dash { font-family: inherit; width: 100%; box-sizing: border-box; }
 .sas-dash .sas-boxes {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
   margin: 0 0 16px;
+  width: 100%;
 }
 @media (max-width: 1100px) { .sas-dash .sas-boxes { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 560px) { .sas-dash .sas-boxes { grid-template-columns: 1fr; } }
+@media (max-width: 560px) {
+  .sas-dash .sas-boxes { grid-template-columns: 1fr; gap: 10px; }
+}
+body:has(.sas-dash) .container {
+  width: auto;
+  max-width: 100%;
+  margin-inline: 12px;
+  padding-inline: 0;
+  box-sizing: border-box;
+}
 .sas-box {
   position: relative; overflow: hidden; display: block; color: #fff !important;
   text-decoration: none !important; border-radius: 4px; min-height: 90px;

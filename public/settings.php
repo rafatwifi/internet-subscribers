@@ -185,6 +185,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         );
         set_lang_preference($data['language']);
         $tab = 'general';
+    } elseif ($section === 'login_bg') {
+        $tab = 'general';
+        $color = trim((string) post('login_bg_color', '#1b2a38'));
+        if (!preg_match('/^#[0-9A-Fa-f]{6}$/', $color)) {
+            $color = '#1b2a38';
+        }
+        $mode = post('bg_mode') === 'image' ? 'image' : 'color';
+        $data = array(
+            'login_bg_color' => $color,
+            'bg_mode' => $mode,
+        );
+        if (post('login_bg_remove') === '1') {
+            login_bg_delete_files();
+            $data['login_bg'] = '';
+            $data['bg_mode'] = 'color';
+        } elseif (!empty($_FILES['login_bg_file']['tmp_name'])) {
+            $saved = login_bg_store_upload($_FILES['login_bg_file']);
+            if ($saved === false) {
+                flash('error', $lang === 'en'
+                    ? 'Use a JPG/PNG/GIF image up to 5MB.'
+                    : 'ارفع صورة JPG أو PNG أو GIF بحجم 5MB كحد أقصى.');
+                redirect('settings.php?tab=general');
+            }
+            $data['login_bg'] = $saved;
+            $data['bg_mode'] = 'image';
+        }
+        if (post('brand_icon_remove') === '1') {
+            brand_icon_delete_files();
+            $data['brand_icon'] = '';
+        } elseif (!empty($_FILES['brand_icon_file']['tmp_name'])) {
+            $savedIco = brand_icon_store_upload($_FILES['brand_icon_file']);
+            if ($savedIco === false) {
+                flash('error', $lang === 'en'
+                    ? 'Use a square JPG/PNG icon up to 2MB.'
+                    : 'ارفع أيقونة مربعة JPG أو PNG بحجم 2MB كحد أقصى.');
+                redirect('settings.php?tab=general');
+            }
+            $data['brand_icon'] = $savedIco;
+        }
     } elseif ($section === 'rental') {
         $fee = (float) post('rental_fee', '5000');
         if ($fee < 0) {
@@ -600,6 +639,64 @@ $ramTone = ($sys['ram']['source'] === 'host')
         </div>
         <div class="actions">
             <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
+        </div>
+    </form>
+</div>
+
+<?php
+$loginBgUrl = login_bg_url($s);
+$loginBgColor = login_bg_color($s);
+$bgMode = function_exists('app_bg_mode') ? app_bg_mode($s) : 'color';
+$brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
+?>
+<div class="panel">
+    <h2><?php echo e($lang === 'en' ? 'Appearance' : 'المظهر والخلفية'); ?></h2>
+    <p class="meta" style="margin-top:-6px">
+        <?php echo e($lang === 'en'
+            ? 'Toggle color or image. Image covers login and the app. Color is used on the login page. Brand icon appears next to Dashboard.'
+            : 'بدّل بين لون أو صورة. الصورة تظهر بصفحة الدخول وبالنظام. اللون يظهر بصفحة الدخول. أيقونة النظام تظهر يم الرئيسية بالداشبورد.'); ?>
+    </p>
+    <div class="login-bg-preview" style="background-color:<?php echo e($loginBgColor); ?>;<?php echo ($bgMode === 'image' && $loginBgUrl !== '') ? ('background-image:url(' . e($loginBgUrl) . ');') : ''; ?>"></div>
+    <form method="post" enctype="multipart/form-data">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="section" value="login_bg">
+        <div class="bg-mode-toggle" role="group">
+            <label>
+                <input type="radio" name="bg_mode" value="color" <?php echo $bgMode === 'color' ? 'checked' : ''; ?>>
+                <span><?php echo e($lang === 'en' ? 'Color' : 'لون'); ?></span>
+            </label>
+            <label>
+                <input type="radio" name="bg_mode" value="image" <?php echo $bgMode === 'image' ? 'checked' : ''; ?>>
+                <span><?php echo e($lang === 'en' ? 'Image' : 'صورة'); ?></span>
+            </label>
+        </div>
+        <div class="form-grid cols-2">
+            <div>
+                <label><?php echo e($lang === 'en' ? 'Background image' : 'صورة الخلفية'); ?></label>
+                <input type="file" name="login_bg_file" accept="image/jpeg,image/png,image/gif,image/webp">
+            </div>
+            <div>
+                <label><?php echo e($lang === 'en' ? 'Background color' : 'لون الخلفية'); ?></label>
+                <input type="color" name="login_bg_color" value="<?php echo e($loginBgColor); ?>">
+            </div>
+            <div>
+                <label><?php echo e($lang === 'en' ? 'System icon (dashboard)' : 'أيقونة النظام (يم الرئيسية)'); ?></label>
+                <input type="file" name="brand_icon_file" accept="image/jpeg,image/png,image/gif,image/webp">
+                <?php if ($brandIconUrl !== ''): ?>
+                    <div style="margin-top:8px;display:flex;align-items:center;gap:8px">
+                        <img src="<?php echo e($brandIconUrl); ?>" alt="" width="36" height="36" style="border-radius:8px;object-fit:contain;background:#fff;border:1px solid #e2e8f0">
+                    </div>
+                <?php endif; ?>
+            </div>
+        </div>
+        <div class="actions">
+            <button class="btn" type="submit"><?php echo e($lang === 'en' ? 'Save appearance' : 'حفظ المظهر'); ?></button>
+            <?php if ($loginBgUrl !== ''): ?>
+                <button class="btn ghost" type="submit" name="login_bg_remove" value="1"><?php echo e($lang === 'en' ? 'Remove image' : 'حذف الصورة'); ?></button>
+            <?php endif; ?>
+            <?php if ($brandIconUrl !== ''): ?>
+                <button class="btn ghost" type="submit" name="brand_icon_remove" value="1"><?php echo e($lang === 'en' ? 'Remove icon' : 'حذف الأيقونة'); ?></button>
+            <?php endif; ?>
         </div>
     </form>
 </div>

@@ -17,8 +17,59 @@ $config = apply_settings_to_config($config, $settings);
 
 date_default_timezone_set(isset($config['timezone']) ? $config['timezone'] : 'Asia/Baghdad');
 
-if (session_status() === PHP_SESSION_NONE) {
-    session_start();
+function app_session_lifetime()
+{
+    return 3 * 24 * 60 * 60;
+}
+
+function app_session_refresh_cookie()
+{
+    if (session_status() !== PHP_SESSION_ACTIVE) {
+        return;
+    }
+    $life = app_session_lifetime();
+    $secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off');
+    if (defined('PHP_VERSION_ID') && PHP_VERSION_ID >= 70300) {
+        setcookie(session_name(), session_id(), array(
+            'expires' => time() + $life,
+            'path' => '/',
+            'secure' => $secure,
+            'httponly' => true,
+            'samesite' => 'Lax',
+        ));
+        return;
+    }
+    setcookie(session_name(), session_id(), time() + $life, '/', '', $secure, true);
+}
+
+function app_session_start()
+{
+    $life = app_session_lifetime();
+    if (function_exists('ini_set')) {
+        @ini_set('session.gc_maxlifetime', (string) $life);
+        @ini_set('session.cookie_lifetime', (string) $life);
+        @ini_set('session.cookie_httponly', '1');
+        @ini_set('session.use_only_cookies', '1');
+    }
+    if (session_status() === PHP_SESSION_NONE) {
+        if (defined('PHP_VERSION_ID') && PHP_VERSION_ID >= 70300) {
+            session_set_cookie_params(array(
+                'lifetime' => $life,
+                'path' => '/',
+                'secure' => (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off'),
+                'httponly' => true,
+                'samesite' => 'Lax',
+            ));
+        } else {
+            session_set_cookie_params($life, '/');
+        }
+        session_start();
+    }
+}
+
+app_session_start();
+if (!empty($_SESSION['admin_logged_in'])) {
+    app_session_refresh_cookie();
 }
 
 if (isset($_GET['lang']) && ($_GET['lang'] === 'ar' || $_GET['lang'] === 'en')) {

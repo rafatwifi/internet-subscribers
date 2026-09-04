@@ -9,3 +9,5 @@ whatsapp-gateway/*.log
 Thumbs.db
 .env
 .env.*
+public/uploads/*
+!public/uploads/.htaccess

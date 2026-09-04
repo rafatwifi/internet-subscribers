@@ -256,13 +256,38 @@ if (isset($_GET['prepare']) && (string) $_GET['prepare'] !== '') {
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf(post('csrf'))) {
-        if (in_array(post('action'), array('sas_inline', 'sas_enable', 'sas_activate_card', 'sas_activate_credit', 'sas_change_profile', 'give_test', 'sas_update_rental', 'sas_update_debt', 'sas_update_grace'), true)) {
+        if (in_array(post('action'), array('sas_inline', 'sas_enable', 'sas_activate_card', 'sas_activate_credit', 'sas_change_profile', 'give_test', 'sas_update_rental', 'sas_update_debt', 'sas_update_grace', 'sas_save_cols'), true)) {
             sas_json_out(false, 'طلب غير صالح');
         }
         flash('error', 'طلب غير صالح');
         sas_page_redirect();
     }
     $action = post('action');
+
+    if ($action === 'sas_save_cols') {
+        $decoded = json_decode((string) post('cols', '{}'), true);
+        if (!is_array($decoded)) {
+            $decoded = array();
+        }
+        if (function_exists('admin_ui_prefs_save')) {
+            admin_ui_prefs_save($pdo, 'sas_table_cols', $decoded);
+        } else {
+            if (!isset($_SESSION['ui_prefs']) || !is_array($_SESSION['ui_prefs'])) {
+                $_SESSION['ui_prefs'] = array();
+            }
+            $_SESSION['ui_prefs']['sas_table_cols'] = $decoded;
+        }
+        $refreshSec = (int) post('refresh_sec', '0');
+        if ($refreshSec < 0) {
+            $refreshSec = 0;
+        }
+        if (function_exists('admin_ui_prefs_save')) {
+            admin_ui_prefs_save($pdo, 'sas_refresh_sec', $refreshSec);
+        } else {
+            $_SESSION['ui_prefs']['sas_refresh_sec'] = $refreshSec;
+        }
+        sas_json_out(true, 'ok');
+    }
 
     if ($action === 'sas_inline' || $action === 'sas_enable' || $action === 'sas_activate_card'
         || $action === 'sas_activate_credit' || $action === 'sas_change_profile' || $action === 'give_test') {
@@ -493,6 +518,10 @@ $subFilter = isset($_GET['sub']) ? (string) $_GET['sub'] : '';
 if (!function_exists('sas_cache_filter_sql') || sas_cache_filter_sql($subFilter) === '') {
     $subFilter = '';
 }
+$parentFilter = isset($_GET['parent']) ? trim((string) $_GET['parent']) : '';
+if (strlen($parentFilter) > 80) {
+    $parentFilter = '';
+}
 
 $cacheCount = 0;
 try {
@@ -529,6 +558,10 @@ $params = array();
 $where = function_exists('sas_cache_search_sql') ? sas_cache_search_sql($q, $params) : '1=1';
 if (function_exists('sas_cache_filter_sql')) {
     $where .= sas_cache_filter_sql($subFilter);
+}
+if ($parentFilter !== '') {
+    $where .= ' AND c.parent_name = :parent_name';
+    $params[':parent_name'] = $parentFilter;
 }
 
 if ($sasReady && $q !== '' && strlen($q) >= 2 && function_exists('sas_cache_pull_search')) {
@@ -579,7 +612,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'refresh_now') {
 
 if (isset($_GET['live']) && $_GET['live'] === '1') {
     header('Content-Type: application/json; charset=utf-8');
-    $html = '<tr><td colspan="14">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
+    $html = '<tr><td colspan="15">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
     $liveCount = 0;
     try {
         $fromSql = function_exists('sas_cache_list_from_sql')
@@ -599,12 +632,12 @@ if (isset($_GET['live']) && $_GET['live'] === '1') {
         }
         $liveCount = count($liveRows);
         if ($html === '') {
-            $html = '<tr><td colspan="14">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
+            $html = '<tr><td colspan="15">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
         }
     } catch (Exception $e) {
-        $html = '<tr><td colspan="14">' . e($e->getMessage()) . '</td></tr>';
+        $html = '<tr><td colspan="15">' . e($e->getMessage()) . '</td></tr>';
     } catch (Error $e) {
-        $html = '<tr><td colspan="14">' . e($e->getMessage()) . '</td></tr>';
+        $html = '<tr><td colspan="15">' . e($e->getMessage()) . '</td></tr>';
     }
     echo json_encode(array(
         'html' => $html,
@@ -615,7 +648,7 @@ if (isset($_GET['live']) && $_GET['live'] === '1') {
 }
 
 $page = isset($_GET['page']) ? max(1, (int) $_GET['page']) : 1;
-$perPageRaw = isset($_GET['per_page']) ? $_GET['per_page'] : '20';
+$perPageRaw = isset($_GET['per_page']) ? $_GET['per_page'] : '10';
 $showAll = ($perPageRaw === 'all');
 $perPage = $showAll ? 0 : max(1, (int) $perPageRaw);
 
@@ -635,6 +668,7 @@ $sortMap = array(
     'days' => 'c.expire_at',
     'debt' => 'debt',
     'rent' => 's.rental_device_id',
+    'ip' => 'c.framed_ip',
     'msg' => 'last_msg_at',
 );
 if (!isset($sortMap[$sortKey])) {
@@ -679,6 +713,7 @@ if ($showAll) {
     $offset = ($page - 1) * $perPage;
 }
 
+$sql = '';
 try {
     $sql = sas_cache_list_select_sql() . $fromSql . '
      WHERE ' . $where . '
@@ -701,6 +736,36 @@ try {
     }
 }
 
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'live_table') {
+    header('Content-Type: application/json; charset=utf-8');
+    if ($sql === '') {
+        echo json_encode(array('ok' => false, 'html' => '', 'last_error' => 'query'));
+        exit;
+    }
+    try {
+        if (function_exists('sas_refresh_online_flags')) {
+            sas_refresh_online_flags($pdo, $config);
+        }
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute($params);
+        $rows = $stmt->fetchAll();
+        $html = '';
+        $nLive = $offset + 1;
+        foreach ($rows as $liveRow) {
+            $html .= sas_render_table_row($liveRow, $nLive++, $config, $lang);
+        }
+        if ($html === '') {
+            $html = '<tr><td colspan="15">' . e($lang === 'en' ? 'No SAS users in cache yet' : 'ماكو مشتركين من الساس بعد') . '</td></tr>';
+        }
+        echo json_encode(array('ok' => true, 'html' => $html, 'count' => count($rows)));
+    } catch (Exception $e) {
+        echo json_encode(array('ok' => false, 'html' => '', 'last_error' => $e->getMessage()));
+    } catch (Error $e) {
+        echo json_encode(array('ok' => false, 'html' => '', 'last_error' => $e->getMessage()));
+    }
+    exit;
+}
+
 function sas_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw, $subFilter)
 {
     if ($currentKey === $key) {
@@ -714,11 +779,14 @@ function sas_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw, 
     if ($q !== '') {
         $qs[] = 'q=' . urlencode($q);
     }
-    if ($perPageRaw !== '20') {
+    if ($perPageRaw !== '10') {
         $qs[] = 'per_page=' . urlencode($perPageRaw);
     }
     if ($subFilter !== '') {
         $qs[] = 'sub=' . urlencode($subFilter);
+    }
+    if (!empty($GLOBALS['parentFilter'])) {
+        $qs[] = 'parent=' . urlencode((string) $GLOBALS['parentFilter']);
     }
     $arrow = '';
     if ($currentKey === $key) {
@@ -734,13 +802,55 @@ if ($lastOk !== '') {
 }
 $sasLastErr = (!empty($syncMeta['last_error'])) ? (string) $syncMeta['last_error'] : '';
 $sasOfflineSnap = $sasReady && $sasLastErr !== '';
+$uiPrefs = function_exists('admin_ui_prefs_load') ? admin_ui_prefs_load($pdo) : array();
+if (!is_array($uiPrefs)) {
+    $uiPrefs = array();
+}
+$savedCols = (isset($uiPrefs['sas_table_cols']) && is_array($uiPrefs['sas_table_cols'])) ? $uiPrefs['sas_table_cols'] : array();
+$savedRefreshSec = isset($uiPrefs['sas_refresh_sec']) ? (int) $uiPrefs['sas_refresh_sec'] : 30;
+if ($savedRefreshSec < 0) {
+    $savedRefreshSec = 0;
+}
+$parentNames = array();
+try {
+    $parentNames = $pdo->query(
+        'SELECT DISTINCT parent_name FROM sas_users_cache
+         WHERE parent_name IS NOT NULL AND parent_name <> ""
+         ORDER BY parent_name ASC LIMIT 100'
+    )->fetchAll(PDO::FETCH_COLUMN);
+    if (!is_array($parentNames)) {
+        $parentNames = array();
+    }
+} catch (Exception $e) {
+    $parentNames = array();
+} catch (Error $e) {
+    $parentNames = array();
+}
+
+function sas_filter_href($sub, $parent, $q, $perPageRaw)
+{
+    $qs = array();
+    if ($sub !== '') {
+        $qs[] = 'sub=' . urlencode($sub);
+    }
+    if ($parent !== '') {
+        $qs[] = 'parent=' . urlencode($parent);
+    }
+    if ($q !== '') {
+        $qs[] = 'q=' . urlencode($q);
+    }
+    if ($perPageRaw !== '10') {
+        $qs[] = 'per_page=' . urlencode($perPageRaw);
+    }
+    return 'sas.php' . (count($qs) ? ('?' . implode('&', $qs)) : '');
+}
 
 render_header(t('sas'), 'sas', '');
 ?>
 <style>
-.sas-radius-page { font-family: inherit; }
+.sas-radius-page { font-family: inherit; overflow-anchor: none; }
 .sas-radius-page .sas-legend { display: flex; gap: 18px; flex-wrap: wrap; margin: 0 0 12px; font-size: 14px; color: #444; }
-.sas-radius-page .sas-legend > span { display: inline-flex; align-items: center; gap: 6px; }
+.sas-radius-page .sas-legend > span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; flex: 0 0 auto; }
 .sas-radius-page .status-sq {
   display: inline-block;
   width: 14px;
@@ -794,20 +904,23 @@ render_header(t('sas'), 'sas', '');
   opacity: 1;
   text-align: center;
 }
-.sas-user-copywrap {
+.sas-user-copywrap,
+.sas-ip-wrap {
   display: inline-flex;
   flex-direction: row;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 6px;
   max-width: 100%;
+  width: 100%;
 }
-body.rtl .sas-user-copywrap { flex-direction: row-reverse; }
-.sas-user-copywrap a {
-  overflow: hidden;
-  text-overflow: ellipsis;
+.sas-user-copywrap a,
+.sas-ip-wrap a,
+.sas-ip-wrap span {
+  overflow: visible;
   white-space: nowrap;
   min-width: 0;
+  text-align: left;
 }
 .sas-user-copy {
   flex: 0 0 auto;
@@ -822,40 +935,65 @@ body.rtl .sas-user-copywrap { flex-direction: row-reverse; }
 .sas-card-empty { padding: 10px; text-align: center; color: #dd4b39; font-weight: 700; font-size: 13px; }
 .sas-table-card { background: #fff; border: 1px solid #d2d6de; }
 .sas-table-headbar {
-  background: #243040; color: #dbe3ea; padding: 6px 10px;
+  background: #eef2f6; color: #1e293b; padding: 6px 10px;
   display: flex; align-items: center; justify-content: flex-start; gap: 8px 10px;
   font-weight: 700; font-size: 14px; flex-wrap: nowrap;
+  border-bottom: 1px solid #d2d6de;
 }
-.sas-table-headbar .sas-found { font-weight: 600; opacity: .9; color: #c5d0da; }
+.sas-table-headbar .sas-found { font-weight: 600; opacity: 1; color: #64748b; font-size: 11px; line-height: 1.2; }
 .sas-headbar-lead {
   display: flex; align-items: center; gap: 8px;
   flex: 0 1 auto; min-width: 0;
 }
-.sas-headbar-title { flex: 0 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sas-headbar-title {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 1px;
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  line-height: 1.15;
+}
+.sas-headbar-name { font-weight: 800; font-size: 14px; color: #0f172a; }
+.sas-radius-page .sas-table-headbar .ops-top-btn::after { content: none !important; display: none !important; }
 .sas-headbar-actions {
   display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0;
 }
 .sas-table-tools {
   display: flex; align-items: stretch; flex: 0 0 auto;
-  border: 1px solid rgba(167,181,193,.28); border-radius: 2px; overflow: hidden;
+  border: 1px solid #c5d0da; border-radius: 4px; overflow: hidden;
+  background: #fff;
 }
 .sas-table-tools .tool-ico {
-  appearance: none; border: 0; background: transparent; color: #a7b5c1;
+  appearance: none; border: 0; background: transparent; color: #475569;
   width: 36px; height: 30px; cursor: pointer; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
-  border-inline-end: 1px solid rgba(167,181,193,.22);
+  border-inline-end: 1px solid #e2e8f0;
 }
 .sas-table-tools .tool-ico:last-child { border-inline-end: 0; }
-.sas-table-tools .tool-ico:hover { color: #e8eef3; background: rgba(255,255,255,.08); }
+.sas-table-tools .tool-ico:hover { color: #0f172a; background: #e8eef3; }
+.sas-table-tools .tool-ico.is-on { color: #1d4ed8; background: #dbeafe; }
 .sas-table-tools .tool-ico svg { display: block; }
-.sas-table-headbar .sas-search-wrap { flex: 1 1 280px; width: auto; min-width: 180px; max-width: none; }
+.sas-table-headbar .sas-search-wrap { flex: 1 1 280px; width: auto; min-width: 180px; max-width: none; align-self: center; }
 .sas-table-headbar .sas-search-wrap input {
-  height: 28px; font-size: 12px; background: #fff;
+  height: 40px;
+  min-height: 40px;
+  font-size: 14px;
+  background: #fff;
   border-color: #9aa8b5;
+  text-align: center;
+  line-height: normal;
+  padding-block: 0;
 }
 .sas-table-headbar .ops-top-btn {
   height: 28px !important; min-height: 28px; min-width: 0 !important;
   padding: 0 12px !important; font-size: 13px !important; line-height: 28px;
+  overflow: hidden;
+  position: relative;
+  z-index: 3;
 }
 .sas-mode-row {
   display: flex; flex-wrap: wrap; align-items: center; gap: 12px 18px; margin: 10px 0 8px;
@@ -1165,10 +1303,13 @@ body.rtl .sas-user-copywrap { flex-direction: row-reverse; }
 }
 .sas-search-wrap .sas-search-ico svg { display: block; }
 .sas-search-wrap input {
-  width: 100%; min-width: 0; height: 32px;
-  padding-block: 4px; padding-inline: 30px 28px;
+  width: 100%; min-width: 0; height: 40px;
+  padding-block: 0; padding-inline: 32px 30px;
   border: 1px solid #c5d0da; border-radius: 3px;
-  font-size: 13px; font-family: inherit; background: #fff;
+  font-size: 14px; font-family: inherit; background: #fff;
+  text-align: center;
+  line-height: normal;
+  box-sizing: border-box;
 }
 .sas-search-wrap input:focus {
   outline: 0; border-color: #2b6c9a; box-shadow: 0 0 0 2px rgba(43,108,154,.18);
@@ -1180,24 +1321,73 @@ body.rtl .sas-user-copywrap { flex-direction: row-reverse; }
   font-size: 14px; font-weight: 700; text-decoration: none;
 }
 .sas-radius-page .ops-dropdown { min-width: 188px; font-size: 13px; }
+#colsDropdown { min-width: 260px; max-height: min(72vh, 520px); overflow: auto; }
+#colsDropdown .cols-check {
+  display: flex !important;
+  align-items: center;
+  gap: 6px;
+  cursor: default;
+  padding: 4px 6px;
+}
+#colsDropdown .cols-check > label {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  min-height: 0;
+}
+#colsDropdown .cols-handle,
+#colsDropdown .cols-shift {
+  flex: 0 0 auto;
+  border: 0;
+  background: #eef2f7;
+  color: #334155;
+  width: 26px;
+  height: 26px;
+  border-radius: 4px;
+  padding: 0;
+  font-size: 11px;
+  line-height: 26px;
+  cursor: pointer;
+}
+#colsDropdown .cols-handle { cursor: grab; letter-spacing: -1px; font-weight: 800; }
+#colsDropdown .cols-check.is-drag { opacity: .45; }
+#colsDropdown .cols-check.is-over { outline: 1px dashed #2b6c9a; }
 @media (max-width: 860px) {
-  .sas-radius-page #subsTable .col-num { display: table-cell !important; }
+  .sas-radius-page #subsTable .col-num:not(.col-off) { display: table-cell !important; }
 }
 .sas-radius-page #subsTable .col-num,
 .sas-radius-page #subsTable .sub-check-cell,
 .sas-radius-page #subsTable td.status-cell,
 .sas-radius-page #subsTable th.status-cell {
-  width: 32px;
-  min-width: 32px;
   white-space: nowrap;
   text-align: center !important;
   vertical-align: middle;
-  padding: 4px 3px !important;
   color: #334155;
-  display: table-cell !important;
   box-sizing: border-box;
 }
-.sas-radius-page .table-wrap { width: 100%; overflow-x: hidden; max-width: 100%; }
+.sas-radius-page #subsTable .sub-check-cell {
+  width: 22px;
+  min-width: 22px;
+  max-width: 26px;
+  padding: 4px 0 !important;
+}
+.sas-radius-page #subsTable .col-num {
+  width: 22px;
+  min-width: 22px;
+  max-width: 32px;
+  padding: 4px 2px !important;
+}
+.sas-radius-page #subsTable td.status-cell,
+.sas-radius-page #subsTable th.status-cell {
+  width: 28px;
+  min-width: 28px;
+  padding: 4px 2px !important;
+}
+.sas-radius-page .table-wrap { width: 100%; overflow: auto; max-width: 100%; overflow-anchor: none; }
 .sas-radius-page #subsTable {
   width: 100%;
   min-width: 0;
@@ -1208,7 +1398,7 @@ body.rtl .sas-user-copywrap { flex-direction: row-reverse; }
 .sas-radius-page #subsTable td {
   text-align: center !important;
   vertical-align: middle;
-  overflow: hidden;
+  overflow: visible;
   white-space: nowrap;
 }
 .sas-radius-page #subsTable th {
@@ -1223,13 +1413,17 @@ body.rtl .sas-user-copywrap { flex-direction: row-reverse; }
 .sas-radius-page #subsTable td {
   padding: 4px 6px; font-size: 14px; font-weight: 600;
   border-bottom: 1px solid #ececec;
-  text-overflow: ellipsis;
 }
-.sas-radius-page #subsTable .col-user,
+.sas-radius-page #subsTable td.col-user,
+.sas-radius-page #subsTable th.col-user {
+  text-align: left !important;
+  direction: ltr;
+  unicode-bidi: isolate;
+}
 .sas-radius-page #subsTable .col-fn,
 .sas-radius-page #subsTable .col-pkg,
 .sas-radius-page #subsTable .col-parent {
-  max-width: 11em;
+  max-width: none;
 }
 .sas-radius-page #subsTable .col-rent { min-width: 0 !important; }
 .sas-radius-page #subsTable .cell-edit,
@@ -1242,10 +1436,31 @@ body.rtl .sas-user-copywrap { flex-direction: row-reverse; }
   display: inline-block;
   max-width: 100%;
 }
-.sas-radius-page #subsTable .rent-cell-edit {
-  max-width: 100%;
-  min-width: 0;
-  justify-content: center;
+.sas-radius-page #subsTable th.col-fn,
+.sas-radius-page #subsTable td.col-fn,
+.sas-radius-page #subsTable td.col-fn .cell-edit {
+  text-align: right !important;
+}
+.sas-radius-page #subsTable .col-ip {
+  direction: ltr;
+  unicode-bidi: isolate;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.sas-ip-link { color: #3c8dbc; text-decoration: none; font-weight: 600; }
+.sas-ip-link:hover { text-decoration: underline; }
+.sas-radius-page #subsTable th.col-off,
+.sas-radius-page #subsTable td.col-off { display: none !important; }
+.sas-filter-label {
+  font-size: 11px; font-weight: 800; color: #64748b;
+  padding: 8px 10px 4px; letter-spacing: .02em;
+}
+.sas-filter-parents { max-height: 200px; overflow-y: auto; }
+#filterDropdown { min-width: min(280px, calc(100vw - 20px)); max-height: min(72vh, 520px); overflow: auto; }
+.sas-radius-page #subsTable .rent-cell-empty {
+  min-height: 26px;
+  min-width: 22px;
+  opacity: 0.35;
 }
 .sas-offline-banner {
   border-radius: 6px; padding: 10px 14px; font-weight: 700; margin: 0 0 12px;
@@ -1312,39 +1527,99 @@ body.rtl .sas-user-copywrap { flex-direction: row-reverse; }
   background: #fff;
 }
 @media (max-width: 760px) {
-  .sas-radius-page .sas-legend { gap: 8px 12px; font-size: 12px; margin-bottom: 8px; }
+  .sas-radius-page .sas-legend {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    gap: 10px 14px;
+    font-size: 12px;
+    margin-bottom: 8px;
+    padding-bottom: 2px;
+    -webkit-overflow-scrolling: touch;
+  }
   .sas-table-headbar {
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "title ops tools"
+      "search search search";
+    align-items: center;
     padding: 8px;
     gap: 8px;
   }
-  .sas-headbar-lead { flex: 1 1 auto; min-width: 0; }
+  .sas-headbar-lead {
+    display: contents;
+  }
+  .sas-headbar-title {
+    grid-area: title;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    overflow: hidden;
+    min-width: 0;
+    max-width: 9.5rem;
+  }
+  .sas-headbar-name {
+    font-size: 13px;
+    white-space: nowrap;
+  }
+  .sas-headbar-title .sas-found {
+    display: block;
+    font-size: 10px;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .sas-headbar-lead .subs-ops-side,
+  .sas-headbar-lead .subs-ops-anchor {
+    grid-area: ops;
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex !important;
+    width: auto;
+  }
+  .sas-headbar-lead .ops-top-btn {
+    flex: 1 1 auto;
+    width: 100%;
+    min-width: 0 !important;
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden !important;
+    height: 36px !important;
+    min-height: 36px;
+    line-height: 1.2 !important;
+    padding: 0 12px !important;
+    font-size: 13px !important;
+  }
   .sas-table-headbar .sas-search-wrap {
-    flex: 1 1 100%;
+    grid-area: search;
+    flex: 1 1 auto;
     min-width: 0;
     width: 100%;
-    order: 5;
+    order: unset;
   }
-  .sas-table-tools { margin-inline-start: auto; }
-  .sas-radius-page .ops-top-btn {
-    min-width: 0 !important;
-    padding: 0 10px !important;
-    font-size: 12px !important;
+  .sas-table-tools {
+    grid-area: tools;
+    margin-inline-start: 0;
   }
   .sas-search-wrap input {
-    height: 36px;
+    height: 52px;
+    min-height: 52px;
     font-size: 16px;
+    text-align: center;
+    line-height: normal;
+    padding-block: 0;
+    padding-inline: 36px 32px;
   }
   .sas-radius-page .table-wrap {
-    overflow-x: hidden;
+    overflow: auto;
     max-width: 100%;
+    -webkit-overflow-scrolling: touch;
   }
   .sas-radius-page #subsTable { min-width: 0; width: 100%; table-layout: auto; }
-  .sas-radius-page #subsTable .col-ln,
-  .sas-radius-page #subsTable .col-parent,
-  .sas-radius-page #subsTable .col-traf {
-    display: none !important;
-  }
   .sas-radius-page #subsTable th,
   .sas-radius-page #subsTable td {
     padding: 4px 4px;
@@ -1359,12 +1634,54 @@ body.rtl .sas-user-copywrap { flex-direction: row-reverse; }
 @media (max-width: 480px) {
   .sas-headbar-title { font-size: 12px; }
   .sas-table-tools .tool-ico { width: 32px; height: 32px; }
-  .sas-radius-page .ops-top-btn { height: 32px !important; min-height: 32px; line-height: 32px; }
-  .sas-radius-page #subsTable .col-phone {
-    display: none !important;
+}
+@media (min-width: 761px) {
+  body:has(.sas-radius-page) .footer { display: none; }
+  body:has(.sas-radius-page) .main-top {
+    position: sticky;
+    top: 0;
+    z-index: 60;
   }
+  .sas-table-card {
+    display: flex;
+    flex-direction: column;
+    max-height: calc(100vh - 168px);
+    min-height: 0;
+  }
+  .sas-table-headbar { flex: 0 0 auto; position: sticky; top: 0; z-index: 4; }
+  .sas-radius-page .table-wrap {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+  }
+  .sas-radius-page #subsTable thead th {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background: #f4f4f4;
+  }
+  #subsPager { flex: 0 0 auto; }
 }
 </style>
+<script>
+(function () {
+  try {
+    var o = JSON.parse(localStorage.getItem('sas_table_cols_v1') || '{}');
+    if (!o || typeof o !== 'object') return;
+    var parts = [];
+    for (var k in o) {
+      if (Object.prototype.hasOwnProperty.call(o, k) && !o[k]) {
+        parts.push('#subsTable .col-' + k + '{display:none!important}');
+      }
+    }
+    if (!parts.length) return;
+    var s = document.createElement('style');
+    s.id = 'sasColsBoot';
+    s.appendChild(document.createTextNode(parts.join('')));
+    document.head.appendChild(s);
+  } catch (e) {}
+})();
+</script>
 <div class="sas-radius-page">
     <?php if ($sasOfflineSnap): ?>
         <div class="sas-offline-banner" id="sasOfflineBanner" role="status">
@@ -1399,11 +1716,11 @@ body.rtl .sas-user-copywrap { flex-direction: row-reverse; }
         <div class="sas-table-headbar">
             <div class="sas-headbar-lead">
             <div class="sas-headbar-title">
-                <?php echo e($lang === 'en' ? 'Subscribers' : 'المشتركين'); ?>
+                <span class="sas-headbar-name"><?php echo e($lang === 'en' ? 'Subscribers' : 'المشتركين'); ?></span>
                 <span class="sas-found" id="sasFoundLabel">
                     <?php echo $lang === 'en'
-                        ? (' | Found ' . (int) $totalRows . ' record(s)')
-                        : (' | عُثر على ' . (int) $totalRows . ' قيد'); ?>
+                        ? ('Found ' . (int) $totalRows . ' record(s)')
+                        : ('عُثر على ' . (int) $totalRows . ' قيد'); ?>
                 </span>
             </div>
             <div class="subs-ops-side" style="display:flex;align-items:center;gap:8px">
@@ -1413,18 +1730,21 @@ body.rtl .sas-user-copywrap { flex-direction: row-reverse; }
             </div>
             </div>
             <form method="get" action="sas.php" id="subsSearchForm" class="sas-search-wrap" autocomplete="off">
-                <?php if ($perPageRaw !== '20'): ?>
+                <?php if ($perPageRaw !== '10'): ?>
                     <input type="hidden" name="per_page" value="<?php echo e($perPageRaw); ?>">
                 <?php endif; ?>
                 <?php if ($subFilter !== ''): ?>
                     <input type="hidden" name="sub" value="<?php echo e($subFilter); ?>">
+                <?php endif; ?>
+                <?php if ($parentFilter !== ''): ?>
+                    <input type="hidden" name="parent" value="<?php echo e($parentFilter); ?>">
                 <?php endif; ?>
                 <span class="sas-search-ico" aria-hidden="true">
                     <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
                 </span>
                 <input id="filterInput" name="q" value="<?php echo e($q); ?>" placeholder="<?php echo e($lang === 'en' ? 'Search username, name, or number…' : 'اسم الدخول أو الاسم أو الرقم'); ?>" autocomplete="off">
                 <?php if ($q !== ''): ?>
-                    <a class="sas-search-clear" href="sas.php<?php echo $subFilter !== '' ? ('?sub=' . rawurlencode($subFilter)) : ''; ?>" title="<?php echo e($lang === 'en' ? 'Clear' : 'مسح'); ?>">×</a>
+                    <a class="sas-search-clear" href="<?php echo e(sas_filter_href($subFilter, $parentFilter, '', $perPageRaw)); ?>" title="<?php echo e($lang === 'en' ? 'Clear' : 'مسح'); ?>">×</a>
                 <?php endif; ?>
             </form>
             <div class="sas-table-tools">
@@ -1450,8 +1770,9 @@ body.rtl .sas-user-copywrap { flex-direction: row-reverse; }
             <tr>
                 <th class="sub-check-cell"><label class="th-check-only"><input type="checkbox" id="subCheckAll"></label></th>
                 <th class="col-num">#</th>
-                <th class="status-cell"><?php echo e($lang === 'en' ? 'Status' : 'الحالة'); ?></th>
+                <th class="status-cell col-status"><?php echo e($lang === 'en' ? 'Status' : 'الحالة'); ?></th>
                 <th class="col-user"><?php echo sas_sort_link('username', $lang === 'en' ? 'Username' : 'اسم الدخول', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
+                <th class="col-ip"><?php echo sas_sort_link('ip', 'IP Address', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
                 <th class="col-fn"><?php echo sas_sort_link('firstname', $lang === 'en' ? 'First Name' : 'الاسم الأول', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
                 <th class="col-ln"><?php echo sas_sort_link('lastname', $lang === 'en' ? 'Last Name' : 'الاسم الثاني', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
                 <th class="col-phone"><?php echo e($lang === 'en' ? 'Phone' : 'الهاتف'); ?></th>
@@ -1471,7 +1792,7 @@ body.rtl .sas-user-copywrap { flex-direction: row-reverse; }
                 $emptyMsg = ($sasReady && $cacheCount <= 0)
                     ? ($lang === 'en' ? 'Loading users from SAS…' : 'جاري جلب المشتركين من الساس…')
                     : ($lang === 'en' ? 'No SAS users in cache yet' : 'ماكو مشتركين من الساس بعد');
-                echo '<tr><td colspan="14">' . e($emptyMsg) . '</td></tr>';
+                echo '<tr><td colspan="15">' . e($emptyMsg) . '</td></tr>';
             }
             foreach ($rows as $row) {
                 echo sas_render_table_row($row, $n++, $config, $lang);
@@ -1491,7 +1812,10 @@ body.rtl .sas-user-copywrap { flex-direction: row-reverse; }
             if ($subFilter !== '') {
                 $baseQs[] = 'sub=' . urlencode($subFilter);
             }
-            if ($perPageRaw !== '20') {
+            if ($parentFilter !== '') {
+                $baseQs[] = 'parent=' . urlencode($parentFilter);
+            }
+            if ($perPageRaw !== '10') {
                 $baseQs[] = 'per_page=' . urlencode($perPageRaw);
             }
             $baseStr = count($baseQs) ? '&' . implode('&', $baseQs) : '';
@@ -1503,7 +1827,7 @@ body.rtl .sas-user-copywrap { flex-direction: row-reverse; }
             <?php if (!$showAll): ?>
                 <a class="btn ghost sm" href="?per_page=all<?php echo $extraQs; ?>"><?php echo e(t('show_all')); ?></a>
             <?php else: ?>
-                <a class="btn ghost sm" href="?per_page=20<?php echo $extraQs; ?>">20</a>
+                <a class="btn ghost sm" href="?per_page=10<?php echo $extraQs; ?>">10</a>
             <?php endif; ?>
         </div>
     <?php endif; ?>
@@ -1526,30 +1850,117 @@ body.rtl .sas-user-copywrap { flex-direction: row-reverse; }
     <button type="button" class="ops-item" data-ops="retry" id="opsItemRetry" hidden><?php echo e(t('retry_send')); ?></button>
 </div>
 <div class="ops-dropdown cols-dropdown hidden" id="colsDropdown">
-    <label class="ops-item cols-check"><input type="checkbox" data-col="fn" checked> <?php echo e($lang === 'en' ? 'First Name' : 'الاسم الأول'); ?></label>
-    <label class="ops-item cols-check"><input type="checkbox" data-col="ln" checked> <?php echo e($lang === 'en' ? 'Last Name' : 'الاسم الأخير'); ?></label>
-    <label class="ops-item cols-check"><input type="checkbox" data-col="phone" checked> <?php echo e($lang === 'en' ? 'Phone' : 'الهاتف'); ?></label>
-    <label class="ops-item cols-check"><input type="checkbox" data-col="exp" checked> <?php echo e($lang === 'en' ? 'Expiration' : 'الانتهاء'); ?></label>
-    <label class="ops-item cols-check"><input type="checkbox" data-col="parent" checked> <?php echo e($lang === 'en' ? 'Parent' : 'تابع الى'); ?></label>
-    <label class="ops-item cols-check"><input type="checkbox" data-col="pkg" checked> <?php echo e($lang === 'en' ? 'Profile' : 'البروفايل'); ?></label>
-    <label class="ops-item cols-check"><input type="checkbox" data-col="rent" checked> <?php echo e($lang === 'en' ? 'Rental' : 'الإيجار'); ?></label>
-    <label class="ops-item cols-check"><input type="checkbox" data-col="debt" checked> <?php echo e($lang === 'en' ? 'Debts' : 'الديون'); ?></label>
-    <label class="ops-item cols-check"><input type="checkbox" data-col="traf" checked> <?php echo e($lang === 'en' ? 'Daily Traffic' : 'الترافيك اليومي'); ?></label>
-    <label class="ops-item cols-check"><input type="checkbox" data-col="days" checked> <?php echo e($lang === 'en' ? 'Remaining Days' : 'الأيام المتبقية'); ?></label>
+    <div class="sas-filter-label"><?php echo e($lang === 'en' ? 'Show / reorder columns' : 'إظهار وترتيب الأعمدة'); ?></div>
+    <div class="cols-check ops-item" data-col-row="num">
+        <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
+        <label><input type="checkbox" data-col="num" checked> #</label>
+        <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
+        <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
+    </div>
+    <div class="cols-check ops-item" data-col-row="status">
+        <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
+        <label><input type="checkbox" data-col="status" checked> <?php echo e($lang === 'en' ? 'Status' : 'الحالة'); ?></label>
+        <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
+        <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
+    </div>
+    <div class="cols-check ops-item" data-col-row="user">
+        <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
+        <label><input type="checkbox" data-col="user" checked> <?php echo e($lang === 'en' ? 'Username' : 'اسم الدخول'); ?></label>
+        <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
+        <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
+    </div>
+    <div class="cols-check ops-item" data-col-row="ip">
+        <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
+        <label><input type="checkbox" data-col="ip" checked> IP Address</label>
+        <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
+        <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
+    </div>
+    <div class="cols-check ops-item" data-col-row="fn">
+        <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
+        <label><input type="checkbox" data-col="fn" checked> <?php echo e($lang === 'en' ? 'First Name' : 'الاسم الأول'); ?></label>
+        <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
+        <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
+    </div>
+    <div class="cols-check ops-item" data-col-row="ln">
+        <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
+        <label><input type="checkbox" data-col="ln" checked> <?php echo e($lang === 'en' ? 'Last Name' : 'الاسم الأخير'); ?></label>
+        <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
+        <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
+    </div>
+    <div class="cols-check ops-item" data-col-row="phone">
+        <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
+        <label><input type="checkbox" data-col="phone" checked> <?php echo e($lang === 'en' ? 'Phone' : 'الهاتف'); ?></label>
+        <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
+        <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
+    </div>
+    <div class="cols-check ops-item" data-col-row="exp">
+        <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
+        <label><input type="checkbox" data-col="exp" checked> <?php echo e($lang === 'en' ? 'Expiration' : 'الانتهاء'); ?></label>
+        <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
+        <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
+    </div>
+    <div class="cols-check ops-item" data-col-row="parent">
+        <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
+        <label><input type="checkbox" data-col="parent" checked> <?php echo e($lang === 'en' ? 'Parent' : 'تابع الى'); ?></label>
+        <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
+        <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
+    </div>
+    <div class="cols-check ops-item" data-col-row="pkg">
+        <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
+        <label><input type="checkbox" data-col="pkg" checked> <?php echo e($lang === 'en' ? 'Profile' : 'البروفايل'); ?></label>
+        <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
+        <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
+    </div>
+    <div class="cols-check ops-item" data-col-row="rent">
+        <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
+        <label><input type="checkbox" data-col="rent" checked> <?php echo e($lang === 'en' ? 'Rental' : 'الإيجار'); ?></label>
+        <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
+        <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
+    </div>
+    <div class="cols-check ops-item" data-col-row="debt">
+        <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
+        <label><input type="checkbox" data-col="debt" checked> <?php echo e($lang === 'en' ? 'Debts' : 'الديون'); ?></label>
+        <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
+        <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
+    </div>
+    <div class="cols-check ops-item" data-col-row="traf">
+        <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
+        <label><input type="checkbox" data-col="traf" checked> <?php echo e($lang === 'en' ? 'Daily Traffic' : 'الترافيك اليومي'); ?></label>
+        <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
+        <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
+    </div>
+    <div class="cols-check ops-item" data-col-row="days">
+        <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
+        <label><input type="checkbox" data-col="days" checked> <?php echo e($lang === 'en' ? 'Remaining Days' : 'الأيام المتبقية'); ?></label>
+        <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
+        <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
+    </div>
 </div>
 <div class="ops-dropdown hidden" id="filterDropdown">
-    <a class="ops-item<?php echo $subFilter === '' ? ' is-on' : ''; ?>" href="sas.php"><?php echo e($lang === 'en' ? 'All' : 'الكل'); ?></a>
-    <a class="ops-item<?php echo $subFilter === 'active' ? ' is-on' : ''; ?>" href="sas.php?sub=active"><?php echo e($lang === 'en' ? 'Active' : 'فعال'); ?></a>
-    <a class="ops-item<?php echo $subFilter === 'online' ? ' is-on' : ''; ?>" href="sas.php?sub=online"><?php echo e($lang === 'en' ? 'Connected' : 'متصل حاليا'); ?></a>
-    <a class="ops-item<?php echo $subFilter === 'expired' ? ' is-on' : ''; ?>" href="sas.php?sub=expired"><?php echo e($lang === 'en' ? 'Expired' : 'منتهي'); ?></a>
-    <a class="ops-item<?php echo $subFilter === 'disabled' ? ' is-on' : ''; ?>" href="sas.php?sub=disabled"><?php echo e($lang === 'en' ? 'Disabled' : 'معطل'); ?></a>
-    <a class="ops-item<?php echo $subFilter === 'soon' ? ' is-on' : ''; ?>" href="sas.php?sub=soon"><?php echo e($lang === 'en' ? 'Expiring soon' : 'قرب ينتهي'); ?></a>
-    <a class="ops-item<?php echo $subFilter === 'today' ? ' is-on' : ''; ?>" href="sas.php?sub=today"><?php echo e($lang === 'en' ? 'Ends today' : 'ينتهي اليوم'); ?></a>
-    <a class="ops-item<?php echo $subFilter === 'debt' ? ' is-on' : ''; ?>" href="sas.php?sub=debt"><?php echo e($lang === 'en' ? 'Has debt' : 'عليهم دين'); ?></a>
-    <a class="ops-item<?php echo $subFilter === 'rental' ? ' is-on' : ''; ?>" href="sas.php?sub=rental"><?php echo e($lang === 'en' ? 'Has rental' : 'عليهم إيجار'); ?></a>
+    <div class="sas-filter-label"><?php echo e($lang === 'en' ? 'Status' : 'الحالة'); ?></div>
+    <a class="ops-item<?php echo $subFilter === '' ? ' is-on' : ''; ?>" href="<?php echo e(sas_filter_href('', $parentFilter, $q, $perPageRaw)); ?>"><?php echo e($lang === 'en' ? 'All' : 'الكل'); ?></a>
+    <a class="ops-item<?php echo $subFilter === 'active' ? ' is-on' : ''; ?>" href="<?php echo e(sas_filter_href('active', $parentFilter, $q, $perPageRaw)); ?>"><?php echo e($lang === 'en' ? 'Active' : 'فعال'); ?></a>
+    <a class="ops-item<?php echo $subFilter === 'online' ? ' is-on' : ''; ?>" href="<?php echo e(sas_filter_href('online', $parentFilter, $q, $perPageRaw)); ?>"><?php echo e($lang === 'en' ? 'Connected' : 'متصل حاليا'); ?></a>
+    <a class="ops-item<?php echo $subFilter === 'expired' ? ' is-on' : ''; ?>" href="<?php echo e(sas_filter_href('expired', $parentFilter, $q, $perPageRaw)); ?>"><?php echo e($lang === 'en' ? 'Expired' : 'منتهي'); ?></a>
+    <a class="ops-item<?php echo $subFilter === 'disabled' ? ' is-on' : ''; ?>" href="<?php echo e(sas_filter_href('disabled', $parentFilter, $q, $perPageRaw)); ?>"><?php echo e($lang === 'en' ? 'Disabled' : 'معطل'); ?></a>
+    <a class="ops-item<?php echo $subFilter === 'soon' ? ' is-on' : ''; ?>" href="<?php echo e(sas_filter_href('soon', $parentFilter, $q, $perPageRaw)); ?>"><?php echo e($lang === 'en' ? 'Expiring soon' : 'قرب ينتهي'); ?></a>
+    <a class="ops-item<?php echo $subFilter === 'today' ? ' is-on' : ''; ?>" href="<?php echo e(sas_filter_href('today', $parentFilter, $q, $perPageRaw)); ?>"><?php echo e($lang === 'en' ? 'Ends today' : 'ينتهي اليوم'); ?></a>
+    <a class="ops-item<?php echo $subFilter === 'debt' ? ' is-on' : ''; ?>" href="<?php echo e(sas_filter_href('debt', $parentFilter, $q, $perPageRaw)); ?>"><?php echo e($lang === 'en' ? 'Has debt' : 'عليهم دين'); ?></a>
+    <a class="ops-item<?php echo $subFilter === 'rental' ? ' is-on' : ''; ?>" href="<?php echo e(sas_filter_href('rental', $parentFilter, $q, $perPageRaw)); ?>"><?php echo e($lang === 'en' ? 'Has rental' : 'عليهم إيجار'); ?></a>
+    <div class="sas-filter-label"><?php echo e($lang === 'en' ? 'Parent' : 'تابع الى'); ?></div>
+    <a class="ops-item<?php echo $parentFilter === '' ? ' is-on' : ''; ?>" href="<?php echo e(sas_filter_href($subFilter, '', $q, $perPageRaw)); ?>"><?php echo e($lang === 'en' ? 'All parents' : 'كل التوابع'); ?></a>
+    <div class="sas-filter-parents">
+        <?php foreach ($parentNames as $pn): ?>
+            <a class="ops-item<?php echo $parentFilter === (string) $pn ? ' is-on' : ''; ?>" href="<?php echo e(sas_filter_href($subFilter, (string) $pn, $q, $perPageRaw)); ?>"><?php echo e((string) $pn); ?></a>
+        <?php endforeach; ?>
+        <?php if (!$parentNames): ?>
+            <div class="ops-item" style="cursor:default;color:#94a3b8"><?php echo e($lang === 'en' ? 'No parents yet' : 'ماكو تابع الى بعد'); ?></div>
+        <?php endif; ?>
+    </div>
 </div>
 <div class="ops-dropdown hidden" id="autoRefreshDropdown">
     <button type="button" class="ops-item" data-refresh="0"><?php echo e($lang === 'en' ? 'Off' : 'إيقاف'); ?></button>
+    <button type="button" class="ops-item" data-refresh="30"><?php echo e($lang === 'en' ? 'Every 30s' : 'كل 30 ثانية'); ?></button>
     <button type="button" class="ops-item" data-refresh="60"><?php echo e($lang === 'en' ? 'Every 1 min' : 'كل دقيقة'); ?></button>
     <button type="button" class="ops-item" data-refresh="180"><?php echo e($lang === 'en' ? 'Every 3 min' : 'كل 3 دقائق'); ?></button>
     <button type="button" class="ops-item" data-refresh="300"><?php echo e($lang === 'en' ? 'Every 5 min' : 'كل 5 دقائق'); ?></button>
@@ -1741,8 +2152,66 @@ body.rtl .sas-user-copywrap { flex-direction: row-reverse; }
   syncBulk();
   var confirmTest = <?php echo json_encode(t('confirm_give_test')); ?>;
   var stale = <?php echo json_encode($syncMode === 'stale'); ?>;
-  var refreshSec = 0;
+  var refreshSec = <?php echo (int) $savedRefreshSec; ?>;
+  try {
+    var rs = localStorage.getItem('sas_refresh_sec_v1');
+    if (rs !== null) {
+      var rn = parseInt(rs, 10);
+      if (!isNaN(rn) && rn >= 0) refreshSec = rn;
+    }
+  } catch (e) {}
   var refreshTimer = null;
+  var liveBusy = false;
+  var COLS_KEY = 'sas_table_cols_v1';
+  var ORDER_KEY = 'sas_table_col_order_v1';
+  var DEFAULT_COL_ORDER = ['num','status','user','ip','fn','ln','phone','exp','parent','pkg','rent','debt','traf','days'];
+  function loadLocalCols() {
+    try {
+      var raw = localStorage.getItem(COLS_KEY);
+      if (!raw) return {};
+      var o = JSON.parse(raw);
+      return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {};
+    } catch (e) { return {}; }
+  }
+  function saveLocalCols() {
+    try { localStorage.setItem(COLS_KEY, JSON.stringify(savedCols || {})); } catch (e) {}
+  }
+  function mergeColOrder(saved) {
+    var seen = {};
+    var out = [];
+    if (saved && saved.length) {
+      saved.forEach(function (k) {
+        if (DEFAULT_COL_ORDER.indexOf(k) !== -1 && !seen[k]) {
+          seen[k] = 1;
+          out.push(k);
+        }
+      });
+    }
+    DEFAULT_COL_ORDER.forEach(function (k) {
+      if (!seen[k]) out.push(k);
+    });
+    return out;
+  }
+  function loadColOrder() {
+    try {
+      var a = JSON.parse(localStorage.getItem(ORDER_KEY) || '[]');
+      return mergeColOrder(Array.isArray(a) ? a : []);
+    } catch (e) { return DEFAULT_COL_ORDER.slice(); }
+  }
+  function saveColOrder() {
+    try { localStorage.setItem(ORDER_KEY, JSON.stringify(colOrder || [])); } catch (e) {}
+  }
+  var savedCols = loadLocalCols();
+  var colOrder = loadColOrder();
+  var liveQs = <?php echo json_encode(array(
+      'q' => $q,
+      'sub' => $subFilter,
+      'parent' => $parentFilter,
+      'sort' => $sortKey,
+      'dir' => $sortDir,
+      'page' => (string) $page,
+      'per_page' => $perPageRaw,
+  )); ?>;
   var csrf = <?php echo json_encode(csrf_token()); ?>;
   var rentalDevices = <?php echo json_encode(function_exists('rental_devices_list') ? rental_devices_list() : array()); ?>;
   var rentNoneLabel = <?php echo json_encode($lang === 'en' ? 'No rental' : 'بدون إيجار'); ?>;
@@ -1758,7 +2227,7 @@ body.rtl .sas-user-copywrap { flex-direction: row-reverse; }
   }
   function reloadIfIdle() {
     if (actModalOpen()) return false;
-    window.location.reload();
+    refreshTableLive();
     return true;
   }
 
@@ -2501,34 +2970,211 @@ body.rtl .sas-user-copywrap { flex-direction: row-reverse; }
   });
 
   var colsDrop = document.getElementById('colsDropdown');
-  var COL_KEY = 'sas_table_cols';
+  var colsSkipUntil = 0;
+  var colsReady = false;
+  function applyOrder() {
+    var table = document.getElementById('subsTable');
+    if (!table || !colOrder || !colOrder.length) return;
+    var rows = table.querySelectorAll('tr');
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      if (!row.querySelector('.col-user') && !row.querySelector('.col-num')) continue;
+      colOrder.forEach(function (col) {
+        var cell = row.querySelector('.col-' + col);
+        if (cell) row.appendChild(cell);
+      });
+    }
+  }
+  function syncMenuToOrder() {
+    if (!colsDrop) return;
+    colOrder.forEach(function (k) {
+      var row = colsDrop.querySelector('[data-col-row="' + k + '"]');
+      if (row) colsDrop.appendChild(row);
+    });
+  }
   function applyCols() {
     if (!colsDrop) return;
-    var saved = {};
-    try { saved = JSON.parse(localStorage.getItem(COL_KEY) || '{}'); } catch (e) { saved = {}; }
+    if (!savedCols || typeof savedCols !== 'object') savedCols = {};
     colsDrop.querySelectorAll('input[data-col]').forEach(function (inp) {
       var col = inp.getAttribute('data-col');
-      if (saved.hasOwnProperty(col)) inp.checked = !!saved[col];
+      if (!col) return;
+      if (!colsReady && Object.prototype.hasOwnProperty.call(savedCols, col)) {
+        inp.checked = !!savedCols[col];
+      }
+      var on = !!inp.checked;
+      savedCols[col] = on;
       document.querySelectorAll('#subsTable .col-' + col).forEach(function (el) {
-        el.style.display = inp.checked ? '' : 'none';
+        if (on) {
+          el.classList.remove('col-off');
+          el.style.removeProperty('display');
+        } else {
+          el.classList.add('col-off');
+          el.style.setProperty('display', 'none', 'important');
+        }
       });
     });
+    applyOrder();
   }
-  applyCols();
+  function persistCols() {
+    saveLocalCols();
+    saveColOrder();
+    try { localStorage.setItem('sas_refresh_sec_v1', String(refreshSec || 0)); } catch (e) {}
+  }
+  function moveCol(key, dir) {
+    var i = colOrder.indexOf(key);
+    if (i < 0) return;
+    var j = i + dir;
+    if (j < 0 || j >= colOrder.length) return;
+    var tmp = colOrder[i];
+    colOrder[i] = colOrder[j];
+    colOrder[j] = tmp;
+    syncMenuToOrder();
+    applyOrder();
+    persistCols();
+  }
   if (colsDrop) {
     colsDrop.addEventListener('change', function (e) {
-      var inp = e.target;
-      if (!inp || !inp.getAttribute('data-col')) return;
-      var col = inp.getAttribute('data-col');
-      document.querySelectorAll('#subsTable .col-' + col).forEach(function (el) {
-        el.style.display = inp.checked ? '' : 'none';
+      var inp = e.target && e.target.closest ? e.target.closest('input[data-col]') : null;
+      if (!inp) return;
+      colsSkipUntil = Date.now() + 1500;
+      applyCols();
+      persistCols();
+    });
+    colsDrop.addEventListener('click', function (e) {
+      var btn = e.target && e.target.closest ? e.target.closest('.cols-shift') : null;
+      if (!btn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      var row = btn.closest('[data-col-row]');
+      if (!row) return;
+      moveCol(row.getAttribute('data-col-row'), parseInt(btn.getAttribute('data-dir'), 10) || 0);
+    });
+    var dragKey = '';
+    colsDrop.addEventListener('dragstart', function (e) {
+      var h = e.target && e.target.closest ? e.target.closest('.cols-handle') : null;
+      if (!h) { e.preventDefault(); return; }
+      var row = h.closest('[data-col-row]');
+      if (!row) return;
+      dragKey = row.getAttribute('data-col-row') || '';
+      row.classList.add('is-drag');
+      try { e.dataTransfer.setData('text/plain', dragKey); e.dataTransfer.effectAllowed = 'move'; } catch (err) {}
+    });
+    colsDrop.addEventListener('dragend', function () {
+      colsDrop.querySelectorAll('.is-drag,.is-over').forEach(function (el) {
+        el.classList.remove('is-drag');
+        el.classList.remove('is-over');
       });
-      var saved = {};
-      try { saved = JSON.parse(localStorage.getItem(COL_KEY) || '{}'); } catch (err) { saved = {}; }
-      saved[col] = !!inp.checked;
-      try { localStorage.setItem(COL_KEY, JSON.stringify(saved)); } catch (err2) {}
+      dragKey = '';
+    });
+    colsDrop.addEventListener('dragover', function (e) {
+      if (!dragKey) return;
+      e.preventDefault();
+      var row = e.target && e.target.closest ? e.target.closest('[data-col-row]') : null;
+      colsDrop.querySelectorAll('.is-over').forEach(function (el) { el.classList.remove('is-over'); });
+      if (row) row.classList.add('is-over');
+    });
+    colsDrop.addEventListener('drop', function (e) {
+      e.preventDefault();
+      var row = e.target && e.target.closest ? e.target.closest('[data-col-row]') : null;
+      var from = dragKey;
+      var to = row ? row.getAttribute('data-col-row') : '';
+      colsDrop.querySelectorAll('.is-drag,.is-over').forEach(function (el) {
+        el.classList.remove('is-drag');
+        el.classList.remove('is-over');
+      });
+      dragKey = '';
+      if (!from || !to || from === to) return;
+      var fi = colOrder.indexOf(from);
+      var ti = colOrder.indexOf(to);
+      if (fi < 0 || ti < 0) return;
+      colOrder.splice(fi, 1);
+      colOrder.splice(ti, 0, from);
+      colOrder = mergeColOrder(colOrder);
+      syncMenuToOrder();
+      applyOrder();
+      persistCols();
     });
   }
+  function tableIsBusy() {
+    if (actModalOpen()) return true;
+    if (!tbody) return false;
+    return !!(tbody.querySelector('.editing') || tbody.querySelector('select') || tbody.querySelector('[contenteditable="true"]'));
+  }
+  function liveTableUrl() {
+    var p = liveQs || {};
+    return 'sas.php?ajax=live_table'
+      + '&q=' + encodeURIComponent(p.q || '')
+      + '&sub=' + encodeURIComponent(p.sub || '')
+      + '&parent=' + encodeURIComponent(p.parent || '')
+      + '&sort=' + encodeURIComponent(p.sort || 'name')
+      + '&dir=' + encodeURIComponent(p.dir || 'asc')
+      + '&page=' + encodeURIComponent(p.page || '1')
+      + '&per_page=' + encodeURIComponent(p.per_page || '10');
+  }
+  function replaceTableHtml(html) {
+    if (!tbody || !html) return;
+    var wrap = document.querySelector('.sas-table-card .table-wrap');
+    var y = window.pageYOffset || document.documentElement.scrollTop;
+    var wrapTop = wrap ? wrap.scrollTop : 0;
+    var wrapLeft = wrap ? wrap.scrollLeft : 0;
+    var kept = {};
+    visibleChecks().forEach(function (c) { if (c.checked) kept[c.value] = 1; });
+    tbody.innerHTML = html;
+    originalHtml = html;
+    visibleChecks().forEach(function (c) { if (kept[c.value]) c.checked = true; });
+    applyCols();
+    syncBulk();
+    if (wrap) {
+      wrap.scrollTop = wrapTop;
+      wrap.scrollLeft = wrapLeft;
+    }
+    if (window.scrollTo) window.scrollTo(0, y);
+  }
+  function refreshTableLive() {
+    if (liveBusy || tableIsBusy() || document.hidden) return Promise.resolve(null);
+    if (Date.now() < colsSkipUntil) return Promise.resolve(null);
+    if (filter && filter.value.trim() !== String((liveQs && liveQs.q) || '')) return Promise.resolve(null);
+    liveBusy = true;
+    return fetch(liveTableUrl(), { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        liveBusy = false;
+        if (d && d.ok && d.html && !tableIsBusy()) replaceTableHtml(d.html);
+        return d;
+      })
+      .catch(function () { liveBusy = false; return null; });
+  }
+  function applyAutoRefresh(sec, skipSave) {
+    refreshSec = parseInt(sec, 10) || 0;
+    if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+    var autoBtn = document.getElementById('autoRefreshBtn');
+    if (autoBtn) autoBtn.classList.toggle('is-on', refreshSec > 0);
+    var autoDrop = document.getElementById('autoRefreshDropdown');
+    if (autoDrop) {
+      Array.prototype.slice.call(autoDrop.querySelectorAll('[data-refresh]')).forEach(function (b) {
+        b.classList.toggle('is-on', String(b.getAttribute('data-refresh')) === String(refreshSec));
+      });
+    }
+    if (refreshSec > 0) {
+      refreshTimer = setInterval(refreshTableLive, refreshSec * 1000);
+    }
+    if (!skipSave) persistCols();
+  }
+  syncMenuToOrder();
+  applyCols();
+  colsReady = true;
+  persistCols();
+  var autoRefreshDrop = document.getElementById('autoRefreshDropdown');
+  if (autoRefreshDrop) {
+    autoRefreshDrop.addEventListener('click', function (e) {
+      var b = e.target && e.target.closest ? e.target.closest('[data-refresh]') : null;
+      if (!b) return;
+      e.preventDefault();
+      applyAutoRefresh(b.getAttribute('data-refresh'));
+      closeMenus();
+    });
+  }
+  applyAutoRefresh(refreshSec, true);
 
   function liveSearch() {
     if (!filter || !tbody) return;
@@ -2539,7 +3185,7 @@ body.rtl .sas-user-copywrap { flex-direction: row-reverse; }
       return;
     }
     if (pager) pager.style.display = 'none';
-    fetch('sas.php?live=1&q=' + encodeURIComponent(q) + '&sub=<?php echo rawurlencode($subFilter); ?>')
+    fetch('sas.php?live=1&q=' + encodeURIComponent(q) + '&sub=<?php echo rawurlencode($subFilter); ?>&parent=<?php echo rawurlencode($parentFilter); ?>')
       .then(function (r) { return r.json(); })
       .then(function (d) {
         if (d && d.html) {
@@ -2599,8 +3245,8 @@ body.rtl .sas-user-copywrap { flex-direction: row-reverse; }
     }
   } catch (e) {}
   function markSyncOkAndReload() {
-    try { sessionStorage.setItem('sas_sync_ok', '1'); } catch (e2) {}
-    if (!reloadIfIdle()) showSyncOkBanner();
+    showSyncOkBanner();
+    refreshTableLive();
   }
   function parseSyncRes(r) {
     return r.text().then(function (t) {
@@ -2618,9 +3264,11 @@ body.rtl .sas-user-copywrap { flex-direction: row-reverse; }
       .then(parseSyncRes)
       .then(function (d) {
         if (d && d.ok) {
-          showSyncNote(<?php echo json_encode($lang === 'en' ? 'Updated — reloading' : 'تم التحديث — جاري إعادة التحميل'); ?>);
-          markSyncOkAndReload();
-          return d;
+          showSyncNote(<?php echo json_encode($lang === 'en' ? 'Updated' : 'تم التحديث'); ?>);
+          return refreshTableLive().then(function () {
+            showSyncOkBanner();
+            return d;
+          });
         }
         setOfflineBanner(true);
         showSyncNote((d && (d.last_error || d.message)) || <?php echo json_encode($lang === 'en' ? 'Refresh failed' : 'فشل التحديث'); ?>);

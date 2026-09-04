@@ -79,6 +79,7 @@ function ensure_sas_users_cache_table($pdo)
         'last_online' => 'DATETIME NULL DEFAULT NULL',
         'is_online' => 'TINYINT(1) NOT NULL DEFAULT 0',
         'daily_traffic' => 'VARCHAR(60) NULL DEFAULT NULL',
+        'framed_ip' => 'VARCHAR(45) NULL DEFAULT NULL',
     );
     foreach ($extraCols as $cName => $cSql) {
         try {
@@ -450,6 +451,41 @@ function sas_cache_is_online_row($row)
         }
     }
     return 0;
+}
+
+function sas_cache_framed_ip($row)
+{
+    if (!is_array($row)) {
+        return '';
+    }
+    $nests = array($row);
+    foreach (array('acct', 'session', 'radius', 'online', 'data', 'user') as $nk) {
+        if (isset($row[$nk]) && is_array($row[$nk]) && !isset($row[$nk][0])) {
+            $nests[] = $row[$nk];
+        }
+    }
+    $keys = array(
+        'framedipaddress', 'framed_ip_address', 'framedIPAddress', 'framed_ip',
+        'ipaddress', 'ip_address', 'ipAddress', 'user_ip', 'client_ip', 'wan_ip', 'ip',
+    );
+    foreach ($nests as $block) {
+        foreach ($keys as $k) {
+            if (!isset($block[$k]) || is_array($block[$k])) {
+                continue;
+            }
+            $v = trim((string) $block[$k]);
+            if ($v === '' || $v === '0' || $v === '0.0.0.0' || $v === '::') {
+                continue;
+            }
+            if (filter_var($v, FILTER_VALIDATE_IP)) {
+                return $v;
+            }
+            if (preg_match('/(\d{1,3}(?:\.\d{1,3}){3})/', $v, $m)) {
+                return $m[1];
+            }
+        }
+    }
+    return '';
 }
 
 function sas_cache_daily_traffic($row)
@@ -1173,6 +1209,7 @@ function sas_refresh_online_flags($pdo, $config)
     }
     $names = array();
     $trafMap = array();
+    $ipMap = array();
     foreach ($rows as $row) {
         $u = sas_cache_username($row);
         if ($u === '') {
@@ -1183,14 +1220,21 @@ function sas_refresh_online_flags($pdo, $config)
         if ($tr !== '') {
             $trafMap[strtolower($u)] = sas_clip($tr, 60);
         }
+        $ip = sas_cache_framed_ip($row);
+        if ($ip !== '') {
+            $ipMap[strtolower($u)] = sas_clip($ip, 45);
+        }
     }
     try {
-        $pdo->exec('UPDATE sas_users_cache SET is_online = 0');
+        $pdo->exec('UPDATE sas_users_cache SET is_online = 0, framed_ip = NULL');
         if ($names) {
-            $st = $pdo->prepare('UPDATE sas_users_cache SET is_online = 1, last_online = NOW() WHERE username = :u');
+            $st = $pdo->prepare('UPDATE sas_users_cache SET is_online = 1, last_online = NOW(), framed_ip = :ip WHERE username = :u');
             $stTraf = $pdo->prepare('UPDATE sas_users_cache SET daily_traffic = :t WHERE username = :u');
             foreach ($names as $key => $u) {
-                $st->execute(array(':u' => $u));
+                $st->execute(array(
+                    ':u' => $u,
+                    ':ip' => isset($ipMap[$key]) ? $ipMap[$key] : null,
+                ));
                 if (isset($trafMap[$key])) {
                     $stTraf->execute(array(':u' => $u, ':t' => $trafMap[$key]));
                 }
@@ -2388,6 +2432,11 @@ function sas_render_table_row($row, $n, $config, $lang)
     }
     $traf = (isset($row['daily_traffic']) && $row['daily_traffic'] !== null && $row['daily_traffic'] !== '')
         ? (string) $row['daily_traffic'] : '-';
+    $framedIp = '';
+    if ($isOnline && isset($row['framed_ip']) && $row['framed_ip'] !== null) {
+        $framedIp = trim((string) $row['framed_ip']);
+    }
+    $ipDisp = ($isOnline && $framedIp !== '') ? $framedIp : '-';
     $detailUrl = function_exists('sas_user_url') ? sas_user_url($username) : ('sas_user.php?u=' . rawurlencode($username));
     $editTip = $lang === 'en' ? 'Click to edit' : 'اضغط للتعديل';
     $rentSub = array(
@@ -2403,6 +2452,7 @@ function sas_render_table_row($row, $n, $config, $lang)
     }
     $searchText = strtolower($name . ' ' . $username . ' ' . $fn . ' ' . $ln . ' ' . $phone . ' ' . $pkgLabel
         . ' ' . $rentDevName . ' ' . (isset($row['rental_device_id']) ? $row['rental_device_id'] : '')
+        . ' ' . $ipDisp
         . ' ' . (isset($row['local_address']) ? $row['local_address'] : '')
         . ' ' . (isset($row['local_notes']) ? $row['local_notes'] : ''));
 
@@ -2434,9 +2484,31 @@ function sas_render_table_row($row, $n, $config, $lang)
         . ' id="sas-row-' . e(preg_replace('/[^a-zA-Z0-9_-]/', '_', $username)) . '">';
     $html .= '<td class="sub-check-cell"><label class="sub-check-lab"><input type="checkbox" class="sub-check" value="' . e($username) . '"></label></td>';
     $html .= '<td class="col-num">' . (int) $n . '</td>';
-    $html .= '<td class="status-cell" title="' . e($statusTitle) . '">' . $statusHtml . '</td>';
+    $html .= '<td class="status-cell col-status" title="' . e($statusTitle) . '">' . $statusHtml . '</td>';
     $copyTip = $lang === 'en' ? 'Copy username' : 'نسخ اسم الدخول';
-    $html .= '<td class="col-user"><span class="sas-user-copywrap"><a class="sas-link" href="' . e($detailUrl) . '" title="' . e($lang === 'en' ? 'Edit' : 'تعديل') . '">' . e($username) . '</a><button type="button" class="sas-user-copy" data-copy="' . e($username) . '" title="' . e($copyTip) . '" aria-label="' . e($copyTip) . '">⧉</button></span></td>';
+    $html .= '<td class="col-user"><span class="sas-user-copywrap">'
+        . '<button type="button" class="sas-user-copy" data-copy="' . e($username) . '" title="' . e($copyTip) . '" aria-label="' . e($copyTip) . '">⧉</button>'
+        . '<a class="sas-link" href="' . e($detailUrl) . '" title="' . e($lang === 'en' ? 'Edit' : 'تعديل') . '">' . e($username) . '</a>'
+        . '</span></td>';
+    if ($ipDisp !== '-' && $framedIp !== '') {
+        $ipHref = '';
+        if (filter_var($framedIp, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+            $ipHref = 'http://[' . $framedIp . ']/';
+        } elseif (filter_var($framedIp, FILTER_VALIDATE_IP)) {
+            $ipHref = 'http://' . $framedIp . '/';
+        }
+        $ipCopyTip = $lang === 'en' ? 'Copy IP' : 'نسخ عنوان IP';
+        $html .= '<td class="col-ip" dir="ltr"><span class="sas-ip-wrap">'
+            . '<button type="button" class="sas-user-copy" data-copy="' . e($framedIp) . '" title="' . e($ipCopyTip) . '" aria-label="' . e($ipCopyTip) . '">⧉</button>';
+        if ($ipHref !== '') {
+            $html .= '<a class="sas-ip-link" href="' . e($ipHref) . '" target="_blank" rel="noopener noreferrer">' . e($framedIp) . '</a>';
+        } else {
+            $html .= '<span>' . e($framedIp) . '</span>';
+        }
+        $html .= '</span></td>';
+    } else {
+        $html .= '<td class="col-ip" dir="ltr">-</td>';
+    }
     $html .= '<td class="col-fn"><span class="cell-edit" tabindex="0" data-edit="firstname" data-id="' . e($username) . '" data-value="' . e($fn) . '" title="' . e($editTip) . '">' . e($fn !== '' ? $fn : '-') . '</span></td>';
     $html .= '<td class="col-ln"><span class="cell-edit" tabindex="0" data-edit="lastname" data-allow-empty="1" data-id="' . e($username) . '" data-value="' . e($ln) . '" title="' . e($editTip) . '">' . e($ln !== '' ? $ln : '-') . '</span></td>';
     $html .= '<td class="col-phone"><span class="cell-edit" tabindex="0" data-edit="phone" data-allow-empty="1" data-id="' . e($username) . '" data-value="' . e($phone) . '" title="' . e($editTip) . '">' . e($phone !== '' ? $phone : '-') . '</span></td>';
@@ -2449,7 +2521,7 @@ function sas_render_table_row($row, $n, $config, $lang)
     if (function_exists('rental_cell_html')) {
         $html .= rental_cell_html($rentSub, $username, $lang);
     } else {
-        $html .= e($rentDevName !== '' ? $rentDevName : '-');
+        $html .= e($rentDevName);
     }
     $html .= '</td>';
     $html .= '<td class="debt-cell col-debt">';
