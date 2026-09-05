@@ -40,6 +40,7 @@ $failed = 0;
 $skipped = 0;
 
 foreach ($rows as $row) {
+    $row['_wa_case'] = 'reminder_auto';
     $msg = reminder_message($row, $config);
     $result = whatsapp_send($config, $row['phone'], $msg, 'reminder_auto');
     log_message($pdo, (int) $row['subscriber_id'], $result);

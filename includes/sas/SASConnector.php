@@ -388,12 +388,18 @@ class SASConnector
         return $this->parseApiResponse($this->post('user', $payload, true));
     }
 
-    public function activateUserCredit($username, $profileId, $units = 1, $userId = 0)
+    public function activateUserReward($username, $profileId, $units = 1, $userId = 0)
+    {
+        return $this->activateUserCredit($username, $profileId, $units, $userId, 'reward_points');
+    }
+
+    public function activateUserCredit($username, $profileId, $units = 1, $userId = 0, $payMethod = 'credit')
     {
         if (!$this->token && !$this->login()) {
             return array('__auth_error' => true, 'message' => 'SAS login failed');
         }
 
+        $payMethod = ($payMethod === 'reward_points') ? 'reward_points' : 'credit';
         $username = (string) $username;
         $profileId = (int) $profileId;
         $units = max(1, (int) $units);
@@ -415,7 +421,7 @@ class SASConnector
                 'profile_id' => $profileId,
                 'units' => $units,
                 'from_expiration' => 0,
-                'method' => 'credit',
+                'method' => $payMethod,
             );
             $payloads[] = array(
                 'id' => $userId,
@@ -425,7 +431,7 @@ class SASConnector
                 'units' => $units,
                 'from_expiration' => 1,
                 'from_expire' => 1,
-                'method' => 'credit',
+                'method' => $payMethod,
             );
             $payloads[] = array(
                 'id' => $userId,
@@ -467,16 +473,27 @@ class SASConnector
             'units' => $units,
         );
 
-        $routes = array(
-            'user/activate/credit',
-            'user/activate/managerBalance',
-            'user/activate/manager_balance',
-            'user/renew',
-            'user/purchase',
-        );
-        if ($userId > 0) {
-            $routes[] = 'user/' . $userId . '/activate/credit';
-            $routes[] = 'user/' . $userId . '/renew';
+        if ($payMethod === 'reward_points') {
+            $routes = array(
+                'user/activate/reward_points',
+                'user/activate/rewardPoints',
+                'user/activate/points',
+            );
+            if ($userId > 0) {
+                $routes[] = 'user/' . $userId . '/activate/reward_points';
+            }
+        } else {
+            $routes = array(
+                'user/activate/credit',
+                'user/activate/managerBalance',
+                'user/activate/manager_balance',
+                'user/renew',
+                'user/purchase',
+            );
+            if ($userId > 0) {
+                $routes[] = 'user/' . $userId . '/activate/credit';
+                $routes[] = 'user/' . $userId . '/renew';
+            }
         }
 
         $last = array();
@@ -1705,25 +1722,49 @@ class SASConnector
         if (!$this->token && !$this->login()) {
             return array();
         }
-        $payload = array(
-            'page' => 1,
-            'count' => 500,
-            'sortBy' => 'username',
-            'direction' => 'asc',
-            'search' => '',
-        );
-        $rows = array();
+        $all = array();
+        $seen = array();
         foreach (array('index/online', 'index/onlineUser', 'index/session') as $route) {
-            $full = $this->decodeApiBody($this->post($route, $payload, true), false);
-            if (isset($full['__http_error']) || isset($full['__auth_error']) || isset($full['__curl_error'])) {
-                continue;
+            $page = 1;
+            $gotAny = false;
+            while ($page <= 6) {
+                $payload = array(
+                    'page' => $page,
+                    'count' => 800,
+                    'sortBy' => 'username',
+                    'direction' => 'asc',
+                    'search' => '',
+                );
+                $full = $this->decodeApiBody($this->post($route, $payload, true), false);
+                if (isset($full['__http_error']) || isset($full['__auth_error']) || isset($full['__curl_error'])) {
+                    break;
+                }
+                $batch = $this->normalizeUserList($full);
+                if (!is_array($batch) || !$batch) {
+                    break;
+                }
+                $gotAny = true;
+                foreach ($batch as $row) {
+                    $u = '';
+                    if (is_array($row) && isset($row['username'])) {
+                        $u = strtolower(trim((string) $row['username']));
+                    }
+                    if ($u === '' || isset($seen[$u])) {
+                        continue;
+                    }
+                    $seen[$u] = 1;
+                    $all[] = $row;
+                }
+                if (count($batch) < 800) {
+                    break;
+                }
+                $page++;
             }
-            $rows = $this->normalizeUserList($full);
-            if ($rows) {
+            if ($gotAny) {
                 break;
             }
         }
-        return is_array($rows) ? $rows : array();
+        return $all;
     }
 
     public function activateUserCard($username, $pin, $userId = 0, $cardId = 0, $profileId = 0)

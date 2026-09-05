@@ -269,31 +269,43 @@ function sas_save_user_grace_days($pdo, $config, $username, $days)
 {
     $username = trim((string) $username);
     if ($username === '' || !function_exists('sas_cache_get') || !function_exists('sas_cache_ensure_local')) {
-        return array(false, 'مشترك غير محدد', 3);
+        return array(false, 'مشترك غير محدد', null);
     }
-    $days = (int) $days;
-    if ($days < 0) {
-        $days = 0;
-    }
-    if ($days > 30) {
-        $days = 30;
+    // null / '' / 'system' = حسب النظام
+    $isSystem = ($days === null || $days === '' || $days === 'system' || $days === 'sys');
+    if ($isSystem) {
+        $store = null;
+        $disp = null;
+    } else {
+        $store = (int) $days;
+        if ($store < 0) {
+            $store = 0;
+        }
+        if ($store > 90) {
+            $store = 90;
+        }
+        $disp = $store;
     }
     $cache = sas_cache_get($pdo, $username);
     if (!$cache) {
-        return array(false, 'المشترك مو موجود بكاش SAS — حدّث القائمة', $days);
+        return array(false, 'المشترك مو موجود بكاش SAS — حدّث القائمة', $disp);
     }
     list($localId, $err) = sas_cache_ensure_local($pdo, $config, $cache);
     if ($localId <= 0) {
-        return array(false, ($err !== '' ? $err : 'تعذر ربط المشترك محلياً'), $days);
+        return array(false, ($err !== '' ? $err : 'تعذر ربط المشترك محلياً'), $disp);
     }
     if (function_exists('ensure_subscriber_grace_days_column')) {
         ensure_subscriber_grace_days_column($pdo);
     }
     $oldSt = $pdo->prepare('SELECT grace_days FROM subscribers WHERE id = :id');
     $oldSt->execute(array(':id' => $localId));
-    $old = (int) $oldSt->fetchColumn();
+    $oldRaw = $oldSt->fetchColumn();
+    $oldLabel = ($oldRaw === null || $oldRaw === false || $oldRaw === '')
+        ? 'حسب النظام'
+        : (string) (int) $oldRaw;
     $pdo->prepare('UPDATE subscribers SET grace_days = :g WHERE id = :id')
-        ->execute(array(':g' => $days, ':id' => $localId));
+        ->execute(array(':g' => $store, ':id' => $localId));
+    $newLabel = $isSystem ? 'حسب النظام' : (string) (int) $store;
     if (function_exists('activity_log')) {
         activity_log(
             $pdo,
@@ -302,10 +314,10 @@ function sas_save_user_grace_days($pdo, $config, $username, $days)
             $localId,
             'update',
             'تعديل أيام السماح',
-            'اليوزرنيم: ' . $username . "\nمن: " . $old . ' إلى: ' . $days
+            'اليوزرنيم: ' . $username . "\nمن: " . $oldLabel . ' إلى: ' . $newLabel
         );
     }
-    return array(true, 'تم حفظ أيام السماح', $days);
+    return array(true, 'تم حفظ أيام السماح', $disp);
 }
 
 function rental_cell_html($sub, $username, $lang = 'ar', $settings = null)
@@ -456,16 +468,20 @@ function activation_message_with_rental($sub, $config, $extraNote = '', $rentalF
     $rentFmt = money_format_iqd($rentalFee, $currency);
     $totalFmt = money_format_iqd($total, $currency);
 
-    $msg = "مرحباً {$sub['name']}\n"
-        . "تم تفعيل خدمة الإنترنت ({$sub['service_name']})\n"
-        . 'من تاريخ ' . $sub['start_date'] . ' إلى تاريخ ' . $sub['end_date'] . "\n"
-        . 'الاشتراك: ' . $subFmt;
+    $msg = '';
+    if (function_exists('activation_message')) {
+        $msg = activation_message($sub, $config, '');
+    }
+    if ($msg === '') {
+        $msg = "مرحباً {$sub['name']}\n"
+            . "تم تفعيل خدمة الإنترنت ({$sub['service_name']})\n"
+            . 'من تاريخ ' . $sub['start_date'] . ' إلى تاريخ ' . $sub['end_date'] . "\n"
+            . 'الاشتراك: ' . $subFmt;
+    }
     if ($rentalFee > 0) {
         $label = $rentalDeviceName !== '' ? $rentalDeviceName : 'جهاز إيجار';
         $msg .= "\nإيجار ({$label}): " . $rentFmt;
         $msg .= "\nالإجمالي: " . $totalFmt;
-    } else {
-        $msg .= "\nالمبلغ: " . $subFmt;
     }
     if ($extraNote !== '') {
         $msg .= "\n" . $extraNote;
@@ -474,7 +490,7 @@ function activation_message_with_rental($sub, $config, $extraNote = '', $rentalF
     if (isset($config['whatsapp']['sender_note'])) {
         $senderNote = trim((string) $config['whatsapp']['sender_note']);
     }
-    if ($senderNote !== '') {
+    if ($senderNote !== '' && strpos($msg, $senderNote) === false) {
         $msg .= "\n" . $senderNote;
     }
     return $msg;

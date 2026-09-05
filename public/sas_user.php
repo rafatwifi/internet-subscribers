@@ -50,13 +50,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             flash('error', 'تعذر حفظ التفاصيل');
             redirect(sas_user_url($username) . '#local');
         }
-        $graceDays = (int) post('grace_days', '3');
-        if ($graceDays < 0) {
-            $graceDays = 0;
-        }
+        $graceMode = post('grace_mode', 'system');
+        $graceRaw = post('grace_days', '');
         list($ok, $msg) = sas_save_user_local_details($pdo, $config, $username, $address, $notes);
         if ($ok && function_exists('sas_save_user_grace_days')) {
-            list($gOk, $gMsg) = sas_save_user_grace_days($pdo, $config, $username, $graceDays);
+            $graceVal = ($graceMode === 'custom') ? $graceRaw : 'system';
+            list($gOk, $gMsg) = sas_save_user_grace_days($pdo, $config, $username, $graceVal);
             if (!$gOk) {
                 $ok = false;
                 $msg = $gMsg;
@@ -232,9 +231,9 @@ $currentRentDev = ($hasRent && function_exists('rental_device_by_id'))
     : null;
 $localAddress = ($localSub && isset($localSub['address'])) ? $localSub['address'] : '';
 $localNotes = ($localSub && isset($localSub['notes'])) ? $localSub['notes'] : '';
-$localGrace = function_exists('subscriber_grace_days')
-    ? subscriber_grace_days($localSub ? $localSub : array(), $config)
-    : 3;
+$graceIsCustom = $localSub && function_exists('subscriber_grace_is_custom') && subscriber_grace_is_custom($localSub);
+$localGraceNum = $graceIsCustom ? (int) $localSub['grace_days'] : (function_exists('subscriber_default_grace_days') ? subscriber_default_grace_days($config) : 3);
+$sysGraceNum = function_exists('subscriber_default_grace_days') ? subscriber_default_grace_days($config) : 3;
 
 render_header($pageTitle, 'sas', $isNew ? '' : $username);
 ?>
@@ -436,7 +435,20 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
             </div>
             <div>
                 <label><?php echo e($isEn ? 'Grace days after activation' : 'أيام السماح بعد التفعيل'); ?></label>
-                <input type="number" name="grace_days" min="0" max="30" step="1" value="<?php echo (int) $localGrace; ?>">
+                <select name="grace_mode" id="graceModeSel" style="width:100%;margin-top:4px">
+                    <option value="system" <?php echo !$graceIsCustom ? 'selected' : ''; ?>>
+                        <?php echo e($isEn ? ('Follow system (' . $sysGraceNum . ' days)') : ('حسب النظام (' . $sysGraceNum . ' يوم)')); ?>
+                    </option>
+                    <option value="custom" <?php echo $graceIsCustom ? 'selected' : ''; ?>>
+                        <?php echo e($isEn ? 'Custom number only' : 'رقم مخصص (حصراً)'); ?>
+                    </option>
+                </select>
+                <input type="number" name="grace_days" id="graceDaysInp" min="0" max="90" step="1"
+                       value="<?php echo (int) $localGraceNum; ?>"
+                       style="margin-top:6px;<?php echo $graceIsCustom ? '' : 'display:none'; ?>">
+                <p class="meta" style="margin:6px 0 0"><?php echo e($isEn
+                    ? 'System = settings default. Custom = this subscriber only.'
+                    : 'حسب النظام = قيمة الإعدادات. الرقم المخصص يستثني المشترك من إعداد النظام.'); ?></p>
             </div>
         </div>
         <div class="sas-form-actions">
@@ -447,6 +459,15 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
 <?php endif; ?>
 <script>
 (function () {
+  var mode = document.getElementById('graceModeSel');
+  var inp = document.getElementById('graceDaysInp');
+  if (mode && inp) {
+    function syncGrace() {
+      inp.style.display = mode.value === 'custom' ? '' : 'none';
+    }
+    mode.addEventListener('change', syncGrace);
+    syncGrace();
+  }
   var moreBtn = document.getElementById('sasMoreBtn');
   var moreBox = document.getElementById('sasMoreBox');
   if (moreBtn && moreBox) {

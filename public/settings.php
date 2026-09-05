@@ -43,7 +43,7 @@ $tab = isset($_GET['tab']) ? (string) $_GET['tab'] : 'general';
 if ($tab === 'templates') {
     redirect('messages.php?mode=templates');
 }
-if (!in_array($tab, array('general', 'whatsapp', 'rental', 'users', 'plans', 'sas'), true)) {
+if (!in_array($tab, array('general', 'whatsapp', 'rental', 'users', 'plans', 'sas', 'schedule', 'sensitive'), true)) {
     $tab = 'general';
 }
 
@@ -51,8 +51,54 @@ if ($tab === 'users') {
     require_perm('users');
 } elseif ($tab === 'plans') {
     redirect('plans.php');
+} elseif ($tab === 'sensitive') {
+    require_perm('clear_data');
 } else {
     require_perm('settings');
+}
+
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'sys_status') {
+    header('Content-Type: application/json; charset=utf-8');
+    if (isset($_GET['refresh']) && $_GET['refresh'] === '1') {
+        $_SESSION['sas_rp_at'] = 0;
+    }
+    $sys = collect_system_status($config);
+    $points = '—';
+    if (function_exists('sas_is_ready') && sas_is_ready($config) && function_exists('sas_manager_reward_points')) {
+        list($ptsOk, $ptsVal) = sas_manager_reward_points($config, $pdo);
+        if ($ptsOk && $ptsVal !== null) {
+            $points = ((float) $ptsVal == (int) $ptsVal)
+                ? number_format((int) $ptsVal)
+                : number_format((float) $ptsVal, 2);
+        }
+    }
+    $gMs = isset($sys['google']['ms']) ? $sys['google']['ms'] : null;
+    $sasMs = isset($sys['sas_latency']['ms']) ? $sys['sas_latency']['ms'] : null;
+    $sasOk = !empty($sys['sas_latency']['ok']);
+    $sasHost = isset($sys['sas_latency']['host']) ? (string) $sys['sas_latency']['host'] : '';
+    $fmtMs = function ($ms) {
+        return function_exists('system_format_ms') ? system_format_ms($ms) : (($ms !== null) ? (number_format((float) $ms, 1) . ' ms') : '—');
+    };
+    echo json_encode(array(
+        'ok' => true,
+        'cpu' => isset($sys['cpu']['label']) ? $sys['cpu']['label'] : '—',
+        'cpu_pct' => isset($sys['cpu']['pct']) ? $sys['cpu']['pct'] : null,
+        'google_ms' => $gMs,
+        'google_label' => $fmtMs($gMs),
+        'google_ok' => !empty($sys['google']['ok']),
+        'sas_ms' => $sasMs,
+        'sas_ok' => $sasOk,
+        'sas_host' => $sasHost,
+        'bank' => $fmtMs($sasMs),
+        'points' => $points,
+        'ram' => $sys['ram']['label'],
+        'ram_pct' => isset($sys['ram']['pct_used']) ? (int) $sys['ram']['pct_used'] : 0,
+        'disk' => $sys['disk']['ok'] ? $sys['disk']['label'] : '—',
+        'disk_pct' => isset($sys['disk']['pct_used']) ? (int) $sys['disk']['pct_used'] : 0,
+        'whatsapp' => $sys['whatsapp']['label'],
+        'server_time' => $sys['server_time'],
+    ));
+    exit;
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -68,12 +114,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($section === 'sas_test') {
         $skipSettingsSave = true;
         $tab = 'sas';
+    } elseif ($section === 'system_power') {
+        require_perm('settings');
+        $skipSettingsSave = true;
+        $tab = 'general';
+        $pass = (string) post('admin_password', '');
+        $power = post('power_action', '');
+        if (!settings_verify_wipe_password($pdo, $config, $pass)) {
+            flash('error', $lang === 'en' ? 'Wrong password' : 'كلمة المرور غير صحيحة');
+            redirect('settings.php?tab=general');
+        }
+        if (!function_exists('system_power_action')) {
+            flash('error', $lang === 'en' ? 'Power action unavailable' : 'أمر الطاقة غير متاح');
+            redirect('settings.php?tab=general');
+        }
+        list($ok, $msg) = system_power_action($power);
+        flash($ok ? 'success' : 'error', $msg);
+        redirect('settings.php?tab=general');
     } elseif ($section === 'clear_data' || $section === 'clear_logs' || $section === 'clear_offline') {
         require_perm('clear_data');
         $pass = (string) post('admin_password', '');
         if (!settings_verify_wipe_password($pdo, $config, $pass)) {
             flash('error', $lang === 'en' ? 'Wrong password' : 'كلمة المرور غير صحيحة');
-            redirect('settings.php?tab=general');
+            redirect('settings.php?tab=sensitive');
         }
         try {
             if ($section === 'clear_logs') {
@@ -91,7 +154,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } catch (Exception $e) {
             flash('error', 'Clear failed: ' . $e->getMessage());
         }
-        redirect('settings.php?tab=general');
+        redirect('settings.php?tab=sensitive');
     }
 
     if ($section === 'add_user') {
@@ -302,10 +365,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'tpl_payment_ok' => (string) post('tpl_payment_ok', ''),
             'tpl_debt_created' => (string) post('tpl_debt_created', ''),
             'tpl_activation' => (string) post('tpl_activation', ''),
+            'tpl_activation_credit' => (string) post('tpl_activation_credit', ''),
+            'tpl_activation_debts' => (string) post('tpl_activation_debts', ''),
             'tpl_days_left' => (string) post('tpl_days_left', ''),
             'tpl_unpaid_overdue' => (string) post('tpl_unpaid_overdue', ''),
+            'tpl_expiry_soon' => (string) post('tpl_expiry_soon', ''),
             'unpaid_remind_after_days' => $afterDays,
         );
+        $tplAllowed = array(
+            'activation', 'activation_credit', 'activation_debts',
+            'debt_created', 'payment_ok', 'debt_remind', 'days_left', 'unpaid_overdue', 'expiry_soon'
+        );
+        $caseKeys = array(
+            'activation_cash', 'activation_credit', 'activation_debts', 'debt_created', 'payment_ok',
+            'debt_remind', 'reminder_auto', 'days_left', 'unpaid_overdue', 'expiry_soon'
+        );
+        foreach ($caseKeys as $ck) {
+            $v = trim((string) post('wa_case_' . $ck, ''));
+            if (!in_array($v, $tplAllowed, true)) {
+                if ($ck === 'activation_cash') {
+                    $v = 'activation';
+                } elseif ($ck === 'activation_credit') {
+                    $v = 'activation_credit';
+                } elseif ($ck === 'activation_debts') {
+                    $v = 'activation_debts';
+                } elseif ($ck === 'reminder_auto') {
+                    $v = 'debt_remind';
+                } else {
+                    $v = $ck;
+                }
+                if (!in_array($v, $tplAllowed, true)) {
+                    $v = 'activation';
+                }
+            }
+            $data['wa_case_' . $ck] = $v;
+        }
         if (settings_save($data)) {
             flash('success', t('saved'));
         } else {
@@ -335,8 +429,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'sas_extend_method' => post('sas_extend_method') === 'credit' ? 'credit' : 'reward_points',
             'sas_extend_profile_id' => (int) post('sas_extend_profile_id', '0'),
             'sas_on_failure' => post('sas_on_failure') === 'rollback' ? 'rollback' : 'warn',
+            'cpe_http_user' => trim((string) post('cpe_http_user', 'ubnt')),
+            'cpe_http_pass' => (string) post('cpe_http_pass', 'ubnt'),
+            'cpe_use_https' => post('cpe_use_https') === '1',
         );
         $tab = 'sas';
+    } elseif ($section === 'schedule') {
+        $data = array(
+            'schedule_cut_enabled' => post('schedule_cut_enabled') === '1',
+            'schedule_cut_send_wa' => post('schedule_cut_send_wa') === '1',
+            'tpl_schedule_cut' => (string) post('tpl_schedule_cut', ''),
+            'wa_case_schedule_cut' => 'schedule_cut',
+        );
+        $tab = 'schedule';
+        if (post('schedule_run_now') === '1' && function_exists('run_schedule_debt_cuts')) {
+            // احفظ أولاً ثم شغّل بالكود المحدّث
+            if (settings_save($data)) {
+                $settings = settings_load();
+                $config = apply_settings_to_config($config, $settings);
+                $run = run_schedule_debt_cuts($pdo, $config, 100);
+                $msg = 'تشغيل: فحص ' . (int) $run['checked']
+                    . ' — قطع ' . (int) $run['cut']
+                    . ' — واتساب ' . (int) $run['wa_sent'];
+                flash('success', $msg);
+            } else {
+                flash('error', 'Cannot write settings.json');
+            }
+            redirect('settings.php?tab=schedule');
+        }
     } elseif (!$skipSettingsSave) {
         flash('error', 'Unknown section');
         redirect('settings.php');
@@ -537,18 +657,28 @@ $sys = collect_system_status($config);
 $waState = $sys['whatsapp']['state'];
 $waTone = ($waState === 'online') ? 'ok' : (($waState === 'qr') ? 'warn' : 'bad');
 $gOk = !empty($sys['google']['ok']);
-$gMs = isset($sys['google']['ms']) ? (int) $sys['google']['ms'] : null;
+$gMs = isset($sys['google']['ms']) ? $sys['google']['ms'] : null;
 $diskPct = (int) $sys['disk']['pct_used'];
 $diskTone = ($diskPct >= 90) ? 'bad' : (($diskPct >= 75) ? 'warn' : 'ok');
 $ramPct = (int) $sys['ram']['pct_used'];
 $ramTone = ($sys['ram']['source'] === 'host')
     ? (($ramPct >= 90) ? 'bad' : (($ramPct >= 75) ? 'warn' : 'ok'))
     : 'ok';
+$cpuPct = isset($sys['cpu']['pct']) ? (int) $sys['cpu']['pct'] : null;
+$cpuTone = ($cpuPct === null) ? 'ok' : (($cpuPct >= 90) ? 'bad' : (($cpuPct >= 75) ? 'warn' : 'ok'));
+$sasLat = isset($sys['sas_latency']) && is_array($sys['sas_latency']) ? $sys['sas_latency'] : array();
+$sasLatOk = !empty($sasLat['ok']);
+$sasLatMs = isset($sasLat['ms']) ? $sasLat['ms'] : null;
+$sasLatHost = isset($sasLat['host']) ? (string) $sasLat['host'] : '';
+$sasLatTone = ($sasLatMs === null) ? 'bad' : (($sasLatMs >= 200) ? 'bad' : (($sasLatMs >= 100) ? 'warn' : 'ok'));
+$sasLatDisp = function_exists('system_format_ms') ? system_format_ms($sasLatMs) : (($sasLatMs !== null) ? (number_format((float) $sasLatMs, 1) . ' ms') : '—');
+$gLatDisp = function_exists('system_format_ms') ? system_format_ms($gMs) : (($gMs !== null) ? (number_format((float) $gMs, 1) . ' ms') : '—');
+$gLatTone = ($gMs === null || !$gOk) ? 'bad' : (($gMs >= 200) ? 'bad' : (($gMs >= 100) ? 'warn' : 'ok'));
 ?>
 <div class="panel">
     <div class="sys-status-head">
         <h2 style="margin:0"><?php echo e($lang === 'en' ? 'System status' : 'حالة النظام'); ?></h2>
-        <a class="btn ghost sm" href="settings.php?tab=general"><?php echo e($lang === 'en' ? 'Refresh' : 'تحديث'); ?></a>
+        <button type="button" class="btn ghost sm" id="sysStatusRefresh"><?php echo e($lang === 'en' ? 'Refresh' : 'تحديث'); ?></button>
     </div>
     <div class="sys-status-grid">
         <div class="sys-card tone-ok">
@@ -556,21 +686,26 @@ $ramTone = ($sys['ram']['source'] === 'host')
             <div class="sys-card-v">v<?php echo e($sys['version']); ?></div>
             <div class="sys-card-s">PHP <?php echo e($sys['php']); ?></div>
         </div>
-        <div class="sys-card tone-<?php echo e($diskTone); ?>">
+        <div class="sys-card tone-<?php echo e($diskTone); ?>" id="sysDiskCard">
             <div class="sys-card-k"><?php echo e($lang === 'en' ? 'Disk free' : 'المساحة'); ?></div>
-            <div class="sys-card-v"><?php echo e($sys['disk']['ok'] ? $sys['disk']['label'] : '—'); ?></div>
-            <div class="sys-card-s"><?php echo e($lang === 'en' ? 'Used' : 'مستخدم'); ?> <?php echo (int) $diskPct; ?>%</div>
+            <div class="sys-card-v" id="sysDiskVal"><?php echo e($sys['disk']['ok'] ? $sys['disk']['label'] : '—'); ?></div>
+            <div class="sys-card-s" id="sysDiskSub"><?php echo e($lang === 'en' ? 'Used' : 'مستخدم'); ?> <?php echo (int) $diskPct; ?>%</div>
         </div>
-        <div class="sys-card tone-<?php echo e($ramTone); ?>">
+        <div class="sys-card tone-<?php echo e($ramTone); ?>" id="sysRamCard">
             <div class="sys-card-k"><?php echo e($lang === 'en' ? 'RAM' : 'الرام'); ?></div>
-            <div class="sys-card-v"><?php echo e($sys['ram']['label']); ?></div>
-            <div class="sys-card-s">
+            <div class="sys-card-v" id="sysRamVal"><?php echo e($sys['ram']['label']); ?></div>
+            <div class="sys-card-s" id="sysRamSub">
                 <?php if ($sys['ram']['source'] === 'host'): ?>
                     <?php echo e($lang === 'en' ? 'Used' : 'مستخدم'); ?> <?php echo (int) $ramPct; ?>%
                 <?php else: ?>
                     peak <?php echo e(format_bytes_short($sys['ram']['php_peak'])); ?>
                 <?php endif; ?>
             </div>
+        </div>
+        <div class="sys-card tone-<?php echo e($cpuTone); ?>" id="sysCpuCard">
+            <div class="sys-card-k"><?php echo e($lang === 'en' ? 'CPU' : 'المعالج'); ?></div>
+            <div class="sys-card-v" id="sysCpuVal"><?php echo e(isset($sys['cpu']['label']) ? $sys['cpu']['label'] : '—'); ?></div>
+            <div class="sys-card-s"><?php echo e($lang === 'en' ? 'Usage' : 'الاستخدام'); ?></div>
         </div>
         <div class="sys-card tone-<?php echo e($waTone); ?>">
             <div class="sys-card-k"><?php echo e($lang === 'en' ? 'WhatsApp' : 'واتساب'); ?></div>
@@ -589,14 +724,95 @@ $ramTone = ($sys['ram']['source'] === 'host')
                 ?>
             </div>
         </div>
-        <div class="sys-card tone-<?php echo $gOk ? 'ok' : 'bad'; ?>">
+        <div class="sys-card tone-<?php echo e($gLatTone); ?>" id="sysGoogleCard">
             <div class="sys-card-k"><?php echo e($lang === 'en' ? 'Google latency' : 'اتصال كوكل (Latency)'); ?></div>
-            <div class="sys-card-v"><?php echo $gMs !== null ? ((int) $gMs . ' ms') : '—'; ?></div>
-            <div class="sys-card-s"><?php echo $gOk ? e($lang === 'en' ? 'Reachable' : 'متاح') : e($lang === 'en' ? 'Failed' : 'فشل'); ?></div>
+            <div class="sys-card-v" id="sysGoogleVal"><?php echo e($gLatDisp); ?></div>
+            <div class="sys-card-s" id="sysGoogleSub"><?php echo $gOk ? e($lang === 'en' ? 'Reachable' : 'متاح') : e($lang === 'en' ? 'Failed' : 'فشل'); ?></div>
+        </div>
+        <div class="sys-card tone-<?php echo e($sasLatTone); ?>" id="sysBankCard">
+            <div class="sys-card-k"><?php echo e($lang === 'en' ? 'SAS latency' : 'بنك الساس'); ?></div>
+            <div class="sys-card-v" id="sysBankVal"><?php echo e($sasLatDisp); ?></div>
+            <div class="sys-card-s" id="sysBankSub"><?php
+                if ($sasLatHost !== '') {
+                    echo e(($lang === 'en' ? 'Ping → ' : 'Latency → ') . $sasLatHost);
+                } else {
+                    echo e($lang === 'en' ? 'SAS domain ping' : 'بينغ دومين الساس');
+                }
+            ?></div>
         </div>
     </div>
-    <p class="meta" style="margin:10px 0 0"><?php echo e($lang === 'en' ? 'Server time' : 'وقت السيرفر'); ?>: <?php echo e($sys['server_time']); ?></p>
+    <p class="meta" style="margin:10px 0 0"><?php echo e($lang === 'en' ? 'Server time' : 'وقت السيرفر'); ?>: <span id="sysServerTime"><?php echo e($sys['server_time']); ?></span></p>
 </div>
+
+<div class="panel">
+    <h2><?php echo e($lang === 'en' ? 'Server power' : 'طاقة السيرفر'); ?></h2>
+    <p class="meta" style="margin:0 0 12px"><?php echo e($lang === 'en'
+        ? 'Requires OS permissions (sudo/reboot). Confirm with your admin password.'
+        : 'يحتاج صلاحيات النظام على السيرفر. أكّد بكلمة مرور الأدمن.'); ?></p>
+    <div class="form-grid cols-2">
+        <form method="post" onsubmit="return confirm(<?php echo json_encode($lang === 'en' ? 'Reboot the server now?' : 'إعادة تشغيل السيرفر الآن؟'); ?>);">
+            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+            <input type="hidden" name="section" value="system_power">
+            <input type="hidden" name="power_action" value="reboot">
+            <label><?php echo e($lang === 'en' ? 'Admin password' : 'كلمة مرور الأدمن'); ?></label>
+            <input type="password" name="admin_password" required autocomplete="current-password">
+            <div class="actions" style="margin-top:10px">
+                <button class="btn" type="submit" style="background:#b45309"><?php echo e($lang === 'en' ? 'Reboot system' : 'إعادة تشغيل النظام'); ?></button>
+            </div>
+        </form>
+        <form method="post" onsubmit="return confirm(<?php echo json_encode($lang === 'en' ? 'SHUT DOWN the server now? This will take it offline.' : 'إطفاء السيرفر الآن؟ راح ينقطع بالكامل.'); ?>);">
+            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+            <input type="hidden" name="section" value="system_power">
+            <input type="hidden" name="power_action" value="shutdown">
+            <label><?php echo e($lang === 'en' ? 'Admin password' : 'كلمة مرور الأدمن'); ?></label>
+            <input type="password" name="admin_password" required autocomplete="current-password">
+            <div class="actions" style="margin-top:10px">
+                <button class="btn" type="submit" style="background:#b91c1c"><?php echo e($lang === 'en' ? 'Shutdown system' : 'إطفاء النظام'); ?></button>
+            </div>
+        </form>
+    </div>
+</div>
+<script>
+(function () {
+  var btn = document.getElementById('sysStatusRefresh');
+  function applySys(d) {
+    if (!d || !d.ok) return;
+    var cpu = document.getElementById('sysCpuVal');
+    if (cpu) cpu.textContent = d.cpu || '—';
+    var bank = document.getElementById('sysBankVal');
+    if (bank) bank.textContent = d.bank || '—';
+    var bs = document.getElementById('sysBankSub');
+    if (bs) {
+      bs.textContent = d.sas_host
+        ? (<?php echo json_encode($lang === 'en' ? 'Ping → ' : 'Latency → '); ?> + d.sas_host)
+        : <?php echo json_encode($lang === 'en' ? 'SAS domain ping' : 'بينغ دومين الساس'); ?>;
+    }
+    var g = document.getElementById('sysGoogleVal');
+    if (g) g.textContent = d.google_label || '—';
+    var gs = document.getElementById('sysGoogleSub');
+    if (gs) gs.textContent = d.google_ok ? <?php echo json_encode($lang === 'en' ? 'Reachable' : 'متاح'); ?> : <?php echo json_encode($lang === 'en' ? 'Failed' : 'فشل'); ?>;
+    var t = document.getElementById('sysServerTime');
+    if (t && d.server_time) t.textContent = d.server_time;
+    var disk = document.getElementById('sysDiskVal');
+    if (disk && d.disk) disk.textContent = d.disk;
+    var ram = document.getElementById('sysRamVal');
+    if (ram && d.ram) ram.textContent = d.ram;
+    var rs = document.getElementById('sysRamSub');
+    if (rs && d.ram_pct !== undefined && d.ram_pct !== null) {
+      rs.textContent = <?php echo json_encode($lang === 'en' ? 'Used ' : 'مستخدم '); ?> + d.ram_pct + '%';
+    }
+  }
+  function loadSys(force) {
+    fetch('settings.php?tab=general&ajax=sys_status' + (force ? '&refresh=1' : ''), { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(applySys)
+      .catch(function () {});
+  }
+  if (btn) btn.addEventListener('click', function () { loadSys(true); });
+  loadSys(true);
+  setInterval(function () { loadSys(true); }, 20000);
+})();
+</script>
 
 <div class="panel">
     <h2><?php echo e(t('settings_general')); ?></h2>
@@ -701,78 +917,80 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
     </form>
 </div>
 
-<?php if (user_can('clear_data')): ?>
-<div class="panel">
-    <h2><?php echo e($lang === 'en' ? 'Reset / wipe' : 'تصفير النظام ومسح المحتويات'); ?></h2>
-    <p style="color:#6b7a88;font-weight:600">
-        <?php echo e($lang === 'en'
-            ? 'Debts stay in this system (not SAS). SAS cache is a snapshot only.'
-            : 'الديون تُحفظ هنا بالنظام — مو بالساس. كاش SAS لقطة حماية فقط.'); ?>
-    </p>
-
-    <form method="post" onsubmit="return confirm(<?php echo json_encode(t('confirm_clear_logs')); ?>);" style="margin-top:14px">
-        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
-        <input type="hidden" name="section" value="clear_logs">
-        <p style="margin:0 0 8px;font-weight:700"><?php echo e(t('clear_logs')); ?></p>
-        <p style="color:#6b7a88;margin:0 0 10px">
-            <?php echo e($lang === 'en' ? 'Deletes activity log only.' : 'يحذف حركات اللوك فقط.'); ?>
-        </p>
-        <div class="form-grid cols-2">
-            <div>
-                <label><?php echo e(t('password')); ?></label>
-                <input type="password" name="admin_password" required placeholder="<?php echo e($lang === 'en' ? 'Your password' : 'رمزك'); ?>">
-            </div>
-        </div>
-        <div class="actions">
-            <button class="btn danger" type="submit"><?php echo e(t('clear_logs')); ?></button>
-        </div>
-    </form>
-
-    <hr style="border:0;border-top:1px solid #e5e7eb;margin:18px 0">
-
-    <form method="post" onsubmit="return confirm(<?php echo json_encode(t('confirm_clear_offline')); ?>);">
-        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
-        <input type="hidden" name="section" value="clear_offline">
-        <p style="margin:0 0 8px;font-weight:700"><?php echo e(t('clear_offline')); ?></p>
-        <p style="color:#6b7a88;margin:0 0 10px">
-            <?php echo e($lang === 'en'
-                ? 'Deletes local debts, subscriptions and WhatsApp logs. SAS user list stays.'
-                : 'يحذف الديون والاشتراكات المحلية وسجل الرسائل. قائمة مشتركين SAS تبقى.'); ?>
-        </p>
-        <div class="form-grid cols-2">
-            <div>
-                <label><?php echo e(t('password')); ?></label>
-                <input type="password" name="admin_password" required placeholder="<?php echo e($lang === 'en' ? 'Your password' : 'رمزك'); ?>">
-            </div>
-        </div>
-        <div class="actions">
-            <button class="btn danger" type="submit"><?php echo e(t('clear_offline')); ?></button>
-        </div>
-    </form>
-
-    <hr style="border:0;border-top:1px solid #e5e7eb;margin:18px 0">
-
-    <form method="post" onsubmit="return confirm('<?php echo e(t('confirm_clear')); ?>');">
-        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
-        <input type="hidden" name="section" value="clear_data">
-        <p style="margin:0 0 8px;font-weight:700"><?php echo e(t('clear_data')); ?></p>
-        <p style="color:#6b7a88;margin:0 0 10px">
-            <?php echo e($lang === 'en'
-                ? 'Deletes all subscribers, movements, invoices and message logs. Packages stay.'
-                : 'يحذف كل المشتركين والحركات والفواتير وسجل الرسائل. الباقات تبقى.'); ?>
-        </p>
-        <div class="form-grid cols-2">
-            <div>
-                <label><?php echo e(t('password')); ?></label>
-                <input type="password" name="admin_password" required placeholder="<?php echo e($lang === 'en' ? 'Your password' : 'رمزك'); ?>">
-            </div>
-        </div>
-        <div class="actions">
-            <button class="btn danger" type="submit"><?php echo e(t('clear_data')); ?></button>
-        </div>
-    </form>
-</div>
 <?php endif; ?>
+
+<?php if ($tab === 'sensitive'): ?>
+<style>
+.sens-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+@media (max-width: 980px) { .sens-grid { grid-template-columns: 1fr; } }
+.sens-card {
+  border: 1px solid #fecaca;
+  background: #fff7f7;
+  border-radius: 12px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 100%;
+}
+.sens-card h3 { margin: 0; font-size: 15px; color: #991b1b; }
+.sens-card p { margin: 0; color: #6b7a88; font-size: 13px; line-height: 1.45; flex: 1; }
+.sens-card .actions { margin-top: 6px; }
+</style>
+<div class="panel">
+    <h2 style="margin:0 0 8px"><?php echo e($lang === 'en' ? 'Sensitive data' : 'بيانات حساسة'); ?></h2>
+    <p style="color:#6b7a88;font-weight:600;margin:0 0 14px">
+        <?php echo e($lang === 'en'
+            ? 'Dangerous wipe actions. Debts stay in this system (not SAS). SAS cache is a snapshot only.'
+            : 'عمليات مسح خطرة. الديون تُحفظ هنا بالنظام — مو بالساس. كاش SAS لقطة حماية فقط.'); ?>
+    </p>
+    <div class="sens-grid">
+        <form class="sens-card" method="post" onsubmit="return confirm(<?php echo json_encode(t('confirm_clear_logs')); ?>);">
+            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+            <input type="hidden" name="section" value="clear_logs">
+            <h3><?php echo e(t('clear_logs')); ?></h3>
+            <p><?php echo e($lang === 'en' ? 'Deletes activity log only.' : 'يحذف حركات اللوك فقط.'); ?></p>
+            <label><?php echo e(t('password')); ?>
+                <input type="password" name="admin_password" required placeholder="<?php echo e($lang === 'en' ? 'Your password' : 'رمزك'); ?>">
+            </label>
+            <div class="actions">
+                <button class="btn danger" type="submit"><?php echo e(t('clear_logs')); ?></button>
+            </div>
+        </form>
+        <form class="sens-card" method="post" onsubmit="return confirm(<?php echo json_encode(t('confirm_clear_offline')); ?>);">
+            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+            <input type="hidden" name="section" value="clear_offline">
+            <h3><?php echo e(t('clear_offline')); ?></h3>
+            <p><?php echo e($lang === 'en'
+                ? 'Deletes local debts, subscriptions and WhatsApp logs. SAS user list stays.'
+                : 'يحذف الديون والاشتراكات المحلية وسجل الرسائل. قائمة مشتركين SAS تبقى.'); ?></p>
+            <label><?php echo e(t('password')); ?>
+                <input type="password" name="admin_password" required placeholder="<?php echo e($lang === 'en' ? 'Your password' : 'رمزك'); ?>">
+            </label>
+            <div class="actions">
+                <button class="btn danger" type="submit"><?php echo e(t('clear_offline')); ?></button>
+            </div>
+        </form>
+        <form class="sens-card" method="post" onsubmit="return confirm('<?php echo e(t('confirm_clear')); ?>');">
+            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+            <input type="hidden" name="section" value="clear_data">
+            <h3><?php echo e(t('clear_data')); ?></h3>
+            <p><?php echo e($lang === 'en'
+                ? 'Deletes all subscribers, movements, invoices and message logs. Packages stay.'
+                : 'يحذف كل المشتركين والحركات والفواتير وسجل الرسائل. الباقات تبقى.'); ?></p>
+            <label><?php echo e(t('password')); ?>
+                <input type="password" name="admin_password" required placeholder="<?php echo e($lang === 'en' ? 'Your password' : 'رمزك'); ?>">
+            </label>
+            <div class="actions">
+                <button class="btn danger" type="submit"><?php echo e(t('clear_data')); ?></button>
+            </div>
+        </form>
+    </div>
+</div>
 <?php endif; ?>
 
 <?php if ($tab === 'rental'): ?>
@@ -1198,7 +1416,29 @@ $sasHasPass = !empty($sasCfgUi['password']);
                        value="<?php echo e(isset($sasCfgUi['default_password']) ? $sasCfgUi['default_password'] : ''); ?>"
                        placeholder="<?php echo e($isEn ? 'Empty = last 6 digits of phone' : 'فارغ = آخر 6 أرقام من الهاتف'); ?>">
             </div>
+            <div>
+                <label><?php echo e($isEn ? 'CPE login user (IP click)' : 'يوزر جهاز المشترك (ضغط IP)'); ?></label>
+                <input class="ltr" name="cpe_http_user"
+                       value="<?php echo e(isset($s['cpe_http_user']) && $s['cpe_http_user'] !== '' ? $s['cpe_http_user'] : 'ubnt'); ?>"
+                       placeholder="ubnt">
+            </div>
+            <div>
+                <label><?php echo e($isEn ? 'CPE login password' : 'باسورد جهاز المشترك'); ?></label>
+                <input class="ltr" name="cpe_http_pass"
+                       value="<?php echo e(isset($s['cpe_http_pass']) ? $s['cpe_http_pass'] : 'ubnt'); ?>"
+                       placeholder="ubnt">
+            </div>
+            <div>
+                <label class="toggle" style="display:flex;align-items:center;gap:10px;margin-top:22px">
+                    <input type="checkbox" name="cpe_use_https" value="1" <?php echo !isset($s['cpe_use_https']) || !empty($s['cpe_use_https']) ? 'checked' : ''; ?>>
+                    <span class="toggle-ui"></span>
+                    <span><?php echo e($isEn ? 'Prefer HTTPS (like UISP ticket link)' : 'تفضيل HTTPS (مثل رابط التكت في UISP)'); ?></span>
+                </label>
+            </div>
         </div>
+        <p class="meta" style="margin:0 0 10px"><?php echo e($isEn
+            ? 'Clicking a subscriber IP opens the device address in a new tab (http/https only — no auto login).'
+            : 'ضغط IP يفتح عنوان الجهاز بتبويب جديد مباشرة (http/https فقط — بدون تسجيل دخول تلقائي).'); ?></p>
         <div class="actions">
             <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
         </div>
@@ -1320,6 +1560,62 @@ $sasHasPass = !empty($sasCfgUi['password']);
     <div class="actions">
         <a class="btn secondary" href="plans.php"><?php echo e($isEn ? 'Edit plans' : 'تعديل الباقات'); ?></a>
     </div>
+</div>
+<?php endif; ?>
+
+<?php if ($tab === 'schedule'): ?>
+<?php
+$isEn = ($lang === 'en');
+$cronSecret = isset($config['cron_secret']) ? (string) $config['cron_secret'] : '';
+$cronUrl = 'cron/schedule_cut.php?key=' . rawurlencode($cronSecret);
+$sysGrace = (int) (isset($s['grace_days']) ? $s['grace_days'] : 3);
+?>
+<div class="panel">
+    <h2><?php echo e($isEn ? 'Periodic jobs' : 'الجدول الدوري'); ?></h2>
+    <p class="meta" style="margin:0 0 14px">
+        <?php echo e($isEn
+            ? 'When enabled, subscribers who exceed their grace days without paying unpaid debts are disabled on SAS automatically.'
+            : 'عند التشغيل: من يتجاوز أيام السماح وعليه دين غير مسدد يُعطَّل يوزره بالساس تلقائياً وينقطع النت.'); ?>
+    </p>
+    <form method="post">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="section" value="schedule">
+        <div class="form-grid cols-2" style="margin-bottom:14px">
+            <label class="toggle" style="display:flex;align-items:center;gap:10px;padding:12px;border:1px solid #e2e8f0;border-radius:10px">
+                <input type="checkbox" name="schedule_cut_enabled" value="1" <?php echo !empty($s['schedule_cut_enabled']) ? 'checked' : ''; ?>>
+                <span class="toggle-ui"></span>
+                <span>
+                    <strong><?php echo e($isEn ? 'Auto-disable after grace' : 'قطع تلقائي بعد أيام السماح'); ?></strong><br>
+                    <span class="meta"><?php echo e($isEn
+                        ? ('Uses each subscriber’s grace (or system default: ' . $sysGrace . ' days).')
+                        : ('يعتمد أيام السماح لكل مشترك أو الافتراضي بالنظام: ' . $sysGrace . ' يوم.')); ?></span>
+                </span>
+            </label>
+            <label class="toggle" style="display:flex;align-items:center;gap:10px;padding:12px;border:1px solid #e2e8f0;border-radius:10px">
+                <input type="checkbox" name="schedule_cut_send_wa" value="1" <?php echo !isset($s['schedule_cut_send_wa']) || !empty($s['schedule_cut_send_wa']) ? 'checked' : ''; ?>>
+                <span class="toggle-ui"></span>
+                <span>
+                    <strong><?php echo e($isEn ? 'Send cut WhatsApp message' : 'إرسال رسالة القطع عبر واتساب'); ?></strong><br>
+                    <span class="meta"><?php echo e($isEn ? 'Turn off to cut without messaging.' : 'اطفه إذا تريد القطع بدون رسالة.'); ?></span>
+                </span>
+            </label>
+        </div>
+        <div class="panel" style="margin:0 0 14px;padding:12px 14px">
+            <h3 style="margin:0 0 8px;font-size:15px"><?php echo e($isEn ? 'Cut message template' : 'قالب رسالة القطع'); ?></h3>
+            <p class="meta" style="margin:0 0 8px">{name} {debt} {amount} {days_passed} {grace} {package} {month}</p>
+            <textarea name="tpl_schedule_cut" rows="5" style="width:100%"><?php echo e(isset($s['tpl_schedule_cut']) ? $s['tpl_schedule_cut'] : ''); ?></textarea>
+        </div>
+        <p class="meta" style="margin:0 0 10px">
+            <?php echo e($isEn ? 'Cron URL (run hourly recommended):' : 'رابط الكرون (يفضّل كل ساعة):'); ?>
+            <code class="ltr" style="display:block;margin-top:4px;word-break:break-all"><?php echo e($cronUrl); ?></code>
+        </p>
+        <div class="actions">
+            <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
+            <?php if (!empty($s['schedule_cut_enabled']) && function_exists('run_schedule_debt_cuts')): ?>
+                <button class="btn ghost" type="submit" name="schedule_run_now" value="1"><?php echo e($isEn ? 'Run once now' : 'تشغيل مرة الآن'); ?></button>
+            <?php endif; ?>
+        </div>
+    </form>
 </div>
 <?php endif; ?>
 

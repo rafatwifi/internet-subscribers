@@ -15,23 +15,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if ($action === 'expire') {
         $id = (int) post('id', '0');
-        $info = $pdo->prepare('SELECT subscriber_id, service_name FROM subscriptions WHERE id = :id');
-        $info->execute(array(':id' => $id));
-        $subRow = $info->fetch();
-        $pdo->prepare('UPDATE subscriptions SET status = "expired" WHERE id = :id')
-            ->execute(array(':id' => $id));
-        if ($subRow) {
-            activity_log(
-                $pdo,
-                (int) $subRow['subscriber_id'],
-                'subscription',
-                $id,
-                'expire',
-                'إنهاء اشتراك: ' . $subRow['service_name'],
-                ''
-            );
+        if (function_exists('reverse_subscription_movement')) {
+            list($okRev, $msgRev) = reverse_subscription_movement($pdo, $id);
+            flash($okRev ? 'success' : 'error', $msgRev);
+        } else {
+            $info = $pdo->prepare('SELECT subscriber_id, service_name FROM subscriptions WHERE id = :id');
+            $info->execute(array(':id' => $id));
+            $subRow = $info->fetch();
+            $pdo->prepare('UPDATE subscriptions SET status = "expired" WHERE id = :id')
+                ->execute(array(':id' => $id));
+            if ($subRow) {
+                activity_log(
+                    $pdo,
+                    (int) $subRow['subscriber_id'],
+                    'subscription',
+                    $id,
+                    'expire',
+                    'إنهاء اشتراك: ' . $subRow['service_name'],
+                    ''
+                );
+            }
+            flash('success', $lang === 'en' ? 'Ended' : 'تم إنهاء الاشتراك');
         }
-        flash('success', $lang === 'en' ? 'Ended' : 'تم إنهاء الاشتراك');
         redirect('subscriptions.php');
     }
 

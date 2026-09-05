@@ -256,7 +256,7 @@ if (isset($_GET['prepare']) && (string) $_GET['prepare'] !== '') {
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf(post('csrf'))) {
-        if (in_array(post('action'), array('sas_inline', 'sas_enable', 'sas_activate_card', 'sas_activate_credit', 'sas_change_profile', 'give_test', 'sas_update_rental', 'sas_update_debt', 'sas_update_grace', 'sas_save_cols'), true)) {
+        if (in_array(post('action'), array('sas_inline', 'sas_enable', 'sas_activate_card', 'sas_activate_credit', 'sas_activate_reward', 'sas_change_profile', 'give_test', 'sas_update_rental', 'sas_update_debt', 'sas_update_grace', 'sas_save_cols'), true)) {
             sas_json_out(false, 'طلب غير صالح');
         }
         flash('error', 'طلب غير صالح');
@@ -290,7 +290,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if ($action === 'sas_inline' || $action === 'sas_enable' || $action === 'sas_activate_card'
-        || $action === 'sas_activate_credit' || $action === 'sas_change_profile' || $action === 'give_test') {
+        || $action === 'sas_activate_credit' || $action === 'sas_activate_reward' || $action === 'sas_change_profile' || $action === 'give_test') {
         if ($action === 'give_test') {
             $username = trim((string) post('id', ''));
             if (!function_exists('sas_extend_one_day')) {
@@ -312,6 +312,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'send_whatsapp' => post('send_whatsapp', '0'),
             'send_old_debts' => post('send_old_debts', '0'),
             'pay_mode' => post('pay_mode', 'cash'),
+            'wa_template' => post('wa_template', 'activation'),
         );
         list($ok, $msg, $extra) = sas_write_user($pdo, $config, $action, $username, $fields);
         sas_json_out($ok, $msg, is_array($extra) ? $extra : array());
@@ -356,14 +357,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if ($action === 'sas_update_grace') {
         $username = trim((string) post('id', ''));
-        $days = (int) post('value', '3');
+        $raw = trim((string) post('value', ''));
         if (!function_exists('sas_save_user_grace_days')) {
             sas_json_out(false, 'تعذر حفظ أيام السماح');
         }
-        list($ok, $msg, $saved) = sas_save_user_grace_days($pdo, $config, $username, $days);
+        $rawLow = function_exists('mb_strtolower') ? mb_strtolower($raw, 'UTF-8') : strtolower($raw);
+        $isSys = ($raw === ''
+            || strcasecmp($raw, 'system') === 0
+            || strcasecmp($raw, 'sys') === 0
+            || $raw === 'حسب النظام'
+            || strpos($raw, 'حسب النظام') === 0
+            || strpos($rawLow, 'system') === 0);
+        if (!$isSys && !preg_match('/^\d+$/', $raw)) {
+            sas_json_out(false, $lang === 'en'
+                ? 'Enter a number, or leave empty / type system for default'
+                : 'اكتب رقماً فقط، أو اتركه فارغاً / اكتب «حسب النظام»');
+        }
+        list($ok, $msg, $saved) = sas_save_user_grace_days(
+            $pdo,
+            $config,
+            $username,
+            $isSys ? 'system' : $raw
+        );
+        $label = $isSys
+            ? (function_exists('subscriber_grace_label')
+                ? subscriber_grace_label(array('grace_days' => null), $config, $lang)
+                : 'حسب النظام')
+            : (string) (int) $saved;
         sas_json_out($ok, $msg, array(
-            'value' => (string) (int) $saved,
-            'raw' => (string) (int) $saved,
+            'value' => $label,
+            'raw' => $isSys ? 'system' : (string) (int) $saved,
+            'is_system' => $isSys ? 1 : 0,
         ));
     }
 
@@ -564,11 +588,23 @@ if ($parentFilter !== '') {
     $params[':parent_name'] = $parentFilter;
 }
 
-if ($sasReady && $q !== '' && strlen($q) >= 2 && function_exists('sas_cache_pull_search')) {
+$isLiveReq = isset($_GET['live']) && $_GET['live'] === '1';
+if ($sasReady && !$isLiveReq && $q !== '' && strlen($q) >= 2 && function_exists('sas_cache_pull_search')) {
+    $localHits = 0;
     try {
-        sas_cache_pull_search($pdo, $config, $q);
+        $cntSql = 'SELECT COUNT(*) FROM sas_users_cache c WHERE ' . $where;
+        $cntSt = $pdo->prepare($cntSql);
+        $cntSt->execute($params);
+        $localHits = (int) $cntSt->fetchColumn();
     } catch (Exception $e) {
-    } catch (Error $e) {
+        $localHits = 0;
+    }
+    if ($localHits <= 0) {
+        try {
+            sas_cache_pull_search($pdo, $config, $q);
+        } catch (Exception $e) {
+        } catch (Error $e) {
+        }
     }
 }
 
@@ -580,6 +616,10 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'refresh_now') {
     $qNow = isset($_GET['q']) ? trim((string) $_GET['q']) : '';
     $n = 0;
     try {
+        // أول شيء: أونلاين + IP من الساس (مصدر الحقيقة للـ IP)
+        if (function_exists('sas_refresh_online_flags')) {
+            sas_refresh_online_flags($pdo, $config);
+        }
         if ($qNow !== '' && function_exists('sas_cache_pull_search')) {
             $n = sas_cache_pull_search($pdo, $config, $qNow);
         } elseif ($sasReady) {
@@ -598,8 +638,12 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'refresh_now') {
                 }
             }
         }
+        // بعد upsert المستخدمين: أعد قراءة الأونلاين حتى لا يبقى IP قديم
         if (function_exists('sas_refresh_online_flags')) {
-            sas_refresh_online_flags($pdo, $config);
+            $nOnline = sas_refresh_online_flags($pdo, $config);
+            if ($nOnline > $n) {
+                $n = $nOnline;
+            }
         }
         echo json_encode(array('ok' => true, 'count' => $n, 'mode' => 'synced'));
     } catch (Exception $e) {
@@ -612,13 +656,13 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'refresh_now') {
 
 if (isset($_GET['live']) && $_GET['live'] === '1') {
     header('Content-Type: application/json; charset=utf-8');
-    $html = '<tr><td colspan="15">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
+    $html = '<tr><td colspan="16">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
     $liveCount = 0;
     try {
         $fromSql = function_exists('sas_cache_list_from_sql')
             ? sas_cache_list_from_sql()
             : ' FROM sas_users_cache c LEFT JOIN subscribers s ON s.id = c.local_subscriber_id';
-        $sqlLive = sas_cache_list_select_sql() . $fromSql . '
+        $sqlLive = sas_cache_list_select_sql(true) . $fromSql . '
             WHERE ' . $where . '
             ORDER BY c.display_name ASC
             LIMIT 80';
@@ -632,12 +676,12 @@ if (isset($_GET['live']) && $_GET['live'] === '1') {
         }
         $liveCount = count($liveRows);
         if ($html === '') {
-            $html = '<tr><td colspan="15">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
+            $html = '<tr><td colspan="16">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
         }
     } catch (Exception $e) {
-        $html = '<tr><td colspan="15">' . e($e->getMessage()) . '</td></tr>';
+        $html = '<tr><td colspan="16">' . e($e->getMessage()) . '</td></tr>';
     } catch (Error $e) {
-        $html = '<tr><td colspan="15">' . e($e->getMessage()) . '</td></tr>';
+        $html = '<tr><td colspan="16">' . e($e->getMessage()) . '</td></tr>';
     }
     echo json_encode(array(
         'html' => $html,
@@ -755,7 +799,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'live_table') {
             $html .= sas_render_table_row($liveRow, $nLive++, $config, $lang);
         }
         if ($html === '') {
-            $html = '<tr><td colspan="15">' . e($lang === 'en' ? 'No SAS users in cache yet' : 'ماكو مشتركين من الساس بعد') . '</td></tr>';
+            $html = '<tr><td colspan="16">' . e($lang === 'en' ? 'No SAS users in cache yet' : 'ماكو مشتركين من الساس بعد') . '</td></tr>';
         }
         echo json_encode(array('ok' => true, 'html' => $html, 'count' => count($rows)));
     } catch (Exception $e) {
@@ -1020,11 +1064,43 @@ render_header(t('sas'), 'sas', '');
 }
 .sas-row-flash td { background: #fff6d6 !important; }
 .sas-act-wa { margin-top: 8px; width: 100%; }
-.sas-radius-page #sasActModal .sas-act-wa {
+.sas-radius-page #sasActModal .sas-act-opts {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fff;
+  overflow: hidden;
+}
+.sas-radius-page #sasActModal .sas-act-opt {
+  display: flex;
   width: 100%;
+  margin: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  box-sizing: border-box;
+  min-height: 40px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #eef2f7;
+}
+.sas-radius-page #sasActModal .sas-act-opt:last-child { border-bottom: 0; }
+.sas-radius-page #sasActModal .sas-act-opt .toggle-ui {
+  width: 40px; height: 22px; flex: 0 0 40px;
+}
+.sas-radius-page #sasActModal .sas-act-opt .toggle-ui::after {
+  width: 16px; height: 16px; top: 3px;
+}
+.sas-radius-page #sasActModal .sas-act-opt .toggle-text {
+  flex: 1 1 auto;
+  order: -1;
+  font-size: 13px;
+  font-weight: 700;
+  color: #1e293b;
+  text-align: start;
 }
 .sas-radius-page #sasActModal .sas-act-wa .toggle {
   display: flex;
@@ -1064,93 +1140,188 @@ render_header(t('sas'), 'sas', '');
 }
 .sas-radius-page #sasActModal .sas-seg {
   display: flex;
-  flex-direction: row;
+  flex-direction: column;
   flex-wrap: nowrap;
   align-items: stretch;
   width: 100%;
   box-sizing: border-box;
-  margin: 0 0 10px;
-  padding: 3px;
-  gap: 3px;
-  background: #eef2f7;
-  border-radius: 10px;
+  margin: 0 0 8px;
+  padding: 0;
+  gap: 4px;
+  background: transparent;
+  border-radius: 0;
 }
 .sas-radius-page #sasActModal .sas-seg-opt {
-  flex: 1 1 0;
+  flex: 0 0 auto;
   display: flex !important;
-  align-items: stretch;
+  align-items: center;
+  gap: 8px;
   margin: 0 !important;
   min-width: 0;
-  min-height: 0;
+  min-height: 28px;
   font-size: inherit;
   font-weight: inherit;
   color: inherit;
   cursor: pointer;
 }
 .sas-radius-page #sasActModal .sas-seg-opt input {
-  position: absolute;
-  opacity: 0;
-  pointer-events: none;
-  width: 1px;
-  height: 1px;
+  position: static;
+  opacity: 1;
+  pointer-events: auto;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  margin: 0;
+  accent-color: #2563eb;
 }
 .sas-radius-page #sasActModal .sas-seg-opt span {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 100%;
-  height: 36px;
-  min-height: 36px;
-  padding: 0 8px;
-  border-radius: 8px;
+  justify-content: flex-start;
+  width: auto;
+  height: auto;
+  min-height: 0;
+  padding: 0;
+  border-radius: 0;
   font-size: 13px;
-  font-weight: 800;
-  color: #475569;
-  text-align: center;
+  font-weight: 700;
+  color: #1e293b;
+  text-align: start;
+  background: transparent;
+  box-shadow: none;
 }
 .sas-radius-page #sasActModal .sas-seg-opt input:checked + span {
-  background: #fff;
+  background: transparent;
   color: #0f172a;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
+  box-shadow: none;
 }
 .sas-radius-page #sasActModal .pay-mode-box {
-  margin: 10px 0 8px;
+  margin: 8px 0 10px;
 }
 .sas-radius-page #sasActModal .pay-mode-row {
   margin-top: 6px;
 }
-.sas-radius-page #sasActModal #sasActCardBox { margin: 0 0 8px; }
+.sas-radius-page #sasActModal #sasActCardBox { margin: 0 0 6px; }
 .sas-radius-page #sasActModal #sasActCardBox select { margin-top: 0; }
+.sas-radius-page #sasActModal .sas-act-below {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 6px;
+  min-width: 0;
+}
 .sas-radius-page #sasActModal .sas-act-debts {
-  margin: 0 0 8px;
-  padding: 8px 10px;
-  border: 1px solid #dbe4ee;
-  border-radius: 8px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
   background: #f8fafc;
+  overflow: hidden;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.sas-radius-page #sasActModal .sas-act-debts .d-block {
+  padding: 10px 12px 8px;
 }
 .sas-radius-page #sasActModal .sas-act-debts .d-head {
-  display: flex; justify-content: space-between; gap: 8px;
-  font-weight: 700; color: #1e293b; margin-bottom: 2px;
-  font-size: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  font-weight: 800;
+  color: #0f172a;
+  margin-bottom: 6px;
+  font-size: 13px;
 }
-.sas-radius-page #sasActModal .sas-act-debts .d-empty { color: #64748b; font-size: 12px; margin: 0; }
-.sas-radius-page #sasActModal .sas-act-debts ul { list-style: none; margin: 0; padding: 0; }
-.sas-radius-page #sasActModal .sas-act-debts li,
+.sas-radius-page #sasActModal .sas-act-debts .d-head strong {
+  color: #b45309;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.sas-radius-page #sasActModal .sas-act-debts .d-empty {
+  color: #64748b;
+  font-size: 12px;
+  margin: 0;
+}
+.sas-radius-page #sasActModal .sas-act-debts ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sas-radius-page #sasActModal .sas-act-debts li {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 12px;
+  padding: 6px 8px;
+  color: #475569;
+  background: #fff;
+  border: 1px solid #e8eef5;
+  border-radius: 7px;
+}
+.sas-radius-page #sasActModal .sas-act-debts li span {
+  flex: 1 1 auto;
+  min-width: 0;
+  line-height: 1.35;
+}
+.sas-radius-page #sasActModal .sas-act-debts li strong {
+  flex: 0 0 auto;
+  color: #0f172a;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .sas-radius-page #sasActModal .sas-act-debts .d-row {
-  display: flex; justify-content: space-between; gap: 8px;
-  font-size: 13px; padding: 2px 0; color: #334155;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  padding: 10px 12px;
+  color: #334155;
+  border-top: 1px solid #e2e8f0;
+  background: #fff;
+}
+.sas-radius-page #sasActModal .sas-act-debts .d-row span {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.sas-radius-page #sasActModal .sas-act-debts .d-row strong {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.sas-radius-page #sasActModal .sas-act-debts .d-act {
+  color: #1e293b;
+}
+.sas-radius-page #sasActModal .sas-act-debts .d-act strong {
+  color: #0f172a;
 }
 .sas-radius-page #sasActModal .sas-act-debts .d-total {
-  margin-top: 4px; padding-top: 4px; border-top: 1px dashed #cbd5e1;
-  font-weight: 800; color: #0f172a;
+  margin: 0;
+  padding: 11px 12px;
+  border-top: 1px solid #dbe4ee;
+  background: #eef6ff;
+  font-weight: 800;
+  color: #0f172a;
 }
-.sas-radius-page #sasActModal .sas-act-debts.is-empty .d-head,
+.sas-radius-page #sasActModal .sas-act-debts .d-total strong {
+  color: #1d4ed8;
+  font-size: 14px;
+}
+.sas-radius-page #sasActModal .sas-act-debts.is-empty .d-block,
 .sas-radius-page #sasActModal .sas-act-debts.is-empty .d-empty,
-.sas-radius-page #sasActModal .sas-act-debts.is-empty #sasActGrandRow {
+.sas-radius-page #sasActModal .sas-act-debts.is-empty #sasActGrandRow,
+.sas-radius-page #sasActModal .sas-act-debts.is-empty #sasActNewRow {
   display: none !important;
 }
-.sas-radius-page #sasActModal #sasActCardHint { font-size: 11px; margin: 0 0 8px; }
-.sas-radius-page #sasActModal #sasActCardHint.is-ok { display: none; }
+.sas-radius-page #sasActModal #sasActCardHint { font-size: 11px; margin: 4px 0 8px; color: #64748b; }
+.sas-radius-page #sasActModal #sasActCardHint.is-ok { display: block; }
 .sas-act-who { margin: 0; }
 .sas-act-name { font-weight: 800; font-size: 14px; color: #1e293b; line-height: 1.25; }
 .sas-act-user {
@@ -1180,14 +1351,94 @@ render_header(t('sas'), 'sas', '');
   position: relative;
   display: flex;
   flex-direction: column;
-  max-width: 400px;
-  width: min(400px, calc(100vw - 20px));
-  padding: 12px 14px 12px;
-  max-height: min(92vh, 620px);
-  max-height: min(92dvh, 620px);
+  max-width: min(440px, calc(100vw - 16px));
+  width: min(440px, calc(100vw - 16px));
+  padding: 10px 12px 0;
+  max-height: min(100dvh, 100vh);
   overflow: hidden;
   box-sizing: border-box;
   border-radius: 14px;
+}
+.sas-radius-page #sasActModal .ops-modal-head {
+  margin-bottom: 6px;
+  align-items: flex-start;
+  gap: 8px;
+}
+.sas-radius-page #sasActModal .ops-modal-head h3 { display: none; }
+.sas-act-name { font-weight: 800; font-size: 15px; color: #1e293b; line-height: 1.25; }
+.sas-radius-page #sasActModal .sas-act-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 4px;
+}
+.sas-radius-page #sasActModal .sas-act-field { margin: 0 0 6px; }
+.sas-radius-page #sasActModal .sas-seg { margin: 0 0 6px; }
+.sas-radius-page #sasActModal .pay-mode-box { margin: 0 0 10px; }
+.sas-radius-page #sasActModal .sas-act-below { margin: 0 0 4px; }
+.sas-radius-page #sasActModal .sas-act-debts { margin: 0; }
+.sas-radius-page #sasActModal .sas-act-wa {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #dbe4ee;
+  border-radius: 8px;
+  background: #fff;
+  box-sizing: border-box;
+}
+.sas-radius-page #sasActModal .sas-act-wa .toggle {
+  display: flex;
+  width: 100%;
+  margin: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  box-sizing: border-box;
+  min-height: 28px;
+}
+.sas-radius-page #sasActModal .sas-act-foot {
+  flex: 0 0 auto;
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: block !important;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 10px 0 12px;
+  box-sizing: border-box;
+  border-top: 1px solid #e2e8f0;
+  background: #fff;
+  box-shadow: 0 -6px 16px rgba(15, 23, 42, 0.06);
+}
+.sas-radius-page #sasActModal .sas-act-foot .btn,
+.sas-radius-page #sasActModal #sasActSubmit {
+  display: block !important;
+  width: 100% !important;
+  max-width: none !important;
+  min-width: 100% !important;
+  margin: 0 !important;
+  height: 48px;
+  border-radius: 10px !important;
+  font-weight: 800;
+  font-size: 16px;
+  background: #1e293b;
+  color: #fff;
+  border: 0;
+  box-shadow: none;
+  transition: background .12s ease, transform .12s ease;
+}
+.sas-act-pts {
+  display: inline-block;
+  margin-inline-start: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #0369a1;
+  opacity: .95;
 }
 #sasActLock {
   display: none !important;
@@ -1227,39 +1478,8 @@ render_header(t('sas'), 'sas', '');
 @keyframes sasActSpin {
   to { transform: rotate(360deg); }
 }
-.sas-radius-page #sasActModal .ops-modal-head {
-  margin-bottom: 10px;
-  align-items: flex-start;
-}
-.sas-radius-page #sasActModal .ops-modal-head h3 { font-size: 16px; }
-.sas-radius-page #sasActModal .sas-act-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-}
-.sas-radius-page #sasActModal .sas-act-foot {
-  flex: 0 0 auto;
-  padding-top: 10px;
-  margin-top: 4px;
-  border-top: 1px solid #e2e8f0;
-  background: #fff;
-}
-.sas-radius-page #sasActModal .sas-act-foot .btn,
-.sas-radius-page #sasActModal #sasActSubmit {
-  width: 100%;
-  margin: 0;
-  height: 42px;
-  border-radius: 10px;
-  font-weight: 800;
-  background: #2563eb;
-  color: #fff;
-  border: 0;
-  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.22);
-  transition: background .12s ease, transform .12s ease, box-shadow .12s ease;
-}
 .sas-radius-page #sasActModal #sasActSubmit:hover:not(:disabled):not(.is-busy) {
-  background: #1d4ed8;
+  background: #0f172a;
 }
 .sas-radius-page #sasActModal #sasActSubmit:active,
 .sas-radius-page #sasActModal #sasActSubmit.is-pressed,
@@ -1337,13 +1557,13 @@ render_header(t('sas'), 'sas', '');
     align-items: flex-end;
   }
   .sas-radius-page #sasActModal .sas-seg {
-    flex-direction: row !important;
+    flex-direction: column !important;
     flex-wrap: nowrap !important;
   }
   .sas-radius-page #sasActModal .sas-seg-opt span {
-    font-size: 12px;
-    height: 34px;
-    min-height: 34px;
+    font-size: 13px;
+    height: auto;
+    min-height: 0;
   }
   .sas-radius-page #sasActModal .ops-modal-card.sas-act-card {
     max-width: 100%;
@@ -1351,8 +1571,17 @@ render_header(t('sas'), 'sas', '');
     height: auto;
     max-height: 100vh;
     max-height: 100dvh;
-    padding: 12px 14px max(12px, env(safe-area-inset-bottom));
+    padding: 10px 12px 0;
     border-radius: 16px 16px 0 0;
+  }
+  .sas-radius-page #sasActModal .sas-act-foot {
+    margin: 0;
+    width: 100%;
+    padding: 10px 0 calc(14px + env(safe-area-inset-bottom, 0px));
+  }
+  .sas-radius-page #sasActModal #sasActSubmit {
+    border-radius: 10px !important;
+    height: 50px;
   }
   .sas-radius-page #sasProfModal .ops-modal-card {
     max-width: 100%;
@@ -1865,6 +2094,7 @@ render_header(t('sas'), 'sas', '');
                 <th class="col-rent"><?php echo sas_sort_link('rent', $lang === 'en' ? 'Rental' : 'الإيجار', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
                 <th class="col-debt"><?php echo sas_sort_link('debt', $lang === 'en' ? 'Debts' : 'الديون', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
                 <th class="col-traf" title="<?php echo e($lang === 'en' ? 'Daily traffic' : 'الاستهلاك اليومي'); ?>"><?php echo e($lang === 'en' ? 'Daily' : 'الاستهلاك'); ?></th>
+                <th class="col-grace" title="<?php echo e($lang === 'en' ? 'Grace days' : 'أيام السماح'); ?>"><?php echo e($lang === 'en' ? 'Grace' : 'السماح'); ?></th>
                 <th class="col-days" title="<?php echo e($lang === 'en' ? 'Remaining days' : 'الأيام المتبقية'); ?>"><?php echo sas_sort_link('days', $lang === 'en' ? 'Days left' : 'المتبقي', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
             </tr>
             </thead>
@@ -1875,7 +2105,7 @@ render_header(t('sas'), 'sas', '');
                 $emptyMsg = ($sasReady && $cacheCount <= 0)
                     ? ($lang === 'en' ? 'Loading users from SAS…' : 'جاري جلب المشتركين من الساس…')
                     : ($lang === 'en' ? 'No SAS users in cache yet' : 'ماكو مشتركين من الساس بعد');
-                echo '<tr><td colspan="15">' . e($emptyMsg) . '</td></tr>';
+                echo '<tr><td colspan="16">' . e($emptyMsg) . '</td></tr>';
             }
             foreach ($rows as $row) {
                 echo sas_render_table_row($row, $n++, $config, $lang);
@@ -2012,6 +2242,12 @@ render_header(t('sas'), 'sas', '');
         <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
         <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
     </div>
+    <div class="cols-check ops-item" data-col-row="grace">
+        <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
+        <label><input type="checkbox" data-col="grace" checked> <?php echo e($lang === 'en' ? 'Grace days' : 'أيام السماح'); ?></label>
+        <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
+        <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
+    </div>
     <div class="cols-check ops-item" data-col-row="days">
         <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
         <label><input type="checkbox" data-col="days" checked> <?php echo e($lang === 'en' ? 'Remaining Days' : 'الأيام المتبقية'); ?></label>
@@ -2112,7 +2348,6 @@ render_header(t('sas'), 'sas', '');
     <div class="modal-card ops-modal-card sas-act-card">
         <div class="ops-modal-head">
             <div>
-                <h3 id="sasActTitle"><?php echo e(t('activate')); ?></h3>
                 <div class="sas-act-who" id="sasActWho">
                     <div class="sas-act-name" id="sasActName"></div>
                     <div class="sas-act-user">
@@ -2135,6 +2370,10 @@ render_header(t('sas'), 'sas', '');
             <label class="sas-seg-opt">
                 <input type="radio" name="sas_act_mode" value="credit">
                 <span><?php echo e($lang === 'en' ? 'By balance' : 'تفعيل بالرصيد'); ?></span>
+            </label>
+            <label class="sas-seg-opt">
+                <input type="radio" name="sas_act_mode" value="reward">
+                <span><?php echo e($lang === 'en' ? 'By reward points' : 'تفعيل بالنقاط التشجيعية'); ?><span class="sas-act-pts" id="sasActPtsHint"></span></span>
             </label>
         </div>
         <div id="sasActCardBox">
@@ -2163,30 +2402,34 @@ render_header(t('sas'), 'sas', '');
                 </label>
             </div>
         </div>
-        <div class="sas-act-debts is-empty" id="sasActDebtsBox">
-            <div class="d-head"><span><?php echo e(t('old_debts')); ?></span><strong id="sasActOldSum"></strong></div>
-            <p class="d-empty" id="sasActNoDebt"><?php echo e(t('no_old_debts')); ?></p>
-            <ul id="sasActDebtList"></ul>
-            <div class="d-row" id="sasActNewRow">
-                <span><?php echo e(t('this_activation')); ?></span>
-                <strong id="sasActNewAmt"></strong>
+        <div class="sas-act-below">
+            <div class="sas-act-opts">
+                <label class="toggle sas-act-opt">
+                    <input type="checkbox" id="sasActSendWa" value="1" checked>
+                    <span class="toggle-ui"></span>
+                    <span class="toggle-text"><?php echo e(t('send_wa_notice')); ?></span>
+                </label>
+                <label class="toggle sas-act-opt" id="sasActOldDebtsBox" style="display:none">
+                    <input type="checkbox" id="sasActOldDebts" value="1" checked>
+                    <span class="toggle-ui"></span>
+                    <span class="toggle-text"><?php echo e(t('include_old_debts')); ?></span>
+                </label>
             </div>
-            <div class="d-row d-total" id="sasActGrandRow">
-                <span><?php echo e(t('after_activate')); ?></span>
-                <strong id="sasActGrandAmt"></strong>
+            <div class="sas-act-debts is-empty" id="sasActDebtsBox">
+                <div class="d-block d-old">
+                    <div class="d-head"><span><?php echo e(t('old_debts')); ?></span><strong id="sasActOldSum"></strong></div>
+                    <p class="d-empty" id="sasActNoDebt"><?php echo e(t('no_old_debts')); ?></p>
+                    <ul id="sasActDebtList"></ul>
+                </div>
+                <div class="d-row d-act" id="sasActNewRow">
+                    <span><?php echo e(t('this_activation')); ?></span>
+                    <strong id="sasActNewAmt"></strong>
+                </div>
+                <div class="d-row d-total" id="sasActGrandRow">
+                    <span><?php echo e(t('after_activate')); ?></span>
+                    <strong id="sasActGrandAmt"></strong>
+                </div>
             </div>
-        </div>
-        <div class="quick-msg-box sas-act-wa">
-            <label class="toggle">
-                <input type="checkbox" id="sasActSendWa" value="1" checked>
-                <span class="toggle-ui"></span>
-                <span class="toggle-text"><?php echo e(t('send_wa_notice')); ?></span>
-            </label>
-            <label class="toggle" id="sasActOldDebtsBox" style="display:none">
-                <input type="checkbox" id="sasActOldDebts" value="1" checked>
-                <span class="toggle-ui"></span>
-                <span class="toggle-text"><?php echo e(t('include_old_debts')); ?></span>
-            </label>
         </div>
         <p class="sas-modal-err" id="sasActErr"></p>
         </div>
@@ -2249,7 +2492,7 @@ render_header(t('sas'), 'sas', '');
   var liveBusy = false;
   var COLS_KEY = 'sas_table_cols_v1';
   var ORDER_KEY = 'sas_table_col_order_v1';
-  var DEFAULT_COL_ORDER = ['num','status','user','ip','fn','ln','phone','exp','parent','pkg','rent','debt','traf','days'];
+  var DEFAULT_COL_ORDER = ['num','status','user','ip','fn','ln','phone','exp','parent','pkg','rent','debt','traf','grace','days'];
   function loadLocalCols() {
     try {
       var raw = localStorage.getItem(COLS_KEY);
@@ -2304,6 +2547,27 @@ render_header(t('sas'), 'sas', '');
   var profilesCache = null;
   var cardsCacheAll = null;
   var cardsPrefetch = null;
+  var rewardPtsDisp = <?php
+    $rpShow = '';
+    if (isset($_SESSION['sas_rp_val']) && $_SESSION['sas_rp_val'] !== null) {
+        $rpShow = ((float) $_SESSION['sas_rp_val'] == (int) $_SESSION['sas_rp_val'])
+            ? number_format((int) $_SESSION['sas_rp_val'])
+            : number_format((float) $_SESSION['sas_rp_val'], 2);
+    }
+    echo json_encode($rpShow);
+  ?>;
+
+  function paintRewardPts(val) {
+    var el = document.getElementById('sasActPtsHint');
+    if (!el) return;
+    if (val === null || val === undefined || val === '') {
+      el.textContent = rewardPtsDisp ? (' (' + rewardPtsDisp + ')') : '';
+      return;
+    }
+    rewardPtsDisp = String(val);
+    el.textContent = ' (' + rewardPtsDisp + ')';
+  }
+  paintRewardPts(rewardPtsDisp);
 
   function actModalOpen() {
     var m = document.getElementById('sasActModal');
@@ -2680,8 +2944,8 @@ render_header(t('sas'), 'sas', '');
       .catch(function () { return null; });
   }
   function prefetchCards(force) {
-    if (!force && cardsPrefetch) return cardsPrefetch;
-    cardsPrefetch = fetch('sas.php?ajax=cards&preload=1' + (force ? '&refresh=1' : ''), { credentials: 'same-origin' })
+    if (!force && cardsPrefetch && cardsCacheAll) return cardsPrefetch;
+    cardsPrefetch = fetch('sas.php?ajax=cards&preload=1&refresh=1', { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(function (d) {
         cardsCacheAll = (d && d.cards) ? d.cards : [];
@@ -2694,17 +2958,21 @@ render_header(t('sas'), 'sas', '');
       });
     return cardsPrefetch;
   }
+  function normProf(s) {
+    return String(s || '').toLowerCase().replace(/[\s_\-]+/g, '').replace(/msl$/, '');
+  }
   function cardsForProfile(profileId, profileName) {
     var all = cardsCacheAll || [];
     if (!all.length) return [];
     var pid = String(profileId || '0');
-    var pn = String(profileName || '').toLowerCase();
+    var pn = normProf(profileName);
     var hit = [];
     all.forEach(function (c) {
+      var cn = normProf(c.profile_name);
       if (pid !== '0' && String(c.profile_id || '0') === pid) hit.push(c);
-      else if (pn && String(c.profile_name || '').toLowerCase().indexOf(pn) !== -1) hit.push(c);
+      else if (pn && cn && (cn === pn || cn.indexOf(pn) !== -1 || pn.indexOf(cn) !== -1)) hit.push(c);
     });
-    return hit.length ? hit : all;
+    return hit;
   }
   function loadCards(username, profileId, profileName) {
     var cached = cardsForProfile(profileId, profileName);
@@ -2722,15 +2990,24 @@ render_header(t('sas'), 'sas', '');
     try { return Math.round(Number(n) || 0).toLocaleString('en-US') + ' ' + cur; }
     catch (e) { return Math.round(Number(n) || 0) + ' ' + cur; }
   }
+  function currentPayMode() {
+    var el = document.querySelector('#sasActModal input[name="sas_pay_mode"]:checked');
+    return (el && el.value === 'credit') ? 'credit' : 'cash';
+  }
   function renderActDebts() {
     var empty = document.getElementById('sasActNoDebt');
     var list = document.getElementById('sasActDebtList');
     var oldSumEl = document.getElementById('sasActOldSum');
     var newAmt = document.getElementById('sasActNewAmt');
     var grandAmt = document.getElementById('sasActGrandAmt');
+    var newRow = document.getElementById('sasActNewRow');
+    var grandRow = document.getElementById('sasActGrandRow');
     var oldSum = actBill.old_sum || 0;
     var charge = actBill.charge || 0;
     var lines = actBill.old_lines || [];
+    var isCredit = currentPayMode() === 'credit';
+    // نقد = المبلغ ما ينضاف دين ولا يدخل بتوتل الديون بعد التفعيل
+    var debtFromThis = isCredit ? charge : 0;
     if (oldSumEl) oldSumEl.textContent = oldSum > 0 ? moneyAct(oldSum) : '';
     if (list) {
       list.innerHTML = '';
@@ -2746,10 +3023,29 @@ render_header(t('sas'), 'sas', '');
     if (empty) empty.style.display = oldSum > 0 ? 'none' : 'block';
     if (list) list.style.display = oldSum > 0 ? 'block' : 'none';
     if (newAmt) newAmt.textContent = moneyAct(charge);
-    if (grandAmt) grandAmt.textContent = moneyAct(oldSum + charge);
+    if (newRow) {
+      newRow.style.display = '';
+      var newLab = newRow.querySelector('span');
+      if (newLab) {
+        newLab.textContent = isCredit
+          ? <?php echo json_encode(t('this_activation')); ?>
+          : <?php echo json_encode(($lang === 'en') ? 'This activation (cash — not debt)' : 'هذا التفعيل (نقد — بدون دين)'); ?>;
+      }
+    }
+    if (grandAmt) grandAmt.textContent = moneyAct(oldSum + debtFromThis);
+    if (grandRow) {
+      grandRow.style.display = (oldSum > 0 || isCredit) ? '' : 'none';
+      var gLab = grandRow.querySelector('span');
+      if (gLab) {
+        gLab.textContent = isCredit
+          ? <?php echo json_encode(t('after_activate')); ?>
+          : <?php echo json_encode(($lang === 'en') ? 'Remaining debts' : 'الديون المتبقية'); ?>;
+      }
+    }
     var debtsBox = document.getElementById('sasActDebtsBox');
     if (debtsBox) {
-      if (oldSum > 0) debtsBox.classList.remove('is-empty');
+      // أظهر الصندوق إذا في ديون قديمة أو آجل (حتى يبان مبلغ التفعيل كدين)
+      if (oldSum > 0 || isCredit) debtsBox.classList.remove('is-empty');
       else debtsBox.classList.add('is-empty');
     }
     syncActWa();
@@ -2799,16 +3095,18 @@ render_header(t('sas'), 'sas', '');
       sel.appendChild(o);
     });
     if (hint) {
-      hint.className = 'sas-sync-note is-ok';
-      hint.textContent = '';
+      hint.className = 'sas-sync-note';
+      hint.textContent = cards.length + ' ' + <?php echo json_encode($lang === 'en' ? 'unused cards' : 'كروت متوفرة'); ?>;
     }
   }
   function currentActMode() {
     var on = document.querySelector('#sasActModal input[name="sas_act_mode"]:checked');
-    return (on && on.value === 'card') ? 'card' : 'credit';
+    var v = on ? on.value : 'card';
+    if (v === 'credit' || v === 'reward') return v;
+    return 'card';
   }
   function setActMode(mode) {
-    var want = (mode === 'card') ? 'card' : 'credit';
+    var want = (mode === 'credit' || mode === 'reward') ? mode : 'card';
     document.querySelectorAll('#sasActModal input[name="sas_act_mode"]').forEach(function (el) {
       el.checked = el.value === want;
     });
@@ -2839,27 +3137,30 @@ render_header(t('sas'), 'sas', '');
       lockEl.setAttribute('aria-hidden', 'true');
     }
     setActMode('card');
+    paintRewardPts(rewardPtsDisp);
     loadQuote(row.id, row.profileId);
-    var ready = cardsForProfile(row.profileId, row.profileName);
-    if (cardsCacheAll) {
-      renderCards(ready);
-      loadProfiles().then(function (ps) {
-        fillSelect(document.getElementById('sasActProfile'), ps, row.profileId);
+    fetch('index.php?ajax=dash_sas&refresh=1', { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d && d.points && d.points !== '—') paintRewardPts(d.points);
       }).catch(function () {});
+    var ready = cardsForProfile(row.profileId, row.profileName);
+    if (cardsCacheAll && cardsCacheAll.length) {
+      renderCards(ready);
     } else {
       if (hint) {
         hint.className = 'sas-sync-note';
         hint.textContent = <?php echo json_encode($lang === 'en' ? 'Loading unused cards…' : 'جاري جلب الكروت الشاغرة…'); ?>;
       }
       if (cardSel) { cardSel.innerHTML = ''; cardSel.disabled = true; }
-      prefetchCards().then(function () {
-        return loadProfiles();
-      }).then(function (ps) {
-        fillSelect(document.getElementById('sasActProfile'), ps, row.profileId);
-        var sel = document.getElementById('sasActProfile');
-        renderCards(cardsForProfile(sel ? sel.value : row.profileId, selectedProfileName(sel) || row.profileName || ''));
-      }).catch(function () { renderCards([]); });
     }
+    prefetchCards(true).then(function () {
+      return loadProfiles();
+    }).then(function (ps) {
+      fillSelect(document.getElementById('sasActProfile'), ps, row.profileId);
+      var sel = document.getElementById('sasActProfile');
+      renderCards(cardsForProfile(sel ? sel.value : row.profileId, selectedProfileName(sel) || row.profileName || ''));
+    }).catch(function () { renderCards(cardsForProfile(row.profileId, row.profileName)); });
     syncActWa();
   }
   function paintRowStatus(tr, d) {
@@ -2928,6 +3229,9 @@ render_header(t('sas'), 'sas', '');
   document.querySelectorAll('#sasActModal input[name="sas_act_mode"]').forEach(function (el) {
     el.addEventListener('change', toggleActMode);
   });
+  document.querySelectorAll('#sasActModal input[name="sas_pay_mode"]').forEach(function (el) {
+    el.addEventListener('change', renderActDebts);
+  });
   var actProf = document.getElementById('sasActProfile');
   if (actProf) {
     actProf.addEventListener('change', function () {
@@ -2942,11 +3246,18 @@ render_header(t('sas'), 'sas', '');
     actOld.addEventListener('change', function () { actOld.dataset.userTouched = '1'; });
   }
   var actClose = document.getElementById('sasActClose');
-  if (actClose) actClose.addEventListener('click', function () {
+  function closeActModal() {
     var m = document.getElementById('sasActModal');
     if (m && m.classList.contains('is-locking')) return;
     if (m) m.classList.add('hidden');
-  });
+  }
+  if (actClose) actClose.addEventListener('click', closeActModal);
+  var actModalEl = document.getElementById('sasActModal');
+  if (actModalEl) {
+    actModalEl.addEventListener('click', function (e) {
+      if (e.target === actModalEl) closeActModal();
+    });
+  }
   var actCopy = document.getElementById('sasActCopy');
   if (actCopy) {
     actCopy.addEventListener('click', function () {
@@ -3041,10 +3352,11 @@ render_header(t('sas'), 'sas', '');
         pay_mode: (payModeEl && payModeEl.value === 'credit') ? 'credit' : 'cash'
       };
       var req;
-      if (currentActMode() === 'credit') {
+      var actModeNow = currentActMode();
+      if (actModeNow === 'credit' || actModeNow === 'reward') {
         var units = document.getElementById('sasActUnits');
         setActBusy(true);
-        req = postSas('sas_activate_credit', {
+        req = postSas(actModeNow === 'reward' ? 'sas_activate_reward' : 'sas_activate_credit', {
           id: actUser.id,
           profile_id: profileId,
           profile_name: profileName,
@@ -3166,9 +3478,16 @@ render_header(t('sas'), 'sas', '');
       if (row) colsDrop.appendChild(row);
     });
   }
-  function applyCols() {
+  function applyCols(skipOrder) {
     if (!colsDrop) return;
     if (!savedCols || typeof savedCols !== 'object') savedCols = {};
+    var style = document.getElementById('sasColsStyle');
+    if (!style) {
+      style = document.createElement('style');
+      style.id = 'sasColsStyle';
+      document.head.appendChild(style);
+    }
+    var css = [];
     colsDrop.querySelectorAll('input[data-col]').forEach(function (inp) {
       var col = inp.getAttribute('data-col');
       if (!col) return;
@@ -3177,17 +3496,12 @@ render_header(t('sas'), 'sas', '');
       }
       var on = !!inp.checked;
       savedCols[col] = on;
-      document.querySelectorAll('#subsTable .col-' + col).forEach(function (el) {
-        if (on) {
-          el.classList.remove('col-off');
-          el.style.removeProperty('display');
-        } else {
-          el.classList.add('col-off');
-          el.style.setProperty('display', 'none', 'important');
-        }
-      });
+      if (!on) {
+        css.push('#subsTable .col-' + col + '{display:none!important}');
+      }
     });
-    applyOrder();
+    style.textContent = css.join('');
+    if (!skipOrder) applyOrder();
   }
   function persistCols() {
     saveLocalCols();
@@ -3210,8 +3524,8 @@ render_header(t('sas'), 'sas', '');
     colsDrop.addEventListener('change', function (e) {
       var inp = e.target && e.target.closest ? e.target.closest('input[data-col]') : null;
       if (!inp) return;
-      colsSkipUntil = Date.now() + 1500;
-      applyCols();
+      colsSkipUntil = Date.now() + 8000;
+      applyCols(true);
       persistCols();
     });
     colsDrop.addEventListener('click', function (e) {
@@ -3534,6 +3848,9 @@ render_header(t('sas'), 'sas', '');
       el.setAttribute('data-display', el.textContent.trim());
       el.classList.add('editing');
       el.contentEditable = 'true';
+      if (field === 'grace_days') {
+        el.textContent = (current === 'system' || current === '') ? '' : current;
+      }
       el.focus();
       try {
         var range = document.createRange();
@@ -3557,7 +3874,19 @@ render_header(t('sas'), 'sas', '');
           el.textContent = el.getAttribute('data-display') || current || '-';
           return;
         }
-        if (val === current) {
+        if (field === 'grace_days') {
+          var wantSys = (val === '' || /^system$/i.test(val) || val.indexOf('حسب النظام') === 0);
+          var wasSys = (current === 'system' || current === '');
+          if (wantSys && wasSys) {
+            el.textContent = el.getAttribute('data-display') || '';
+            return;
+          }
+          if (!wantSys && val === current) {
+            el.textContent = el.getAttribute('data-display') || val;
+            return;
+          }
+          if (wantSys) val = 'system';
+        } else if (val === current) {
           el.textContent = current !== '' ? current : '-';
           return;
         }
@@ -3592,16 +3921,16 @@ render_header(t('sas'), 'sas', '');
         btn.contentEditable = 'false';
         var raw = String(btn.textContent || '').replace(/[^\d]/g, '');
         var n = parseInt(raw, 10);
-        if (!ok || !raw) {
+        if (!ok || raw === '') {
+          btn.textContent = snap;
+          return;
+        }
+        if (isNaN(n) || n < 0) {
+          alert(<?php echo json_encode($lang === 'en' ? 'Enter a valid amount' : 'أدخل مبلغ صحيح'); ?>);
           btn.textContent = snap;
           return;
         }
         if (String(n) === String(current)) {
-          btn.textContent = snap;
-          return;
-        }
-        if (!(n > 0)) {
-          alert(<?php echo json_encode($lang === 'en' ? 'Enter a valid amount' : 'أدخل مبلغ صحيح'); ?>);
           btn.textContent = snap;
           return;
         }

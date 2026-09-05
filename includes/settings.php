@@ -22,12 +22,28 @@ function settings_defaults()
         'tpl_payment_ok' => "مرحباً {name}\nتم استلام مبلغ {amount}\nعن: {month}\nالمتبقي عليك: {remaining}",
         'tpl_debt_created' => "مرحباً {name}\nتم تسجيل دين بمبلغ {amount}\nعن: {month}\n{notes}",
         'tpl_activation' => "مرحباً {name}\nتم تفعيل خدمة الإنترنت ({package})\nمن {from} إلى {to}\nالمبلغ: {amount}",
+        'tpl_activation_credit' => "مرحباً {name}\nتم تفعيل خدمة الإنترنت ({package}) بالآجل\nمن {from} إلى {to}\nالمبلغ المستحق: {amount}",
+        'tpl_activation_debts' => "تنويه: عليك ديون سابقة بمبلغ {debt}\nالتفاصيل: {month}",
         'tpl_days_left' => "السلام عليكم {name}\nتبقى لديك {days} يوم على الاشتراك",
         'tpl_unpaid_overdue' => "السلام عليكم {name}\nمضى على تفعيل خطك {days_passed} أيام\nيرجى تسديد الديون البالغة {debt}\nوبعكسه سيتم إيقاف الخدمة",
         'unpaid_remind_after_days' => 7,
         'expiry_auto_remind_enabled' => false,
         'expiry_auto_remind_days' => 1,
         'tpl_expiry_soon' => "السلام عليكم {name}\nتبقى لديك {days} يوم على اشتراك ({package})\nينتهي بتاريخ {to}\nيرجى التجديد لتجنب انقطاع الخدمة",
+        'tpl_schedule_cut' => "السلام عليكم {name}\nتم قطع الإنترنت بسبب عدم تسديد الديون غير المسددة والبالغة {debt}\nبعد تجاوز أيام السماح ({grace} يوم).\nيرجى التسديد لإعادة الخدمة.",
+        'wa_case_activation_cash' => 'activation',
+        'wa_case_activation_credit' => 'activation_credit',
+        'wa_case_activation_debts' => 'activation_debts',
+        'wa_case_debt_created' => 'debt_created',
+        'wa_case_payment_ok' => 'payment_ok',
+        'wa_case_debt_remind' => 'debt_remind',
+        'wa_case_days_left' => 'days_left',
+        'wa_case_unpaid_overdue' => 'unpaid_overdue',
+        'wa_case_expiry_soon' => 'expiry_soon',
+        'wa_case_reminder_auto' => 'debt_remind',
+        'wa_case_schedule_cut' => 'schedule_cut',
+        'schedule_cut_enabled' => false,
+        'schedule_cut_send_wa' => true,
         'rental_fee' => 5000,
         'rental_devices' => array(
             array('id' => 'powerbeam', 'name' => 'بور بيم', 'icon' => 'PB', 'color' => '#3b82f6'),
@@ -45,6 +61,9 @@ function settings_defaults()
         'sas_extend_method' => 'reward_points',
         'sas_extend_profile_id' => 0,
         'sas_on_failure' => 'warn',
+        'cpe_http_user' => 'ubnt',
+        'cpe_http_pass' => 'ubnt',
+        'cpe_use_https' => true,
         'login_bg' => '',
         'login_bg_color' => '#1b2a38',
         'bg_mode' => 'color',
@@ -291,10 +310,52 @@ function apply_settings_to_config($config, $settings)
         'payment_ok' => isset($settings['tpl_payment_ok']) ? $settings['tpl_payment_ok'] : '',
         'debt_created' => isset($settings['tpl_debt_created']) ? $settings['tpl_debt_created'] : '',
         'activation' => isset($settings['tpl_activation']) ? $settings['tpl_activation'] : '',
+        'activation_credit' => isset($settings['tpl_activation_credit']) ? $settings['tpl_activation_credit'] : '',
+        'activation_debts' => isset($settings['tpl_activation_debts']) ? $settings['tpl_activation_debts'] : '',
         'days_left' => isset($settings['tpl_days_left']) ? $settings['tpl_days_left'] : '',
         'unpaid_overdue' => isset($settings['tpl_unpaid_overdue']) ? $settings['tpl_unpaid_overdue'] : '',
         'expiry_soon' => isset($settings['tpl_expiry_soon']) ? $settings['tpl_expiry_soon'] : '',
+        'schedule_cut' => isset($settings['tpl_schedule_cut']) ? $settings['tpl_schedule_cut'] : '',
     );
+    if (trim((string) $config['templates']['activation_credit']) === '') {
+        $config['templates']['activation_credit'] = $config['templates']['activation'];
+    }
+    if (trim((string) $config['templates']['activation_debts']) === '') {
+        $config['templates']['activation_debts'] = isset($settings['tpl_debt_remind'])
+            ? $settings['tpl_debt_remind']
+            : '';
+    }
+    $tplKeys = array_keys($config['templates']);
+    $legacyAct = isset($settings['wa_case_activation']) ? trim((string) $settings['wa_case_activation']) : 'activation';
+    if ($legacyAct === '' || !in_array($legacyAct, $tplKeys, true)) {
+        $legacyAct = 'activation';
+    }
+    $caseDefaults = array(
+        'activation_cash' => $legacyAct,
+        'activation_credit' => 'activation_credit',
+        'activation_debts' => 'activation_debts',
+        'debt_created' => 'debt_created',
+        'payment_ok' => 'payment_ok',
+        'debt_remind' => 'debt_remind',
+        'days_left' => 'days_left',
+        'unpaid_overdue' => 'unpaid_overdue',
+        'expiry_soon' => 'expiry_soon',
+        'reminder_auto' => 'debt_remind',
+        'schedule_cut' => 'schedule_cut',
+    );
+    $config['wa_cases'] = array();
+    foreach ($caseDefaults as $case => $def) {
+        $raw = isset($settings['wa_case_' . $case]) ? trim((string) $settings['wa_case_' . $case]) : $def;
+        if ($case === 'activation_debts' && ($raw === 'activation_debts' || $raw === '') && !in_array('activation_debts', $tplKeys, true)) {
+            $raw = 'debt_remind';
+        }
+        $config['wa_cases'][$case] = in_array($raw, $tplKeys, true) ? $raw : $def;
+        if (!in_array($config['wa_cases'][$case], $tplKeys, true)) {
+            $config['wa_cases'][$case] = in_array($def, $tplKeys, true) ? $def : 'activation';
+        }
+    }
+    // توافق قديم: activation = نقدي
+    $config['wa_cases']['activation'] = $config['wa_cases']['activation_cash'];
     $config['unpaid_remind_after_days'] = isset($settings['unpaid_remind_after_days'])
         ? max(1, (int) $settings['unpaid_remind_after_days'])
         : 7;
@@ -302,6 +363,9 @@ function apply_settings_to_config($config, $settings)
     $config['expiry_auto_remind_days'] = isset($settings['expiry_auto_remind_days'])
         ? max(0, (int) $settings['expiry_auto_remind_days'])
         : 1;
+    $config['schedule_cut_enabled'] = !empty($settings['schedule_cut_enabled']);
+    $config['schedule_cut_send_wa'] = !isset($settings['schedule_cut_send_wa'])
+        || !empty($settings['schedule_cut_send_wa']);
 
     if (!isset($config['sas']) || !is_array($config['sas'])) {
         $config['sas'] = array();
@@ -330,6 +394,13 @@ function apply_settings_to_config($config, $settings)
             ? 'rollback'
             : 'warn';
     }
+    $config['cpe_http_user'] = isset($settings['cpe_http_user']) && trim((string) $settings['cpe_http_user']) !== ''
+        ? trim((string) $settings['cpe_http_user'])
+        : 'ubnt';
+    $config['cpe_http_pass'] = isset($settings['cpe_http_pass'])
+        ? (string) $settings['cpe_http_pass']
+        : 'ubnt';
+    $config['cpe_use_https'] = !isset($settings['cpe_use_https']) || !empty($settings['cpe_use_https']);
 
     return $config;
 }

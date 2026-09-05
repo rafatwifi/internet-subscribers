@@ -281,12 +281,115 @@ function retry_failed_message($pdo, $config, $logId, $subscriberId = 0)
     return array(false, whatsapp_fail_user_message($result, 'فشلت إعادة الإرسال — تأكد أن واتساب متصل'));
 }
 
+function wa_template_choices($lang = 'ar')
+{
+    $en = ($lang === 'en');
+    return array(
+        'activation' => $en ? 'Activation (cash)' : 'قالب التفعيل (نقد)',
+        'activation_credit' => $en ? 'Activation (credit)' : 'قالب التفعيل (آجل)',
+        'activation_debts' => $en ? 'Old debts appendix' : 'قالب ملحق الديون السابقة',
+        'debt_created' => $en ? 'New debt' : 'قالب إضافة دين',
+        'debt_remind' => $en ? 'Debt reminder' : 'قالب تذكير الدين',
+        'days_left' => $en ? 'Days left' : 'قالب الأيام المتبقية',
+        'unpaid_overdue' => $en ? 'Unpaid warning' : 'قالب المتأخرين',
+        'expiry_soon' => $en ? 'Expiry soon' : 'قالب قرب الانتهاء',
+        'payment_ok' => $en ? 'Payment received' : 'قالب التسديد',
+        'schedule_cut' => $en ? 'Auto cut (unpaid)' : 'قالب القطع التلقائي',
+    );
+}
+
+function wa_case_labels($lang = 'ar')
+{
+    $en = ($lang === 'en');
+    return array(
+        'activation_cash' => $en ? 'Activation — cash' : 'تفعيل نقدي',
+        'activation_credit' => $en ? 'Activation — credit' : 'تفعيل آجل',
+        'activation_debts' => $en ? 'Appendix: previous debts on activation' : 'ملحق الديون السابقة مع التفعيل',
+        'debt_created' => $en ? 'New debt notice' : 'إشعار إضافة دين',
+        'payment_ok' => $en ? 'Payment received' : 'إشعار التسديد',
+        'debt_remind' => $en ? 'Manual debt reminder' : 'تذكير دين يدوي',
+        'reminder_auto' => $en ? 'Automatic debt reminder' : 'تذكير دين تلقائي',
+        'days_left' => $en ? 'Days left reminder' : 'تذكير الأيام المتبقية',
+        'unpaid_overdue' => $en ? 'Unpaid / delay warning' : 'تنبيه تأخير التسديد',
+        'expiry_soon' => $en ? 'Expiry soon (auto)' : 'قرب الانتهاء (تلقائي)',
+        'schedule_cut' => $en ? 'Auto cut after grace' : 'قطع تلقائي بعد السماح',
+    );
+}
+
+function wa_case_template_key($config, $case)
+{
+    $case = trim((string) $case);
+    if ($case === '' || $case === 'activation') {
+        $case = 'activation_cash';
+    }
+    if (isset($config['wa_cases'][$case]) && trim((string) $config['wa_cases'][$case]) !== '') {
+        return (string) $config['wa_cases'][$case];
+    }
+    $fallback = array(
+        'activation_cash' => 'activation',
+        'activation_credit' => 'activation_credit',
+        'activation_debts' => 'activation_debts',
+        'activation' => 'activation',
+        'debt_created' => 'debt_created',
+        'payment_ok' => 'payment_ok',
+        'debt_remind' => 'debt_remind',
+        'reminder_auto' => 'debt_remind',
+        'days_left' => 'days_left',
+        'unpaid_overdue' => 'unpaid_overdue',
+        'expiry_soon' => 'expiry_soon',
+        'schedule_cut' => 'schedule_cut',
+    );
+    return isset($fallback[$case]) ? $fallback[$case] : $case;
+}
+
+function wa_render_named_template($key, $sub, $config, $extra = array())
+{
+    $key = trim((string) $key);
+    if ($key === '') {
+        $key = 'activation';
+    }
+    $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
+    $amountVal = isset($extra['amount']) ? $extra['amount'] : (isset($sub['monthly_price']) ? $sub['monthly_price'] : 0);
+    $debtVal = isset($extra['debt']) ? $extra['debt'] : (isset($sub['debt_total']) ? $sub['debt_total'] : $amountVal);
+    $vars = array(
+        'name' => isset($sub['name']) ? $sub['name'] : '',
+        'package' => isset($extra['package']) ? $extra['package'] : (isset($sub['service_name']) ? $sub['service_name'] : ''),
+        'from' => isset($sub['start_date']) ? $sub['start_date'] : '',
+        'to' => isset($sub['end_date']) ? $sub['end_date'] : '',
+        'amount' => money_format_iqd($amountVal, $currency),
+        'debt' => money_format_iqd($debtVal, $currency),
+        'month' => function_exists('month_short_label')
+            ? month_short_label(isset($sub['month_label']) ? $sub['month_label'] : date('Y-m'))
+            : date('Y-m'),
+        'notes' => isset($extra['notes']) ? $extra['notes'] : (isset($sub['notes']) ? $sub['notes'] : ''),
+        'days' => isset($extra['days']) ? $extra['days'] : (isset($sub['days']) ? $sub['days'] : ''),
+        'days_passed' => isset($extra['days_passed']) ? $extra['days_passed'] : '',
+        'remaining' => isset($extra['remaining'])
+            ? money_format_iqd($extra['remaining'], $currency)
+            : '',
+    );
+    $tpl = '';
+    if (isset($config['templates'][$key]) && trim((string) $config['templates'][$key]) !== '') {
+        $tpl = $config['templates'][$key];
+    }
+    if ($tpl === '' && $key === 'activation' && isset($config['templates']['activation'])) {
+        $tpl = $config['templates']['activation'];
+    }
+    if ($tpl === '') {
+        return '';
+    }
+    return function_exists('tpl_fill') ? tpl_fill($tpl, $vars) : $tpl;
+}
+
 function activation_message($sub, $config, $extraNote = '')
 {
     $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
     $amount = money_format_iqd($sub['monthly_price'], $currency);
+    $key = function_exists('wa_case_template_key') ? wa_case_template_key($config, 'activation') : 'activation';
     $tpl = '';
-    if (isset($config['templates']['activation']) && trim((string) $config['templates']['activation']) !== '') {
+    if (isset($config['templates'][$key]) && trim((string) $config['templates'][$key]) !== '') {
+        $tpl = $config['templates'][$key];
+    } elseif (isset($config['templates']['activation']) && trim((string) $config['templates']['activation']) !== '') {
         $tpl = $config['templates']['activation'];
     }
     if ($tpl !== '') {
@@ -323,8 +426,12 @@ function reminder_message($row, $config)
     $amount = money_format_iqd($row['amount'], $currency);
     $month = month_short_label($row['month_label']);
     $notes = isset($row['notes']) ? trim((string) $row['notes']) : '';
+    $case = !empty($row['_wa_case']) ? (string) $row['_wa_case'] : 'debt_remind';
+    $key = function_exists('wa_case_template_key') ? wa_case_template_key($config, $case) : 'debt_remind';
     $tpl = '';
-    if (isset($config['templates']['debt_remind']) && trim((string) $config['templates']['debt_remind']) !== '') {
+    if (isset($config['templates'][$key]) && trim((string) $config['templates'][$key]) !== '') {
+        $tpl = $config['templates'][$key];
+    } elseif (isset($config['templates']['debt_remind']) && trim((string) $config['templates']['debt_remind']) !== '') {
         $tpl = $config['templates']['debt_remind'];
     }
     if ($tpl !== '') {
@@ -346,8 +453,11 @@ function debt_created_message($row, $config)
     $month = month_short_label($row['month_label']);
     $notes = isset($row['notes']) ? trim((string) $row['notes']) : '';
     $debt = money_format_iqd(isset($row['debt_total']) ? $row['debt_total'] : $row['amount'], $currency);
+    $key = function_exists('wa_case_template_key') ? wa_case_template_key($config, 'debt_created') : 'debt_created';
     $tpl = '';
-    if (isset($config['templates']['debt_created']) && trim((string) $config['templates']['debt_created']) !== '') {
+    if (isset($config['templates'][$key]) && trim((string) $config['templates'][$key]) !== '') {
+        $tpl = $config['templates'][$key];
+    } elseif (isset($config['templates']['debt_created']) && trim((string) $config['templates']['debt_created']) !== '') {
         $tpl = $config['templates']['debt_created'];
     }
     if ($tpl !== '') {
@@ -380,8 +490,11 @@ function days_left_message($row, $config)
     $debtTotal = isset($row['debt_total']) ? (float) $row['debt_total'] : 0;
     $debtFmt = $debtTotal > 0 ? money_format_iqd($debtTotal, $currency) : '';
     $package = isset($row['package']) ? (string) $row['package'] : '';
+    $key = function_exists('wa_case_template_key') ? wa_case_template_key($config, 'days_left') : 'days_left';
     $tpl = '';
-    if (isset($config['templates']['days_left']) && trim((string) $config['templates']['days_left']) !== '') {
+    if (isset($config['templates'][$key]) && trim((string) $config['templates'][$key]) !== '') {
+        $tpl = $config['templates'][$key];
+    } elseif (isset($config['templates']['days_left']) && trim((string) $config['templates']['days_left']) !== '') {
         $tpl = $config['templates']['days_left'];
     }
     if ($tpl !== '') {
@@ -415,8 +528,11 @@ function unpaid_overdue_message($row, $config)
     $debtTotal = isset($row['debt_total']) ? (float) $row['debt_total'] : 0;
     $debtFmt = money_format_iqd($debtTotal, $currency);
     $package = isset($row['package']) ? (string) $row['package'] : '';
+    $key = function_exists('wa_case_template_key') ? wa_case_template_key($config, 'unpaid_overdue') : 'unpaid_overdue';
     $tpl = '';
-    if (isset($config['templates']['unpaid_overdue']) && trim((string) $config['templates']['unpaid_overdue']) !== '') {
+    if (isset($config['templates'][$key]) && trim((string) $config['templates'][$key]) !== '') {
+        $tpl = $config['templates'][$key];
+    } elseif (isset($config['templates']['unpaid_overdue']) && trim((string) $config['templates']['unpaid_overdue']) !== '') {
         $tpl = $config['templates']['unpaid_overdue'];
     }
     if ($tpl !== '') {
@@ -470,8 +586,11 @@ function payment_message($row, $config)
     }
     $remaining = isset($row['remaining']) ? money_format_iqd($row['remaining'], $currency) : '';
     $hasRemaining = array_key_exists('remaining', $row);
+    $key = function_exists('wa_case_template_key') ? wa_case_template_key($config, 'payment_ok') : 'payment_ok';
     $tpl = '';
-    if (isset($config['templates']['payment_ok']) && trim((string) $config['templates']['payment_ok']) !== '') {
+    if (isset($config['templates'][$key]) && trim((string) $config['templates'][$key]) !== '') {
+        $tpl = $config['templates'][$key];
+    } elseif (isset($config['templates']['payment_ok']) && trim((string) $config['templates']['payment_ok']) !== '') {
         $tpl = $config['templates']['payment_ok'];
     }
     if ($tpl !== '') {
@@ -509,8 +628,11 @@ function expiry_soon_message($row, $config)
     $days = isset($row['days']) ? (int) $row['days'] : 0;
     $from = isset($row['from']) ? (string) $row['from'] : '';
     $to = isset($row['to']) ? (string) $row['to'] : '';
+    $key = function_exists('wa_case_template_key') ? wa_case_template_key($config, 'expiry_soon') : 'expiry_soon';
     $tpl = '';
-    if (isset($config['templates']['expiry_soon']) && trim((string) $config['templates']['expiry_soon']) !== '') {
+    if (isset($config['templates'][$key]) && trim((string) $config['templates'][$key]) !== '') {
+        $tpl = $config['templates'][$key];
+    } elseif (isset($config['templates']['expiry_soon']) && trim((string) $config['templates']['expiry_soon']) !== '') {
         $tpl = $config['templates']['expiry_soon'];
     }
     if ($tpl !== '') {

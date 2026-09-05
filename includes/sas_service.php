@@ -331,13 +331,15 @@ function sas_sync_on_activate($pdo, $config, $subscriberRow, $plan, $opts = arra
         sas_save_subscriber_link($pdo, $subscriberRow, $username, $existing, $activateRes);
 
         $graceNote = '';
-        $graceDays = function_exists('subscriber_grace_days')
-            ? subscriber_grace_days($subscriberRow, $config)
-            : 0;
-        if ($graceDays > 0 && function_exists('sas_extend_days')) {
-            list($gOk, $gMsg) = sas_extend_days($pdo, $config, $username, $graceDays, false);
-            if ($gMsg !== '') {
-                $graceNote = ' — ' . $gMsg;
+        if (empty($opts['skip_grace'])) {
+            $graceDays = function_exists('subscriber_grace_days')
+                ? subscriber_grace_days($subscriberRow, $config)
+                : 0;
+            if ($graceDays > 0 && function_exists('sas_extend_days')) {
+                list($gOk, $gMsg) = sas_extend_days($pdo, $config, $username, $graceDays, false);
+                if ($gMsg !== '') {
+                    $graceNote = ' — ' . $gMsg;
+                }
             }
         }
 
@@ -800,13 +802,32 @@ function sas_reward_points_number($v)
     if ($v === '' || $v === null || is_array($v)) {
         return null;
     }
-    if (is_string($v)) {
-        $v = str_replace(array(',', ' '), '', trim($v));
+    if (is_int($v) || is_float($v)) {
+        return (float) $v;
     }
-    if (!is_numeric($v)) {
+    $s = trim((string) $v);
+    $s = str_replace(array(' ', "\xc2\xa0"), '', $s);
+    $s = str_replace('٫', '.', $s);
+    if (strpos($s, '.') !== false && strpos($s, ',') !== false) {
+        if (strrpos($s, ',') > strrpos($s, '.')) {
+            $s = str_replace('.', '', $s);
+            $s = str_replace(',', '.', $s);
+        } else {
+            $s = str_replace(',', '', $s);
+        }
+    } elseif (strpos($s, ',') !== false) {
+        $parts = explode(',', $s);
+        $last = end($parts);
+        if (count($parts) === 2 && strlen($last) <= 2) {
+            $s = $parts[0] . '.' . $last;
+        } else {
+            $s = str_replace(',', '', $s);
+        }
+    }
+    if (!is_numeric($s)) {
         return null;
     }
-    return (float) $v;
+    return (float) $s;
 }
 
 function sas_row_reward_points($row)
@@ -887,8 +908,81 @@ function sas_find_reward_points($node, $depth = 0, $wantUser = '', $wantId = 0)
     return null;
 }
 
+function sas_find_domain_bank($node, $depth = 0)
+{
+    if ($depth > 6 || !is_array($node)) {
+        return null;
+    }
+    if (isset($node['__http_error']) || isset($node['__auth_error']) || isset($node['__curl_error'])) {
+        return null;
+    }
+    foreach (array(
+        'bank', 'Bank', 'bank_balance', 'bankBalance', 'BankBalance',
+        'domain_bank', 'domainBank', 'site_bank', 'siteBank',
+        'company_bank', 'companyBank', 'reseller_bank', 'resellerBank',
+        'sas_bank', 'sasBank', 'money_bank', 'moneyBank',
+        'domain_balance', 'domainBalance', 'site_balance', 'siteBalance',
+        'company_balance', 'companyBalance', 'office_balance', 'officeBalance',
+    ) as $k) {
+        if (!array_key_exists($k, $node)) {
+            continue;
+        }
+        if (is_array($node[$k])) {
+            $nested = sas_find_domain_bank($node[$k], $depth + 1);
+            if ($nested !== null) {
+                return $nested;
+            }
+            continue;
+        }
+        $num = function_exists('sas_reward_points_number')
+            ? sas_reward_points_number($node[$k])
+            : (is_numeric($node[$k]) ? (float) $node[$k] : null);
+        if ($num !== null) {
+            return $num;
+        }
+    }
+    foreach ($node as $k => $v) {
+        if (is_array($v) || $v === '' || $v === null) {
+            continue;
+        }
+        $lk = strtolower(preg_replace('/[^a-z0-9]+/i', '', (string) $k));
+        if ($lk === '' || strpos($lk, 'bank') === false) {
+            continue;
+        }
+        if (strpos($lk, 'reward') !== false || strpos($lk, 'point') !== false) {
+            continue;
+        }
+        $num = function_exists('sas_reward_points_number')
+            ? sas_reward_points_number($v)
+            : (is_numeric($v) ? (float) $v : null);
+        if ($num !== null) {
+            return $num;
+        }
+    }
+    foreach ($node as $k => $v) {
+        if (!is_array($v)) {
+            continue;
+        }
+        $lk = strtolower((string) $k);
+        if ($lk === 'token' || $lk === 'payload' || $lk === 'profiles' || $lk === 'users'
+            || $lk === 'parent' || $lk === 'children' || $lk === 'cards'
+            || $lk === 'traffic' || $lk === 'permissions' || $lk === 'group') {
+            continue;
+        }
+        $found = sas_find_domain_bank($v, $depth + 1);
+        if ($found !== null) {
+            return $found;
+        }
+    }
+    return null;
+}
+
 function sas_find_manager_balance($node, $depth = 0)
 {
+    $bank = sas_find_domain_bank($node, $depth);
+    if ($bank !== null) {
+        return $bank;
+    }
     if ($depth > 6 || !is_array($node)) {
         return null;
     }
@@ -1002,7 +1096,20 @@ function sas_manager_reward_points($config, $pdo = null)
             $fin = $api->getFinanceDashboard();
             if (is_array($fin)) {
                 $points = sas_find_reward_points($fin);
-                $balance = function_exists('sas_find_manager_balance') ? sas_find_manager_balance($fin) : null;
+                $balance = function_exists('sas_find_domain_bank')
+                    ? sas_find_domain_bank($fin)
+                    : (function_exists('sas_find_manager_balance') ? sas_find_manager_balance($fin) : null);
+            }
+        }
+        if (method_exists($api, 'getDashboardManager') && $balance === null) {
+            $dash = $api->getDashboardManager();
+            if (is_array($dash)) {
+                if ($points === null) {
+                    $points = sas_find_reward_points($dash);
+                }
+                $balance = function_exists('sas_find_domain_bank')
+                    ? sas_find_domain_bank($dash)
+                    : null;
             }
         }
         $rows = array();
@@ -1023,7 +1130,9 @@ function sas_manager_reward_points($config, $pdo = null)
                     continue;
                 }
                 $points = $got;
-                $bal = function_exists('sas_find_manager_balance') ? sas_find_manager_balance($row) : null;
+                $bal = function_exists('sas_find_domain_bank')
+                    ? sas_find_domain_bank($row)
+                    : (function_exists('sas_find_manager_balance') ? sas_find_manager_balance($row) : null);
                 if ($bal !== null) {
                     $balance = $bal;
                 }
@@ -1040,7 +1149,9 @@ function sas_manager_reward_points($config, $pdo = null)
                 if (!is_array($row)) {
                     continue;
                 }
-                $bal = function_exists('sas_find_manager_balance') ? sas_find_manager_balance($row) : null;
+                $bal = function_exists('sas_find_domain_bank')
+                    ? sas_find_domain_bank($row)
+                    : (function_exists('sas_find_manager_balance') ? sas_find_manager_balance($row) : null);
                 if ($bal !== null) {
                     $balance = $bal;
                     break;
@@ -1048,7 +1159,9 @@ function sas_manager_reward_points($config, $pdo = null)
             }
         }
         if ($balance === null && is_array($login)) {
-            $balance = function_exists('sas_find_manager_balance') ? sas_find_manager_balance($login) : null;
+            $balance = function_exists('sas_find_domain_bank')
+                ? sas_find_domain_bank($login)
+                : (function_exists('sas_find_manager_balance') ? sas_find_manager_balance($login) : null);
         }
 
         if ($balance !== null) {
@@ -1056,8 +1169,6 @@ function sas_manager_reward_points($config, $pdo = null)
                 ? number_format((int) $balance)
                 : number_format((float) $balance, 2);
             $_SESSION['sas_balance_disp'] = $disp;
-        } elseif ($points !== null) {
-            $_SESSION['sas_balance_disp'] = '0';
         }
 
         if ($points !== null) {

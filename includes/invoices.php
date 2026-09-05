@@ -542,8 +542,23 @@ function apply_unpaid_invoice_update($pdo, $invoiceId, $subscriberId, $fields)
     }
 
     $newAmount = array_key_exists('amount', $fields) ? (float) $fields['amount'] : (float) $old['amount'];
-    if ($newAmount <= 0) {
+    if ($newAmount < 0) {
         return array(false, 'مبلغ غير صالح');
+    }
+    if ($newAmount == 0.0) {
+        $pdo->prepare('DELETE FROM invoices WHERE id = :id AND subscriber_id = :sid AND status = "unpaid"')
+            ->execute(array(':id' => $invoiceId, ':sid' => $subscriberId));
+        if (function_exists('log_invoice_accounts')) {
+            log_invoice_accounts(
+                $pdo,
+                $subscriberId,
+                $invoiceId,
+                'delete',
+                'تصفير دين #' . $invoiceId,
+                'المبلغ السابق: ' . $old['amount']
+            );
+        }
+        return array(true, 'تم تصفير الدين');
     }
     $monthLabel = array_key_exists('month_label', $fields)
         ? trim((string) $fields['month_label'])
@@ -677,6 +692,102 @@ function apply_invoice_unpay($pdo, $invoiceId)
  * تعديل إجمالي الديون غير المسددة لمشترك (من الجدول).
  * يرجع array($ok, $message, $newTotal)
  */
+function reverse_subscription_movement($pdo, $subscriptionId)
+{
+    $subscriptionId = (int) $subscriptionId;
+    if ($subscriptionId <= 0) {
+        return array(false, 'حركة غير صالحة');
+    }
+    $st = $pdo->prepare('SELECT * FROM subscriptions WHERE id = :id');
+    $st->execute(array(':id' => $subscriptionId));
+    $sub = $st->fetch();
+    if (!$sub) {
+        return array(false, 'الحركة غير موجودة');
+    }
+    $sid = (int) $sub['subscriber_id'];
+    $mark = 'استرجاع حركة #' . $subscriptionId;
+    $chk = $pdo->prepare('SELECT id FROM invoices WHERE subscriber_id = :sid AND notes LIKE :n LIMIT 1');
+    $chk->execute(array(':sid' => $sid, ':n' => '%' . $mark . '%'));
+    if ($chk->fetch()) {
+        $pdo->prepare('UPDATE subscriptions SET status = "expired" WHERE id = :id')
+            ->execute(array(':id' => $subscriptionId));
+        return array(true, 'تم إنهاء الحركة مسبقاً مع الاسترجاع');
+    }
+
+    $ownTx = !$pdo->inTransaction();
+    if ($ownTx) {
+        $pdo->beginTransaction();
+    }
+    try {
+        $pdo->prepare('UPDATE subscriptions SET status = "expired" WHERE id = :id')
+            ->execute(array(':id' => $subscriptionId));
+        $invSt = $pdo->prepare('SELECT * FROM invoices WHERE subscription_id = :sid');
+        $invSt->execute(array(':sid' => $subscriptionId));
+        $invoices = $invSt->fetchAll();
+        foreach ($invoices as $inv) {
+            if ($inv['status'] === 'unpaid') {
+                $pdo->prepare('DELETE FROM invoices WHERE id = :id')->execute(array(':id' => (int) $inv['id']));
+                if (function_exists('log_invoice_accounts')) {
+                    log_invoice_accounts(
+                        $pdo,
+                        $sid,
+                        (int) $inv['id'],
+                        'delete',
+                        $mark,
+                        'إلغاء دين التفعيل: ' . $inv['amount']
+                    );
+                }
+            } elseif ($inv['status'] === 'paid') {
+                $amt = (float) $inv['amount'];
+                $profit = isset($inv['profit']) ? (float) $inv['profit'] : 0;
+                $ins = $pdo->prepare(
+                    'INSERT INTO invoices
+                        (subscription_id, subscriber_id, month_label, amount, cost_price, profit, due_date, paid_at, status, notes)
+                     VALUES
+                        (NULL, :sid, :month, :amount, 0, :profit, CURDATE(), NOW(), "paid", :notes)'
+                );
+                $ins->execute(array(
+                    ':sid' => $sid,
+                    ':month' => isset($inv['month_label']) ? $inv['month_label'] : date('Y-m'),
+                    ':amount' => -1 * $amt,
+                    ':profit' => -1 * $profit,
+                    ':notes' => $mark . ' — استرجاع نقد',
+                ));
+                if (function_exists('log_invoice_accounts')) {
+                    log_invoice_accounts(
+                        $pdo,
+                        $sid,
+                        (int) $pdo->lastInsertId(),
+                        'refund',
+                        $mark,
+                        'استرجاع مبلغ: ' . $amt
+                    );
+                }
+            }
+        }
+        if (function_exists('activity_log')) {
+            activity_log(
+                $pdo,
+                $sid,
+                'subscription',
+                $subscriptionId,
+                'expire',
+                'إنهاء حركة مع استرجاع: ' . $sub['service_name'],
+                $mark
+            );
+        }
+        if ($ownTx) {
+            $pdo->commit();
+        }
+        return array(true, 'تم إنهاء الحركة واسترجاع المبلغ');
+    } catch (Exception $e) {
+        if ($ownTx && $pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        return array(false, 'تعذر الاسترجاع: ' . $e->getMessage());
+    }
+}
+
 function apply_subscriber_unpaid_total_update($pdo, $subscriberId, $newAmount)
 {
     if (function_exists('user_can_edit_debts') && !user_can_edit_debts()) {
@@ -687,12 +798,31 @@ function apply_subscriber_unpaid_total_update($pdo, $subscriberId, $newAmount)
     if ($subscriberId <= 0) {
         return array(false, 'مشترك غير صالح', 0);
     }
-    if ($newAmount <= 0) {
+    if ($newAmount < 0) {
         return array(false, 'مبلغ غير صالح', 0);
     }
     $newAmount = round($newAmount);
-    if ($newAmount <= 0) {
-        return array(false, 'مبلغ غير صالح', 0);
+    if ($newAmount === 0.0 || $newAmount === 0) {
+        $oldRows = $pdo->prepare(
+            'SELECT id, amount FROM invoices WHERE subscriber_id = :sid AND status = "unpaid"'
+        );
+        $oldRows->execute(array(':sid' => $subscriberId));
+        $cleared = $oldRows->fetchAll();
+        $pdo->prepare('DELETE FROM invoices WHERE subscriber_id = :sid AND status = "unpaid"')
+            ->execute(array(':sid' => $subscriberId));
+        if (function_exists('log_invoice_accounts') && $cleared) {
+            foreach ($cleared as $cr) {
+                log_invoice_accounts(
+                    $pdo,
+                    $subscriberId,
+                    (int) $cr['id'],
+                    'delete',
+                    'تصفير ديون المشترك',
+                    'المبلغ السابق: ' . $cr['amount']
+                );
+            }
+        }
+        return array(true, 'تم تصفير الديون', 0);
     }
 
     $st = $pdo->prepare(

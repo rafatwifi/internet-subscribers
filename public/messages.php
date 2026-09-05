@@ -10,6 +10,7 @@ if (!in_array($mode, array('debt', 'days', 'overdue', 'log', 'templates'), true)
 }
 
 $logQ = isset($_GET['q']) ? trim((string) $_GET['q']) : '';
+$logType = isset($_GET['type']) ? trim((string) $_GET['type']) : '';
 $logPage = isset($_GET['page']) ? max(1, (int) $_GET['page']) : 1;
 $logPerPage = 40;
 
@@ -69,16 +70,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($afterDaysSave > 365) {
             $afterDaysSave = 365;
         }
-        $okSave = settings_save(array(
+        $tplAllowed = array(
+            'activation', 'activation_credit', 'activation_debts',
+            'debt_created', 'payment_ok', 'debt_remind', 'days_left', 'unpaid_overdue', 'expiry_soon'
+        );
+        $caseKeys = array(
+            'activation_cash', 'activation_credit', 'activation_debts', 'debt_created', 'payment_ok',
+            'debt_remind', 'reminder_auto', 'days_left', 'unpaid_overdue', 'expiry_soon'
+        );
+        $payload = array(
             'tpl_debt_remind' => (string) post('tpl_debt_remind', ''),
             'tpl_payment_ok' => (string) post('tpl_payment_ok', ''),
             'tpl_debt_created' => (string) post('tpl_debt_created', ''),
             'tpl_activation' => (string) post('tpl_activation', ''),
+            'tpl_activation_credit' => (string) post('tpl_activation_credit', ''),
+            'tpl_activation_debts' => (string) post('tpl_activation_debts', ''),
             'tpl_days_left' => (string) post('tpl_days_left', ''),
             'tpl_unpaid_overdue' => (string) post('tpl_unpaid_overdue', ''),
             'tpl_expiry_soon' => (string) post('tpl_expiry_soon', ''),
             'unpaid_remind_after_days' => $afterDaysSave
-        ));
+        );
+        foreach ($caseKeys as $ck) {
+            $v = trim((string) post('wa_case_' . $ck, ''));
+            if (!in_array($v, $tplAllowed, true)) {
+                if ($ck === 'activation_cash') {
+                    $v = 'activation';
+                } elseif ($ck === 'activation_credit') {
+                    $v = 'activation_credit';
+                } elseif ($ck === 'activation_debts' || $ck === 'reminder_auto') {
+                    $v = ($ck === 'activation_debts') ? 'activation_debts' : 'debt_remind';
+                } else {
+                    $v = $ck;
+                }
+                if (!in_array($v, $tplAllowed, true)) {
+                    $v = 'activation';
+                }
+            }
+            $payload['wa_case_' . $ck] = $v;
+        }
+        $okSave = settings_save($payload);
         flash($okSave ? 'success' : 'error', $okSave ? t('saved') : 'Cannot write settings.json');
         redirect('messages.php?mode=templates');
     }
@@ -305,6 +335,19 @@ if ($mode === 'log') {
         $where = '(m.body LIKE :q OR m.phone LIKE :q OR m.message_type LIKE :q OR s.name LIKE :q)';
         $params[':q'] = '%' . $logQ . '%';
     }
+    $autoTypes = array('expiry_auto', 'reminder_auto', 'unpaid_overdue', 'bulk_overdue', 'days_left', 'remind_days');
+    if ($logType === 'auto') {
+        $ins = array();
+        foreach ($autoTypes as $i => $t) {
+            $k = ':lt' . $i;
+            $ins[] = $k;
+            $params[$k] = $t;
+        }
+        $where .= ' AND m.message_type IN (' . implode(',', $ins) . ')';
+    } elseif ($logType !== '') {
+        $where .= ' AND m.message_type = :ltype';
+        $params[':ltype'] = $logType;
+    }
     $stCount = $pdo->prepare(
         "SELECT COUNT(*) FROM message_logs m
          LEFT JOIN subscribers s ON s.id = m.subscriber_id
@@ -420,19 +463,74 @@ render_header(t('messages'), 'messages');
     ?>
     <p class="meta tpl-lead">
         <?php echo e($isEnMsg
-            ? 'Edit WhatsApp texts here. Placeholders are replaced when sending.'
-            : 'عدّل نصوص واتساب هنا. الكلمات بين الأقواس تتعوّض عند الإرسال.'); ?>
+            ? 'Edit template texts below, then assign which template each system case uses.'
+            : 'عدّل نصوص القوالب بالأسفل، ثم خصّص أي قالب تُستخدمه كل حالة بالنظام.'); ?>
     </p>
+    <?php
+    $tplChoices = function_exists('wa_template_choices') ? wa_template_choices($lang) : array();
+    $caseLabels = function_exists('wa_case_labels') ? wa_case_labels($lang) : array();
+    $caseMap = isset($config['wa_cases']) && is_array($config['wa_cases']) ? $config['wa_cases'] : array();
+    ?>
     <form method="post" class="tpl-form">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="action" value="save_templates">
+        <div class="panel" style="margin:0 0 14px;padding:12px 14px">
+            <h3 style="margin:0 0 8px;font-size:15px"><?php echo e($isEnMsg ? 'Case → template mapping' : 'تخصيص الحالات للقوالب'); ?></h3>
+            <p class="meta" style="margin:0 0 10px"><?php echo e($isEnMsg
+                ? 'Cash and credit activations use different cases. The debts appendix is appended only when “include old debts” is on.'
+                : 'التفعيل النقدي والآجل حالتان منفصلتان. ملحق الديون السابقة يُضاف فقط عند تفعيل خيار تضمين الديون القديمة.'); ?></p>
+            <div class="form-grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">
+                <?php foreach ($caseLabels as $caseKey => $caseLab): ?>
+                    <?php
+                    $sel = isset($caseMap[$caseKey]) ? $caseMap[$caseKey] : $caseKey;
+                    if ($caseKey === 'activation_cash' && ($sel === 'activation_cash' || $sel === '')) {
+                        $sel = 'activation';
+                    }
+                    if ($caseKey === 'activation_credit' && ($sel === 'activation_credit' || $sel === '')) {
+                        $sel = 'activation_credit';
+                    }
+                    if ($caseKey === 'activation_debts' && ($sel === 'activation_debts' || $sel === '')) {
+                        $sel = 'activation_debts';
+                    }
+                    if ($caseKey === 'reminder_auto' && ($sel === 'reminder_auto' || $sel === '')) {
+                        $sel = 'debt_remind';
+                    }
+                    ?>
+                    <label style="display:block;font-size:12px;font-weight:700;color:#475569">
+                        <?php echo e($caseLab); ?>
+                        <select name="wa_case_<?php echo e($caseKey); ?>" style="width:100%;margin-top:4px;height:36px">
+                            <?php foreach ($tplChoices as $tk => $tl): ?>
+                                <option value="<?php echo e($tk); ?>"<?php echo $sel === $tk ? ' selected' : ''; ?>><?php echo e($tl); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </label>
+                <?php endforeach; ?>
+            </div>
+        </div>
         <div class="tpl-grid">
             <article class="tpl-card">
                 <header class="tpl-card-head">
-                    <h3><?php echo e(t('msg_activation')); ?></h3>
+                    <h3><?php echo e($isEnMsg ? 'Activation (cash)' : 'رسالة التفعيل — نقد'); ?></h3>
                     <span class="tpl-vars">{name} {package} {from} {to} {amount}</span>
                 </header>
                 <textarea name="tpl_activation" rows="4"><?php echo e(isset($sTpl['tpl_activation']) ? $sTpl['tpl_activation'] : ''); ?></textarea>
+            </article>
+            <article class="tpl-card">
+                <header class="tpl-card-head">
+                    <h3><?php echo e($isEnMsg ? 'Activation (credit)' : 'رسالة التفعيل — آجل'); ?></h3>
+                    <span class="tpl-vars">{name} {package} {from} {to} {amount}</span>
+                </header>
+                <textarea name="tpl_activation_credit" rows="4"><?php echo e(isset($sTpl['tpl_activation_credit']) ? $sTpl['tpl_activation_credit'] : ''); ?></textarea>
+            </article>
+            <article class="tpl-card">
+                <header class="tpl-card-head">
+                    <h3><?php echo e($isEnMsg ? 'Old debts appendix' : 'ملحق الديون السابقة'); ?></h3>
+                    <span class="tpl-vars">{name} {debt} {amount} {month} {notes}</span>
+                </header>
+                <p class="meta" style="margin:0 0 6px;font-size:11px"><?php echo e($isEnMsg
+                    ? 'Appended under the activation message when old debts are included.'
+                    : 'يُضاف أسفل رسالة التفعيل عند تفعيل «تضمين الديون القديمة».'); ?></p>
+                <textarea name="tpl_activation_debts" rows="4"><?php echo e(isset($sTpl['tpl_activation_debts']) ? $sTpl['tpl_activation_debts'] : ''); ?></textarea>
             </article>
             <article class="tpl-card">
                 <header class="tpl-card-head">
@@ -492,6 +590,14 @@ render_header(t('messages'), 'messages');
     <form method="get" class="actions actions-tight" style="margin-bottom:10px">
         <input type="hidden" name="mode" value="log">
         <input name="q" value="<?php echo e($logQ); ?>" placeholder="<?php echo e($lang === 'en' ? 'Search message text, name, phone…' : 'بحث بنص الرسالة أو الاسم أو الرقم…'); ?>" style="max-width:340px;flex:1">
+        <select name="type" style="max-width:200px">
+            <option value=""><?php echo e($lang === 'en' ? 'All types' : 'كل الأنواع'); ?></option>
+            <option value="auto"<?php echo $logType === 'auto' ? ' selected' : ''; ?>><?php echo e($lang === 'en' ? 'Automatic only' : 'التلقائي فقط'); ?></option>
+            <option value="activation"<?php echo $logType === 'activation' ? ' selected' : ''; ?>><?php echo e($lang === 'en' ? 'Activation' : 'تفعيل'); ?></option>
+            <option value="reminder_debt"<?php echo $logType === 'reminder_debt' ? ' selected' : ''; ?>><?php echo e($lang === 'en' ? 'Debt reminder' : 'تذكير دين'); ?></option>
+            <option value="unpaid_overdue"<?php echo $logType === 'unpaid_overdue' ? ' selected' : ''; ?>><?php echo e($lang === 'en' ? 'Unpaid / delay' : 'تأخير الدين'); ?></option>
+            <option value="expiry_auto"<?php echo $logType === 'expiry_auto' ? ' selected' : ''; ?>><?php echo e($lang === 'en' ? 'Expiry auto' : 'قرب الانتهاء'); ?></option>
+        </select>
         <button class="btn secondary sm" type="submit"><?php echo e($lang === 'en' ? 'Search' : 'بحث'); ?></button>
         <?php if ($logQ !== ''): ?>
             <a class="btn ghost sm" href="messages.php?mode=log"><?php echo e(t('show_all')); ?></a>

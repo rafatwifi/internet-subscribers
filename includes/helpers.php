@@ -868,8 +868,16 @@ function ensure_subscriber_grace_days_column($pdo)
         if (!$col) {
             $pdo->exec(
                 'ALTER TABLE subscribers
-                 ADD COLUMN grace_days INT NOT NULL DEFAULT 3 AFTER notes'
+                 ADD COLUMN grace_days INT NULL DEFAULT NULL AFTER notes'
             );
+        } else {
+            // NULL = حسب إعداد النظام
+            $nullOk = isset($col['Null']) && strtoupper((string) $col['Null']) === 'YES';
+            if (!$nullOk) {
+                $pdo->exec('ALTER TABLE subscribers MODIFY COLUMN grace_days INT NULL DEFAULT NULL');
+                // القيم القديمة الافتراضية → حسب النظام للجميع
+                $pdo->exec('UPDATE subscribers SET grace_days = NULL');
+            }
         }
     } catch (Exception $e) {
     }
@@ -886,10 +894,32 @@ function subscriber_default_grace_days($config = null)
     return 3;
 }
 
+/**
+ * أيام السماح الفعلية:
+ * - grace_days = NULL → حسب النظام
+ * - رقم → استثناء خاص بهذا المشترك فقط
+ */
 function subscriber_grace_days($row, $config = null)
 {
-    if (is_array($row) && isset($row['grace_days']) && $row['grace_days'] !== null && $row['grace_days'] !== '') {
+    if (is_array($row) && array_key_exists('grace_days', $row)
+        && $row['grace_days'] !== null && $row['grace_days'] !== '') {
         return max(0, (int) $row['grace_days']);
     }
     return subscriber_default_grace_days($config);
+}
+
+function subscriber_grace_is_custom($row)
+{
+    return is_array($row) && array_key_exists('grace_days', $row)
+        && $row['grace_days'] !== null && $row['grace_days'] !== '';
+}
+
+function subscriber_grace_label($row, $config = null, $lang = 'ar')
+{
+    $en = ($lang === 'en');
+    if (subscriber_grace_is_custom($row)) {
+        return (string) max(0, (int) $row['grace_days']);
+    }
+    $sys = subscriber_default_grace_days($config);
+    return $en ? ('System (' . $sys . ')') : ('حسب النظام (' . $sys . ')');
 }

@@ -143,6 +143,18 @@ function activate_one_subscriber($pdo, $config, $subscriberId, $opts = array())
     $daysRaw = isset($opts['days_left']) ? $opts['days_left'] : null;
     $daysLeftPost = ($daysRaw === null || $daysRaw === '') ? -1 : (int) $daysRaw;
     $doCarry = !isset($opts['carry_days']) || $opts['carry_days'];
+    $skipGrace = !empty($opts['skip_grace']);
+    $actCase = ($payMode === 'credit') ? 'activation_credit' : 'activation_cash';
+    $waTemplate = '';
+    if (function_exists('wa_case_template_key')) {
+        $waTemplate = wa_case_template_key($config, $actCase);
+    }
+    if (isset($opts['wa_template']) && trim((string) $opts['wa_template']) !== '') {
+        $waTemplate = trim((string) $opts['wa_template']);
+    }
+    if ($waTemplate === '') {
+        $waTemplate = ($payMode === 'credit') ? 'activation_credit' : 'activation';
+    }
 
     $subRowSt = $pdo->prepare('SELECT * FROM subscribers WHERE id = :id');
     $subRowSt->execute(array(':id' => $subscriberId));
@@ -197,7 +209,7 @@ function activate_one_subscriber($pdo, $config, $subscriberId, $opts = array())
     }
 
     $graceDays = 0;
-    if ($daysLeftPost < 0 && function_exists('subscriber_grace_days')) {
+    if (!$skipGrace && $daysLeftPost < 0 && function_exists('subscriber_grace_days')) {
         $graceDays = subscriber_grace_days($subscriberRow, $config);
         if ($graceDays > 0) {
             $endDate = date('Y-m-d', strtotime($endDate . ' +' . $graceDays . ' days'));
@@ -327,37 +339,62 @@ function activate_one_subscriber($pdo, $config, $subscriberId, $opts = array())
             $subInfo->execute(array(':id' => $subscriptionId));
             $row = $subInfo->fetch();
             if ($row) {
+                $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
                 $extra = $msgNote;
-                if ($isCash) {
-                    $extra = trim(($extra !== '' ? $extra . "\n" : '') . 'تم استلام المبلغ نقداً');
-                } else {
-                    $extra = trim(($extra !== '' ? $extra . "\n" : '') . 'الدفع آجل — يرجى التسديد');
+                $msg = function_exists('wa_render_named_template')
+                    ? wa_render_named_template($waTemplate, $row, $config, array(
+                        'amount' => $chargeTotal,
+                        'debt' => $oldDebtSum,
+                        'package' => $serviceName,
+                    ))
+                    : '';
+                if ($msg === '' && function_exists('activation_message')) {
+                    $msg = activation_message($row, $config, '');
+                }
+                if ($msg === '' && function_exists('activation_message_with_rental')) {
+                    $rentName = $rentalDev ? $rentalDev['name'] : '';
+                    $msg = activation_message_with_rental($row, $config, '', $rentalFee, $rentName);
+                }
+                if ($rentalFee > 0 && $rentalDev && strpos($msg, (string) $rentalDev['name']) === false) {
+                    $msg .= "\nإيجار (" . $rentalDev['name'] . '): ' . money_format_iqd($rentalFee, $currency);
+                }
+                if ($extra !== '') {
+                    $msg .= "\n" . $extra;
                 }
                 if ($sendOldDebts && $oldDebtLines) {
-                    $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
-                    $extra .= "\n\nالديون السابقة:";
-                    foreach ($oldDebtLines as $od) {
-                        $lab = month_short_label($od['month_label']);
-                        $extra .= "\n• " . $lab . ': ' . money_format_iqd($od['amount'], $currency);
-                        if (!empty($od['notes'])) {
-                            $extra .= ' (' . $od['notes'] . ')';
+                    $debtKey = function_exists('wa_case_template_key')
+                        ? wa_case_template_key($config, 'activation_debts')
+                        : 'activation_debts';
+                    $debtMonths = array();
+                    foreach ($oldDebtLines as $ol) {
+                        if (!empty($ol['month_label'])) {
+                            $lab = function_exists('month_short_label')
+                                ? month_short_label($ol['month_label'])
+                                : $ol['month_label'];
+                            $amt = money_format_iqd(isset($ol['amount']) ? $ol['amount'] : 0, $currency);
+                            $debtMonths[] = $lab . ' ' . $amt;
                         }
                     }
-                    $extra .= "\nإجمالي السابق: " . money_format_iqd($oldDebtSum, $currency);
-                    if (!$isCash) {
-                        $extra .= "\nدين التفعيل: " . money_format_iqd($chargeTotal, $currency);
-                        $extra .= "\nالإجمالي الكلي: " . money_format_iqd($oldDebtSum + $chargeTotal, $currency);
-                    } else {
-                        $totalAfter = subscriber_unpaid_total($pdo, $subscriberId);
-                        $extra .= "\nالإجمالي المتبقي: " . money_format_iqd($totalAfter, $currency);
+                    $notesLine = implode(' · ', $debtMonths);
+                    $debtTpl = function_exists('wa_render_named_template')
+                        ? wa_render_named_template($debtKey, array_merge($row, array(
+                            'month_label' => isset($oldDebtLines[0]['month_label']) ? $oldDebtLines[0]['month_label'] : date('Y-m'),
+                            'notes' => $notesLine,
+                        )), $config, array(
+                            'amount' => $oldDebtSum,
+                            'debt' => $oldDebtSum,
+                            'package' => $serviceName,
+                            'notes' => $notesLine,
+                        ))
+                        : '';
+                    if ($debtTpl === '') {
+                        $debtTpl = 'تنويه: عليك ديون سابقة بمبلغ ' . money_format_iqd($oldDebtSum, $currency);
+                        if ($notesLine !== '') {
+                            $debtTpl .= "\n" . $notesLine;
+                        }
                     }
-                } elseif (!$isCash) {
-                    $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
-                    $totalAfter = subscriber_unpaid_total($pdo, $subscriberId);
-                    $extra .= "\nإجمالي الدين: " . money_format_iqd($totalAfter, $currency);
+                    $msg .= "\n\n" . $debtTpl;
                 }
-                $rentName = $rentalDev ? $rentalDev['name'] : '';
-                $msg = activation_message_with_rental($row, $config, $extra, $rentalFee, $rentName);
                 $result = whatsapp_send($config, $row['phone'], $msg, 'activation');
                 log_message($pdo, $subscriberId, $result);
                 $waOk = !empty($result['success']);
@@ -386,28 +423,32 @@ function activate_one_subscriber($pdo, $config, $subscriberId, $opts = array())
             $pdo->commit();
         }
 
-        $okMsg = 'تم التفعيل (' . $modeLabel . ') — ' . $serviceName;
-        if ($rentalFee > 0) {
-            $okMsg .= ' مع إيجار ' . $rentalFee;
-        }
-        if ($carryDays > 0) {
-            $okMsg .= ' — أُضيف +' . $carryDays . ' يوم';
-        }
-        if ($graceDays > 0) {
-            $okMsg .= ' — سماح +' . $graceDays . ' يوم';
-        }
-        if ($sendWhatsapp) {
-            if ($waOk) {
-                $okMsg .= ' وإرسال رسالة';
-            } elseif ($waMsg !== '') {
-                $okMsg .= ' — ' . $waMsg;
+        if (!empty($opts['simple_msg'])) {
+            $okMsg = 'تم تفعيل المشترك';
+        } else {
+            $okMsg = 'تم التفعيل (' . $modeLabel . ') — ' . $serviceName;
+            if ($rentalFee > 0) {
+                $okMsg .= ' مع إيجار ' . $rentalFee;
             }
-        }
-        if ($sasMsg !== '') {
-            if ($sasOk) {
-                $okMsg .= ' — ' . $sasMsg;
-            } else {
-                $okMsg .= ' — تحذير: ' . $sasMsg;
+            if ($carryDays > 0) {
+                $okMsg .= ' — أُضيف +' . $carryDays . ' يوم';
+            }
+            if ($graceDays > 0) {
+                $okMsg .= ' — سماح +' . $graceDays . ' يوم';
+            }
+            if ($sendWhatsapp) {
+                if ($waOk) {
+                    $okMsg .= ' وإرسال رسالة';
+                } elseif ($waMsg !== '') {
+                    $okMsg .= ' — ' . $waMsg;
+                }
+            }
+            if ($sasMsg !== '') {
+                if ($sasOk) {
+                    $okMsg .= ' — ' . $sasMsg;
+                } else {
+                    $okMsg .= ' — تحذير: ' . $sasMsg;
+                }
             }
         }
 

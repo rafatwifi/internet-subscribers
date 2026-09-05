@@ -4,8 +4,83 @@ require_once __DIR__ . '/../includes/bootstrap.php';
 require_once __DIR__ . '/../includes/layout.php';
 require_login();
 
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
+    header('Content-Type: application/json; charset=utf-8');
+    $en = (isset($lang) && $lang === 'en');
+    $out = array(
+        'ok' => true,
+        'points' => '—',
+        'balance' => '—',
+        'sas_ms' => null,
+        'cards' => array(),
+        'card_total' => 0,
+        'card_sub' => $en ? 'Unused' : 'شاغرة',
+    );
+    if (function_exists('sas_is_ready') && sas_is_ready($config)) {
+        if (isset($_GET['refresh']) && $_GET['refresh'] === '1') {
+            $_SESSION['sas_rp_at'] = 0;
+            if (function_exists('sas_clear_unused_card_cache')) {
+                sas_clear_unused_card_cache();
+            }
+        }
+        if (function_exists('sas_manager_reward_points')) {
+            list($ptsOk, $ptsVal) = sas_manager_reward_points($config, $pdo);
+            if ($ptsOk && $ptsVal !== null) {
+                $out['points'] = ((float) $ptsVal == (int) $ptsVal)
+                    ? number_format((int) $ptsVal)
+                    : number_format((float) $ptsVal, 2);
+            }
+        }
+        if (function_exists('system_sas_latency')) {
+            $lat = system_sas_latency($config);
+            if (isset($lat['ms']) && $lat['ms'] !== null) {
+                $out['sas_ms'] = (int) $lat['ms'];
+                $out['balance'] = number_format((float) $lat['ms'], 0) . ' ms';
+                $_SESSION['sas_latency_ms'] = (int) $lat['ms'];
+                $_SESSION['sas_latency_host'] = isset($lat['host']) ? (string) $lat['host'] : '';
+            }
+        } elseif (isset($_SESSION['sas_latency_ms'])) {
+            $out['sas_ms'] = (int) $_SESSION['sas_latency_ms'];
+            $out['balance'] = number_format((float) $_SESSION['sas_latency_ms'], 0) . ' ms';
+        }
+        if (function_exists('sas_page_connector') && function_exists('sas_dash_card_groups')) {
+            try {
+                $apiDash = sas_page_connector($config);
+                if ($apiDash && method_exists($apiDash, 'setTimeout')) {
+                    $apiDash->setTimeout(12);
+                }
+                if ($apiDash) {
+                    $groups = sas_dash_card_groups($apiDash);
+                    $_SESSION['sas_card_groups_v2'] = $groups;
+                    $_SESSION['sas_card_groups_v2_at'] = time();
+                    $parts = array();
+                    $total = 0;
+                    foreach ($groups as $g) {
+                        $n = isset($g['count']) ? (int) $g['count'] : 0;
+                        if ($n <= 0) {
+                            continue;
+                        }
+                        $total += $n;
+                        $nm = isset($g['name']) ? (string) $g['name'] : '';
+                        $parts[] = trim($nm . ' ' . $n);
+                    }
+                    $out['cards'] = $groups;
+                    $out['card_total'] = $total;
+                    $out['card_sub'] = $parts ? implode(' · ', $parts) : ($en ? 'Unused' : 'شاغرة');
+                }
+            } catch (Exception $e) {
+            }
+        }
+    }
+    echo json_encode($out);
+    exit;
+}
+
 $pdo->exec("UPDATE subscriptions SET status = 'expired' WHERE status = 'active' AND end_date < CURDATE()");
-archive_closed_months($pdo);
+if (empty($_SESSION['archive_months_at']) || (time() - (int) $_SESSION['archive_months_at']) > 3600) {
+    archive_closed_months($pdo);
+    $_SESSION['archive_months_at'] = time();
+}
 
 $totalSubscribers = (int) $pdo->query('SELECT COUNT(*) FROM subscribers')->fetchColumn();
 $totalDebt = (float) $pdo->query("SELECT COALESCE(SUM(amount),0) FROM invoices WHERE status = 'unpaid'")->fetchColumn();
@@ -111,52 +186,37 @@ if ($sasReadyDash) {
     if (function_exists('sas_dash_user_counts')) {
         $sasCounts = sas_dash_user_counts($pdo);
     }
-    $needCards = empty($_SESSION['sas_card_groups_v2']) || !isset($_SESSION['sas_card_groups_v2_at'])
-        || ((time() - (int) $_SESSION['sas_card_groups_v2_at']) > 120);
-    if (isset($_SESSION['sas_card_groups_v2']) && is_array($_SESSION['sas_card_groups_v2']) && !$_SESSION['sas_card_groups_v2']
-        && isset($_SESSION['sas_card_groups_v2_at']) && ((time() - (int) $_SESSION['sas_card_groups_v2_at']) > 20)) {
-        $needCards = true;
-    }
-    if ($needCards && function_exists('sas_page_connector') && function_exists('sas_dash_card_groups')) {
-        try {
-            $apiDash = sas_page_connector($config);
-            if ($apiDash && method_exists($apiDash, 'setTimeout')) {
-                $apiDash->setTimeout(35);
-            }
-            if ($apiDash) {
-                $_SESSION['sas_card_groups_v2'] = sas_dash_card_groups($apiDash);
-                $_SESSION['sas_card_groups_v2_at'] = time();
-            }
-        } catch (Exception $e) {
-        }
-    }
     if (isset($_SESSION['sas_card_groups_v2']) && is_array($_SESSION['sas_card_groups_v2'])) {
         $sasCardGroups = $_SESSION['sas_card_groups_v2'];
     }
-    if (function_exists('sas_manager_reward_points')) {
-        list($ptsOk, $ptsVal) = sas_manager_reward_points($config, $pdo);
-        if ($ptsOk && $ptsVal !== null) {
-            $sasPointsOk = true;
-            $sasPointsVal = $ptsVal;
-            $sasPointsDisp = ((float) $ptsVal == (int) $ptsVal)
-                ? number_format((int) $ptsVal)
-                : number_format((float) $ptsVal, 2);
-        }
+    if (isset($_SESSION['sas_rp_val']) && $_SESSION['sas_rp_val'] !== null) {
+        $sasPointsOk = true;
+        $sasPointsVal = $_SESSION['sas_rp_val'];
+        $sasPointsDisp = ((float) $sasPointsVal == (int) $sasPointsVal)
+            ? number_format((int) $sasPointsVal)
+            : number_format((float) $sasPointsVal, 2);
     }
-    if (array_key_exists('sas_balance_disp', $_SESSION) && $_SESSION['sas_balance_disp'] !== '' && $_SESSION['sas_balance_disp'] !== null) {
-        $sasBalanceDisp = (string) $_SESSION['sas_balance_disp'];
+    if (isset($_SESSION['sas_latency_ms']) && $_SESSION['sas_latency_ms'] !== null && $_SESSION['sas_latency_ms'] !== '') {
+        $sasBalanceDisp = number_format((float) $_SESSION['sas_latency_ms'], 0) . ' ms';
+    } elseif (function_exists('system_sas_latency')) {
+        $lat0 = system_sas_latency($config);
+        if (isset($lat0['ms']) && $lat0['ms'] !== null) {
+            $sasBalanceDisp = number_format((float) $lat0['ms'], 0) . ' ms';
+            $_SESSION['sas_latency_ms'] = (int) $lat0['ms'];
+        }
     }
 }
 
 if (!function_exists('dash_sas_box')) {
-    function dash_sas_box($href, $tone, $title, $sub, $value, $ico)
+    function dash_sas_box($href, $tone, $title, $sub, $value, $ico, $boxId = '')
     {
-        echo '<a class="sas-box ' . e($tone) . '" href="' . e($href) . '">';
+        echo '<a class="sas-box ' . e($tone) . '" href="' . e($href) . '"'
+            . ($boxId !== '' ? (' id="' . e($boxId) . '"') : '') . '>';
         echo '<div class="sas-box-title">' . e($title) . '</div>';
-        if ($sub !== '') {
-            echo '<div class="sas-box-sub">' . e($sub) . '</div>';
+        if ($sub !== '' || $boxId !== '') {
+            echo '<div class="sas-box-sub"' . ($boxId !== '' ? (' id="' . e($boxId) . 'Sub"') : '') . '>' . e($sub) . '</div>';
         }
-        echo '<div class="sas-box-val">' . e($value) . '</div>';
+        echo '<div class="sas-box-val"' . ($boxId !== '' ? (' id="' . e($boxId) . 'Val"') : '') . '>' . e($value) . '</div>';
         echo '<span class="sas-box-ico" aria-hidden="true">' . $ico . '</span>';
         echo '</a>';
     }
@@ -192,6 +252,7 @@ body:has(.sas-dash) .container {
 .sas-box:hover { color: #fff !important; filter: brightness(1.05); }
 .sas-box-title { font-size: 15px; font-weight: 700; line-height: 1.3; }
 .sas-box-sub { font-size: 13px; font-weight: 400; opacity: .92; margin-top: 2px; }
+#dashCardsSub { font-size: 11px; line-height: 1.3; max-height: 2.7em; overflow: hidden; }
 .sas-box-val { font-size: 26px; font-weight: 400; margin-top: 8px; line-height: 1; }
 .sas-box-ico {
   position: absolute; inset-inline-end: 10px; top: 50%; transform: translateY(-50%);
@@ -221,8 +282,8 @@ dash_sas_box('sas.php?sub=expired', 'tone-red', $en ? 'Expired users' : 'منت�
 dash_sas_box('sas.php?sub=soon', 'tone-yellow', $en ? 'About to expire' : 'على وشك الانتهاء', $en ? 'In 3 days' : '', (string) (int) $sasCounts['soon'], '📅');
 dash_sas_box('sas.php?sub=today', 'tone-teal', $en ? 'Expiring today' : 'ينتهي اليوم', '', (string) (int) $sasCounts['today'], '📅');
 if ($sasReadyDash) {
-    dash_sas_box('sas.php', 'tone-lime', $en ? 'Reward points' : 'نقاط تشجيعية', '', (string) $sasPointsDisp, '🎁');
-    dash_sas_box('sas.php', 'tone-navy', $en ? 'Balance' : 'الرصيد', '', (string) $sasBalanceDisp, '💵');
+    dash_sas_box('sas.php', 'tone-lime', $en ? 'Reward points' : 'نقاط تشجيعية', '', (string) $sasPointsDisp, '🎁', 'dashPoints');
+    dash_sas_box('sas.php', 'tone-navy', $en ? 'SAS latency' : 'بنك الساس', $en ? 'Domain ping' : 'Latency دومين الساس', (string) $sasBalanceDisp, '📡', 'dashBank');
 }
 ?>
 </div>
@@ -238,20 +299,49 @@ dash_sas_box('subscriptions.php', 'tone-aqua', $en ? 'Activations' : 'تفعيل
 dash_sas_box('rentals.php', 'tone-navy', $en ? 'Rental towers' : 'أبراج الإيجار', ((int) ($rentalActiveCount + $rentalInactiveCount)) . ' \\ ' . (int) $rentalActiveCount, (string) (int) $rentalActiveCount, '📡');
 if ($sasReadyDash) {
     $cardTotal = 0;
-    $cardSub = $en ? 'Unused' : 'شاغرة';
+    $cardParts = array();
     if ($sasCardGroups) {
         foreach ($sasCardGroups as $g) {
-            $cardTotal += isset($g['count']) ? (int) $g['count'] : 0;
-        }
-        if (count($sasCardGroups) === 1 && !empty($sasCardGroups[0]['name'])) {
-            $cardSub = (string) $sasCardGroups[0]['name'];
+            $n = isset($g['count']) ? (int) $g['count'] : 0;
+            if ($n <= 0) {
+                continue;
+            }
+            $cardTotal += $n;
+            $nm = isset($g['name']) ? (string) $g['name'] : '';
+            $cardParts[] = trim($nm . ' ' . $n);
         }
     }
-    dash_sas_box('sas.php', 'tone-navy', $en ? 'Cards' : 'الكروت', $cardSub, (string) (int) $cardTotal, '🃏');
+    $cardSub = $cardParts ? implode(' · ', $cardParts) : ($en ? 'Unused' : 'شاغرة');
+    dash_sas_box('sas.php', 'tone-navy', $en ? 'Cards' : 'الكروت', $cardSub, (string) (int) $cardTotal, '🃏', 'dashCards');
 }
 ?>
 </div>
 </div>
+<?php if ($sasReadyDash): ?>
+<script>
+(function () {
+  function applyDash(d) {
+    if (!d || !d.ok) return;
+    var p = document.getElementById('dashPointsVal');
+    if (p && d.points) p.textContent = d.points;
+    var b = document.getElementById('dashBankVal');
+    if (b && d.balance) b.textContent = d.balance;
+    var c = document.getElementById('dashCardsVal');
+    if (c) c.textContent = String(d.card_total || 0);
+    var cs = document.getElementById('dashCardsSub');
+    if (cs && d.card_sub) cs.textContent = d.card_sub;
+  }
+  function loadDash() {
+    fetch('index.php?ajax=dash_sas&refresh=1', { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(applyDash)
+      .catch(function () {});
+  }
+  loadDash();
+  setInterval(loadDash, 12000);
+})();
+</script>
+<?php endif; ?>
 
 <div class="panel chart-panel glass-panel panel-compact">
     <div class="chart-head chart-head-row">

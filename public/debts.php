@@ -405,6 +405,11 @@ if (!$canEditDebts) {
 
 render_header(t('debts'), 'debts');
 ?>
+<p class="meta" style="margin:0 0 10px">
+    <?php echo e($lang === 'en'
+        ? 'Local debts are independent of SAS. Changing debt on SAS does not change amounts here.'
+        : 'ديون النظام محلية ومستقلة عن الساس. تعديل الدين بالساس لا يغيّر المبالغ هنا.'); ?>
+</p>
 <?php if ($filterSubscriberId > 0): ?>
 <div class="page-head">
     <h1><?php echo e($lang === 'en' ? 'Subscriber debts' : 'ديون المشترك'); ?></h1>
@@ -633,16 +638,16 @@ render_header(t('debts'), 'debts');
       btn.contentEditable = 'false';
       var raw = String(btn.textContent || '').replace(/[^\d]/g, '');
       var n = parseInt(raw, 10);
-      if (!ok || !raw) {
+      if (!ok || raw === '') {
+        btn.textContent = snap;
+        return;
+      }
+      if (isNaN(n) || n < 0) {
+        alert(<?php echo json_encode($lang === 'en' ? 'Enter a valid amount' : 'أدخل مبلغ صحيح'); ?>);
         btn.textContent = snap;
         return;
       }
       if (String(n) === String(current)) {
-        btn.textContent = snap;
-        return;
-      }
-      if (!(n > 0)) {
-        alert(<?php echo json_encode($lang === 'en' ? 'Enter a valid amount' : 'أدخل مبلغ صحيح'); ?>);
         btn.textContent = snap;
         return;
       }

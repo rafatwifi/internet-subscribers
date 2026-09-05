@@ -90,6 +90,18 @@ function ensure_sas_users_cache_table($pdo)
         } catch (Exception $e) {
         }
     }
+    try {
+        $pdo->exec('ALTER TABLE sas_users_cache ADD INDEX idx_sas_disp (display_name)');
+    } catch (Exception $e) {
+    }
+    try {
+        $pdo->exec('ALTER TABLE sas_users_cache ADD INDEX idx_sas_user (username)');
+    } catch (Exception $e) {
+    }
+    try {
+        $pdo->exec('ALTER TABLE sas_users_cache ADD INDEX idx_sas_online (is_online)');
+    } catch (Exception $e) {
+    }
 }
 
 function sas_sync_meta($pdo)
@@ -459,14 +471,17 @@ function sas_cache_framed_ip($row)
         return '';
     }
     $nests = array($row);
-    foreach (array('acct', 'session', 'radius', 'online', 'data', 'user') as $nk) {
+    foreach (array('acct', 'session', 'radius', 'online', 'data', 'user', 'info', 'attributes') as $nk) {
         if (isset($row[$nk]) && is_array($row[$nk]) && !isset($row[$nk][0])) {
             $nests[] = $row[$nk];
         }
     }
     $keys = array(
-        'framedipaddress', 'framed_ip_address', 'framedIPAddress', 'framed_ip',
-        'ipaddress', 'ip_address', 'ipAddress', 'user_ip', 'client_ip', 'wan_ip', 'ip',
+        'framedipaddress', 'framed_ip_address', 'framedIPAddress', 'framed_ip', 'framedIp',
+        'Framed-IP-Address', 'framed-ip-address',
+        'ipaddress', 'ip_address', 'ipAddress', 'user_ip', 'client_ip', 'wan_ip',
+        'remote_address', 'remoteAddress', 'remote_ip', 'remoteIp',
+        'address', 'ip',
     );
     foreach ($nests as $block) {
         foreach ($keys as $k) {
@@ -486,6 +501,110 @@ function sas_cache_framed_ip($row)
         }
     }
     return '';
+}
+
+/**
+ * مفاتيح مطابقة لاسم الدخول (مع/بدون @realm)
+ */
+function sas_cache_username_match_keys($username)
+{
+    $u = strtolower(trim((string) $username));
+    if ($u === '') {
+        return array();
+    }
+    $keys = array($u => true);
+    if (strpos($u, '@') !== false) {
+        $base = strtolower(trim(strtok($u, '@')));
+        if ($base !== '') {
+            $keys[$base] = true;
+        }
+    }
+    return array_keys($keys);
+}
+
+function sas_refresh_online_flags($pdo, $config)
+{
+    ensure_sas_users_cache_table($pdo);
+    $api = function_exists('sas_page_connector') ? sas_page_connector($config) : null;
+    if (!$api || !method_exists($api, 'listOnlineUsers')) {
+        return 0;
+    }
+    try {
+        if (method_exists($api, 'setTimeout')) {
+            $api->setTimeout(18);
+        }
+        $rows = $api->listOnlineUsers();
+    } catch (Exception $e) {
+        return 0;
+    }
+    if (!is_array($rows)) {
+        return 0;
+    }
+    $names = array();
+    $trafMap = array();
+    $ipMap = array();
+    foreach ($rows as $row) {
+        $u = sas_cache_username($row);
+        if ($u === '') {
+            continue;
+        }
+        $keys = sas_cache_username_match_keys($u);
+        if (!$keys) {
+            continue;
+        }
+        $ip = sas_cache_framed_ip($row);
+        $tr = sas_cache_daily_traffic($row);
+        foreach ($keys as $key) {
+            $names[$key] = $u;
+            if ($ip !== '') {
+                $ipMap[$key] = sas_clip($ip, 45);
+            }
+            if ($tr !== '') {
+                $trafMap[$key] = sas_clip($tr, 60);
+            }
+        }
+    }
+    try {
+        // امسح حالة الاتصال والـ IP ثم عبّ من قائمة الأونلاين الحقيقية
+        $pdo->exec('UPDATE sas_users_cache SET is_online = 0, framed_ip = NULL');
+        if ($names) {
+            $stExact = $pdo->prepare(
+                'UPDATE sas_users_cache SET is_online = 1, last_online = NOW(), framed_ip = :ip
+                 WHERE LOWER(username) = :u'
+            );
+            $stBase = $pdo->prepare(
+                'UPDATE sas_users_cache SET is_online = 1, last_online = NOW(), framed_ip = :ip
+                 WHERE LOWER(username) = :u1
+                    OR LOWER(SUBSTRING_INDEX(username, "@", 1)) = :u2'
+            );
+            $stTrafExact = $pdo->prepare(
+                'UPDATE sas_users_cache SET daily_traffic = :t WHERE LOWER(username) = :u'
+            );
+            $stTrafBase = $pdo->prepare(
+                'UPDATE sas_users_cache SET daily_traffic = :t
+                 WHERE LOWER(username) = :u1
+                    OR LOWER(SUBSTRING_INDEX(username, "@", 1)) = :u2'
+            );
+            foreach ($names as $key => $u) {
+                $ipVal = isset($ipMap[$key]) ? $ipMap[$key] : null;
+                if (strpos($key, '@') !== false) {
+                    $stExact->execute(array(':u' => $key, ':ip' => $ipVal));
+                } else {
+                    $stBase->execute(array(':u1' => $key, ':u2' => $key, ':ip' => $ipVal));
+                }
+                if (isset($trafMap[$key])) {
+                    if (strpos($key, '@') !== false) {
+                        $stTrafExact->execute(array(':u' => $key, ':t' => $trafMap[$key]));
+                    } else {
+                        $stTrafBase->execute(array(':u1' => $key, ':u2' => $key, ':t' => $trafMap[$key]));
+                    }
+                }
+            }
+        }
+    } catch (Exception $e) {
+        return 0;
+    }
+    return count($names);
 }
 
 function sas_cache_daily_traffic($row)
@@ -753,7 +872,7 @@ function sas_cache_ensure_local($pdo, $config, $cacheRow)
         $agentId = default_admin_user_id($pdo);
     }
 
-    $graceDef = function_exists('subscriber_default_grace_days') ? subscriber_default_grace_days($config) : 3;
+    $graceDef = null; // حسب النظام
     $params = array(
         ':name' => $name,
         ':phone' => $phoneStore,
@@ -1045,7 +1164,7 @@ function sas_clear_unused_card_cache()
 
 function sas_unused_cards_cached($api, $force = false)
 {
-    $ttl = 180;
+    $ttl = 25;
     $at = isset($_SESSION['sas_unused_ui_v3_at']) ? (int) $_SESSION['sas_unused_ui_v3_at'] : 0;
     if (!$force && $at > 0 && isset($_SESSION['sas_unused_ui_v3']) && is_array($_SESSION['sas_unused_ui_v3'])) {
         $age = time() - $at;
@@ -1074,21 +1193,32 @@ function sas_unused_cards_cached($api, $force = false)
     return $out;
 }
 
+function sas_profile_norm($s)
+{
+    $s = strtolower(trim((string) $s));
+    $s = preg_replace('/[\s_\-]+/', '', $s);
+    $s = preg_replace('/msl$/', '', $s);
+    return $s;
+}
+
 function sas_cards_filter_cached($cards, $profileId, $profileName)
 {
     $profileId = (int) $profileId;
     $profileName = trim((string) $profileName);
-    if (!is_array($cards) || ($profileId <= 0 && $profileName === '')) {
-        return is_array($cards) ? $cards : array();
+    if (!is_array($cards)) {
+        return array();
+    }
+    if ($profileId <= 0 && $profileName === '') {
+        return $cards;
     }
     $hit = array();
-    $want = strtolower($profileName);
+    $want = sas_profile_norm($profileName);
     foreach ($cards as $c) {
         if (!is_array($c)) {
             continue;
         }
         $pid = isset($c['profile_id']) ? (int) $c['profile_id'] : 0;
-        $pn = isset($c['profile_name']) ? strtolower((string) $c['profile_name']) : '';
+        $pn = sas_profile_norm(isset($c['profile_name']) ? $c['profile_name'] : '');
         if ($profileId > 0 && $pid === $profileId) {
             $hit[] = $c;
             continue;
@@ -1097,10 +1227,7 @@ function sas_cards_filter_cached($cards, $profileId, $profileName)
             $hit[] = $c;
         }
     }
-    if ($hit) {
-        return $hit;
-    }
-    return $cards;
+    return $hit;
 }
 
 function sas_cards_for_ui($api, $profileId, $sasUserId = 0, $profileName = '')
@@ -1190,60 +1317,27 @@ function sas_activation_quote($pdo, $config, $username, $profileId = 0)
     return $out;
 }
 
+function sas_cpe_login_url($ip, $config = null)
+{
+    $ip = trim((string) $ip);
+    if ($ip === '') {
+        return '';
+    }
+    // فتح مباشر للـ IP فقط (بدون تكت / تسجيل دخول تلقائي)
+    $https = is_array($config) && !empty($config['cpe_use_https']);
+    $scheme = $https ? 'https' : 'http';
+    if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+        return $scheme . '://[' . $ip . ']/
+    }
+    if (filter_var($ip, FILTER_VALIDATE_IP)) {
+        return $scheme . '://' . $ip . '/';
+    }
+    return '';
+}
+
 function sas_unused_cards_grouped($api)
 {
     return sas_group_unused_cards(sas_unused_cards_cached($api, false));
-}
-
-function sas_refresh_online_flags($pdo, $config)
-{
-    ensure_sas_users_cache_table($pdo);
-    $api = function_exists('sas_page_connector') ? sas_page_connector($config) : null;
-    if (!$api || !method_exists($api, 'listOnlineUsers')) {
-        return 0;
-    }
-    try {
-        $rows = $api->listOnlineUsers();
-    } catch (Exception $e) {
-        return 0;
-    }
-    $names = array();
-    $trafMap = array();
-    $ipMap = array();
-    foreach ($rows as $row) {
-        $u = sas_cache_username($row);
-        if ($u === '') {
-            continue;
-        }
-        $names[strtolower($u)] = $u;
-        $tr = sas_cache_daily_traffic($row);
-        if ($tr !== '') {
-            $trafMap[strtolower($u)] = sas_clip($tr, 60);
-        }
-        $ip = sas_cache_framed_ip($row);
-        if ($ip !== '') {
-            $ipMap[strtolower($u)] = sas_clip($ip, 45);
-        }
-    }
-    try {
-        $pdo->exec('UPDATE sas_users_cache SET is_online = 0, framed_ip = NULL');
-        if ($names) {
-            $st = $pdo->prepare('UPDATE sas_users_cache SET is_online = 1, last_online = NOW(), framed_ip = :ip WHERE username = :u');
-            $stTraf = $pdo->prepare('UPDATE sas_users_cache SET daily_traffic = :t WHERE username = :u');
-            foreach ($names as $key => $u) {
-                $st->execute(array(
-                    ':u' => $u,
-                    ':ip' => isset($ipMap[$key]) ? $ipMap[$key] : null,
-                ));
-                if (isset($trafMap[$key])) {
-                    $stTraf->execute(array(':u' => $u, ':t' => $trafMap[$key]));
-                }
-            }
-        }
-    } catch (Exception $e) {
-        return 0;
-    }
-    return count($names);
 }
 
 function sas_dash_user_counts($pdo)
@@ -1648,31 +1742,9 @@ function sas_finish_local_activation($pdo, $config, $username, $fields, $okMsg)
     }
     if ($localId <= 0 || !function_exists('activate_one_subscriber')) {
         if ($sendWa && function_exists('sas_notify_activation_whatsapp')) {
-            $waErr = sas_notify_activation_whatsapp($pdo, $config, $username, $sendOld);
-            if ($waErr !== '') {
-                $okMsg .= ' — واتساب: ' . $waErr;
-            } else {
-                $okMsg .= ' وتم إرسال واتساب';
-            }
+            sas_notify_activation_whatsapp($pdo, $config, $username, $sendOld);
         }
-        return $okMsg;
-    }
-    $graceDays = 0;
-    try {
-        $gSt = $pdo->prepare('SELECT * FROM subscribers WHERE id = :id');
-        $gSt->execute(array(':id' => $localId));
-        $gRow = $gSt->fetch();
-        $graceDays = function_exists('subscriber_grace_days')
-            ? subscriber_grace_days($gRow ? $gRow : array(), $config)
-            : 0;
-    } catch (Exception $e) {
-        $graceDays = function_exists('subscriber_default_grace_days') ? subscriber_default_grace_days($config) : 3;
-    }
-    if ($graceDays > 0 && function_exists('sas_extend_days')) {
-        list($gOk, $gMsg) = sas_extend_days($pdo, $config, $username, $graceDays, false);
-        if ($gMsg !== '') {
-            $okMsg .= ' — ' . $gMsg;
-        }
+        return 'تم تفعيل المشترك';
     }
     $planId = 0;
     $pid = isset($fields['profile_id']) ? (int) $fields['profile_id'] : 0;
@@ -1686,20 +1758,26 @@ function sas_finish_local_activation($pdo, $config, $username, $fields, $okMsg)
         } catch (Exception $e) {
         }
     }
+    $waTpl = '';
+    if (function_exists('wa_case_template_key')) {
+        $actCase = ($payMode === 'credit') ? 'activation_credit' : 'activation_cash';
+        $waTpl = wa_case_template_key($config, $actCase);
+    }
     list($lok, $lmsg) = activate_one_subscriber($pdo, $config, $localId, array(
         'plan_id' => $planId,
         'pay_mode' => $payMode,
         'send_whatsapp' => $sendWa,
         'send_old_debts' => $sendOld,
         'skip_sas' => true,
+        'skip_grace' => true,
+        'simple_msg' => true,
         'carry_days' => true,
+        'wa_template' => $waTpl !== '' ? $waTpl : (($payMode === 'credit') ? 'activation_credit' : 'activation'),
     ));
-    if ($lok) {
-        $okMsg .= ' — ' . $lmsg;
-    } elseif ($lmsg !== '') {
-        $okMsg .= ' — محلي: ' . $lmsg;
+    if (!$lok && $lmsg !== '') {
+        return 'تم تفعيل المشترك — محلي: ' . $lmsg;
     }
-    return $okMsg;
+    return 'تم تفعيل المشترك';
 }
 
 function sas_write_user($pdo, $config, $action, $username, $fields)
@@ -1726,7 +1804,7 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
                 }
             }
         }
-        if ($sasUserId <= 0 && $action !== 'sas_activate_card' && $action !== 'sas_activate_credit') {
+        if ($sasUserId <= 0 && $action !== 'sas_activate_card' && $action !== 'sas_activate_credit' && $action !== 'sas_activate_reward') {
             return array(false, 'ماكو رقم مستخدم بالساس لهذا المشترك', array());
         }
     }
@@ -2026,8 +2104,60 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
             sas_cache_refresh_one($pdo, $config, $username, $sasUserId);
         }
         sas_clear_unused_card_cache();
-        $okMsg = 'تم التفعيل بالرصيد على الساس';
-        $okMsg = sas_finish_local_activation($pdo, $config, $username, $fields, $okMsg);
+        $okMsg = sas_finish_local_activation($pdo, $config, $username, $fields, 'تم تفعيل المشترك');
+        return array(true, $okMsg, array());
+    }
+
+    if ($action === 'sas_activate_reward') {
+        $profileId = isset($fields['profile_id']) ? (int) $fields['profile_id'] : 0;
+        if ($profileId <= 0 && !empty($cache['profile_id'])) {
+            $profileId = (int) $cache['profile_id'];
+        }
+        if ($profileId <= 0) {
+            return array(false, 'ماكو بروفايل محدد للتفعيل', array());
+        }
+        $units = isset($fields['units']) ? (int) $fields['units'] : 1;
+        if ($units <= 0) {
+            $units = 1;
+        }
+        $beforeTs = ($cache && !empty($cache['expire_at'])) ? strtotime((string) $cache['expire_at']) : 0;
+        if ($beforeTs <= 0) {
+            $beforeTs = sas_row_expire_ts(sas_live_user_row($api, $username, $sasUserId));
+        }
+        if (!method_exists($api, 'activateUserReward')) {
+            return array(false, 'ارفع ملف SASConnector المحدّث للتفعيل بالنقاط', array());
+        }
+        $res = $api->activateUserReward($username, $profileId, $units, $sasUserId);
+        if (is_array($res) && !empty($res['__auth_error'])) {
+            return array(false, 'SAS: ' . (function_exists('sas_response_message') ? sas_response_message($res) : 'فشل الدخول'), array());
+        }
+        list($confirmed, $afterRow) = sas_confirm_live_activation($api, $username, $sasUserId, $beforeTs);
+        if (!$confirmed && sas_activate_may_force_expire($res)) {
+            list($confirmed, $afterRow) = sas_force_activation_expire(
+                $api,
+                $username,
+                $sasUserId,
+                $beforeTs,
+                $profileId,
+                $units,
+                $config
+            );
+        }
+        if (!$confirmed) {
+            $afterSql = $afterRow ? sas_cache_expire_at($afterRow) : '';
+            $beforeSql = $beforeTs > 0 ? date('Y-m-d H:i', $beforeTs) : '-';
+            return array(
+                false,
+                'الساس ما فعّل المشترك (التاريخ ما تغير: ' . $beforeSql . ' → ' . ($afterSql ? $afterSql : '-') . '). ما تم تسجيل المبلغ.',
+                array()
+            );
+        }
+        if ($afterRow) {
+            sas_cache_upsert_row($pdo, $afterRow);
+        } else {
+            sas_cache_refresh_one($pdo, $config, $username, $sasUserId);
+        }
+        $okMsg = sas_finish_local_activation($pdo, $config, $username, $fields, 'تم تفعيل المشترك');
         return array(true, $okMsg, array());
     }
 
@@ -2079,11 +2209,7 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
             sas_cache_refresh_one($pdo, $config, $username, $sasUserId);
         }
         sas_clear_unused_card_cache();
-        $okMsg = 'تم التفعيل بالكرت على الساس';
-        if (isset($res['_via']) && strpos((string) $res['_via'], 'credit') !== false) {
-            $okMsg = 'تم التفعيل برصيد المدير — مسار الكرت غير متوفر على هذا الساس';
-        }
-        $okMsg = sas_finish_local_activation($pdo, $config, $username, $fields, $okMsg);
+        $okMsg = sas_finish_local_activation($pdo, $config, $username, $fields, 'تم تفعيل المشترك');
         return array(true, $okMsg, array());
     }
 
@@ -2115,10 +2241,10 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
         $ins = $pdo->prepare(
             'INSERT INTO sas_users_cache
                 (username, sas_user_id, firstname, lastname, display_name, phone, profile_id, profile_name,
-                 enabled, expire_at, parent_id, parent_name, city, email, company, last_online, is_online, daily_traffic, local_subscriber_id, synced_at)
+                 enabled, expire_at, parent_id, parent_name, city, email, company, last_online, is_online, framed_ip, daily_traffic, local_subscriber_id, synced_at)
              VALUES
                 (:username, :sas_user_id, :firstname, :lastname, :display_name, :phone, :profile_id, :profile_name,
-                 :enabled, :expire_at, :parent_id, :parent_name, :city, :email, :company, :last_online, :is_online, :daily_traffic, :local_subscriber_id, :synced_at)
+                 :enabled, :expire_at, :parent_id, :parent_name, :city, :email, :company, :last_online, :is_online, :framed_ip, :daily_traffic, :local_subscriber_id, :synced_at)
              ON DUPLICATE KEY UPDATE
                 sas_user_id = VALUES(sas_user_id),
                 firstname = VALUES(firstname),
@@ -2134,8 +2260,9 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
                 city = VALUES(city),
                 email = VALUES(email),
                 company = VALUES(company),
-                last_online = VALUES(last_online),
-                is_online = VALUES(is_online),
+                last_online = IF(VALUES(last_online) IS NULL, last_online, VALUES(last_online)),
+                is_online = IF(VALUES(is_online) = 1, 1, is_online),
+                framed_ip = IF(VALUES(framed_ip) IS NULL OR VALUES(framed_ip) = "", framed_ip, VALUES(framed_ip)),
                 daily_traffic = IF(VALUES(daily_traffic) IS NULL, daily_traffic, VALUES(daily_traffic)),
                 local_subscriber_id = IF(VALUES(local_subscriber_id) IS NULL, local_subscriber_id, VALUES(local_subscriber_id)),
                 synced_at = VALUES(synced_at)'
@@ -2164,6 +2291,7 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
             ':company' => (($co = sas_cache_str_field($row, array('company'))) !== '' ? sas_clip($co, 150) : null),
             ':last_online' => sas_cache_last_online($row),
             ':is_online' => sas_cache_is_online_row($row),
+            ':framed_ip' => (($ip = sas_cache_framed_ip($row)) !== '' ? sas_clip($ip, 45) : null),
             ':daily_traffic' => (($tr = sas_cache_daily_traffic($row)) !== '' ? sas_clip($tr, 60) : null),
             ':local_subscriber_id' => null,
             ':synced_at' => $nowSql,
@@ -2343,10 +2471,10 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
         $ins = $pdo->prepare(
             'INSERT INTO sas_users_cache
                 (username, sas_user_id, firstname, lastname, display_name, phone, profile_id, profile_name,
-                 enabled, expire_at, parent_id, parent_name, city, email, company, last_online, is_online, daily_traffic, local_subscriber_id, synced_at)
+                 enabled, expire_at, parent_id, parent_name, city, email, company, last_online, is_online, framed_ip, daily_traffic, local_subscriber_id, synced_at)
              VALUES
                 (:username, :sas_user_id, :firstname, :lastname, :display_name, :phone, :profile_id, :profile_name,
-                 :enabled, :expire_at, :parent_id, :parent_name, :city, :email, :company, :last_online, :is_online, :daily_traffic, :local_subscriber_id, :synced_at)
+                 :enabled, :expire_at, :parent_id, :parent_name, :city, :email, :company, :last_online, :is_online, :framed_ip, :daily_traffic, :local_subscriber_id, :synced_at)
              ON DUPLICATE KEY UPDATE
                 sas_user_id = VALUES(sas_user_id),
                 firstname = VALUES(firstname),
@@ -2362,8 +2490,9 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
                 city = VALUES(city),
                 email = VALUES(email),
                 company = VALUES(company),
-                last_online = VALUES(last_online),
-                is_online = VALUES(is_online),
+                last_online = IF(VALUES(last_online) IS NULL, last_online, VALUES(last_online)),
+                is_online = IF(VALUES(is_online) = 1, 1, is_online),
+                framed_ip = IF(VALUES(framed_ip) IS NULL OR VALUES(framed_ip) = "", framed_ip, VALUES(framed_ip)),
                 daily_traffic = IF(VALUES(daily_traffic) IS NULL, daily_traffic, VALUES(daily_traffic)),
                 local_subscriber_id = IF(VALUES(local_subscriber_id) IS NULL, local_subscriber_id, VALUES(local_subscriber_id)),
                 synced_at = VALUES(synced_at)'
@@ -2490,8 +2619,12 @@ function sas_cache_search_sql($q, &$params)
         OR c.firstname LIKE :q
         OR c.lastname LIKE :q
         OR c.profile_name LIKE :q
+        OR CONCAT(IFNULL(c.firstname,""), " ", IFNULL(c.lastname,"")) LIKE :q
+        OR CONCAT(IFNULL(c.lastname,""), " ", IFNULL(c.firstname,"")) LIKE :q
+        OR REPLACE(REPLACE(IFNULL(c.display_name,""), " ", ""), "-", "") LIKE :qns
     ';
     $params[':q'] = '%' . $q . '%';
+    $params[':qns'] = '%' . preg_replace('/[\s\-]+/', '', $q) . '%';
     if ($qDigits !== '') {
         $where .= ' OR c.username LIKE :qd OR c.phone LIKE :qd';
         $params[':qd'] = '%' . $qDigits . '%';
@@ -2561,9 +2694,9 @@ function sas_cache_list_from_sql()
      )';
 }
 
-function sas_cache_list_select_sql()
+function sas_cache_list_select_sql($light = false)
 {
-    return 'SELECT c.*,
+    $sql = 'SELECT c.*,
         s.id AS local_id,
         s.name AS local_name,
         s.phone AS local_phone,
@@ -2572,7 +2705,19 @@ function sas_cache_list_select_sql()
         s.address AS local_address,
         s.notes AS local_notes,
         s.grace_days AS grace_days,
-        (SELECT COALESCE(SUM(amount),0) FROM invoices i WHERE i.subscriber_id = s.id AND i.status = "unpaid") AS debt,
+        (SELECT COALESCE(SUM(amount),0) FROM invoices i WHERE i.subscriber_id = s.id AND i.status = "unpaid") AS debt';
+    if ($light) {
+        $sql .= ',
+        NULL AS debt_months,
+        NULL AS last_msg_ok,
+        NULL AS last_msg_type,
+        NULL AS last_msg_body,
+        NULL AS last_msg_response,
+        NULL AS last_msg_at,
+        NULL AS last_msg_id';
+        return $sql;
+    }
+    $sql .= ',
         (SELECT GROUP_CONCAT(DISTINCT i.month_label ORDER BY i.month_label SEPARATOR \',\')
             FROM invoices i WHERE i.subscriber_id = s.id AND i.status = "unpaid") AS debt_months,
         (SELECT m.success FROM message_logs m WHERE m.subscriber_id = s.id ORDER BY m.id DESC LIMIT 1) AS last_msg_ok,
@@ -2581,6 +2726,7 @@ function sas_cache_list_select_sql()
         (SELECT m.response_json FROM message_logs m WHERE m.subscriber_id = s.id ORDER BY m.id DESC LIMIT 1) AS last_msg_response,
         (SELECT m.created_at FROM message_logs m WHERE m.subscriber_id = s.id ORDER BY m.id DESC LIMIT 1) AS last_msg_at,
         (SELECT m.id FROM message_logs m WHERE m.subscriber_id = s.id ORDER BY m.id DESC LIMIT 1) AS last_msg_id';
+    return $sql;
 }
 
 function sas_status_squares_html($enabled, $isOnline, $isActive)
@@ -2716,17 +2862,22 @@ function sas_render_table_row($row, $n, $config, $lang)
         . '<a class="sas-link" href="' . e($detailUrl) . '" title="' . e($lang === 'en' ? 'Edit' : 'تعديل') . '">' . e($username) . '</a>'
         . '</span></td>';
     if ($ipDisp !== '-' && $framedIp !== '') {
-        $ipHref = '';
-        if (filter_var($framedIp, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
-            $ipHref = 'http://[' . $framedIp . ']/';
-        } elseif (filter_var($framedIp, FILTER_VALIDATE_IP)) {
-            $ipHref = 'http://' . $framedIp . '/';
+        $ipHref = function_exists('sas_cpe_login_url')
+            ? sas_cpe_login_url($framedIp, $config)
+            : '';
+        if ($ipHref === '') {
+            if (filter_var($framedIp, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+                $ipHref = 'http://[' . $framedIp . ']/';
+            } elseif (filter_var($framedIp, FILTER_VALIDATE_IP)) {
+                $ipHref = 'http://' . $framedIp . '/';
+            }
         }
         $ipCopyTip = $lang === 'en' ? 'Copy IP' : 'نسخ عنوان IP';
+        $ipOpenTip = $lang === 'en' ? 'Open CPE IP' : 'فتح IP الجهاز';
         $html .= '<td class="col-ip" dir="ltr"><span class="sas-ip-wrap">'
             . '<button type="button" class="sas-user-copy" data-copy="' . e($framedIp) . '" title="' . e($ipCopyTip) . '" aria-label="' . e($ipCopyTip) . '">⧉</button>';
         if ($ipHref !== '') {
-            $html .= '<a class="sas-ip-link" href="' . e($ipHref) . '" target="_blank" rel="noopener noreferrer">' . e($framedIp) . '</a>';
+            $html .= '<a class="sas-ip-link" href="' . e($ipHref) . '" target="_blank" rel="noopener noreferrer" title="' . e($ipOpenTip) . '">' . e($framedIp) . '</a>';
         } else {
             $html .= '<span>' . e($framedIp) . '</span>';
         }
@@ -2770,6 +2921,15 @@ function sas_render_table_row($row, $n, $config, $lang)
     }
     $html .= '</td>';
     $html .= '<td class="col-traf">' . e($traf) . '</td>';
+    $graceRow = array('grace_days' => array_key_exists('grace_days', $row) ? $row['grace_days'] : null);
+    $graceLabel = function_exists('subscriber_grace_label')
+        ? subscriber_grace_label($graceRow, $config, $lang)
+        : '-';
+    $graceCustom = function_exists('subscriber_grace_is_custom') && subscriber_grace_is_custom($graceRow);
+    $graceRaw = $graceCustom ? (string) (int) $row['grace_days'] : 'system';
+    $html .= '<td class="col-grace"><span class="cell-edit" tabindex="0" data-edit="grace_days" data-allow-empty="1" data-id="'
+        . e($username) . '" data-value="' . e($graceRaw) . '" title="' . e($editTip) . '">'
+        . e($graceLabel) . '</span></td>';
     $html .= '<td class="col-days">' . e($daysLeft !== '' ? $daysLeft : '-') . '</td>';
     $html .= '</tr>';
     return $html;

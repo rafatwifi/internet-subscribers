@@ -100,6 +100,10 @@ if (is_file($sasCacheFile)) {
     require_once $sasCacheFile;
 }
 require_once __DIR__ . '/activate_service.php';
+$scheduleCutFile = __DIR__ . '/schedule_cut.php';
+if (is_file($scheduleCutFile)) {
+    require_once $scheduleCutFile;
+}
 
 $archivesFile = __DIR__ . '/archives.php';
 if (is_file($archivesFile)) {

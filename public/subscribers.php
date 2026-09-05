@@ -1034,6 +1034,9 @@ function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
   width: 100%;
   border-collapse: collapse;
 }
+#subsTable .col-hide {
+  display: none !important;
+}
 #subsTable th,
 #subsTable td {
   border-radius: 0 !important;
@@ -2108,15 +2111,20 @@ window.DEBT_ENTRY = {
       if (raw) state = Object.assign({}, defaults, JSON.parse(raw));
     } catch (err) {}
     applySubsCols = function () {
+      var style = document.getElementById('subsColsStyle');
+      if (!style) {
+        style = document.createElement('style');
+        style.id = 'subsColsStyle';
+        document.head.appendChild(style);
+      }
+      var css = [];
       Object.keys(map).forEach(function (k) {
         var on = state[k] !== false;
-        Array.prototype.slice.call(table.querySelectorAll(map[k])).forEach(function (el) {
-          if (on) el.classList.remove('col-hide');
-          else el.classList.add('col-hide');
-        });
+        if (!on) css.push('#subsTable ' + map[k] + '{display:none!important}');
         var inp = colsDrop.querySelector('input[data-col="' + k + '"]');
         if (inp) inp.checked = on;
       });
+      style.textContent = css.join('');
     };
     applySubsCols();
     if (colsBtn) {
@@ -2311,16 +2319,16 @@ window.DEBT_ENTRY = {
         btn.contentEditable = 'false';
         var raw = String(btn.textContent || '').replace(/[^\d]/g, '');
         var n = parseInt(raw, 10);
-        if (!ok || !raw) {
+        if (!ok || raw === '') {
+          btn.textContent = snap;
+          return;
+        }
+        if (isNaN(n) || n < 0) {
+          alert(<?php echo json_encode($lang === 'en' ? 'Enter a valid amount' : 'أدخل مبلغ صحيح'); ?>);
           btn.textContent = snap;
           return;
         }
         if (String(n) === String(current)) {
-          btn.textContent = snap;
-          return;
-        }
-        if (!(n > 0)) {
-          alert(<?php echo json_encode($lang === 'en' ? 'Enter a valid amount' : 'أدخل مبلغ صحيح'); ?>);
           btn.textContent = snap;
           return;
         }
