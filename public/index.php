@@ -100,30 +100,27 @@ $activatedMonth = (int) $pdo->query(
     "SELECT COUNT(*) FROM subscriptions
      WHERE DATE_FORMAT(created_at, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')"
 )->fetchColumn();
-// رأس المال هذا الشهر = تكلفة الباقات المستلمة (ما يطلع كتكلفة من المبالغ المسددة)
-$capitalMonth = (float) $pdo->query(
-    "SELECT COALESCE(SUM(cost_price),0) FROM invoices
-     WHERE status = 'paid' AND DATE_FORMAT(paid_at, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')"
-)->fetchColumn();
-if ($capitalMonth <= 0 && $receivedMonth > 0) {
-    $capitalMonth = max(0, $receivedMonth - $profitMonth);
-}
-$rentalInactiveCount = (int) $pdo->query(
-    'SELECT COUNT(*) FROM subscribers s
-     WHERE s.rental_enabled = 1 AND s.rental_device_id IS NOT NULL AND s.rental_device_id <> ""
-       AND NOT EXISTS (
+// رأس المال = الربح + الديون
+$capitalMonth = $profitMonth + $totalDebt;
+// نفس منطق صفحة الإيجار: اشتراك محلي نشط أو صلاحية SAS سارية
+$rentalJoin = ' FROM subscribers s
+     LEFT JOIN sas_users_cache c ON c.local_subscriber_id = s.id
+     LEFT JOIN sas_users_cache cu ON CONVERT(cu.username USING utf8mb4) COLLATE utf8mb4_unicode_ci
+        = CONVERT(s.sas_username USING utf8mb4) COLLATE utf8mb4_unicode_ci
+     WHERE (s.rental_enabled = 1 OR s.rental_enabled = "1")
+       AND s.rental_device_id IS NOT NULL
+       AND TRIM(s.rental_device_id) <> ""';
+$rentalActiveSql = '(EXISTS (
          SELECT 1 FROM subscriptions sub
          WHERE sub.subscriber_id = s.id AND sub.status = "active" AND sub.end_date >= CURDATE()
-       )'
-)->fetchColumn();
+       ) OR (COALESCE(c.enabled, cu.enabled) = 1
+            AND COALESCE(c.expire_at, cu.expire_at) IS NOT NULL
+            AND COALESCE(c.expire_at, cu.expire_at) >= NOW()))';
+$rentalTotalCount = (int) $pdo->query('SELECT COUNT(*)' . $rentalJoin)->fetchColumn();
 $rentalActiveCount = (int) $pdo->query(
-    'SELECT COUNT(*) FROM subscribers s
-     WHERE s.rental_enabled = 1 AND s.rental_device_id IS NOT NULL AND s.rental_device_id <> ""
-       AND EXISTS (
-         SELECT 1 FROM subscriptions sub
-         WHERE sub.subscriber_id = s.id AND sub.status = "active" AND sub.end_date >= CURDATE()
-       )'
+    'SELECT COUNT(*)' . $rentalJoin . ' AND ' . $rentalActiveSql
 )->fetchColumn();
+$rentalInactiveCount = max(0, $rentalTotalCount - $rentalActiveCount);
 
 // حالة الاشتراكات (مشتركين)
 $activeOnlineCount = (int) $pdo->query(
@@ -229,13 +226,13 @@ render_header(t('dashboard'), 'dashboard', '');
 .sas-dash .sas-boxes {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-  margin: 0 0 16px;
+  gap: 14px;
+  margin: 0 0 18px;
   width: 100%;
 }
 @media (max-width: 1100px) { .sas-dash .sas-boxes { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 560px) {
-  .sas-dash .sas-boxes { grid-template-columns: 1fr; gap: 10px; }
+  .sas-dash .sas-boxes { grid-template-columns: 1fr; gap: 11px; }
 }
 body:has(.sas-dash) .container {
   width: auto;
@@ -245,30 +242,97 @@ body:has(.sas-dash) .container {
   box-sizing: border-box;
 }
 .sas-box {
-  position: relative; overflow: hidden; display: block; color: #fff !important;
-  text-decoration: none !important; border-radius: 4px; min-height: 90px;
-  padding: 10px 10px 10px 10px; box-shadow: 0 1px 1px rgba(0,0,0,.1);
+  --c1: #0f766e;
+  --c2: #115e59;
+  --ink: #ffffff;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  color: var(--ink) !important;
+  text-decoration: none !important;
+  font-family: inherit;
+  border-radius: 2px 20px 2px 16px;
+  min-height: 112px;
+  padding: 16px 16px 14px 18px;
+  background: linear-gradient(145deg, var(--c1) 0%, var(--c2) 100%);
+  border: 0;
+  box-shadow: 6px 7px 0 rgba(15, 23, 42, 0.12);
+  transition: transform .16s ease, box-shadow .16s ease, filter .16s ease;
 }
-.sas-box:hover { color: #fff !important; filter: brightness(1.05); }
-.sas-box-title { font-size: 15px; font-weight: 700; line-height: 1.3; }
-.sas-box-sub { font-size: 13px; font-weight: 400; opacity: .92; margin-top: 2px; }
+.sas-box::before {
+  content: '';
+  position: absolute;
+  inset-block: 12px 12px;
+  inset-inline-start: 0;
+  width: 4px;
+  border-radius: 0 6px 6px 0;
+  background: rgba(255,255,255,0.55);
+}
+.sas-box::after {
+  content: '';
+  position: absolute;
+  width: 110px;
+  height: 110px;
+  border-radius: 50%;
+  inset-inline-end: -34px;
+  inset-block-end: -42px;
+  background: rgba(255,255,255,0.12);
+  pointer-events: none;
+}
+.sas-box:hover {
+  color: var(--ink) !important;
+  transform: translate(-2px, -3px);
+  box-shadow: 9px 10px 0 rgba(15, 23, 42, 0.14);
+  filter: brightness(1.04);
+}
+.sas-box-title {
+  position: relative;
+  z-index: 1;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.35;
+  color: rgba(255,255,255,0.92);
+  letter-spacing: 0.01em;
+}
+.sas-box-sub {
+  position: relative;
+  z-index: 1;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255,255,255,0.72);
+  margin-top: 3px;
+  line-height: 1.35;
+}
 #dashCardsSub { font-size: 11px; line-height: 1.3; max-height: 2.7em; overflow: hidden; }
-.sas-box-val { font-size: 26px; font-weight: 400; margin-top: 8px; line-height: 1; }
-.sas-box-ico {
-  position: absolute; inset-inline-end: 10px; top: 50%; transform: translateY(-50%);
-  font-size: 46px; opacity: .22; pointer-events: none;
+.sas-box-val {
+  position: relative;
+  z-index: 1;
+  font-family: inherit;
+  font-size: 26px;
+  font-weight: 800;
+  margin-top: 16px;
+  line-height: 1;
+  color: #ffffff;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  text-shadow: 0 1px 0 rgba(0,0,0,0.12);
 }
-.sas-box.tone-blue { background: linear-gradient(180deg, #5c9fd6 0%, #3c8dbc 58%); }
-.sas-box.tone-green { background: linear-gradient(180deg, #2ecc71 0%, #00a65a 58%); }
-.sas-box.tone-aqua { background: linear-gradient(180deg, #4dd3f5 0%, #00c0ef 58%); }
-.sas-box.tone-red { background: linear-gradient(180deg, #e74c3c 0%, #dd4b39 58%); }
-.sas-box.tone-yellow { background: linear-gradient(180deg, #f6c15b 0%, #f39c12 58%); }
-.sas-box.tone-teal { background: linear-gradient(180deg, #5dced4 0%, #39cccc 58%); }
-.sas-box.tone-purple { background: linear-gradient(180deg, #8e7cc3 0%, #605ca8 58%); }
-.sas-box.tone-lime { background: linear-gradient(180deg, #9ccc65 0%, #7cb342 58%); }
-.sas-box.tone-navy { background: linear-gradient(180deg, #4a6785 0%, #3c4b64 58%); }
-.sas-box.tone-maroon { background: linear-gradient(180deg, #e4728a 0%, #d81b60 58%); }
-.sas-dash h2.sas-sec { font-size: 15px; margin: 6px 0 10px; color: #444; }
+.sas-box-ico { display: none !important; }
+.sas-box.tone-blue { --c1: #3b82f6; --c2: #1d4ed8; }
+.sas-box.tone-green { --c1: #22c55e; --c2: #15803d; }
+.sas-box.tone-aqua { --c1: #22d3ee; --c2: #0e7490; }
+.sas-box.tone-red { --c1: #fb7185; --c2: #be123c; }
+.sas-box.tone-yellow { --c1: #fbbf24; --c2: #b45309; }
+.sas-box.tone-teal { --c1: #2dd4bf; --c2: #0f766e; }
+.sas-box.tone-purple { --c1: #fb923c; --c2: #c2410c; }
+.sas-box.tone-lime { --c1: #a3e635; --c2: #4d7c0f; }
+.sas-box.tone-navy { --c1: #64748b; --c2: #1e293b; }
+.sas-box.tone-maroon { --c1: #f43f5e; --c2: #9f1239; }
+.sas-dash h2.sas-sec { font-size: 15px; margin: 6px 0 10px; color: #444; font-family: inherit; }
 </style>
 <div class="sas-dash">
 <div class="sas-boxes">
@@ -293,10 +357,10 @@ if ($sasReadyDash) {
 dash_sas_box('reports.php', 'tone-yellow', $en ? 'Collected' : 'المقبوض', '', money_format_iqd($receivedMonth, $config['currency']), '💵');
 dash_sas_box('debts.php?status=unpaid', 'tone-red', $en ? 'Debts' : 'الديون', '', money_format_iqd($totalDebt, $config['currency']), '📄');
 dash_sas_box('reports.php', 'tone-green', $en ? 'Profit' : 'الربح', '', money_format_iqd($profitMonth, $config['currency']), '📈');
-dash_sas_box('reports.php', 'tone-teal', $en ? 'Capital' : 'رأس المال', '', money_format_iqd($capitalMonth, $config['currency']), '🏦');
+dash_sas_box('reports.php', 'tone-teal', $en ? 'Capital' : 'رأس المال', $en ? 'Profit + debts' : 'الربح + الديون', money_format_iqd($capitalMonth, $config['currency']), '🏦');
 dash_sas_box('subscriptions.php', 'tone-purple', $en ? 'Sales' : 'المبيعات', '', money_format_iqd($salesMonth, $config['currency']), '🧾');
 dash_sas_box('subscriptions.php', 'tone-aqua', $en ? 'Activations' : 'تفعيلات الشهر', '', (string) (int) $activatedMonth, '⚡');
-dash_sas_box('rentals.php', 'tone-navy', $en ? 'Rental towers' : 'أبراج الإيجار', ((int) ($rentalActiveCount + $rentalInactiveCount)) . ' \\ ' . (int) $rentalActiveCount, (string) (int) $rentalActiveCount, '📡');
+dash_sas_box('rentals.php', 'tone-navy', $en ? 'Rental towers' : 'أبراج الإيجار', $en ? 'Total \\ active' : 'الكل \\ النشط', ((int) $rentalTotalCount) . '\\' . (int) $rentalActiveCount, '📡');
 if ($sasReadyDash) {
     $cardTotal = 0;
     $cardParts = array();
@@ -312,7 +376,7 @@ if ($sasReadyDash) {
         }
     }
     $cardSub = $cardParts ? implode(' · ', $cardParts) : ($en ? 'Unused' : 'شاغرة');
-    dash_sas_box('sas.php', 'tone-navy', $en ? 'Cards' : 'الكروت', $cardSub, (string) (int) $cardTotal, '🃏', 'dashCards');
+    dash_sas_box('cards.php', 'tone-navy', $en ? 'Cards' : 'الكروت', $cardSub, (string) (int) $cardTotal, '🃏', 'dashCards');
 }
 ?>
 </div>

@@ -1027,6 +1027,36 @@ class SASConnector
         return $this->updateUser($userId, array('enabled' => $on));
     }
 
+    /**
+     * قطع جلسة المشترك الأونلاين (Disconnect) — يرجع يتصل لحاله.
+     */
+    public function disconnectUser($userId, $username = '')
+    {
+        $userId = (int) $userId;
+        $username = trim((string) $username);
+        if (!$this->token && !$this->login()) {
+            return array('__auth_error' => true, 'message' => 'SAS login failed');
+        }
+        $payloads = array(
+            array('user/disconnect', array('id' => $userId, 'user_id' => $userId, 'username' => $username)),
+            array('user/kick', array('id' => $userId, 'user_id' => $userId, 'username' => $username)),
+            array('user/drop', array('id' => $userId, 'user_id' => $userId, 'username' => $username)),
+            array('user/' . $userId . '/disconnect', array('id' => $userId, 'username' => $username)),
+            array('online/disconnect', array('id' => $userId, 'user_id' => $userId, 'username' => $username)),
+            array('index/disconnect', array('id' => $userId, 'username' => $username)),
+            array('index/disconnectUser', array('id' => $userId, 'username' => $username)),
+            array('user/dropSession', array('id' => $userId, 'username' => $username)),
+        );
+        $last = array();
+        foreach ($payloads as $t) {
+            $last = $this->parseApiResponse($this->post($t[0], $t[1], true));
+            if ($this->isActivateOk($last)) {
+                return $last;
+            }
+        }
+        return is_array($last) ? $last : array('message' => 'disconnect failed', 'status' => -1);
+    }
+
     public function changeUserProfile($userId, $profileId)
     {
         $userId = (int) $userId;
@@ -1269,7 +1299,7 @@ class SASConnector
         return $all;
     }
 
-    private function sasCardPinsFromSeries($seriesId, $profileId = 0, $seriesCode = '')
+    private function sasCardPinsFromSeries($seriesId, $profileId = 0, $seriesCode = '', $unusedOnly = true)
     {
         $seriesId = (int) $seriesId;
         $seriesCode = trim((string) $seriesCode);
@@ -1278,13 +1308,15 @@ class SASConnector
         }
         $page = array(
             'page' => 1,
-            'count' => 50,
+            'count' => $unusedOnly ? 50 : 120,
             'sortBy' => 'id',
             'direction' => 'desc',
             'search' => '',
         );
         $pageUnused = $page;
         $pageUnused['used'] = 0;
+        $pageUsed = $page;
+        $pageUsed['used'] = 1;
         $routes = array();
         if ($seriesCode !== '' && $this->sasLooksLikeSeriesCode($seriesCode)) {
             $routes[] = 'index/card/' . $seriesCode;
@@ -1292,9 +1324,10 @@ class SASConnector
         if ($seriesId > 0) {
             $routes[] = 'index/card/' . $seriesId;
         }
-        foreach (array($pageUnused, $page) as $payload) {
+        $payloads = $unusedOnly ? array($pageUnused, $page) : array($page, $pageUnused, $pageUsed);
+        foreach ($payloads as $payload) {
             if ($routes) {
-                $paged = $this->sasCardFetchPaged($routes, $payload, 2);
+                $paged = $this->sasCardFetchPaged($routes, $payload, $unusedOnly ? 2 : 3);
                 if ($this->sasCardListHasPin($paged)) {
                     return $paged;
                 }
@@ -1302,11 +1335,11 @@ class SASConnector
         }
         $tries = array();
         if ($seriesCode !== '' && $this->sasLooksLikeSeriesCode($seriesCode)) {
-            $tries[] = array('index/card/' . $seriesCode, $pageUnused);
+            $tries[] = array('index/card/' . $seriesCode, $unusedOnly ? $pageUnused : $page);
         }
         if ($seriesId > 0) {
-            $tries[] = array('index/card/' . $seriesId, $pageUnused);
-            $tries[] = array('list/card/' . $seriesId, $pageUnused);
+            $tries[] = array('index/card/' . $seriesId, $unusedOnly ? $pageUnused : $page);
+            $tries[] = array('list/card/' . $seriesId, $unusedOnly ? $pageUnused : $page);
         }
         foreach ($tries as $t) {
             $full = $this->decodeApiBody($this->post($t[0], $t[1], true), false);
@@ -1711,6 +1744,145 @@ class SASConnector
             $grouped[$key]['count'] += $count;
         }
         $out = array_values($grouped);
+        usort($out, function ($a, $b) {
+            return strcasecmp($a['name'], $b['name']);
+        });
+        return $out;
+    }
+
+    /**
+     * جرد الكروت حسب الفئة: كل كارت مع حالة مستخدم/شاغر.
+     */
+    public function listCardsInventory($maxSeries = 14)
+    {
+        if (!$this->token && !$this->login()) {
+            return array();
+        }
+        $maxSeries = max(1, min(30, (int) $maxSeries));
+        $payload = array(
+            'page' => 1,
+            'count' => 100,
+            'sortBy' => 'series_date',
+            'direction' => 'desc',
+            'search' => '',
+        );
+        $series = $this->sasCardFetchPaged(array('index/series', 'index/card', 'index/cards', 'index/cardSeries'), $payload, 20);
+        $groups = array();
+        $tried = 0;
+        foreach ($series as $srow) {
+            if (!is_array($srow)) {
+                continue;
+            }
+            if (!empty($srow['suspended']) && (string) $srow['suspended'] === '1') {
+                continue;
+            }
+            $name = $this->sasRowProfileName($srow);
+            if ($name === '' && !empty($srow['profile']['name']) && !is_array($srow['profile']['name'])) {
+                $name = trim((string) $srow['profile']['name']);
+            }
+            if ($name === '') {
+                $pidTmp = $this->sasCardSeriesProfileId($srow);
+                $name = $pidTmp > 0 ? ('#' . $pidTmp) : $this->sasCardSeriesCode($srow);
+            }
+            if ($name === '') {
+                $name = 'كروت';
+            }
+            $total = null;
+            $usedMeta = null;
+            if (isset($srow['qty']) && is_numeric($srow['qty'])) {
+                $total = (int) $srow['qty'];
+            } elseif (isset($srow['quantity']) && is_numeric($srow['quantity'])) {
+                $total = (int) $srow['quantity'];
+            }
+            if (array_key_exists('used', $srow) && is_numeric($srow['used'])) {
+                $usedMeta = (int) $srow['used'];
+            } elseif (isset($srow['used_count']) && is_numeric($srow['used_count'])) {
+                $usedMeta = (int) $srow['used_count'];
+            }
+            $unusedMeta = $this->sasCardSeriesUnusedCount($srow);
+            $sid = (isset($srow['id']) && is_numeric($srow['id'])) ? (int) $srow['id'] : 0;
+            $scode = $this->sasCardSeriesCode($srow);
+            $sPid = $this->sasCardSeriesProfileId($srow);
+            $pins = array();
+            if ($tried < $maxSeries && ($sid > 0 || $scode !== '')) {
+                $tried++;
+                $rawPins = $this->sasCardPinsFromSeries($sid, $sPid, $scode, false);
+                foreach ($rawPins as $pinRow) {
+                    if (!is_array($pinRow)) {
+                        continue;
+                    }
+                    $pin = $this->sasCardPinValue($pinRow);
+                    if ($pin === '') {
+                        continue;
+                    }
+                    $pins[] = array(
+                        'pin' => $pin,
+                        'used' => $this->sasCardIsUsed($pinRow) ? 1 : 0,
+                        'used_by' => isset($pinRow['used_by']) ? (string) $pinRow['used_by']
+                            : (isset($pinRow['used_username']) ? (string) $pinRow['used_username'] : ''),
+                    );
+                }
+            }
+            $key = strtolower($name);
+            if (!isset($groups[$key])) {
+                $groups[$key] = array(
+                    'name' => $name,
+                    'profile_id' => $sPid,
+                    'total' => 0,
+                    'used' => 0,
+                    'unused' => 0,
+                    'cards' => array(),
+                );
+            }
+            if ($total !== null) {
+                $groups[$key]['total'] += $total;
+            }
+            if ($usedMeta !== null) {
+                $groups[$key]['used'] += $usedMeta;
+            }
+            if ($unusedMeta >= 0) {
+                $groups[$key]['unused'] += $unusedMeta;
+            }
+            foreach ($pins as $pc) {
+                $pk = $pc['pin'];
+                $dup = false;
+                foreach ($groups[$key]['cards'] as $ex) {
+                    if ($ex['pin'] === $pk) {
+                        $dup = true;
+                        break;
+                    }
+                }
+                if (!$dup) {
+                    $groups[$key]['cards'][] = $pc;
+                }
+            }
+        }
+        foreach ($groups as &$g) {
+            if ($g['cards']) {
+                $u = 0;
+                $nu = 0;
+                foreach ($g['cards'] as $c) {
+                    if (!empty($c['used'])) {
+                        $u++;
+                    } else {
+                        $nu++;
+                    }
+                }
+                $g['used'] = $u;
+                $g['unused'] = $nu;
+                $g['total'] = $u + $nu;
+                usort($g['cards'], function ($a, $b) {
+                    if ((int) $a['used'] !== (int) $b['used']) {
+                        return ((int) $a['used'] < (int) $b['used']) ? -1 : 1;
+                    }
+                    return strcmp($a['pin'], $b['pin']);
+                });
+            } elseif ($g['total'] <= 0 && ($g['used'] > 0 || $g['unused'] > 0)) {
+                $g['total'] = $g['used'] + $g['unused'];
+            }
+        }
+        unset($g);
+        $out = array_values($groups);
         usort($out, function ($a, $b) {
             return strcasecmp($a['name'], $b['name']);
         });

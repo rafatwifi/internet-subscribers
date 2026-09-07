@@ -256,7 +256,7 @@ if (isset($_GET['prepare']) && (string) $_GET['prepare'] !== '') {
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf(post('csrf'))) {
-        if (in_array(post('action'), array('sas_inline', 'sas_enable', 'sas_activate_card', 'sas_activate_credit', 'sas_activate_reward', 'sas_change_profile', 'give_test', 'sas_update_rental', 'sas_update_debt', 'sas_update_grace', 'sas_save_cols'), true)) {
+        if (in_array(post('action'), array('sas_inline', 'sas_enable', 'sas_disconnect', 'sas_activate_card', 'sas_activate_credit', 'sas_activate_reward', 'sas_change_profile', 'give_test', 'sas_update_rental', 'sas_update_debt', 'sas_update_grace', 'sas_save_cols', 'bulk_disconnect'), true)) {
             sas_json_out(false, 'طلب غير صالح');
         }
         flash('error', 'طلب غير صالح');
@@ -289,7 +289,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         sas_json_out(true, 'ok');
     }
 
-    if ($action === 'sas_inline' || $action === 'sas_enable' || $action === 'sas_activate_card'
+    if ($action === 'sas_inline' || $action === 'sas_enable' || $action === 'sas_disconnect' || $action === 'sas_activate_card'
         || $action === 'sas_activate_credit' || $action === 'sas_activate_reward' || $action === 'sas_change_profile' || $action === 'give_test') {
         if ($action === 'give_test') {
             $username = trim((string) post('id', ''));
@@ -316,6 +316,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         );
         list($ok, $msg, $extra) = sas_write_user($pdo, $config, $action, $username, $fields);
         sas_json_out($ok, $msg, is_array($extra) ? $extra : array());
+    }
+
+    if ($action === 'bulk_disconnect') {
+        $ids = isset($_POST['ids']) && is_array($_POST['ids']) ? $_POST['ids'] : array();
+        $okN = 0;
+        $failN = 0;
+        foreach ($ids as $raw) {
+            $username = trim((string) $raw);
+            if ($username === '') {
+                continue;
+            }
+            list($ok, $msg) = sas_write_user($pdo, $config, 'sas_disconnect', $username, array());
+            if ($ok) {
+                $okN++;
+            } else {
+                $failN++;
+            }
+        }
+        sas_json_out($okN > 0, 'قطع اتصال: ' . $okN . ($failN ? (' — فشل ' . $failN) : ''), array(
+            'ok_n' => $okN,
+            'fail_n' => $failN,
+        ));
     }
 
     if ($action === 'sas_update_rental') {
@@ -984,24 +1006,26 @@ render_header(t('sas'), 'sas', '');
   font-weight: 700; font-size: 14px; flex-wrap: nowrap;
   border-bottom: 1px solid #d2d6de;
 }
-.sas-table-headbar .sas-found { font-weight: 600; opacity: 1; color: #64748b; font-size: 11px; line-height: 1.2; }
+.sas-table-headbar .sas-found {
+  font-weight: 600; opacity: 1; color: #64748b;
+  font-size: 11px; line-height: 1.2; white-space: nowrap;
+}
 .sas-headbar-lead {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; gap: 10px;
   flex: 0 1 auto; min-width: 0;
 }
 .sas-headbar-title {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-  gap: 1px;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: flex-start;
+  gap: 6px 10px;
   flex: 0 1 auto;
   min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
   line-height: 1.15;
 }
-.sas-headbar-name { font-weight: 800; font-size: 14px; color: #0f172a; }
+.sas-headbar-name { font-weight: 800; font-size: 15px; color: #0f172a; white-space: nowrap; }
 .sas-radius-page .sas-table-headbar .ops-top-btn::after { content: none !important; display: none !important; }
 .sas-headbar-actions {
   display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0;
@@ -1033,8 +1057,8 @@ render_header(t('sas'), 'sas', '');
   padding-block: 0;
 }
 .sas-table-headbar .ops-top-btn {
-  height: 28px !important; min-height: 28px; min-width: 0 !important;
-  padding: 0 12px !important; font-size: 13px !important; line-height: 28px;
+  height: 34px !important; min-height: 34px; min-width: 8.5rem !important;
+  padding: 0 16px !important; font-size: 14px !important; line-height: 34px;
   overflow: hidden;
   position: relative;
   z-index: 3;
@@ -1337,7 +1361,8 @@ render_header(t('sas'), 'sas', '');
 .sas-act-copy:hover { background: #cbd5e1; }
 .sas-radius-page .ops-top-btn {
   background: #2b6c9a !important; border-color: #245e86 !important; color: #fff !important;
-  border-radius: 3px; font-weight: 700; min-width: 7.5rem;
+  border-radius: 6px; font-weight: 800; min-width: 8.5rem;
+  letter-spacing: 0.01em;
 }
 .sas-radius-page #sasActModal:not(.hidden) {
   display: flex;
@@ -1409,11 +1434,11 @@ render_header(t('sas'), 'sas', '');
   width: 100%;
   max-width: none;
   margin: 0;
-  padding: 10px 0 12px;
+  padding: 12px 0 14px;
   box-sizing: border-box;
   border-top: 1px solid #e2e8f0;
   background: #fff;
-  box-shadow: 0 -6px 16px rgba(15, 23, 42, 0.06);
+  box-shadow: 0 -8px 20px rgba(15, 23, 42, 0.08);
 }
 .sas-radius-page #sasActModal .sas-act-foot .btn,
 .sas-radius-page #sasActModal #sasActSubmit {
@@ -1422,15 +1447,64 @@ render_header(t('sas'), 'sas', '');
   max-width: none !important;
   min-width: 100% !important;
   margin: 0 !important;
-  height: 48px;
-  border-radius: 10px !important;
+  height: 56px !important;
+  min-height: 56px !important;
+  border-radius: 12px !important;
+  font-weight: 800;
+  font-size: 17px !important;
+  line-height: 1.2 !important;
+  background: #1e293b !important;
+  color: #fff !important;
+  border: 0 !important;
+  box-shadow: none;
+  transition: background .12s ease, transform .12s ease, box-shadow .12s ease;
+}
+.sas-act-fab {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%) translateY(120%);
+  bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+  z-index: 120;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  width: min(420px, calc(100vw - 24px));
+  padding: 10px;
+  border-radius: 16px;
+  background: #0f172a;
+  box-shadow: 0 12px 36px rgba(15, 23, 42, 0.35);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform .2s ease, opacity .2s ease;
+}
+.sas-act-fab.is-on {
+  transform: translateX(-50%) translateY(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+.sas-act-fab .sas-act-fab-confirm {
+  flex: 1 1 auto;
+  height: 52px;
+  min-height: 52px;
+  border: 0;
+  border-radius: 12px;
+  background: #16a34a;
+  color: #fff;
   font-weight: 800;
   font-size: 16px;
-  background: #1e293b;
-  color: #fff;
+  cursor: pointer;
+}
+.sas-act-fab .sas-act-fab-cancel {
+  flex: 0 0 auto;
+  height: 52px;
+  min-width: 72px;
   border: 0;
-  box-shadow: none;
-  transition: background .12s ease, transform .12s ease;
+  border-radius: 12px;
+  background: #334155;
+  color: #fff;
+  font-weight: 700;
+  font-size: 14px;
+  cursor: pointer;
 }
 .sas-act-pts {
   display: inline-block;
@@ -1577,11 +1651,13 @@ render_header(t('sas'), 'sas', '');
   .sas-radius-page #sasActModal .sas-act-foot {
     margin: 0;
     width: 100%;
-    padding: 10px 0 calc(14px + env(safe-area-inset-bottom, 0px));
+    padding: 12px 0 calc(16px + env(safe-area-inset-bottom, 0px));
   }
   .sas-radius-page #sasActModal #sasActSubmit {
-    border-radius: 10px !important;
-    height: 50px;
+    border-radius: 12px !important;
+    height: 58px !important;
+    min-height: 58px !important;
+    font-size: 18px !important;
   }
   .sas-radius-page #sasProfModal .ops-modal-card {
     max-width: 100%;
@@ -1756,8 +1832,27 @@ render_header(t('sas'), 'sas', '');
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-.sas-ip-link { color: #3c8dbc; text-decoration: none; font-weight: 600; }
-.sas-ip-link:hover { text-decoration: underline; }
+.sas-radius-page #subsTable .sas-fn-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+}
+.sas-radius-page #subsTable .sas-rent-mini .rent-badge {
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
+  font-size: 10px;
+  line-height: 22px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  flex: 0 0 auto;
+}
+.sas-radius-page #subsTable th.col-rent.col-off,
+.sas-radius-page #subsTable td.col-rent.col-off { display: none !important; }
 .sas-radius-page #subsTable th.col-off,
 .sas-radius-page #subsTable td.col-off { display: none !important; }
 .sas-filter-label {
@@ -1803,6 +1898,13 @@ render_header(t('sas'), 'sas', '');
 .sas-radius-page #subsTable tbody tr.row-status-left:hover td { background: #fbd5d5 !important; }
 .sas-radius-page a.sas-link { color: #3c8dbc; text-decoration: none; font-weight: 600; }
 .sas-radius-page a.sas-link:hover { text-decoration: underline; }
+.sas-radius-page a.sas-ip-link {
+  color: #3c8dbc !important;
+  text-decoration: none;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.sas-radius-page a.sas-ip-link:hover { text-decoration: underline; }
 .sas-radius-page .th-sort { color: inherit; text-decoration: none; }
 .ops-item.is-on { background: rgba(60, 141, 188, 0.12); font-weight: 800; }
 #subsTable .debt-amt {
@@ -1851,10 +1953,11 @@ render_header(t('sas'), 'sas', '');
   }
   .sas-table-headbar {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas:
-      "title ops tools"
-      "search search search";
+      "title tools"
+      "ops ops"
+      "search search";
     align-items: center;
     padding: 8px;
     gap: 8px;
@@ -1865,20 +1968,25 @@ render_header(t('sas'), 'sas', '');
   .sas-headbar-title {
     grid-area: title;
     display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    justify-content: center;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: flex-start;
+    gap: 4px 8px;
     overflow: hidden;
     min-width: 0;
-    max-width: 9.5rem;
+    max-width: none;
   }
   .sas-headbar-name {
-    font-size: 13px;
+    display: inline;
+    font-size: 15px;
     white-space: nowrap;
   }
   .sas-headbar-title .sas-found {
-    display: block;
-    font-size: 10px;
+    display: inline;
+    font-size: 11px;
+    font-weight: 600;
+    color: #64748b;
     max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1890,7 +1998,7 @@ render_header(t('sas'), 'sas', '');
     flex: 1 1 auto;
     min-width: 0;
     display: flex !important;
-    width: auto;
+    width: 100%;
   }
   .sas-headbar-lead .ops-top-btn {
     flex: 1 1 auto;
@@ -1900,11 +2008,11 @@ render_header(t('sas'), 'sas', '');
     align-items: center;
     justify-content: center;
     overflow: hidden !important;
-    height: 36px !important;
-    min-height: 36px;
+    height: 42px !important;
+    min-height: 42px;
     line-height: 1.2 !important;
-    padding: 0 12px !important;
-    font-size: 13px !important;
+    padding: 0 14px !important;
+    font-size: 15px !important;
   }
   .sas-table-headbar .sas-search-wrap {
     grid-area: search;
@@ -1978,6 +2086,17 @@ render_header(t('sas'), 'sas', '');
 <script>
 (function () {
   try {
+    if (!localStorage.getItem('sas_rent_col_restore_v1')) {
+      var rawFix = localStorage.getItem('sas_table_cols_v1');
+      if (rawFix) {
+        var ofix = JSON.parse(rawFix);
+        if (ofix && typeof ofix === 'object' && ofix.rent === false) {
+          delete ofix.rent;
+          localStorage.setItem('sas_table_cols_v1', JSON.stringify(ofix));
+        }
+      }
+      localStorage.setItem('sas_rent_col_restore_v1', '1');
+    }
     var o = JSON.parse(localStorage.getItem('sas_table_cols_v1') || '{}');
     if (!o || typeof o !== 'object') return;
     var parts = [];
@@ -2155,8 +2274,10 @@ render_header(t('sas'), 'sas', '');
     <button type="button" class="ops-item" data-ops="change_profile" id="opsItemProfile" hidden><?php echo e($lang === 'en' ? 'Change package' : 'تغيير نوع الاشتراك'); ?></button>
     <button type="button" class="ops-item" data-ops="enable" id="opsItemEnable" hidden><?php echo e($lang === 'en' ? 'Enable' : 'تشغيل'); ?></button>
     <button type="button" class="ops-item" data-ops="disable" id="opsItemDisable" hidden><?php echo e($lang === 'en' ? 'Disable' : 'إيقاف'); ?></button>
+    <button type="button" class="ops-item" data-ops="disconnect" id="opsItemDisconnect" hidden><?php echo e($lang === 'en' ? 'Disconnect' : 'قطع الاتصال (Disconnect)'); ?></button>
     <button type="button" class="ops-item" data-ops="give_test" id="opsItemGiveTest" hidden><?php echo e(t('give_test')); ?></button>
     <button type="button" class="ops-item" data-ops="bulk_activate" id="opsItemBulkActivate" hidden><?php echo e(t('bulk_activate')); ?></button>
+    <button type="button" class="ops-item" data-ops="bulk_disconnect" id="opsItemBulkDisconnect" hidden><?php echo e($lang === 'en' ? 'Disconnect selected' : 'قطع اتصال المحددين'); ?></button>
     <button type="button" class="ops-item" data-ops="pay" id="opsItemPay" hidden><?php echo e($lang === 'en' ? 'Debts' : 'الديون'); ?></button>
     <button type="button" class="ops-item" data-ops="remind_debt" id="opsItemRemind" hidden><?php echo e($lang === 'en' ? 'Send WhatsApp notice' : 'إرسال إشعار واتساب'); ?></button>
     <button type="button" class="ops-item" data-ops="remind_days" id="opsItemDays" hidden><?php echo e($lang === 'en' ? 'Send days left' : 'إرسال الأيام المتبقية'); ?></button>
@@ -2442,6 +2563,10 @@ render_header(t('sas'), 'sas', '');
         </div>
     </div>
 </div>
+<div class="sas-act-fab" id="sasActFab" aria-hidden="true">
+    <button type="button" class="sas-act-fab-confirm" id="sasActFabConfirm"><?php echo e($lang === 'en' ? 'Confirm activate' : 'تأكيد التفعيل'); ?></button>
+    <button type="button" class="sas-act-fab-cancel" id="sasActFabCancel"><?php echo e($lang === 'en' ? 'Cancel' : 'إلغاء'); ?></button>
+</div>
 <div class="modal-backdrop hidden" id="sasProfModal">
     <div class="modal-card ops-modal-card">
         <div class="ops-modal-head">
@@ -2602,6 +2727,7 @@ render_header(t('sas'), 'sas', '');
         debt: tr.getAttribute('data-debt') === '1',
         hasDays: tr.getAttribute('data-has-days') === '1',
         msgFail: tr.getAttribute('data-msg-fail') === '1',
+        online: tr.getAttribute('data-online') === '1',
         logId: tr.getAttribute('data-log-id') || '0',
         tr: tr
       });
@@ -2715,8 +2841,10 @@ render_header(t('sas'), 'sas', '');
     showEl(document.getElementById('opsItemProfile'), !!one);
     showEl(document.getElementById('opsItemEnable'), !!(one && !one.enabled));
     showEl(document.getElementById('opsItemDisable'), !!(one && one.enabled));
+    showEl(document.getElementById('opsItemDisconnect'), !!(one && one.online));
     showEl(document.getElementById('opsItemGiveTest'), !!one);
     showEl(document.getElementById('opsItemBulkActivate'), n > 1);
+    showEl(document.getElementById('opsItemBulkDisconnect'), n > 1 && rows.some(function (r) { return r.online; }));
     showEl(document.getElementById('opsItemPay'), !!one);
     showEl(document.getElementById('opsItemRemind'), !!one);
     showEl(document.getElementById('opsItemDays'), !!(one && one.hasDays));
@@ -2746,11 +2874,56 @@ render_header(t('sas'), 'sas', '');
       setEnabled(one, action === 'enable');
       return;
     }
+    if (action === 'disconnect' && one) {
+      if (!window.confirm(<?php echo json_encode($lang === 'en' ? 'Disconnect this online session?' : 'تقطع اتصال هذا المشترك الأونلاين؟'); ?>)) return;
+      postSas('sas_disconnect', { id: one.id }).then(function (d) {
+        if (d && d.ok) {
+          rememberActFlash((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Disconnected' : 'تم قطع الاتصال'); ?>, 'ok');
+          if (one.tr) {
+            one.tr.setAttribute('data-online', '0');
+            var ipCell = one.tr.querySelector('.col-ip');
+            if (ipCell) ipCell.textContent = '-';
+          }
+          showAppToast((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Disconnected' : 'تم قطع الاتصال'); ?>, 'ok');
+        } else {
+          alert((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Failed' : 'فشل'); ?>);
+        }
+      }).catch(function () {
+        alert(<?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>);
+      });
+      return;
+    }
+    if (action === 'bulk_disconnect') {
+      var onlineRows = rows.filter(function (r) { return r.online; });
+      if (!onlineRows.length) {
+        alert(<?php echo json_encode($lang === 'en' ? 'No online users selected' : 'ماكو مشتركين أونلاين محددين'); ?>);
+        return;
+      }
+      if (!window.confirm(<?php echo json_encode($lang === 'en' ? 'Disconnect selected online users?' : 'تقطع اتصال المحددين الأونلاين؟'); ?> + ' (' + onlineRows.length + ')')) return;
+      var body = new FormData();
+      body.append('csrf', csrf);
+      body.append('action', 'bulk_disconnect');
+      onlineRows.forEach(function (r) { body.append('ids[]', r.id); });
+      fetch('sas.php', { method: 'POST', body: body, credentials: 'same-origin' })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          rememberActFlash((d && d.message) || '', d && d.ok ? 'ok' : 'error');
+          window.location.reload();
+        })
+        .catch(function () {
+          alert(<?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>);
+        });
+      return;
+    }
     if (action === 'give_test' && one) {
       if (!window.confirm(confirmTest)) return;
       postSas('give_test', { id: one.id }).then(function (d) {
-        alert((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Request failed' : 'فشل الطلب'); ?>);
-        if (d && d.ok) window.location.reload();
+        if (d && d.ok) {
+          rememberActFlash((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Test given' : 'تم إعطاء التست'); ?>, 'ok');
+          window.location.reload();
+        } else {
+          alert((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Request failed' : 'فشل الطلب'); ?>);
+        }
       }).catch(function () {
         alert(<?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>);
       });
@@ -2944,11 +3117,17 @@ render_header(t('sas'), 'sas', '');
       .catch(function () { return null; });
   }
   function prefetchCards(force) {
-    if (!force && cardsPrefetch && cardsCacheAll) return cardsPrefetch;
-    cardsPrefetch = fetch('sas.php?ajax=cards&preload=1&refresh=1', { credentials: 'same-origin' })
+    if (!force && cardsPrefetch) return cardsPrefetch;
+    if (!force && cardsCacheAll && cardsCacheAll.length) {
+      return Promise.resolve(cardsCacheAll);
+    }
+    var needFresh = !!force || !cardsCacheAll;
+    var url = 'sas.php?ajax=cards&preload=1' + (needFresh ? '&refresh=1' : '');
+    cardsPrefetch = fetch(url, { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(function (d) {
         cardsCacheAll = (d && d.cards) ? d.cards : [];
+        cardsPrefetch = null;
         return cardsCacheAll;
       })
       .catch(function () {
@@ -2957,6 +3136,23 @@ render_header(t('sas'), 'sas', '');
         return cardsCacheAll;
       });
     return cardsPrefetch;
+  }
+  function softRefreshCards() {
+    return fetch('sas.php?ajax=cards&preload=1&refresh=1', { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        cardsCacheAll = (d && d.cards) ? d.cards : (cardsCacheAll || []);
+        return cardsCacheAll;
+      })
+      .catch(function () { return cardsCacheAll || []; });
+  }
+  function refreshActCardsIfOpen() {
+    var modal = document.getElementById('sasActModal');
+    if (!modal || modal.classList.contains('hidden') || !actUser) return;
+    var sel = document.getElementById('sasActProfile');
+    var pid = sel ? sel.value : actUser.profileId;
+    var pname = selectedProfileName(sel) || actUser.profileName || '';
+    renderCards(cardsForProfile(pid, pname));
   }
   function normProf(s) {
     return String(s || '').toLowerCase().replace(/[\s_\-]+/g, '').replace(/msl$/, '');
@@ -2975,13 +3171,11 @@ render_header(t('sas'), 'sas', '');
     return hit;
   }
   function loadCards(username, profileId, profileName) {
-    var cached = cardsForProfile(profileId, profileName);
+    loadQuote(username, profileId);
     if (cardsCacheAll) {
-      loadQuote(username, profileId);
-      return Promise.resolve(cached);
+      return Promise.resolve(cardsForProfile(profileId, profileName));
     }
-    return prefetchCards().then(function () {
-      loadQuote(username, profileId);
+    return prefetchCards(true).then(function () {
       return cardsForProfile(profileId, profileName);
     });
   }
@@ -3139,28 +3333,25 @@ render_header(t('sas'), 'sas', '');
     setActMode('card');
     paintRewardPts(rewardPtsDisp);
     loadQuote(row.id, row.profileId);
-    fetch('index.php?ajax=dash_sas&refresh=1', { credentials: 'same-origin' })
-      .then(function (r) { return r.json(); })
-      .then(function (d) {
-        if (d && d.points && d.points !== '—') paintRewardPts(d.points);
-      }).catch(function () {});
-    var ready = cardsForProfile(row.profileId, row.profileName);
+    // الباقات والكروت من الكاش فوراً — بدون انتظار SAS
+    loadProfiles().then(function (ps) {
+      fillSelect(document.getElementById('sasActProfile'), ps, row.profileId);
+      var sel = document.getElementById('sasActProfile');
+      renderCards(cardsForProfile(sel ? sel.value : row.profileId, selectedProfileName(sel) || row.profileName || ''));
+    }).catch(function () {
+      renderCards(cardsForProfile(row.profileId, row.profileName));
+    });
     if (cardsCacheAll && cardsCacheAll.length) {
-      renderCards(ready);
+      renderCards(cardsForProfile(row.profileId, row.profileName));
+      softRefreshCards().then(function () { refreshActCardsIfOpen(); });
     } else {
       if (hint) {
         hint.className = 'sas-sync-note';
         hint.textContent = <?php echo json_encode($lang === 'en' ? 'Loading unused cards…' : 'جاري جلب الكروت الشاغرة…'); ?>;
       }
       if (cardSel) { cardSel.innerHTML = ''; cardSel.disabled = true; }
+      prefetchCards(true).then(function () { refreshActCardsIfOpen(); });
     }
-    prefetchCards(true).then(function () {
-      return loadProfiles();
-    }).then(function (ps) {
-      fillSelect(document.getElementById('sasActProfile'), ps, row.profileId);
-      var sel = document.getElementById('sasActProfile');
-      renderCards(cardsForProfile(sel ? sel.value : row.profileId, selectedProfileName(sel) || row.profileName || ''));
-    }).catch(function () { renderCards(cardsForProfile(row.profileId, row.profileName)); });
     syncActWa();
   }
   function paintRowStatus(tr, d) {
@@ -3250,6 +3441,7 @@ render_header(t('sas'), 'sas', '');
     var m = document.getElementById('sasActModal');
     if (m && m.classList.contains('is-locking')) return;
     if (m) m.classList.add('hidden');
+    if (typeof window.hideActFab === 'function') window.hideActFab();
   }
   if (actClose) actClose.addEventListener('click', closeActModal);
   var actModalEl = document.getElementById('sasActModal');
@@ -3336,8 +3528,23 @@ render_header(t('sas'), 'sas', '');
     actSubmit.addEventListener('mouseup', clearActPressed);
     actSubmit.addEventListener('pointerleave', clearActPressed);
     actSubmit.addEventListener('mouseleave', clearActPressed);
-    actSubmit.addEventListener('click', function () {
+    var actFab = document.getElementById('sasActFab');
+    var actFabConfirm = document.getElementById('sasActFabConfirm');
+    var actFabCancel = document.getElementById('sasActFabCancel');
+    function showActFab() {
+      if (!actFab) return;
+      actFab.classList.add('is-on');
+      actFab.setAttribute('aria-hidden', 'false');
+    }
+    function hideActFab() {
+      if (!actFab) return;
+      actFab.classList.remove('is-on');
+      actFab.setAttribute('aria-hidden', 'true');
+    }
+    window.hideActFab = hideActFab;
+    function runActivateNow() {
       if (!actUser) return;
+      hideActFab();
       var err = document.getElementById('sasActErr');
       if (err) err.textContent = '';
       var profileSel = document.getElementById('sasActProfile');
@@ -3405,7 +3612,22 @@ render_header(t('sas'), 'sas', '');
         if (err) err.textContent = netMsg;
         showAppToast(netMsg, 'error');
       });
+    }
+    actSubmit.addEventListener('click', function () {
+      if (!actUser) return;
+      var err = document.getElementById('sasActErr');
+      if (err) err.textContent = '';
+      if (currentActMode() === 'card') {
+        var cardSel = document.getElementById('sasActCardSelect');
+        if (!cardSel || !cardSel.value) {
+          if (err) err.textContent = <?php echo json_encode($lang === 'en' ? 'No unused cards' : 'ماكو كروت شاغرة'); ?>;
+          return;
+        }
+      }
+      showActFab();
     });
+    if (actFabConfirm) actFabConfirm.addEventListener('click', runActivateNow);
+    if (actFabCancel) actFabCancel.addEventListener('click', hideActFab);
   }
   var profSubmit = document.getElementById('sasProfSubmit');
   if (profSubmit) {
@@ -4108,13 +4330,16 @@ render_header(t('sas'), 'sas', '');
     }
   })();
 
-  prefetchCards().then(function () {
+  prefetchCards(true).then(function () {
     loadProfiles();
     if (stale) runDiagThenSync();
   }).catch(function () {
     loadProfiles();
     if (stale) runDiagThenSync();
   });
+  setInterval(function () {
+    softRefreshCards().then(function () { refreshActCardsIfOpen(); });
+  }, 40000);
   if (window.location.hash) {
     var hid = window.location.hash.replace(/^#/, '');
     var rowEl = hid ? document.getElementById(hid) : null;

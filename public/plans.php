@@ -193,73 +193,88 @@ if ($plans) {
     $nextSort = $maxSort + 1;
 }
 
+$showAdd = $editPlan || (isset($_GET['add']) && (string) $_GET['add'] === '1');
+
 render_header(t('plans'), 'plans');
 render_settings_tabs('plans');
 ?>
+<style>
+.plans-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin-bottom: 12px; flex-wrap: wrap;
+}
+.plans-head h2 { margin: 0; }
+.plans-add-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 40px; height: 40px; border-radius: 10px;
+  background: #15803d; color: #fff !important; text-decoration: none !important;
+  font-size: 26px; font-weight: 700; line-height: 1;
+  box-shadow: 0 4px 0 rgba(21, 128, 61, 0.25);
+}
+.plans-add-btn:hover { background: #166534; color: #fff !important; }
+.plans-add-panel[hidden] { display: none !important; }
+</style>
 
 <div class="panel">
-    <h2><?php echo $editPlan ? t('edit') . ' — ' . e($editPlan['name']) : 'إضافة باقة جديدة'; ?></h2>
-    <form method="post" style="margin-bottom:14px">
-        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
-        <input type="hidden" name="action" value="import_sas">
-        <div class="actions" style="margin:0 0 12px">
-            <button class="btn secondary" type="submit"><?php echo e($lang === 'en' ? 'Import packages from SAS' : 'استيراد الباقات من الساس'); ?></button>
+    <div class="plans-head">
+        <div>
+            <h2><?php echo e($lang === 'en' ? 'Packages' : 'الباقات'); ?></h2>
+            <p style="color:#6b7a88;margin:4px 0 0;font-weight:600"><?php echo e(t('drag_hint')); ?></p>
         </div>
-        <p style="color:#6b7a88;margin:0 0 12px;font-weight:600">
-            <?php echo e($lang === 'en'
-                ? 'Imports SAS profiles, then set cost and sell price here to calculate profit.'
-                : 'تستورد بروفايلات الساس، بعدها تسعّر الكوست وسعر البيع هنا حتى ينحسب الربح.'); ?>
-        </p>
-    </form>
-    <form method="post">
-        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
-        <input type="hidden" name="action" value="<?php echo $editPlan ? 'update' : 'create'; ?>">
-        <?php if ($editPlan): ?>
-            <input type="hidden" name="id" value="<?php echo (int) $editPlan['id']; ?>">
-        <?php endif; ?>
-        <div class="form-grid cols-4">
-            <div>
-                <label>اسم الباقة</label>
-                <input name="name" placeholder="NB-MAX" required
-                       value="<?php echo e($editPlan ? $editPlan['name'] : ''); ?>">
-            </div>
-            <div>
-                <label>سعر البيع للمشترك</label>
-                <input type="number" name="monthly_price" min="0" step="1000"
-                       value="<?php echo e($editPlan ? (string) (int) $editPlan['monthly_price'] : '0'); ?>">
-            </div>
-            <div>
-                <label>سعر الجملة / تكلفتك</label>
-                <input type="number" name="cost_price" min="0" step="1000" required
-                       value="<?php echo e($editPlan ? (string) (int) $editPlan['cost_price'] : '0'); ?>">
-            </div>
-            <div>
-                <label><?php echo e(t('sort_order')); ?></label>
-                <input type="number" name="sort_order" min="1" step="1" required
-                       value="<?php echo e($editPlan ? (string) (int) $editPlan['sort_order'] : (string) $nextSort); ?>">
-                <small style="color:#6b7a88;font-weight:600">مثال: MAX=1 ثم NB-2=2 ثم NB-3=3 ثم NB-4=4</small>
-            </div>
-            <div>
-                <label>SAS Profile ID</label>
-                <input type="number" name="sas_profile_id" min="0" step="1"
-                       value="<?php echo e($editPlan && !empty($editPlan['sas_profile_id']) ? (string) (int) $editPlan['sas_profile_id'] : ''); ?>"
-                       placeholder="من sas_setup.php">
-                <small style="color:#6b7a88;font-weight:600">رقم البروفايل في SAS — اتركه فارغاً إذا ما تريد ربط</small>
-            </div>
+        <div class="actions" style="margin:0;gap:8px;align-items:center">
+            <form method="post" style="margin:0">
+                <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                <input type="hidden" name="action" value="import_sas">
+                <button class="btn secondary sm" type="submit"><?php echo e($lang === 'en' ? 'Import from SAS' : 'استيراد من الساس'); ?></button>
+            </form>
+            <a class="plans-add-btn" href="plans.php?add=1" title="<?php echo e($lang === 'en' ? 'Add package' : 'إضافة باقة'); ?>" aria-label="<?php echo e($lang === 'en' ? 'Add package' : 'إضافة باقة'); ?>">+</a>
         </div>
-        <div class="actions">
-            <button class="btn" type="submit"><?php echo $editPlan ? 'حفظ التعديل' : 'حفظ الباقة'; ?></button>
+    </div>
+
+    <div class="plans-add-panel" id="plansAddPanel"<?php echo $showAdd ? '' : ' hidden'; ?>>
+        <h2 style="margin-top:0"><?php echo $editPlan ? t('edit') . ' — ' . e($editPlan['name']) : ($lang === 'en' ? 'Add package' : 'إضافة باقة جديدة'); ?></h2>
+        <form method="post">
+            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+            <input type="hidden" name="action" value="<?php echo $editPlan ? 'update' : 'create'; ?>">
             <?php if ($editPlan): ?>
-                <a class="btn ghost" href="plans.php">إلغاء</a>
+                <input type="hidden" name="id" value="<?php echo (int) $editPlan['id']; ?>">
             <?php endif; ?>
-        </div>
-    </form>
-</div>
+            <div class="form-grid cols-4">
+                <div>
+                    <label>اسم الباقة</label>
+                    <input name="name" placeholder="NB-MAX" required
+                           value="<?php echo e($editPlan ? $editPlan['name'] : ''); ?>">
+                </div>
+                <div>
+                    <label>سعر البيع للمشترك</label>
+                    <input type="number" name="monthly_price" min="0" step="1000"
+                           value="<?php echo e($editPlan ? (string) (int) $editPlan['monthly_price'] : '0'); ?>">
+                </div>
+                <div>
+                    <label>سعر الجملة / تكلفتك</label>
+                    <input type="number" name="cost_price" min="0" step="1000" required
+                           value="<?php echo e($editPlan ? (string) (int) $editPlan['cost_price'] : '0'); ?>">
+                </div>
+                <div>
+                    <label><?php echo e(t('sort_order')); ?></label>
+                    <input type="number" name="sort_order" min="1" step="1" required
+                           value="<?php echo e($editPlan ? (string) (int) $editPlan['sort_order'] : (string) $nextSort); ?>">
+                </div>
+                <div>
+                    <label>SAS Profile ID</label>
+                    <input type="number" name="sas_profile_id" min="0" step="1"
+                           value="<?php echo e($editPlan && !empty($editPlan['sas_profile_id']) ? (string) (int) $editPlan['sas_profile_id'] : ''); ?>"
+                           placeholder="من sas_setup.php">
+                </div>
+            </div>
+            <div class="actions">
+                <button class="btn" type="submit"><?php echo $editPlan ? 'حفظ التعديل' : 'حفظ الباقة'; ?></button>
+                <a class="btn ghost" href="plans.php"><?php echo e($lang === 'en' ? 'Cancel' : 'إلغاء'); ?></a>
+            </div>
+        </form>
+    </div>
 
-<div class="panel">
-    <h2>كل الباقات</h2>
-    <p style="color:#6b7a88;margin:-4px 0 12px;font-weight:600"><?php echo e(t('drag_hint')); ?> — الأقل رقمًا يظهر أول بالقائمة</p>
-    <div class="table-wrap">
+    <div class="table-wrap" style="margin-top:14px">
         <table>
             <thead>
             <tr>
@@ -277,7 +292,7 @@ render_settings_tabs('plans');
             </thead>
             <tbody id="plansBody">
             <?php if (!$plans): ?>
-                <tr><td colspan="10">لا توجد باقات بعد</td></tr>
+                <tr><td colspan="10"><?php echo e($lang === 'en' ? 'No packages yet — press +' : 'لا توجد باقات بعد — اضغط +'); ?></td></tr>
             <?php endif; ?>
             <?php foreach ($plans as $p): ?>
                 <?php

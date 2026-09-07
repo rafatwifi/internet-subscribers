@@ -34,6 +34,8 @@ $useImage = ($bgMode === 'image' && $loginBgUrl !== '');
 $loginBgCss = $useImage
     ? ('url("' . htmlspecialchars($loginBgUrl, ENT_QUOTES, 'UTF-8') . '")')
     : ('radial-gradient(1200px 700px at 12% 8%, rgba(255,255,255,0.16), transparent 55%), linear-gradient(165deg, ' . $loginBgColor . ' 0%, #0f1720 100%)');
+$brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($settings) : '';
+$brandSrc = ($brandIconUrl !== '') ? $brandIconUrl : 'assets/favicon.svg?v=2';
 ?>
 <!DOCTYPE html>
 <html lang="<?php echo e($lang); ?>" dir="<?php echo $isEn ? 'ltr' : 'rtl'; ?>">
@@ -197,7 +199,7 @@ $loginBgCss = $useImage
 <div class="login-wrap">
     <form class="login-card" method="post" autocomplete="on">
         <div class="login-brand">
-            <img src="assets/favicon.svg?v=2" alt="">
+            <img src="<?php echo e($brandSrc); ?>" alt="">
             <h1><?php echo e($siteName); ?></h1>
         </div>
         <p class="login-sub"><?php echo e(t('login_hint')); ?></p>

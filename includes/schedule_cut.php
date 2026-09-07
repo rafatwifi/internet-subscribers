@@ -61,9 +61,14 @@ function run_schedule_debt_cuts($pdo, $config, $limit = 80)
         ? sas_sql_username_eq('s.sas_username', 'c.username')
         : 'LOWER(TRIM(s.sas_username)) = LOWER(TRIM(c.username))';
     $sql = "SELECT s.id AS subscriber_id, s.name, s.phone, s.grace_days, s.sas_username,
-                   c.username AS cache_username, c.sas_user_id, c.enabled AS sas_enabled,
-                   c.profile_name,
-                   MIN(i.due_date) AS oldest_due,
+                   MAX(c.username) AS cache_username,
+                   MAX(c.sas_user_id) AS sas_user_id,
+                   MAX(c.enabled) AS sas_enabled,
+                   MAX(c.profile_name) AS profile_name,
+                   MIN(CASE
+                         WHEN i.due_date IS NULL OR i.due_date < '1971-01-01' THEN CURDATE()
+                         ELSE i.due_date
+                       END) AS oldest_due,
                    SUM(i.amount) AS debt_total,
                    GROUP_CONCAT(DISTINCT i.month_label ORDER BY i.month_label SEPARATOR ', ') AS months
             FROM subscribers s
@@ -72,8 +77,12 @@ function run_schedule_debt_cuts($pdo, $config, $limit = 80)
                 c.local_subscriber_id = s.id
                 OR (s.sas_username IS NOT NULL AND s.sas_username <> '' AND {$userEq})
             )
-            WHERE s.sas_username IS NOT NULL AND s.sas_username <> ''
-            GROUP BY s.id
+            WHERE (
+                (s.sas_username IS NOT NULL AND TRIM(s.sas_username) <> '')
+                OR c.username IS NOT NULL
+            )
+            GROUP BY s.id, s.name, s.phone, s.grace_days, s.sas_username
+            HAVING SUM(i.amount) > 0
             ORDER BY oldest_due ASC
             LIMIT " . (int) $limit;
     try {

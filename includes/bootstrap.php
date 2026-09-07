@@ -17,9 +17,137 @@ $config = apply_settings_to_config($config, $settings);
 
 date_default_timezone_set(isset($config['timezone']) ? $config['timezone'] : 'Asia/Baghdad');
 
+function app_session_days()
+{
+    global $settings, $config;
+    $days = 3;
+    if (is_array($settings) && isset($settings['login_session_days'])) {
+        $days = (int) $settings['login_session_days'];
+    } elseif (is_array($config) && isset($config['login_session_days'])) {
+        $days = (int) $config['login_session_days'];
+    }
+    if ($days < 1) {
+        $days = 1;
+    }
+    if ($days > 30) {
+        $days = 30;
+    }
+    return $days;
+}
+
 function app_session_lifetime()
 {
-    return 3 * 24 * 60 * 60;
+    return app_session_days() * 24 * 60 * 60;
+}
+
+function app_remember_secret()
+{
+    global $config;
+    if (is_array($config) && !empty($config['cron_secret'])) {
+        return (string) $config['cron_secret'];
+    }
+    if (is_array($config) && !empty($config['admin_password'])) {
+        return hash('sha256', (string) $config['admin_password']);
+    }
+    return 'wifi-net-sales-remember';
+}
+
+function app_remember_clear()
+{
+    if (isset($_COOKIE['app_remember'])) {
+        $secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off');
+        if (defined('PHP_VERSION_ID') && PHP_VERSION_ID >= 70300) {
+            setcookie('app_remember', '', array(
+                'expires' => time() - 3600,
+                'path' => '/',
+                'secure' => $secure,
+                'httponly' => true,
+                'samesite' => 'Lax',
+            ));
+        } else {
+            setcookie('app_remember', '', time() - 3600, '/', '', $secure, true);
+        }
+        unset($_COOKIE['app_remember']);
+    }
+}
+
+function app_remember_set($userId, $username)
+{
+    $userId = (int) $userId;
+    $username = trim((string) $username);
+    $life = app_session_lifetime();
+    $exp = time() + $life;
+    $sig = hash_hmac('sha256', $userId . '|' . $username . '|' . $exp, app_remember_secret());
+    $val = $userId . '|' . rawurlencode($username) . '|' . $exp . '|' . $sig;
+    $secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off');
+    if (defined('PHP_VERSION_ID') && PHP_VERSION_ID >= 70300) {
+        setcookie('app_remember', $val, array(
+            'expires' => $exp,
+            'path' => '/',
+            'secure' => $secure,
+            'httponly' => true,
+            'samesite' => 'Lax',
+        ));
+    } else {
+        setcookie('app_remember', $val, $exp, '/', '', $secure, true);
+    }
+    $_COOKIE['app_remember'] = $val;
+}
+
+function app_remember_try_restore($pdo)
+{
+    if (!empty($_SESSION['admin_logged_in'])) {
+        return;
+    }
+    if (empty($_COOKIE['app_remember']) || !is_string($_COOKIE['app_remember'])) {
+        return;
+    }
+    $parts = explode('|', (string) $_COOKIE['app_remember']);
+    if (count($parts) !== 4) {
+        app_remember_clear();
+        return;
+    }
+    $userId = (int) $parts[0];
+    $username = rawurldecode($parts[1]);
+    $exp = (int) $parts[2];
+    $sig = $parts[3];
+    if ($exp < time() || $username === '') {
+        app_remember_clear();
+        return;
+    }
+    $expect = hash_hmac('sha256', $userId . '|' . $username . '|' . $exp, app_remember_secret());
+    if (!hash_equals($expect, $sig)) {
+        app_remember_clear();
+        return;
+    }
+    try {
+        if ($userId > 0) {
+            $st = $pdo->prepare('SELECT * FROM admin_users WHERE id = :id AND is_active = 1 LIMIT 1');
+            $st->execute(array(':id' => $userId));
+        } else {
+            $st = $pdo->prepare('SELECT * FROM admin_users WHERE username = :u AND is_active = 1 LIMIT 1');
+            $st->execute(array(':u' => $username));
+        }
+        $row = $st->fetch();
+        if ($row && function_exists('set_admin_session_from_row')) {
+            set_admin_session_from_row($row);
+            app_session_refresh_cookie();
+            app_remember_set((int) $row['id'], isset($row['username']) ? $row['username'] : $username);
+            return;
+        }
+        if ($userId === 0 && strtolower($username) === 'admin') {
+            $_SESSION['admin_logged_in'] = true;
+            $_SESSION['admin_user_id'] = 0;
+            $_SESSION['admin_username'] = 'admin';
+            $_SESSION['admin_display_name'] = 'Admin';
+            $_SESSION['admin_role'] = 'admin';
+            app_session_refresh_cookie();
+            app_remember_set(0, 'admin');
+            return;
+        }
+    } catch (Exception $e) {
+    }
+    app_remember_clear();
 }
 
 function app_session_refresh_cookie()
@@ -37,9 +165,9 @@ function app_session_refresh_cookie()
             'httponly' => true,
             'samesite' => 'Lax',
         ));
-        return;
+    } else {
+        setcookie(session_name(), session_id(), time() + $life, '/', '', $secure, true);
     }
-    setcookie(session_name(), session_id(), time() + $life, '/', '', $secure, true);
 }
 
 function app_session_start()
@@ -50,6 +178,14 @@ function app_session_start()
         @ini_set('session.cookie_lifetime', (string) $life);
         @ini_set('session.cookie_httponly', '1');
         @ini_set('session.use_only_cookies', '1');
+        // مسار جلسات داخل المشروع إن أمكن — يقلل مسح الاستضافة
+        $savePath = dirname(__DIR__) . '/storage/sessions';
+        if (!is_dir($savePath)) {
+            @mkdir($savePath, 0755, true);
+        }
+        if (is_dir($savePath) && is_writable($savePath)) {
+            @ini_set('session.save_path', $savePath);
+        }
     }
     if (session_status() === PHP_SESSION_NONE) {
         if (defined('PHP_VERSION_ID') && PHP_VERSION_ID >= 70300) {
@@ -87,6 +223,12 @@ require_once __DIR__ . '/auth.php';
 require_once __DIR__ . '/whatsapp.php';
 
 $pdo = db_connect($config);
+if (function_exists('app_remember_try_restore')) {
+    app_remember_try_restore($pdo);
+}
+if (!empty($_SESSION['admin_logged_in']) && function_exists('app_session_refresh_cookie')) {
+    app_session_refresh_cookie();
+}
 
 require_once __DIR__ . '/invoices.php';
 require_once __DIR__ . '/activity.php';

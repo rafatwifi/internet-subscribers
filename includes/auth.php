@@ -187,7 +187,7 @@ function list_agent_users($pdo, $activeOnly = true)
 {
     try {
         ensure_admin_users_table($pdo);
-        $sql = "SELECT id, username, display_name, role, is_active, created_at, updated_at
+        $sql = "SELECT id, username, display_name, role, is_active, created_at, updated_at, sas_manager_id
                 FROM admin_users WHERE role = 'agent'";
         if ($activeOnly) {
             $sql .= ' AND is_active = 1';
@@ -195,7 +195,17 @@ function list_agent_users($pdo, $activeOnly = true)
         $sql .= ' ORDER BY display_name ASC, id ASC';
         return $pdo->query($sql)->fetchAll();
     } catch (Exception $e) {
-        return array();
+        try {
+            $sql = "SELECT id, username, display_name, role, is_active, created_at, updated_at
+                    FROM admin_users WHERE role = 'agent'";
+            if ($activeOnly) {
+                $sql .= ' AND is_active = 1';
+            }
+            $sql .= ' ORDER BY display_name ASC, id ASC';
+            return $pdo->query($sql)->fetchAll();
+        } catch (Exception $e2) {
+            return array();
+        }
     }
 }
 
@@ -457,6 +467,9 @@ function attempt_login($pdo, $config, $username, $password)
                 if (function_exists('app_session_refresh_cookie')) {
                     app_session_refresh_cookie();
                 }
+                if (function_exists('app_remember_set')) {
+                    app_remember_set((int) $row['id'], isset($row['username']) ? $row['username'] : $username);
+                }
                 return true;
             }
         } catch (Exception $e) {
@@ -490,6 +503,12 @@ function attempt_login($pdo, $config, $username, $password)
         }
         if (function_exists('app_session_refresh_cookie')) {
             app_session_refresh_cookie();
+        }
+        if (function_exists('app_remember_set')) {
+            app_remember_set(
+                isset($_SESSION['admin_user_id']) ? (int) $_SESSION['admin_user_id'] : 0,
+                isset($_SESSION['admin_username']) ? (string) $_SESSION['admin_username'] : 'admin'
+            );
         }
         return true;
     }
@@ -617,6 +636,9 @@ function count_active_admins($pdo)
 function logout()
 {
     $_SESSION = array();
+    if (function_exists('app_remember_clear')) {
+        app_remember_clear();
+    }
     if (ini_get('session.use_cookies')) {
         $params = session_get_cookie_params();
         setcookie(

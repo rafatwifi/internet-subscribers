@@ -51,6 +51,8 @@ if ($tab === 'users') {
     require_perm('users');
 } elseif ($tab === 'plans') {
     redirect('plans.php');
+} elseif ($tab === 'schedule') {
+    redirect('schedule.php');
 } elseif ($tab === 'sensitive') {
     require_perm('clear_data');
 } else {
@@ -245,6 +247,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'currency' => (string) post('currency', 'د.ع'),
             'grace_days' => (int) post('grace_days', '3'),
             'subscription_period_mode' => $periodMode,
+            'login_session_days' => max(1, min(30, (int) post('login_session_days', '3'))),
         );
         set_lang_preference($data['language']);
         $tab = 'general';
@@ -841,6 +844,11 @@ $gLatTone = ($gMs === null || !$gOk) ? 'bad' : (($gMs >= 200) ? 'bad' : (($gMs >
                 <small style="color:#6b7a88;font-weight:600"><?php echo e($lang === 'en' ? 'Default 3 days after activation. Can be changed per subscriber.' : 'الافتراضي 3 أيام بعد التفعيل. قابل للتعديل لكل مشترك.'); ?></small>
             </div>
             <div>
+                <label><?php echo e($lang === 'en' ? 'Keep me logged in (days)' : 'مدة حفظ الدخول (أيام)'); ?></label>
+                <input type="number" min="1" max="30" name="login_session_days" value="<?php echo (int) (isset($s['login_session_days']) ? $s['login_session_days'] : 3); ?>">
+                <small style="color:#6b7a88;font-weight:600"><?php echo e($lang === 'en' ? 'Session cookie duration (1–30). Default 3 days.' : 'مدة كوكي الجلسة (1–30). الافتراضي 3 أيام.'); ?></small>
+            </div>
+            <div>
                 <label><?php echo e($lang === 'en' ? 'Subscription period' : 'مدة الاشتراك'); ?></label>
                 <?php $periodMode = (isset($s['subscription_period_mode']) && $s['subscription_period_mode'] === 'calendar_month') ? 'calendar_month' : 'days_30'; ?>
                 <select name="subscription_period_mode">
@@ -869,8 +877,8 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
     <h2><?php echo e($lang === 'en' ? 'Appearance' : 'المظهر والخلفية'); ?></h2>
     <p class="meta" style="margin-top:-6px">
         <?php echo e($lang === 'en'
-            ? 'Toggle color or image. Image covers login and the app. Color is used on the login page. Brand icon appears next to Dashboard.'
-            : 'بدّل بين لون أو صورة. الصورة تظهر بصفحة الدخول وبالنظام. اللون يظهر بصفحة الدخول. أيقونة النظام تظهر يم الرئيسية بالداشبورد.'); ?>
+            ? 'Toggle color or image. Image covers login and the app. Logo appears on login and dashboard.'
+            : 'بدّل بين لون أو صورة. الصورة تظهر بصفحة الدخول وبالنظام. الشعار يظهر بصفحة الدخول ويم الرئيسية.'); ?>
     </p>
     <div class="login-bg-preview" style="background-color:<?php echo e($loginBgColor); ?>;<?php echo ($bgMode === 'image' && $loginBgUrl !== '') ? ('background-image:url(' . e($loginBgUrl) . ');') : ''; ?>"></div>
     <form method="post" enctype="multipart/form-data">
@@ -896,7 +904,7 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
                 <input type="color" name="login_bg_color" value="<?php echo e($loginBgColor); ?>">
             </div>
             <div>
-                <label><?php echo e($lang === 'en' ? 'System icon (dashboard)' : 'أيقونة النظام (يم الرئيسية)'); ?></label>
+                <label><?php echo e($lang === 'en' ? 'System logo / icon' : 'شعار / أيقونة النظام'); ?></label>
                 <input type="file" name="brand_icon_file" accept="image/jpeg,image/png,image/gif,image/webp">
                 <?php if ($brandIconUrl !== ''): ?>
                     <div style="margin-top:8px;display:flex;align-items:center;gap:8px">
@@ -1437,8 +1445,8 @@ $sasHasPass = !empty($sasCfgUi['password']);
             </div>
         </div>
         <p class="meta" style="margin:0 0 10px"><?php echo e($isEn
-            ? 'Clicking a subscriber IP opens the device address in a new tab (http/https only — no auto login).'
-            : 'ضغط IP يفتح عنوان الجهاز بتبويب جديد مباشرة (http/https فقط — بدون تسجيل دخول تلقائي).'); ?></p>
+            ? 'Clicking IP opens auto-login bridge (tries ticket.cgi then login.cgi) using CPE user/pass below.'
+            : 'ضغط IP يفتح دخول تلقائي للجهاز (ticket.cgi ثم login.cgi) باليوزر/الباس أدناه.'); ?></p>
         <div class="actions">
             <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
         </div>

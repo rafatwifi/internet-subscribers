@@ -1164,7 +1164,7 @@ function sas_clear_unused_card_cache()
 
 function sas_unused_cards_cached($api, $force = false)
 {
-    $ttl = 25;
+    $ttl = 90;
     $at = isset($_SESSION['sas_unused_ui_v3_at']) ? (int) $_SESSION['sas_unused_ui_v3_at'] : 0;
     if (!$force && $at > 0 && isset($_SESSION['sas_unused_ui_v3']) && is_array($_SESSION['sas_unused_ui_v3'])) {
         $age = time() - $at;
@@ -1323,14 +1323,11 @@ function sas_cpe_login_url($ip, $config = null)
     if ($ip === '') {
         return '';
     }
-    // فتح مباشر للـ IP فقط (بدون تكت / تسجيل دخول تلقائي)
-    $https = is_array($config) && !empty($config['cpe_use_https']);
-    $scheme = $https ? 'https' : 'http';
     if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
-        return $scheme . '://[' . $ip . ']/
+        return 'http://[' . $ip . ']/';
     }
     if (filter_var($ip, FILTER_VALIDATE_IP)) {
-        return $scheme . '://' . $ip . '/';
+        return 'http://' . $ip . '/';
     }
     return '';
 }
@@ -2036,6 +2033,21 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
             'expire_at' => $expire,
             'is_online' => $online ? 1 : 0,
             'is_active' => $isActive ? 1 : 0,
+        ));
+    }
+
+    if ($action === 'sas_disconnect') {
+        if (!method_exists($api, 'disconnectUser')) {
+            return array(false, 'قطع الاتصال غير مدعوم', array());
+        }
+        $res = $api->disconnectUser($sasUserId, $username);
+        if (function_exists('sas_response_success') && !sas_response_success($res)) {
+            return array(false, 'SAS: ' . (function_exists('sas_response_message') ? sas_response_message($res) : 'فشل قطع الاتصال'), array());
+        }
+        sas_cache_patch($pdo, $username, array('is_online' => 0, 'framed_ip' => null));
+        return array(true, 'تم قطع اتصال المشترك (Disconnect)', array(
+            'is_online' => 0,
+            'framed_ip' => '',
         ));
     }
 
@@ -2848,6 +2860,7 @@ function sas_render_table_row($row, $n, $config, $lang)
         . ' data-username="' . e($username) . '"'
         . ' data-debt="' . ($debt > 0 ? '1' : '0') . '"'
         . ' data-active="' . ($isActive ? '1' : '0') . '"'
+        . ' data-online="' . ($isOnline ? '1' : '0') . '"'
         . ' data-msg-fail="' . $msgFail . '"'
         . ' data-log-id="' . $logId . '"'
         . ' data-has-days="' . ($hasExpire ? '1' : '0') . '"'
@@ -2873,11 +2886,11 @@ function sas_render_table_row($row, $n, $config, $lang)
             }
         }
         $ipCopyTip = $lang === 'en' ? 'Copy IP' : 'نسخ عنوان IP';
-        $ipOpenTip = $lang === 'en' ? 'Open CPE IP' : 'فتح IP الجهاز';
+        $ipOpenTip = $lang === 'en' ? 'Open device' : 'فتح الجهاز';
         $html .= '<td class="col-ip" dir="ltr"><span class="sas-ip-wrap">'
             . '<button type="button" class="sas-user-copy" data-copy="' . e($framedIp) . '" title="' . e($ipCopyTip) . '" aria-label="' . e($ipCopyTip) . '">⧉</button>';
         if ($ipHref !== '') {
-            $html .= '<a class="sas-ip-link" href="' . e($ipHref) . '" target="_blank" rel="noopener noreferrer" title="' . e($ipOpenTip) . '">' . e($framedIp) . '</a>';
+            $html .= '<a class="sas-link sas-ip-link" href="' . e($ipHref) . '" target="_blank" rel="noopener noreferrer" title="' . e($ipOpenTip) . '">' . e($framedIp) . '</a>';
         } else {
             $html .= '<span>' . e($framedIp) . '</span>';
         }
@@ -2885,7 +2898,15 @@ function sas_render_table_row($row, $n, $config, $lang)
     } else {
         $html .= '<td class="col-ip" dir="ltr">-</td>';
     }
-    $html .= '<td class="col-fn"><span class="cell-edit" tabindex="0" data-edit="firstname" data-id="' . e($username) . '" data-value="' . e($fn) . '" title="' . e($editTip) . '">' . e($fn !== '' ? $fn : '-') . '</span></td>';
+    $rentBadge = '';
+    if (function_exists('subscriber_has_rental') && subscriber_has_rental($rentSub) && function_exists('rental_badge_html')) {
+        $rentBadge = rental_badge_html($rentSub);
+    }
+    // الشعار يسار الاسم (في RTL: الاسم أولاً ثم الشعار)
+    $html .= '<td class="col-fn"><span class="sas-fn-wrap">'
+        . '<span class="cell-edit" tabindex="0" data-edit="firstname" data-id="' . e($username) . '" data-value="' . e($fn) . '" title="' . e($editTip) . '">' . e($fn !== '' ? $fn : '-') . '</span>'
+        . ($rentBadge !== '' ? '<span class="sas-rent-mini" title="' . e($rentDevName) . '">' . $rentBadge . '</span>' : '')
+        . '</span></td>';
     $html .= '<td class="col-ln"><span class="cell-edit" tabindex="0" data-edit="lastname" data-allow-empty="1" data-id="' . e($username) . '" data-value="' . e($ln) . '" title="' . e($editTip) . '">' . e($ln !== '' ? $ln : '-') . '</span></td>';
     $html .= '<td class="col-phone"><span class="cell-edit" tabindex="0" data-edit="phone" data-allow-empty="1" data-id="' . e($username) . '" data-value="' . e($phone) . '" title="' . e($editTip) . '">' . e($phone !== '' ? $phone : '-') . '</span></td>';
     $html .= '<td class="col-exp">' . (function_exists('sas_format_expire_html')

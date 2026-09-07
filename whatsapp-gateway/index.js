@@ -136,10 +136,10 @@ async function startSocket() {
       logger: pino({ level: 'silent' }),
       printQRInTerminal: false,
       syncFullHistory: false,
-      markOnlineOnConnect: false,
+      markOnlineOnConnect: true,
       generateHighQualityLinkPreview: false,
       connectTimeoutMs: 60000,
-      keepAliveIntervalMs: 25000,
+      keepAliveIntervalMs: 20000,
       browser: Browsers && Browsers.macOS ? Browsers.macOS('Chrome') : ['Mac OS', 'Chrome', '14.4.1']
     };
     if (version) {
@@ -205,15 +205,15 @@ async function startSocket() {
         }
 
         failCount += 1;
-        // عند 500 لا تمسح الجلسة بسرعة — خذ وقت أطول وحدّث النسخة
+        // عند 500/408 لا تمسح الجلسة بسرعة — أعد الاتصال فقط
         let waitMs = 5000;
-        if (code === 500 || code === 515 || code === 408 || code === 428 || code === 405) {
-          waitMs = Math.min(90000, 10000 * failCount);
+        if (code === 500 || code === 515 || code === 408 || code === 428 || code === 405 || code === 440) {
+          waitMs = Math.min(120000, 12000 * failCount);
         } else {
-          waitMs = Math.min(30000, 4000 * failCount);
+          waitMs = Math.min(45000, 5000 * failCount);
         }
-        // امسح الجلسة فقط بعد محاولات كثيرة
-        const wipe = failCount >= 5;
+        // امسح الجلسة فقط بعد محاولات كثيرة جداً (تقليل طلب QR)
+        const wipe = failCount >= 12;
         console.log(
           'فشل اتصال WhatsApp. انتظار',
           Math.round(waitMs / 1000),

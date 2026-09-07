@@ -4,10 +4,19 @@ require_once __DIR__ . '/../includes/bootstrap.php';
 require_once __DIR__ . '/../includes/layout.php';
 require_perm('agents');
 ensure_subscriber_agent_column($pdo);
+ensure_admin_users_table($pdo);
 
 $isEn = ($lang === 'en');
 $me = current_admin();
 $meId = $me ? (int) $me['id'] : 0;
+
+try {
+    $col = $pdo->query("SHOW COLUMNS FROM admin_users LIKE 'sas_manager_id'")->fetch();
+    if (!$col) {
+        $pdo->exec('ALTER TABLE admin_users ADD COLUMN sas_manager_id INT UNSIGNED NULL DEFAULT NULL AFTER role');
+    }
+} catch (Exception $e) {
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf(post('csrf'))) {
@@ -45,6 +54,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         update_admin_user_meta($pdo, $uid, $display !== '' ? $display : $row['display_name'], 'agent');
         $pdo->prepare('UPDATE admin_users SET is_active = :a, updated_at = NOW() WHERE id = :id AND role = "agent"')
             ->execute(array(':a' => $active, ':id' => $uid));
+        $sasMid = (int) post('sas_manager_id', '0');
+        try {
+            $pdo->prepare('UPDATE admin_users SET sas_manager_id = :m WHERE id = :id AND role = "agent"')
+                ->execute(array(':m' => $sasMid > 0 ? $sasMid : null, ':id' => $uid));
+        } catch (Exception $e) {
+        }
         $newPass = (string) post('password', '');
         if (strlen($newPass) >= 4) {
             change_user_password($pdo, $uid, $newPass);
@@ -73,6 +88,107 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         redirect('agents.php');
     }
+
+    if ($action === 'import_sas') {
+        if (!function_exists('sas_is_ready') || !sas_is_ready($config)) {
+            flash('error', $isEn ? 'Enable SAS in settings first' : 'فعّل ربط SAS من الإعدادات أولاً');
+            redirect('agents.php');
+        }
+        $api = function_exists('sas_page_connector') ? sas_page_connector($config) : null;
+        if (!$api) {
+            flash('error', $isEn ? 'No SAS connection' : 'ماكو اتصال بالساس');
+            redirect('agents.php');
+        }
+        unset($_SESSION['sas_managers_ui'], $_SESSION['sas_managers_ui_at']);
+        $managers = function_exists('sas_managers_for_ui') ? sas_managers_for_ui($api) : array();
+        if (!$managers) {
+            flash('error', $isEn ? 'No managers returned from SAS' : 'ماكو وكلاء راجعين من الساس');
+            redirect('agents.php');
+        }
+
+        $byUser = array();
+        $bySas = array();
+        try {
+            $st = $pdo->query('SELECT id, username, sas_manager_id FROM admin_users WHERE role = "agent"');
+            foreach ($st->fetchAll() as $er) {
+                $byUser[strtolower((string) $er['username'])] = (int) $er['id'];
+                if (!empty($er['sas_manager_id'])) {
+                    $bySas[(int) $er['sas_manager_id']] = (int) $er['id'];
+                }
+            }
+        } catch (Exception $e) {
+            $st = $pdo->query('SELECT id, username FROM admin_users WHERE role = "agent"');
+            foreach ($st->fetchAll() as $er) {
+                $byUser[strtolower((string) $er['username'])] = (int) $er['id'];
+            }
+        }
+
+        $added = 0;
+        $linked = 0;
+        $skipped = 0;
+        $temps = array();
+        foreach ($managers as $m) {
+            $mid = isset($m['id']) ? (int) $m['id'] : 0;
+            $rawName = isset($m['name']) ? trim((string) $m['name']) : '';
+            if ($mid <= 0 || $rawName === '') {
+                continue;
+            }
+            if (isset($bySas[$mid])) {
+                $linked++;
+                continue;
+            }
+            $username = preg_replace('/[^A-Za-z0-9._\-]/', '', $rawName);
+            if (strlen($username) < 2) {
+                $username = 'mgr' . $mid;
+            }
+            if (strlen($username) > 40) {
+                $username = substr($username, 0, 40);
+            }
+            $ukey = strtolower($username);
+            if (isset($byUser[$ukey])) {
+                try {
+                    $pdo->prepare('UPDATE admin_users SET sas_manager_id = :m WHERE id = :id')
+                        ->execute(array(':m' => $mid, ':id' => $byUser[$ukey]));
+                    $bySas[$mid] = $byUser[$ukey];
+                    $linked++;
+                } catch (Exception $e) {
+                    $skipped++;
+                }
+                continue;
+            }
+            $pass = 'Ag' . $mid . '!' . substr(md5($username . $mid), 0, 4);
+            $res = create_admin_user($pdo, $username, $rawName, $pass, 'agent');
+            if ($res === 'ok') {
+                $newId = (int) $pdo->lastInsertId();
+                try {
+                    $pdo->prepare('UPDATE admin_users SET sas_manager_id = :m WHERE id = :id')
+                        ->execute(array(':m' => $mid, ':id' => $newId));
+                } catch (Exception $e) {
+                }
+                $byUser[$ukey] = $newId;
+                $bySas[$mid] = $newId;
+                $temps[] = $username . ' / ' . $pass;
+                $added++;
+            } elseif ($res === 'taken') {
+                $skipped++;
+            } else {
+                $skipped++;
+            }
+        }
+        $msg = $isEn
+            ? ('SAS import: ' . $added . ' new, ' . $linked . ' linked')
+            : ('استيراد الساس: ' . $added . ' جديد، ' . $linked . ' مربوط');
+        if ($skipped > 0) {
+            $msg .= $isEn ? (', skipped ' . $skipped) : ('، تخطي ' . $skipped);
+        }
+        if ($temps) {
+            $msg .= $isEn
+                ? ('. Temp passwords: ' . implode(' · ', $temps))
+                : ('. كلمات مرور مؤقتة: ' . implode(' · ', $temps));
+        }
+        flash('success', $msg);
+        redirect('agents.php');
+    }
 }
 
 $agents = list_agent_users($pdo, false);
@@ -87,14 +203,42 @@ try {
 } catch (Exception $e) {
 }
 
+$sasManagers = array();
+$sasReady = function_exists('sas_is_ready') && sas_is_ready($config);
+if ($sasReady && function_exists('sas_page_connector') && function_exists('sas_managers_for_ui')) {
+    try {
+        $apiMgr = sas_page_connector($config);
+        if ($apiMgr) {
+            $sasManagers = sas_managers_for_ui($apiMgr);
+        }
+    } catch (Exception $e) {
+        $sasManagers = array();
+    }
+}
+
 render_header($isEn ? 'Agents' : 'الوكلاء', 'agents');
 ?>
 <div class="panel">
     <p class="meta" style="margin-top:0">
         <?php echo e($isEn
-            ? 'Agents log in and only see their own subscribers. They can send messages but cannot change system settings.'
-            : 'الوكيل يدخل للنظام ويشوف مشتركيه فقط. يكدر يرسل رسائل ومايكدر يعدل إعدادات النظام.'); ?>
+            ? 'Agents log in and only see their own subscribers. Import them from SAS managers, then edit passwords and status.'
+            : 'الوكيل يدخل للنظام ويشوف مشتركيه فقط. نستوردهم من مدراء الساس، ونعدّل كلمة المرور والحالة والعمليات.'); ?>
     </p>
+
+    <?php if ($sasReady): ?>
+    <form method="post" style="margin-bottom:16px">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="action" value="import_sas">
+        <div class="actions" style="margin:0;align-items:center;gap:10px;flex-wrap:wrap">
+            <button class="btn" type="submit"><?php echo e($isEn ? 'Import agents from SAS' : 'استيراد الوكلاء من الساس'); ?></button>
+            <span style="color:#6b7a88;font-weight:600;font-size:13px">
+                <?php echo e($isEn
+                    ? (count($sasManagers) . ' manager(s) available from SAS')
+                    : (count($sasManagers) . ' مدير متاح من الساس')); ?>
+            </span>
+        </div>
+    </form>
+    <?php endif; ?>
 
     <h2><?php echo e($isEn ? 'Add agent' : 'إضافة وكيل'); ?></h2>
     <form method="post" class="form-grid" style="margin-bottom:22px">
@@ -125,6 +269,7 @@ render_header($isEn ? 'Agents' : 'الوكلاء', 'agents');
                 <th>#</th>
                 <th><?php echo e($isEn ? 'Name' : 'الاسم'); ?></th>
                 <th><?php echo e($isEn ? 'Username' : 'الدخول'); ?></th>
+                <th>SAS</th>
                 <th><?php echo e($isEn ? 'Subscribers' : 'المشتركين'); ?></th>
                 <th><?php echo e($isEn ? 'Status' : 'الحالة'); ?></th>
                 <th><?php echo e($isEn ? 'Actions' : 'إجراءات'); ?></th>
@@ -132,7 +277,7 @@ render_header($isEn ? 'Agents' : 'الوكلاء', 'agents');
             </thead>
             <tbody>
             <?php if (!$agents): ?>
-                <tr><td colspan="6"><?php echo e($isEn ? 'No agents yet' : 'ماكو وكلاء بعد'); ?></td></tr>
+                <tr><td colspan="7"><?php echo e($isEn ? 'No agents yet' : 'ماكو وكلاء بعد'); ?></td></tr>
             <?php else: ?>
                 <?php foreach ($agents as $a): ?>
                     <?php $aid = (int) $a['id']; ?>
@@ -146,6 +291,30 @@ render_header($isEn ? 'Agents' : 'الوكلاء', 'agents');
                                 <input name="display_name" value="<?php echo e($a['display_name']); ?>" required>
                         </td>
                         <td><?php echo e($a['username']); ?></td>
+                        <td>
+                            <select name="sas_manager_id" style="min-width:120px">
+                                <option value="0"><?php echo e($isEn ? '— none —' : '— بدون —'); ?></option>
+                                <?php
+                                $curSas = isset($a['sas_manager_id']) ? (int) $a['sas_manager_id'] : 0;
+                                foreach ($sasManagers as $sm):
+                                    $smid = (int) $sm['id'];
+                                    $sel = ($curSas === $smid) ? ' selected' : '';
+                                ?>
+                                    <option value="<?php echo $smid; ?>"<?php echo $sel; ?>>
+                                        <?php echo e($sm['name'] . ' (#' . $smid . ')'); ?>
+                                    </option>
+                                <?php endforeach; ?>
+                                <?php if ($curSas > 0):
+                                    $found = false;
+                                    foreach ($sasManagers as $sm) {
+                                        if ((int) $sm['id'] === $curSas) { $found = true; break; }
+                                    }
+                                    if (!$found):
+                                ?>
+                                    <option value="<?php echo $curSas; ?>" selected>#<?php echo $curSas; ?></option>
+                                <?php endif; endif; ?>
+                            </select>
+                        </td>
                         <td>
                             <a href="sas.php">
                                 <?php echo isset($counts[$aid]) ? (int) $counts[$aid] : 0; ?>

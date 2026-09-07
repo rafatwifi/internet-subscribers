@@ -68,6 +68,7 @@ function settings_defaults()
         'login_bg_color' => '#1b2a38',
         'bg_mode' => 'color',
         'brand_icon' => '',
+        'login_session_days' => 3,
     );
 }
 
@@ -401,6 +402,9 @@ function apply_settings_to_config($config, $settings)
         ? (string) $settings['cpe_http_pass']
         : 'ubnt';
     $config['cpe_use_https'] = !isset($settings['cpe_use_https']) || !empty($settings['cpe_use_https']);
+    $config['login_session_days'] = isset($settings['login_session_days'])
+        ? max(1, min(30, (int) $settings['login_session_days']))
+        : 3;
 
     return $config;
 }

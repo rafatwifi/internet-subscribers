@@ -25,7 +25,6 @@ function render_settings_tabs($current = 'general')
     <a class="<?php echo $current === 'rental' ? 'on' : ''; ?>" href="settings.php?tab=rental"><?php echo e($isEn ? 'Rental devices' : 'أجهزة الإيجار'); ?></a>
     <a class="<?php echo $current === 'whatsapp' ? 'on' : ''; ?>" href="settings.php?tab=whatsapp"><?php echo e(t('settings_whatsapp')); ?></a>
     <a class="<?php echo $current === 'sas' ? 'on' : ''; ?>" href="settings.php?tab=sas"><?php echo e(t('settings_sas')); ?></a>
-    <a class="<?php echo $current === 'schedule' ? 'on' : ''; ?>" href="settings.php?tab=schedule"><?php echo e($isEn ? 'Periodic jobs' : 'الجدول الدوري'); ?></a>
     <?php if ($can('clear_data')): ?>
     <a class="<?php echo $current === 'sensitive' ? 'on' : ''; ?>" href="settings.php?tab=sensitive"><?php echo e($isEn ? 'Sensitive data' : 'بيانات حساسة'); ?></a>
     <?php endif; ?>

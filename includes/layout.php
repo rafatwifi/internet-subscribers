@@ -7,7 +7,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     $name = isset($siteName) ? $siteName : 'WiFi-Net-SALES';
     $page = isset($_SERVER['PHP_SELF']) ? basename($_SERVER['PHP_SELF']) : 'index.php';
     $isEn = ($lang === 'en');
-    $settingsActive = ($active === 'settings' || $active === 'whatsapp' || $active === 'backup' || $active === 'users');
+    $settingsActive = ($active === 'settings' || $active === 'whatsapp' || $active === 'backup' || $active === 'users' || $active === 'schedule');
     $adminNow = function_exists('current_admin') ? current_admin() : null;
     $can = function ($p) {
         return function_exists('user_can') ? user_can($p) : true;
@@ -27,7 +27,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     if ($bgMode === 'image' && $bgUrl === '') {
         $bgMode = 'color';
     }
-    $brandIcon = ($active === 'dashboard' && function_exists('brand_icon_url') && is_array($settings))
+    $brandIcon = (function_exists('brand_icon_url') && is_array($settings))
         ? brand_icon_url($settings)
         : '';
     ?>
@@ -37,13 +37,17 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title><?php echo e($title); ?> | <?php echo e($name); ?></title>
+    <?php if ($brandIcon !== ''): ?>
+    <link rel="icon" href="<?php echo e($brandIcon); ?>">
+    <?php else: ?>
     <link rel="icon" href="assets/favicon.svg?v=2" type="image/svg+xml">
     <link rel="icon" href="assets/favicon.png?v=2" type="image/png" sizes="32x32">
-    <link rel="apple-touch-icon" href="assets/apple-touch-icon.png?v=2">
+    <?php endif; ?>
+    <link rel="apple-touch-icon" href="<?php echo e($brandIcon !== '' ? $brandIcon : 'assets/apple-touch-icon.png?v=2'); ?>">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="assets/style.css?v=ui3">
+    <link rel="stylesheet" href="assets/style.css?v=ui4">
     <style>
         <?php if ($bgMode === 'image' && $bgUrl !== ''): ?>
         body.app-bg-image {
@@ -58,6 +62,98 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
         body.app-bg-image .app { background: transparent; }
         body.app-bg-image .main { background: transparent; }
         <?php endif; ?>
+        /* Sidebar modern — text only, centered */
+        .sidebar {
+          background: #12181f !important;
+          border-inline-end: 1px solid rgba(255,255,255,0.06);
+        }
+        .sidebar-head {
+          padding: 18px 14px 12px;
+          border-bottom: 1px solid rgba(255,255,255,0.06);
+          justify-content: center;
+        }
+        .sidebar-head .brand {
+          width: 100%;
+          text-align: center;
+          font-size: 15px;
+          font-weight: 800;
+          letter-spacing: 0.02em;
+          color: #f8fafc;
+        }
+        .side-links {
+          padding: 10px 10px 16px;
+          gap: 4px;
+        }
+        .side-links a {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          text-align: center;
+          min-height: 42px;
+          padding: 10px 12px;
+          border-radius: 10px;
+          font-size: 13.5px;
+          font-weight: 700;
+          color: rgba(248,250,252,0.72);
+          border: 1px solid transparent;
+        }
+        .side-links a .nav-ico { display: none !important; }
+        .side-links a:hover {
+          background: rgba(255,255,255,0.06);
+          color: #fff;
+        }
+        .side-links a.active {
+          background: rgba(56, 189, 248, 0.14);
+          color: #e0f2fe;
+          border-color: rgba(56, 189, 248, 0.22);
+          box-shadow: none;
+        }
+        .side-links .nav-user { display: none !important; }
+        .sidebar .lang-mini { display: none !important; }
+        .main-top-end .top-user-cluster {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          padding: 4px;
+          border-radius: 999px;
+          background: rgba(255,255,255,0.72);
+          border: 1px solid rgba(15,23,42,0.08);
+          box-shadow: 0 4px 14px rgba(15,23,42,0.06);
+        }
+        .top-lang-btn {
+          width: 34px;
+          height: 34px;
+          border-radius: 999px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          font-weight: 800;
+          font-size: 12px;
+          color: #0f172a;
+          text-decoration: none;
+          background: #f1f5f9;
+        }
+        .top-profile-btn {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          padding: 4px 10px 4px 4px;
+          border-radius: 999px;
+          text-decoration: none;
+          color: #0f172a;
+          font-weight: 700;
+          font-size: 13px;
+        }
+        .top-profile-avatar {
+          width: 30px;
+          height: 30px;
+          border-radius: 999px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          background: #e2e8f0;
+          color: #334155;
+        }
     </style>
 </head>
 <body class="<?php echo $isEn ? 'ltr' : 'rtl'; ?> ios-glass<?php echo ($bgMode === 'image' && $bgUrl !== '') ? ' app-bg-image' : ''; ?>">
@@ -72,59 +168,49 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
         </div>
         <nav class="side-links">
             <?php if ($can('dashboard')): ?>
-            <a class="<?php echo $active === 'dashboard' ? 'active' : ''; ?>" href="index.php"><span class="nav-ico" aria-hidden="true">⏱</span><?php echo e(t('dashboard')); ?></a>
+            <a class="<?php echo $active === 'dashboard' ? 'active' : ''; ?>" href="index.php"><?php echo e(t('dashboard')); ?></a>
             <?php endif; ?>
             <?php if ($can('subscribers')): ?>
-            <a class="<?php echo $active === 'sas' ? 'active' : ''; ?>" href="sas.php"><span class="nav-ico" aria-hidden="true">👥</span><?php echo e(t('sas')); ?></a>
+            <a class="<?php echo $active === 'sas' ? 'active' : ''; ?>" href="sas.php"><?php echo e(t('sas')); ?></a>
+            <?php endif; ?>
+            <?php if ($can('subscribers')): ?>
+            <a class="<?php echo $active === 'cards' ? 'active' : ''; ?>" href="cards.php"><?php echo e($isEn ? 'Cards' : 'الكارتات'); ?></a>
             <?php endif; ?>
             <?php if ($can('plans')): ?>
-            <a class="<?php echo $active === 'plans' ? 'active' : ''; ?>" href="plans.php"><span class="nav-ico" aria-hidden="true">📦</span><?php echo e(t('plans')); ?></a>
+            <a class="<?php echo $active === 'plans' ? 'active' : ''; ?>" href="plans.php"><?php echo e(t('plans')); ?></a>
             <?php endif; ?>
             <?php if ($can('agents')): ?>
-            <a class="<?php echo $active === 'agents' ? 'active' : ''; ?>" href="agents.php"><span class="nav-ico" aria-hidden="true">🎩</span><?php echo e($isEn ? 'Agents' : 'الوكلاء'); ?></a>
-            <?php endif; ?>
-            <?php if ($can('activate')): ?>
-            <a class="<?php echo $active === 'activate' ? 'active' : ''; ?>" href="activate.php"><span class="nav-ico" aria-hidden="true">💳</span><?php echo e(t('activate')); ?></a>
+            <a class="<?php echo $active === 'agents' ? 'active' : ''; ?>" href="agents.php"><?php echo e($isEn ? 'Agents' : 'الوكلاء'); ?></a>
             <?php endif; ?>
             <?php if ($can('rentals')): ?>
-            <a class="<?php echo $active === 'rentals' ? 'active' : ''; ?>" href="rentals.php"><span class="nav-ico" aria-hidden="true">📡</span><?php echo e($isEn ? 'Rentals' : 'الإيجار'); ?></a>
+            <a class="<?php echo $active === 'rentals' ? 'active' : ''; ?>" href="rentals.php"><?php echo e($isEn ? 'Rentals' : 'الإيجار'); ?></a>
             <?php endif; ?>
             <?php if ($can('debts')): ?>
-            <a class="<?php echo $active === 'debts' ? 'active' : ''; ?>" href="debts.php"><span class="nav-ico" aria-hidden="true">📄</span><?php echo e(t('debts')); ?></a>
+            <a class="<?php echo $active === 'debts' ? 'active' : ''; ?>" href="debts.php"><?php echo e(t('debts')); ?></a>
+            <?php endif; ?>
+            <?php if ($can('settings')): ?>
+            <a class="<?php echo $active === 'schedule' ? 'active' : ''; ?>" href="schedule.php"><?php echo e($isEn ? 'Periodic jobs' : 'الجدول الدوري'); ?></a>
             <?php endif; ?>
             <?php if ($can('subscribers')): ?>
-            <a class="<?php echo $active === 'import_export' ? 'active' : ''; ?>" href="import_export.php"><span class="nav-ico" aria-hidden="true">↕</span><?php echo e($isEn ? 'Import & Export' : 'استيراد وتصدير'); ?></a>
+            <a class="<?php echo $active === 'import_export' ? 'active' : ''; ?>" href="import_export.php"><?php echo e($isEn ? 'Import & Export' : 'استيراد وتصدير'); ?></a>
             <?php endif; ?>
             <?php if ($can('subscriptions')): ?>
-            <a class="<?php echo $active === 'subscriptions' ? 'active' : ''; ?>" href="subscriptions.php"><span class="nav-ico" aria-hidden="true">📊</span><?php echo e(t('movements')); ?></a>
+            <a class="<?php echo $active === 'subscriptions' ? 'active' : ''; ?>" href="subscriptions.php"><?php echo e(t('movements')); ?></a>
             <?php endif; ?>
             <?php if ($can('messages')): ?>
-            <a class="<?php echo $active === 'messages' ? 'active' : ''; ?>" href="messages.php"><span class="nav-ico" aria-hidden="true">💬</span><?php echo e(t('messages')); ?></a>
+            <a class="<?php echo $active === 'messages' ? 'active' : ''; ?>" href="messages.php"><?php echo e(t('messages')); ?></a>
             <?php endif; ?>
             <?php if ($can('reports')): ?>
-            <a class="<?php echo $active === 'reports' ? 'active' : ''; ?>" href="reports.php"><span class="nav-ico" aria-hidden="true">📈</span><?php echo e(t('reports')); ?></a>
+            <a class="<?php echo $active === 'reports' ? 'active' : ''; ?>" href="reports.php"><?php echo e(t('reports')); ?></a>
             <?php endif; ?>
             <?php if ($can('logs')): ?>
-            <a class="<?php echo $active === 'logs' ? 'active' : ''; ?>" href="logs.php"><span class="nav-ico" aria-hidden="true">🕒</span><?php echo e($isEn ? 'Log' : 'اللوك'); ?></a>
+            <a class="<?php echo $active === 'logs' ? 'active' : ''; ?>" href="logs.php"><?php echo e($isEn ? 'Log' : 'اللوك'); ?></a>
             <?php endif; ?>
-
             <?php if ($can('settings') || $can('users') || $can('plans') || $can('backup')): ?>
-            <a class="<?php echo $settingsActive ? 'active' : ''; ?>" href="settings.php"><span class="nav-ico" aria-hidden="true">⚙</span><?php echo e(t('settings')); ?></a>
+            <a class="<?php echo $settingsActive && $active !== 'schedule' ? 'active' : ''; ?>" href="settings.php"><?php echo e(t('settings')); ?></a>
             <?php endif; ?>
-
-            <a class="<?php echo $active === 'profile' ? 'active' : ''; ?>" href="profile.php"><span class="nav-ico" aria-hidden="true">ℹ</span><?php echo e($isEn ? 'My profile' : 'بروفايلي'); ?></a>
-            <?php if ($adminNow): ?>
-                <div class="nav-user">
-                    <?php echo e($adminNow['display_name']); ?>
-                    <span class="nav-role"><?php echo e(function_exists('admin_role_label') ? admin_role_label(isset($adminNow['role']) ? $adminNow['role'] : 'staff', $lang) : ''); ?></span>
-                </div>
-            <?php endif; ?>
-            <a href="logout.php"><span class="nav-ico" aria-hidden="true">↩</span><?php echo e(t('logout')); ?></a>
+            <a href="logout.php"><?php echo e(t('logout')); ?></a>
         </nav>
-        <div class="lang-mini">
-            <a class="<?php echo !$isEn ? 'on' : ''; ?>" href="<?php echo e($page); ?>?lang=ar">ع</a>
-            <a class="<?php echo $isEn ? 'on' : ''; ?>" href="<?php echo e($page); ?>?lang=en">EN</a>
-        </div>
     </aside>
 
     <div class="main">
