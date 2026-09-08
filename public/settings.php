@@ -119,20 +119,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif ($section === 'system_power') {
         require_perm('settings');
         $skipSettingsSave = true;
-        $tab = 'general';
+        $tab = 'sensitive';
         $pass = (string) post('admin_password', '');
         $power = post('power_action', '');
         if (!settings_verify_wipe_password($pdo, $config, $pass)) {
             flash('error', $lang === 'en' ? 'Wrong password' : 'كلمة المرور غير صحيحة');
-            redirect('settings.php?tab=general');
+            redirect('settings.php?tab=sensitive');
         }
         if (!function_exists('system_power_action')) {
             flash('error', $lang === 'en' ? 'Power action unavailable' : 'أمر الطاقة غير متاح');
-            redirect('settings.php?tab=general');
+            redirect('settings.php?tab=sensitive');
         }
         list($ok, $msg) = system_power_action($power);
         flash($ok ? 'success' : 'error', $msg);
-        redirect('settings.php?tab=general');
+        redirect('settings.php?tab=sensitive');
     } elseif ($section === 'clear_data' || $section === 'clear_logs' || $section === 'clear_offline') {
         require_perm('clear_data');
         $pass = (string) post('admin_password', '');
@@ -267,11 +267,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $data['login_bg'] = '';
             $data['bg_mode'] = 'color';
         } elseif (!empty($_FILES['login_bg_file']['tmp_name'])) {
-            $saved = login_bg_store_upload($_FILES['login_bg_file']);
+            $bgFail = '';
+            $saved = login_bg_store_upload($_FILES['login_bg_file'], $bgFail);
             if ($saved === false) {
-                flash('error', $lang === 'en'
-                    ? 'Use a JPG/PNG/GIF image up to 5MB.'
-                    : 'ارفع صورة JPG أو PNG أو GIF بحجم 5MB كحد أقصى.');
+                $msg = $lang === 'en'
+                    ? 'Background upload failed. Use JPG/PNG/GIF/WEBP up to 8MB.'
+                    : 'فشل رفع الخلفية. استخدم JPG/PNG/GIF/WEBP بحد 8MB.';
+                if ($bgFail === 'writable' || $bgFail === 'mkdir') {
+                    $msg = $lang === 'en'
+                        ? 'Uploads folder is not writable (public/uploads).'
+                        : 'مجلد الرفع غير قابل للكتابة (public/uploads).';
+                } elseif ($bgFail === 'size') {
+                    $msg = $lang === 'en' ? 'Background image is too large (max 8MB).' : 'صورة الخلفية كبيرة (الحد 8MB).';
+                } elseif ($bgFail === 'type') {
+                    $msg = $lang === 'en' ? 'Unsupported background image type.' : 'نوع صورة الخلفية غير مدعوم.';
+                }
+                flash('error', $msg);
                 redirect('settings.php?tab=general');
             }
             $data['login_bg'] = $saved;
@@ -281,11 +292,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             brand_icon_delete_files();
             $data['brand_icon'] = '';
         } elseif (!empty($_FILES['brand_icon_file']['tmp_name'])) {
-            $savedIco = brand_icon_store_upload($_FILES['brand_icon_file']);
+            $icoFail = '';
+            $savedIco = brand_icon_store_upload($_FILES['brand_icon_file'], $icoFail);
             if ($savedIco === false) {
-                flash('error', $lang === 'en'
-                    ? 'Use a square JPG/PNG icon up to 2MB.'
-                    : 'ارفع أيقونة مربعة JPG أو PNG بحجم 2MB كحد أقصى.');
+                $msg = $lang === 'en'
+                    ? 'Logo upload failed. Use JPG/PNG/GIF/WEBP up to 4MB.'
+                    : 'فشل رفع الشعار. استخدم JPG/PNG/GIF/WEBP بحد 4MB.';
+                if ($icoFail === 'writable' || $icoFail === 'mkdir') {
+                    $msg = $lang === 'en'
+                        ? 'Uploads folder is not writable (public/uploads).'
+                        : 'مجلد الرفع غير قابل للكتابة (public/uploads).';
+                } elseif ($icoFail === 'size') {
+                    $msg = $lang === 'en' ? 'Logo is too large (max 4MB).' : 'الشعار كبير (الحد 4MB).';
+                } elseif ($icoFail === 'type') {
+                    $msg = $lang === 'en' ? 'Unsupported logo image type.' : 'نوع صورة الشعار غير مدعوم.';
+                }
+                flash('error', $msg);
                 redirect('settings.php?tab=general');
             }
             $data['brand_icon'] = $savedIco;
@@ -338,21 +360,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($url !== '' && strpos($url, 'http://') !== 0 && strpos($url, 'https://') !== 0) {
             $url = 'http://' . ltrim($url, '/');
         }
-        $expDays = (int) post('expiry_auto_remind_days', '1');
-        if ($expDays < 0) {
-            $expDays = 0;
-        }
-        if ($expDays > 60) {
-            $expDays = 60;
-        }
         $data = array(
             'whatsapp_enabled' => post('whatsapp_enabled') === '1',
             'whatsapp_provider' => 'local',
             'whatsapp_local_url' => $url,
             'whatsapp_local_key' => (string) post('whatsapp_local_key', 'local-secret-change-me'),
             'whatsapp_sender_note' => (string) post('whatsapp_sender_note', ''),
-            'expiry_auto_remind_enabled' => post('expiry_auto_remind_enabled') === '1',
-            'expiry_auto_remind_days' => $expDays,
         );
         $tab = 'whatsapp';
     } elseif ($section === 'templates') {
@@ -746,35 +759,6 @@ $gLatTone = ($gMs === null || !$gOk) ? 'bad' : (($gMs >= 200) ? 'bad' : (($gMs >
     </div>
     <p class="meta" style="margin:10px 0 0"><?php echo e($lang === 'en' ? 'Server time' : 'وقت السيرفر'); ?>: <span id="sysServerTime"><?php echo e($sys['server_time']); ?></span></p>
 </div>
-
-<div class="panel">
-    <h2><?php echo e($lang === 'en' ? 'Server power' : 'طاقة السيرفر'); ?></h2>
-    <p class="meta" style="margin:0 0 12px"><?php echo e($lang === 'en'
-        ? 'Requires OS permissions (sudo/reboot). Confirm with your admin password.'
-        : 'يحتاج صلاحيات النظام على السيرفر. أكّد بكلمة مرور الأدمن.'); ?></p>
-    <div class="form-grid cols-2">
-        <form method="post" onsubmit="return confirm(<?php echo json_encode($lang === 'en' ? 'Reboot the server now?' : 'إعادة تشغيل السيرفر الآن؟'); ?>);">
-            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
-            <input type="hidden" name="section" value="system_power">
-            <input type="hidden" name="power_action" value="reboot">
-            <label><?php echo e($lang === 'en' ? 'Admin password' : 'كلمة مرور الأدمن'); ?></label>
-            <input type="password" name="admin_password" required autocomplete="current-password">
-            <div class="actions" style="margin-top:10px">
-                <button class="btn" type="submit" style="background:#b45309"><?php echo e($lang === 'en' ? 'Reboot system' : 'إعادة تشغيل النظام'); ?></button>
-            </div>
-        </form>
-        <form method="post" onsubmit="return confirm(<?php echo json_encode($lang === 'en' ? 'SHUT DOWN the server now? This will take it offline.' : 'إطفاء السيرفر الآن؟ راح ينقطع بالكامل.'); ?>);">
-            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
-            <input type="hidden" name="section" value="system_power">
-            <input type="hidden" name="power_action" value="shutdown">
-            <label><?php echo e($lang === 'en' ? 'Admin password' : 'كلمة مرور الأدمن'); ?></label>
-            <input type="password" name="admin_password" required autocomplete="current-password">
-            <div class="actions" style="margin-top:10px">
-                <button class="btn" type="submit" style="background:#b91c1c"><?php echo e($lang === 'en' ? 'Shutdown system' : 'إطفاء النظام'); ?></button>
-            </div>
-        </form>
-    </div>
-</div>
 <script>
 (function () {
   var btn = document.getElementById('sysStatusRefresh');
@@ -873,15 +857,15 @@ $loginBgColor = login_bg_color($s);
 $bgMode = function_exists('app_bg_mode') ? app_bg_mode($s) : 'color';
 $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
 ?>
-<div class="panel">
+<div class="panel appearance-panel" id="appearancePanel">
     <h2><?php echo e($lang === 'en' ? 'Appearance' : 'المظهر والخلفية'); ?></h2>
     <p class="meta" style="margin-top:-6px">
         <?php echo e($lang === 'en'
-            ? 'Toggle color or image. Image covers login and the app. Logo appears on login and dashboard.'
-            : 'بدّل بين لون أو صورة. الصورة تظهر بصفحة الدخول وبالنظام. الشعار يظهر بصفحة الدخول ويم الرئيسية.'); ?>
+            ? 'Toggle color or image. Image covers login and the app with a soft blur on panels. Logo appears on login and dashboard.'
+            : 'بدّل بين لون أو صورة. الصورة تظهر بصفحة الدخول وبالنظام بضبابية على اللوحات. الشعار يظهر بصفحة الدخول ويم الرئيسية.'); ?>
     </p>
-    <div class="login-bg-preview" style="background-color:<?php echo e($loginBgColor); ?>;<?php echo ($bgMode === 'image' && $loginBgUrl !== '') ? ('background-image:url(' . e($loginBgUrl) . ');') : ''; ?>"></div>
-    <form method="post" enctype="multipart/form-data">
+    <div class="login-bg-preview" id="appearancePreview" style="background-color:<?php echo e($loginBgColor); ?>;<?php echo ($bgMode === 'image' && $loginBgUrl !== '') ? ('background-image:url(' . e($loginBgUrl) . ');') : ''; ?>"></div>
+    <form method="post" enctype="multipart/form-data" id="appearanceForm">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="section" value="login_bg">
         <div class="bg-mode-toggle" role="group">
@@ -895,17 +879,19 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
             </label>
         </div>
         <div class="form-grid cols-2">
-            <div>
+            <div class="bg-opt-image" data-bg-opt="image">
                 <label><?php echo e($lang === 'en' ? 'Background image' : 'صورة الخلفية'); ?></label>
                 <input type="file" name="login_bg_file" accept="image/jpeg,image/png,image/gif,image/webp">
+                <small style="color:#64748b;font-weight:600"><?php echo e($lang === 'en' ? 'JPG/PNG/GIF/WEBP up to 8MB' : 'JPG/PNG/GIF/WEBP حتى 8MB'); ?></small>
             </div>
-            <div>
+            <div class="bg-opt-color" data-bg-opt="color">
                 <label><?php echo e($lang === 'en' ? 'Background color' : 'لون الخلفية'); ?></label>
                 <input type="color" name="login_bg_color" value="<?php echo e($loginBgColor); ?>">
             </div>
             <div>
                 <label><?php echo e($lang === 'en' ? 'System logo / icon' : 'شعار / أيقونة النظام'); ?></label>
                 <input type="file" name="brand_icon_file" accept="image/jpeg,image/png,image/gif,image/webp">
+                <small style="color:#64748b;font-weight:600"><?php echo e($lang === 'en' ? 'Any image up to 4MB' : 'أي صورة حتى 4MB'); ?></small>
                 <?php if ($brandIconUrl !== ''): ?>
                     <div style="margin-top:8px;display:flex;align-items:center;gap:8px">
                         <img src="<?php echo e($brandIconUrl); ?>" alt="" width="36" height="36" style="border-radius:8px;object-fit:contain;background:#fff;border:1px solid #e2e8f0">
@@ -916,7 +902,7 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
         <div class="actions">
             <button class="btn" type="submit"><?php echo e($lang === 'en' ? 'Save appearance' : 'حفظ المظهر'); ?></button>
             <?php if ($loginBgUrl !== ''): ?>
-                <button class="btn ghost" type="submit" name="login_bg_remove" value="1"><?php echo e($lang === 'en' ? 'Remove image' : 'حذف الصورة'); ?></button>
+                <button class="btn ghost bg-opt-image" type="submit" name="login_bg_remove" value="1" data-bg-opt="image"><?php echo e($lang === 'en' ? 'Remove image' : 'حذف الصورة'); ?></button>
             <?php endif; ?>
             <?php if ($brandIconUrl !== ''): ?>
                 <button class="btn ghost" type="submit" name="brand_icon_remove" value="1"><?php echo e($lang === 'en' ? 'Remove icon' : 'حذف الأيقونة'); ?></button>
@@ -924,6 +910,41 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
         </div>
     </form>
 </div>
+<style>
+.appearance-panel .bg-mode-toggle {
+  display: inline-flex; gap: 0; margin: 0 0 14px; border: 1px solid #d2d6de; border-radius: 10px; overflow: hidden;
+}
+.appearance-panel .bg-mode-toggle label {
+  margin: 0; cursor: pointer;
+}
+.appearance-panel .bg-mode-toggle input { position: absolute; opacity: 0; pointer-events: none; }
+.appearance-panel .bg-mode-toggle span {
+  display: inline-block; padding: 8px 16px; font-weight: 800; font-size: 13px; background: #fff; color: #475569;
+}
+.appearance-panel .bg-mode-toggle input:checked + span { background: #1e293b; color: #fff; }
+.appearance-panel [data-bg-opt].is-dim {
+  opacity: .38; filter: grayscale(.35); pointer-events: none;
+}
+.appearance-panel [data-bg-opt].is-dim input { pointer-events: none; }
+</style>
+<script>
+(function () {
+  var form = document.getElementById('appearanceForm');
+  if (!form) return;
+  function syncBgMode() {
+    var modeEl = form.querySelector('input[name="bg_mode"]:checked');
+    var mode = modeEl ? modeEl.value : 'color';
+    form.querySelectorAll('[data-bg-opt]').forEach(function (el) {
+      var want = el.getAttribute('data-bg-opt');
+      el.classList.toggle('is-dim', want !== mode);
+    });
+  }
+  form.querySelectorAll('input[name="bg_mode"]').forEach(function (r) {
+    r.addEventListener('change', syncBgMode);
+  });
+  syncBgMode();
+})();
+</script>
 
 <?php endif; ?>
 
@@ -995,6 +1016,35 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
             </label>
             <div class="actions">
                 <button class="btn danger" type="submit"><?php echo e(t('clear_data')); ?></button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="panel" style="margin-top:16px">
+    <h2><?php echo e($lang === 'en' ? 'Server power' : 'طاقة السيرفر'); ?></h2>
+    <p class="meta" style="margin:0 0 12px"><?php echo e($lang === 'en'
+        ? 'Requires OS permissions (sudo/reboot). Confirm with your admin password.'
+        : 'يحتاج صلاحيات النظام على السيرفر. أكّد بكلمة مرور الأدمن.'); ?></p>
+    <div class="form-grid cols-2">
+        <form method="post" onsubmit="return confirm(<?php echo json_encode($lang === 'en' ? 'Reboot the server now?' : 'إعادة تشغيل السيرفر الآن؟'); ?>);">
+            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+            <input type="hidden" name="section" value="system_power">
+            <input type="hidden" name="power_action" value="reboot">
+            <label><?php echo e($lang === 'en' ? 'Admin password' : 'كلمة مرور الأدمن'); ?></label>
+            <input type="password" name="admin_password" required autocomplete="current-password">
+            <div class="actions" style="margin-top:10px">
+                <button class="btn" type="submit" style="background:#b45309"><?php echo e($lang === 'en' ? 'Reboot system' : 'إعادة تشغيل النظام'); ?></button>
+            </div>
+        </form>
+        <form method="post" onsubmit="return confirm(<?php echo json_encode($lang === 'en' ? 'SHUT DOWN the server now? This will take it offline.' : 'إطفاء السيرفر الآن؟ راح ينقطع بالكامل.'); ?>);">
+            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+            <input type="hidden" name="section" value="system_power">
+            <input type="hidden" name="power_action" value="shutdown">
+            <label><?php echo e($lang === 'en' ? 'Admin password' : 'كلمة مرور الأدمن'); ?></label>
+            <input type="password" name="admin_password" required autocomplete="current-password">
+            <div class="actions" style="margin-top:10px">
+                <button class="btn" type="submit" style="background:#b91c1c"><?php echo e($lang === 'en' ? 'Shutdown system' : 'إطفاء النظام'); ?></button>
             </div>
         </form>
     </div>
@@ -1095,57 +1145,23 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
             </div>
         </div>
 
-        <div class="expiry-auto-box settings-block">
-            <label class="toggle" for="expiryAutoToggle">
-                <input type="checkbox" id="expiryAutoToggle" name="expiry_auto_remind_enabled" value="1"
-                    <?php echo !empty($s['expiry_auto_remind_enabled']) ? 'checked' : ''; ?>>
-                <span class="toggle-ui" aria-hidden="true"></span>
-                <span class="toggle-text"><?php echo e($lang === 'en'
-                    ? 'Auto reminder before subscription ends'
-                    : 'تذكير تلقائي قبل انتهاء الاشتراك'); ?></span>
-            </label>
-            <div id="expiryAutoFields" class="settings-stack" style="display:none;margin-top:14px">
-                <div class="settings-field settings-field-sm">
-                    <label><?php echo e($lang === 'en' ? 'Days before end' : 'قبل الانتهاء بـ (يوم)'); ?></label>
-                    <input type="number" min="0" max="60" name="expiry_auto_remind_days"
-                        value="<?php echo (int) (isset($s['expiry_auto_remind_days']) ? $s['expiry_auto_remind_days'] : 1); ?>">
-                </div>
-                <p class="meta" style="margin:0">
-                    <?php echo e($lang === 'en' ? 'Message text:' : 'نص الرسالة:'); ?>
-                    <a href="messages.php?mode=templates"><?php echo e(t('templates')); ?></a>
-                </p>
-            </div>
-        </div>
-
         <div class="actions">
             <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
         </div>
     </form>
 </div>
-<script>
-(function () {
-  var t = document.getElementById('expiryAutoToggle');
-  var f = document.getElementById('expiryAutoFields');
-  function sync() {
-    if (!f) return;
-    f.style.display = (t && t.checked) ? 'grid' : 'none';
-  }
-  if (t) t.addEventListener('change', sync);
-  sync();
-})();
-</script>
 
 <div class="panel">
     <h2><?php echo e($lang === 'en' ? 'Connect WhatsApp (QR)' : 'ربط واتساب (QR)'); ?></h2>
     <ol class="wa-steps">
         <?php if ($lang === 'en'): ?>
-            <li>On Windows PC <strong class="ltr" id="gwHost"><?php echo e($hostHint); ?></strong> run <strong>start-gateway.bat</strong> and keep the window open.</li>
-            <li>Click <strong>Disconnect & reconnect</strong> below.</li>
-            <li>The <strong>QR code appears in the big box under this text</strong> — scan it from WhatsApp → Linked devices.</li>
+            <li>On Windows PC <strong class="ltr" id="gwHost"><?php echo e($hostHint); ?></strong> run <strong>start-gateway.bat</strong> and keep it open.</li>
+            <li>If the phone says <em>Couldn’t link new devices</em>: stop trying for <strong>15–30 minutes</strong>. That lock is from WhatsApp, not this system.</li>
+            <li>Then press Disconnect once, wait until ONE QR appears, and scan it once — do not press Refresh repeatedly.</li>
         <?php else: ?>
             <li>على جهاز الويندوز <strong class="ltr" id="gwHost"><?php echo e($hostHint); ?></strong> شغّل <strong>start-gateway.bat</strong> وخلّ النافذة مفتوحة.</li>
-            <li>اضغط زر <strong>قطع الاتصال وإعادة الربط</strong> تحت.</li>
-            <li>رمز <strong>QR يطلع بالمربع الكبير تحت هالنص</strong> — صوّره من واتساب → الأجهزة المرتبطة.</li>
+            <li>إذا طلع بالهاتف <em>يتعذر ربط أجهزة جديدة حالياً</em>: <strong>توقف 15–30 دقيقة</strong> — هذا حظر من واتساب مو من النظام.</li>
+            <li>بعدها اضغط «قطع الاتصال» مرة واحدة، انتظر يطلع QR واحد، وامسحه مرة واحدة فقط — لا تضغط تحديث مرّات.</li>
         <?php endif; ?>
     </ol>
     <div id="wa-status" class="wa-box">...</div>
@@ -1159,7 +1175,7 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
         <img id="wa-qr-img" alt="QR" style="display:none">
     </div>
     <div class="actions">
-        <button class="btn secondary" type="button" onclick="checkWhatsApp(true)"><?php echo e($lang === 'en' ? 'Show / Refresh QR' : 'تحديث / إظهار QR'); ?></button>
+        <button class="btn secondary" type="button" onclick="checkWhatsApp(true)"><?php echo e($lang === 'en' ? 'Show QR (no spam)' : 'إظهار QR (بدون تحديث متكرر)'); ?></button>
         <button class="btn danger" type="button" onclick="logoutWhatsApp()"><?php echo e(t('reconnect_wa')); ?></button>
     </div>
 </div>
@@ -1192,8 +1208,9 @@ var L = {
     : 'ما وصلت لبوابة الويندوز. على جهاز ' . $hostHint . ' شغّل start-gateway.bat وخلّ النافذة مفتوحة.'); ?>,
   scanNew: <?php echo json_encode($lang === 'en' ? 'New QR ready — scan the box below' : 'طلع QR جديد — صوّر المربع تحت'); ?>,
   confirmLogout: <?php echo json_encode($lang === 'en' ? 'Disconnect and show new QR?' : 'تقطع الاتصال وتعيد مسح QR برقم ثاني؟'); ?>,
-  loggingOut: <?php echo json_encode($lang === 'en' ? 'Disconnecting… QR will appear in the box below' : 'جاري قطع الاتصال… الرمز راح يطلع بالمربع تحت'); ?>,
-  pressShow: <?php echo json_encode($lang === 'en' ? 'No QR yet. Make sure start-gateway.bat is running, then press Show QR.' : 'ما طلع QR. تأكد start-gateway.bat شغّال، بعدين اضغط تحديث / إظهار QR.'); ?>
+  loggingOut: <?php echo json_encode($lang === 'en' ? 'Disconnecting… wait ~20 seconds for one QR' : 'جاري قطع الاتصال… انتظر حوالي 20 ثانية لحد يطلع QR واحد'); ?>,
+  pressShow: <?php echo json_encode($lang === 'en' ? 'No QR yet. Wait, then press Show QR once.' : 'ما طلع QR بعد. انتظر شوي، بعدين اضغط إظهار QR مرة واحدة.'); ?>,
+  rateLimit: <?php echo json_encode($lang === 'en' ? 'WhatsApp blocked linking temporarily. Wait 15–30 minutes, then try once.' : 'واتساب حظر الربط مؤقتاً. انتظر 15–30 دقيقة، بعدين حاول مرة واحدة فقط.'); ?>
 };
 
 function setStatus(cls, text) {
@@ -1243,6 +1260,12 @@ function checkWhatsApp(forceQr) {
         }
         return null;
       }
+      if (!forceQr && !(data && data.has_qr)) {
+        var waitMsg = (data && data.status === 'logout_cooldown') ? L.loggingOut : L.pressShow;
+        setStatus('warn', waitMsg);
+        showWaitingBox(waitMsg);
+        return null;
+      }
       setStatus('warn', L.fetching);
       showWaitingBox(L.waiting);
       return fetch('wa_proxy.php?action=qr&_=' + Date.now()).then(function (r) { return r.json(); });
@@ -1279,11 +1302,7 @@ function waitForQr(tries) {
       if (qr && qr.error) {
         setStatus('err', qr.error);
         showWaitingBox(qr.error.indexOf('gateway') >= 0 || qr.error.indexOf('بوابة') >= 0 || qr.error.indexOf('reach') >= 0 ? L.gatewayDown : qr.error);
-        if (tries > 10) {
-          qrWaitTimer = setTimeout(function () { waitForQr(tries - 1); }, 2500);
-          return;
-        }
-        waBusy = false;
+        qrWaitTimer = setTimeout(function () { waitForQr(tries - 1); }, 4000);
         return;
       }
       if (qr && qr.ready) {
@@ -1298,12 +1317,12 @@ function waitForQr(tries) {
       }
       setStatus('warn', L.waiting + ' (' + tries + ')');
       showWaitingBox(L.waiting + ' (' + tries + ')');
-      qrWaitTimer = setTimeout(function () { waitForQr(tries - 1); }, 2000);
+      qrWaitTimer = setTimeout(function () { waitForQr(tries - 1); }, 4000);
     })
     .catch(function () {
       setStatus('err', L.gatewayDown);
       showWaitingBox(L.gatewayDown);
-      qrWaitTimer = setTimeout(function () { waitForQr(tries - 1); }, 3000);
+      qrWaitTimer = setTimeout(function () { waitForQr(tries - 1); }, 5000);
     });
 }
 function logoutWhatsApp() {
@@ -1321,7 +1340,7 @@ function logoutWhatsApp() {
         waBusy = false;
         return;
       }
-      waitForQr(20);
+      setTimeout(function () { waitForQr(15); }, 12000);
     })
     .catch(function () {
       setStatus('err', L.gatewayDown);
@@ -1329,8 +1348,10 @@ function logoutWhatsApp() {
       waBusy = false;
     });
 }
-checkWhatsApp(true);
-setInterval(function () { if (!waBusy) checkWhatsApp(false); }, 10000);
+checkWhatsApp(false);
+setInterval(function () {
+  if (!waBusy) checkWhatsApp(false);
+}, 60000);
 </script>
 <?php endif; ?>
 

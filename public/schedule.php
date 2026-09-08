@@ -18,11 +18,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     $section = post('section', '');
     if ($section === 'schedule') {
+        $expDays = (int) post('expiry_auto_remind_days', '1');
+        if ($expDays < 0) {
+            $expDays = 0;
+        }
+        if ($expDays > 60) {
+            $expDays = 60;
+        }
         $data = array(
             'schedule_cut_enabled' => post('schedule_cut_enabled') === '1',
             'schedule_cut_send_wa' => post('schedule_cut_send_wa') === '1',
             'tpl_schedule_cut' => (string) post('tpl_schedule_cut', ''),
             'wa_case_schedule_cut' => 'schedule_cut',
+            'expiry_auto_remind_enabled' => post('expiry_auto_remind_enabled') === '1',
+            'expiry_auto_remind_days' => $expDays,
         );
         if (post('schedule_run_now') === '1' && function_exists('run_schedule_debt_cuts')) {
             if (settings_save($data)) {
@@ -146,34 +155,64 @@ $topTools = '<button type="button" class="btn ghost sm" id="schedSettingsBtn" ti
 render_header($isEn ? 'Periodic jobs' : 'الجدول الدوري', 'schedule', '', '', $topTools);
 ?>
 <style>
-.sched-page { max-width: 1100px; margin: 0 auto; }
-.sched-head {
-  display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between;
-  margin: 0 0 14px;
+.sched-page { max-width: 1180px; margin: 0 auto; }
+.sched-hero {
+  margin: 0 0 14px; padding: 16px 18px; border-radius: 16px;
+  background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 100%); color: #fff;
+  box-shadow: 0 10px 28px rgba(15,23,42,.18);
 }
+.sched-hero h2 { margin: 0 0 6px; font-size: 18px; }
+.sched-hero p { margin: 0 0 12px; opacity: .88; font-size: 13px; font-weight: 600; max-width: 62ch; }
+.sched-hero-pills { display: flex; flex-wrap: wrap; gap: 8px; }
 .sched-pill {
-  display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 999px;
-  font-size: 12px; font-weight: 800; border: 1px solid #e2e8f0; background: #fff;
+  display: inline-flex; align-items: center; gap: 6px; padding: 6px 11px; border-radius: 999px;
+  font-size: 12px; font-weight: 800; border: 1px solid rgba(255,255,255,.22);
+  background: rgba(255,255,255,.12); color: #fff;
 }
-.sched-pill.on { background: #ecfdf5; color: #166534; border-color: #bbf7d0; }
-.sched-pill.off { background: #fff1f2; color: #9f1239; border-color: #fecdd3; }
+.sched-pill.on { background: rgba(34,197,94,.22); border-color: rgba(134,239,172,.45); }
+.sched-pill.off { background: rgba(244,63,94,.2); border-color: rgba(253,164,175,.45); }
+.sched-toolbar {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 10px;
+}
 .sched-table-wrap {
-  overflow: auto; border: 1px solid #e2e8f0; border-radius: 14px; background: rgba(255,255,255,.92);
+  overflow: auto; border: 1px solid rgba(15,23,42,.08); border-radius: 16px;
+  background: rgba(255,255,255,.92); box-shadow: 0 8px 24px rgba(15,23,42,.05);
 }
-.sched-table { width: 100%; border-collapse: collapse; min-width: 720px; }
+.sched-table { width: 100%; border-collapse: collapse; min-width: 860px; }
 .sched-table th, .sched-table td {
-  padding: 10px 12px; border-bottom: 1px solid #eef2f7; text-align: start; font-size: 13px;
+  padding: 9px 10px; border-bottom: 1px solid #eef2f7; text-align: start; font-size: 13px;
+  vertical-align: middle;
 }
-.sched-table th { background: #f8fafc; font-weight: 800; color: #334155; position: sticky; top: 0; }
+.sched-table th { background: #f1f5f9; font-weight: 800; color: #334155; position: sticky; top: 0; z-index: 1; }
 .sched-table tr:last-child td { border-bottom: 0; }
-.sched-table .will-cut { background: #fff7ed; }
+.sched-table tbody tr:hover td { background: #f8fafc; }
+.sched-table tbody tr.is-checked td { background: #eef2ff; }
+.sched-table .will-cut td { background: #fff7ed; }
 .sched-table .cut-done { opacity: .72; }
+.sched-num { width: 42px; text-align: center !important; color: #64748b; font-weight: 700; }
+.sched-check { width: 36px; text-align: center !important; }
+.sched-ops { width: 70px; white-space: nowrap; }
 .sched-badge {
   display: inline-block; padding: 3px 8px; border-radius: 999px; font-size: 11px; font-weight: 800;
+  white-space: nowrap;
 }
 .sched-badge.warn { background: #ffedd5; color: #9a3412; }
 .sched-badge.ok { background: #dcfce7; color: #166534; }
 .sched-badge.bad { background: #fee2e2; color: #991b1b; }
+.sched-badge.muted { background: #e2e8f0; color: #475569; }
+.sched-name { font-weight: 800; color: #0f172a; }
+.sched-user { font-size: 12px; color: #64748b; font-weight: 600; direction: ltr; unicode-bidi: isolate; }
+.sched-ops-drop {
+  position: fixed; z-index: 90; min-width: 180px; background: #fff; border: 1px solid #e2e8f0;
+  border-radius: 12px; box-shadow: 0 12px 28px rgba(15,23,42,.16); padding: 6px; display: none;
+}
+.sched-ops-drop.open { display: block; }
+.sched-ops-drop a, .sched-ops-drop button {
+  display: block; width: 100%; text-align: start; border: 0; background: transparent;
+  padding: 9px 10px; border-radius: 8px; font: inherit; font-weight: 700; font-size: 13px;
+  color: #0f172a; cursor: pointer; text-decoration: none;
+}
+.sched-ops-drop a:hover, .sched-ops-drop button:hover { background: #f1f5f9; }
 .sched-drawer {
   position: fixed; inset: 0; z-index: 80; display: none; align-items: stretch; justify-content: flex-end;
   background: rgba(15,23,42,.35);
@@ -189,12 +228,17 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
 .sched-drawer .meta { margin: 0 0 14px; color: #64748b; font-size: 13px; }
 @media (max-width: 640px) {
   .sched-drawer-panel { width: 100%; }
+  .sched-hero { padding: 14px; }
 }
 </style>
 
 <div class="sched-page">
-  <div class="sched-head">
-    <div>
+  <div class="sched-hero">
+    <h2><?php echo e($isEn ? 'Periodic schedule' : 'الجدول الدوري'); ?></h2>
+    <p><?php echo e($isEn
+        ? 'Unpaid debtors — days past due vs grace, and who will be cut.'
+        : 'المدينين غير المسددين — الأيام الماضية مقابل السماح، ومن راح ينقطع.'); ?></p>
+    <div class="sched-hero-pills">
       <span class="sched-pill <?php echo $enabled ? 'on' : 'off'; ?>">
         <?php echo $enabled
             ? e($isEn ? 'Auto-cut ON' : 'القطع التلقائي يعمل')
@@ -211,9 +255,14 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
         <?php echo e($isEn ? 'Debtors' : 'مدينين'); ?>: <?php echo count($list); ?>
       </span>
     </div>
-    <div class="meta"><?php echo e($isEn
-        ? 'Subscribers with unpaid debts and days past due vs grace.'
-        : 'المشتركين عليهم دين غير مسدد — كم يوم مضى مقابل أيام السماح.'); ?></div>
+  </div>
+
+  <div class="sched-toolbar">
+    <label style="display:inline-flex;align-items:center;gap:6px;font-weight:700;font-size:13px">
+      <input type="checkbox" id="schedCheckAll">
+      <?php echo e($isEn ? 'Select all' : 'تحديد الكل'); ?>
+    </label>
+    <span class="meta" id="schedSelectedHint" style="margin:0"></span>
   </div>
 
   <?php if ($queryError !== '' && !$list): ?>
@@ -221,22 +270,25 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
   <?php endif; ?>
 
   <div class="sched-table-wrap">
-    <table class="sched-table">
+    <table class="sched-table" id="schedTable">
       <thead>
         <tr>
+          <th class="sched-num">#</th>
+          <th class="sched-check"><input type="checkbox" id="schedCheckAllHead" title="<?php echo e($isEn ? 'Select all' : 'تحديد الكل'); ?>"></th>
           <th><?php echo e($isEn ? 'Subscriber' : 'المشترك'); ?></th>
           <th><?php echo e($isEn ? 'Username' : 'اليوزر'); ?></th>
           <th><?php echo e($isEn ? 'Debt' : 'الدين'); ?></th>
           <th><?php echo e($isEn ? 'Days past' : 'مضى'); ?></th>
           <th><?php echo e($isEn ? 'Grace' : 'السماح'); ?></th>
           <th><?php echo e($isEn ? 'Status' : 'الحالة'); ?></th>
+          <th class="sched-ops"><?php echo e($isEn ? 'Ops' : 'عمليات'); ?></th>
         </tr>
       </thead>
       <tbody>
       <?php if (!$list): ?>
-        <tr><td colspan="6"><?php echo e($isEn ? 'No unpaid debtors found.' : 'ماكو مدينين غير مسددين.'); ?></td></tr>
+        <tr><td colspan="9"><?php echo e($isEn ? 'No unpaid debtors found.' : 'ماكو مدينين غير مسددين.'); ?></td></tr>
       <?php endif; ?>
-      <?php foreach ($list as $r): ?>
+      <?php $rowNum = 0; foreach ($list as $r): $rowNum++; ?>
         <?php
           $cls = '';
           if ((int) $r['enabled'] === 0) {
@@ -244,14 +296,19 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
           } elseif ($r['will_cut']) {
               $cls = 'will-cut';
           }
-          $userUrl = 'sas_user.php?u=' . rawurlencode($r['username']);
+          $userUrl = $r['username'] !== ''
+              ? ('sas_user.php?u=' . rawurlencode($r['username']))
+              : ('subscriber.php?id=' . (int) $r['id']);
+          $debtsUrl = 'debts.php?status=unpaid&subscriber_id=' . (int) $r['id'];
         ?>
-        <tr class="<?php echo e($cls); ?>">
+        <tr class="<?php echo e($cls); ?>" data-sid="<?php echo (int) $r['id']; ?>">
+          <td class="sched-num"><?php echo (int) $rowNum; ?></td>
+          <td class="sched-check"><input type="checkbox" class="sched-row-check" value="<?php echo (int) $r['id']; ?>"></td>
           <td>
-            <a href="<?php echo e($userUrl); ?>"><strong><?php echo e($r['name'] !== '' ? $r['name'] : $r['username']); ?></strong></a>
-            <?php if ($r['phone'] !== ''): ?><div class="meta" style="margin:2px 0 0"><?php echo e($r['phone']); ?></div><?php endif; ?>
+            <a class="sched-name" href="<?php echo e($userUrl); ?>"><?php echo e($r['name'] !== '' ? $r['name'] : $r['username']); ?></a>
+            <?php if ($r['phone'] !== ''): ?><div class="meta" style="margin:2px 0 0;direction:ltr;text-align:left"><?php echo e($r['phone']); ?></div><?php endif; ?>
           </td>
-          <td class="ltr"><a href="<?php echo e($userUrl); ?>"><?php echo e($r['username']); ?></a></td>
+          <td><?php if ($r['username'] !== ''): ?><a class="sched-user" href="<?php echo e($userUrl); ?>"><?php echo e($r['username']); ?></a><?php else: ?>—<?php endif; ?></td>
           <td><?php echo e(money_format_iqd($r['debt'], $config['currency'])); ?></td>
           <td><?php echo (int) $r['days_passed']; ?></td>
           <td><?php echo (int) $r['grace']; ?></td>
@@ -260,20 +317,27 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
               <span class="sched-badge bad"><?php echo e($isEn ? 'Already disabled' : 'معطّل حالياً'); ?></span>
             <?php elseif ($r['will_cut']): ?>
               <span class="sched-badge warn"><?php echo e($isEn ? 'Will be cut' : 'راح ينقطع'); ?></span>
-              <?php if ($sendWa): ?>
-                <div class="meta" style="margin-top:4px"><?php echo e($isEn ? 'WA cut notice: yes' : 'إشعار القطع: نعم'); ?></div>
-              <?php else: ?>
-                <div class="meta" style="margin-top:4px"><?php echo e($isEn ? 'WA cut notice: no' : 'إشعار القطع: لا'); ?></div>
-              <?php endif; ?>
+              <span class="sched-badge muted"><?php echo e($sendWa ? ($isEn ? 'WA: yes' : 'إشعار القطع: نعم') : ($isEn ? 'WA: no' : 'إشعار القطع: لا')); ?></span>
             <?php else: ?>
               <span class="sched-badge ok"><?php echo e($isEn ? ('In grace (' . (int) $r['days_left'] . ' left)') : ('ضمن السماح (باقي ' . (int) $r['days_left'] . ')')); ?></span>
             <?php endif; ?>
+          </td>
+          <td class="sched-ops">
+            <button type="button" class="btn ghost sm sched-ops-btn"
+              data-user="<?php echo e($userUrl); ?>"
+              data-debts="<?php echo e($debtsUrl); ?>"
+              data-name="<?php echo e($r['name'] !== '' ? $r['name'] : $r['username']); ?>">⋯</button>
           </td>
         </tr>
       <?php endforeach; ?>
       </tbody>
     </table>
   </div>
+</div>
+
+<div class="sched-ops-drop" id="schedOpsDrop" hidden>
+  <a href="#" id="schedOpsOpen"><?php echo e($isEn ? 'Open subscriber' : 'فتح المشترك'); ?></a>
+  <a href="#" id="schedOpsDebts"><?php echo e($isEn ? 'Debts' : 'الديون'); ?></a>
 </div>
 
 <div class="sched-drawer" id="schedDrawer" aria-hidden="true">
@@ -298,6 +362,21 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
         <span class="toggle-ui"></span>
         <span><strong><?php echo e($isEn ? 'Send cut WhatsApp' : 'إرسال رسالة القطع'); ?></strong></span>
       </label>
+      <label class="toggle" style="display:flex;align-items:center;gap:10px;padding:12px;border:1px solid #e2e8f0;border-radius:10px;margin-bottom:10px">
+        <input type="checkbox" id="expiryAutoToggle" name="expiry_auto_remind_enabled" value="1"
+          <?php echo !empty($s['expiry_auto_remind_enabled']) ? 'checked' : ''; ?>>
+        <span class="toggle-ui"></span>
+        <span><strong><?php echo e($isEn ? 'Auto reminder before subscription ends' : 'تذكير تلقائي قبل انتهاء الاشتراك'); ?></strong></span>
+      </label>
+      <div id="expiryAutoFields" style="display:none;margin:0 0 12px;padding:12px;border:1px solid #e2e8f0;border-radius:10px">
+        <label><?php echo e($isEn ? 'Days before end' : 'قبل الانتهاء بـ (يوم)'); ?></label>
+        <input type="number" min="0" max="60" name="expiry_auto_remind_days"
+          value="<?php echo (int) (isset($s['expiry_auto_remind_days']) ? $s['expiry_auto_remind_days'] : 1); ?>" style="width:100%;max-width:120px">
+        <p class="meta" style="margin:8px 0 0">
+          <?php echo e($isEn ? 'Message text:' : 'نص الرسالة:'); ?>
+          <a href="messages.php?mode=templates"><?php echo e(t('templates')); ?></a>
+        </p>
+      </div>
       <label><?php echo e($isEn ? 'Cut message template' : 'قالب رسالة القطع'); ?></label>
       <p class="meta">{name} {debt} {days_passed} {grace} {package} {month}</p>
       <textarea name="tpl_schedule_cut" rows="6" style="width:100%"><?php echo e(isset($s['tpl_schedule_cut']) ? $s['tpl_schedule_cut'] : ''); ?></textarea>
@@ -312,6 +391,16 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
   </div>
 </div>
 <script>
+(function () {
+  var t = document.getElementById('expiryAutoToggle');
+  var f = document.getElementById('expiryAutoFields');
+  function syncExp() {
+    if (!f) return;
+    f.style.display = (t && t.checked) ? 'block' : 'none';
+  }
+  if (t) t.addEventListener('change', syncExp);
+  syncExp();
+})();
 (function () {
   var btn = document.getElementById('schedSettingsBtn');
   var drawer = document.getElementById('schedDrawer');
@@ -330,6 +419,61 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
   if (closeBtn) closeBtn.addEventListener('click', close);
   if (drawer) drawer.addEventListener('click', function (e) {
     if (e.target === drawer) close();
+  });
+
+  function syncChecks(master) {
+    document.querySelectorAll('.sched-row-check').forEach(function (c) {
+      c.checked = !!master.checked;
+      var tr = c.closest('tr');
+      if (tr) tr.classList.toggle('is-checked', c.checked);
+    });
+    var all = document.getElementById('schedCheckAll');
+    var head = document.getElementById('schedCheckAllHead');
+    if (all && all !== master) all.checked = !!master.checked;
+    if (head && head !== master) head.checked = !!master.checked;
+    updateHint();
+  }
+  function updateHint() {
+    var n = document.querySelectorAll('.sched-row-check:checked').length;
+    var hint = document.getElementById('schedSelectedHint');
+    if (hint) hint.textContent = n ? (n + ' <?php echo $isEn ? 'selected' : 'محدد'; ?>') : '';
+  }
+  var all = document.getElementById('schedCheckAll');
+  var head = document.getElementById('schedCheckAllHead');
+  if (all) all.addEventListener('change', function () { syncChecks(all); });
+  if (head) head.addEventListener('change', function () { syncChecks(head); });
+  document.querySelectorAll('.sched-row-check').forEach(function (c) {
+    c.addEventListener('change', function () {
+      var tr = c.closest('tr');
+      if (tr) tr.classList.toggle('is-checked', c.checked);
+      updateHint();
+    });
+  });
+
+  var drop = document.getElementById('schedOpsDrop');
+  var opsOpen = document.getElementById('schedOpsOpen');
+  var opsDebts = document.getElementById('schedOpsDebts');
+  function hideOps() {
+    if (!drop) return;
+    drop.classList.remove('open');
+    drop.hidden = true;
+  }
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest ? e.target.closest('.sched-ops-btn') : null;
+    if (b && drop) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (opsOpen) opsOpen.href = b.getAttribute('data-user') || '#';
+      if (opsDebts) opsDebts.href = b.getAttribute('data-debts') || '#';
+      drop.hidden = false;
+      drop.classList.add('open');
+      var r = b.getBoundingClientRect();
+      drop.style.top = Math.round(r.bottom + 4) + 'px';
+      drop.style.left = Math.round(Math.min(window.innerWidth - 200, Math.max(8, r.left))) + 'px';
+      return;
+    }
+    if (!drop || (e.target.closest && e.target.closest('#schedOpsDrop'))) return;
+    hideOps();
   });
 })();
 </script>
