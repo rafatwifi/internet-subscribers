@@ -4,6 +4,7 @@ const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
 const pino = require('pino');
+const https = require('https');
 
 const {
   default: makeWASocket,
@@ -30,9 +31,35 @@ let ignoreReconnect = false;
 let failCount = 0;
 let reconnectTimer = null;
 let lastStatusMsg = 'starting';
+let lastQrAt = 0;
+let qrHoldUntil = 0;
+let pairingQuietUntil = 0;
+let lastWipeAt = 0;
+let useInsecureTls = String(process.env.WA_TLS_INSECURE || '') === '1';
+
+const FALLBACK_WA_VERSION = [2, 3000, 1043857760];
+const STALE_WA_BUILDS = {
+  '2.3000.1023223821': true
+};
+
+function versionKey(v) {
+  return Array.isArray(v) ? v.join('.') : '';
+}
+
+function isUsableVersion(v) {
+  if (!v || !Array.isArray(v) || v.length !== 3) return false;
+  if (STALE_WA_BUILDS[versionKey(v)]) return false;
+  return true;
+}
+
+function makeTlsAgent() {
+  return new https.Agent({
+    keepAlive: true,
+    rejectUnauthorized: !useInsecureTls
+  });
+}
 
 async function resolveWaVersion() {
-  // 1) يدوي من البيئة: WA_VERSION=2,3000,1037641644
   if (process.env.WA_VERSION) {
     const parts = String(process.env.WA_VERSION).split(',').map(function (x) { return parseInt(x.trim(), 10); });
     if (parts.length === 3 && parts.every(function (n) { return !isNaN(n); })) {
@@ -40,11 +67,11 @@ async function resolveWaVersion() {
       return parts;
     }
   }
-  // 2) نسخة واتساب ويب الحالية
+
   try {
     if (typeof fetchLatestWaWebVersion === 'function') {
       const r = await fetchLatestWaWebVersion();
-      if (r && r.version) {
+      if (r && isUsableVersion(r.version)) {
         console.log('WA version (web):', r.version.join('.'));
         return r.version;
       }
@@ -52,20 +79,24 @@ async function resolveWaVersion() {
   } catch (e) {
     console.log('fetchLatestWaWebVersion failed:', e && e.message ? e.message : e);
   }
-  // 3) نسخة Baileys الافتراضية المحدّثة
+
   try {
     if (typeof fetchLatestBaileysVersion === 'function') {
       const r = await fetchLatestBaileysVersion();
-      if (r && r.version) {
-        console.log('WA version (baileys):', r.version.join('.'));
+      if (r && isUsableVersion(r.version)) {
+        console.log('WA version (baileys):', r.version.join('.'), r.isLatest === false ? '(local/cache)' : '');
         return r.version;
+      }
+      if (r && r.version && STALE_WA_BUILDS[versionKey(r.version)]) {
+        console.log('WA version (baileys stale):', r.version.join('.'), '— skipping');
       }
     }
   } catch (e) {
     console.log('fetchLatestBaileysVersion failed:', e && e.message ? e.message : e);
   }
-  console.log('WA version: library default');
-  return undefined;
+
+  console.log('WA version (fallback):', FALLBACK_WA_VERSION.join('.'));
+  return FALLBACK_WA_VERSION;
 }
 
 function ensureAuthDir() {
@@ -96,7 +127,7 @@ function scheduleReconnect(ms, wipeFirst) {
   reconnectTimer = setTimeout(function () {
     reconnectTimer = null;
     if (wipeFirst) {
-      console.log('مسح الجلسة وبدء من جديد...');
+      console.log('Wiping session and starting fresh...');
       wipeAuthDir();
       failCount = 0;
     }
@@ -140,10 +171,15 @@ async function startSocket() {
       generateHighQualityLinkPreview: false,
       connectTimeoutMs: 60000,
       keepAliveIntervalMs: 20000,
-      browser: Browsers && Browsers.macOS ? Browsers.macOS('Chrome') : ['Mac OS', 'Chrome', '14.4.1']
+      browser: Browsers && Browsers.ubuntu ? Browsers.ubuntu('Chrome') : ['Ubuntu', 'Chrome', '22.04.4'],
+      agent: makeTlsAgent(),
+      fetchAgent: makeTlsAgent()
     };
     if (version) {
       sockOpts.version = version;
+    }
+    if (useInsecureTls) {
+      console.log('TLS: rejectUnauthorized=false (WA_TLS_INSECURE / cert workaround)');
     }
 
     sock = makeWASocket(sockOpts);
@@ -155,27 +191,36 @@ async function startSocket() {
 
       if (qr) {
         ready = false;
+        const now = Date.now();
+        // احتفظ بنفس QR دقيقة على الأقل — المسح المتكرر يسبب حظر واتساب
+        if (lastQrDataUrl && lastQrAt > 0 && (now - lastQrAt) < 60000) {
+          lastStatusMsg = 'qr_ready';
+          pairingQuietUntil = Math.max(pairingQuietUntil, now + 120000);
+          return;
+        }
         lastQr = qr;
-        failCount = 0;
+        lastQrAt = now;
+        qrHoldUntil = now + 180000;
+        pairingQuietUntil = now + 180000;
         lastStatusMsg = 'qr_ready';
         try {
           lastQrDataUrl = await QRCode.toDataURL(qr, { width: 360, margin: 2 });
         } catch (e) {
           lastQrDataUrl = null;
         }
-        console.log('\n========== امسح QR من واتساب ==========');
+        console.log('\n========== Scan this QR in WhatsApp (within ~2 min) ==========');
         qrcodeTerminal.generate(qr, { small: true });
-        console.log('========================================');
-        console.log('أو افتح بالمتصفح على الحاسبة:');
+        console.log('Keep this window open. Do not spam refresh.');
         console.log('http://127.0.0.1:' + PORT + '/link?key=' + API_KEY);
-        console.log('أو من الشبكة:');
-        console.log('http://172.16.16.13:' + PORT + '/link?key=' + API_KEY);
       }
 
       if (connection === 'open') {
         ready = true;
         lastQr = null;
         lastQrDataUrl = null;
+        lastQrAt = 0;
+        qrHoldUntil = 0;
+        pairingQuietUntil = 0;
         ignoreReconnect = false;
         failCount = 0;
         lastStatusMsg = 'connected';
@@ -192,33 +237,91 @@ async function startSocket() {
         connectedPhone = null;
         const err = lastDisconnect && lastDisconnect.error ? lastDisconnect.error : null;
         const code = (err && err.output && err.output.statusCode) || 0;
+        const errMsg = err && err.message ? String(err.message) : '';
         const loggedOut = code === DisconnectReason.loggedOut;
-        lastStatusMsg = 'closed_' + code;
-        console.log('Connection closed. code=', code, err && err.message ? err.message : '');
+        const badSession = code === DisconnectReason.badSession || code === 500;
+        const certExpired = /certificate has expired/i.test(errMsg);
+        lastStatusMsg = certExpired ? 'cert_expired' : ('closed_' + code);
+        console.log('Connection closed. code=', code, errMsg || '');
 
         if (ignoreReconnect || loggedOut) {
           if (loggedOut) {
             wipeAuthDir();
-            console.log('Logged out. امسح auth وانتظر QR بعد إعادة التشغيل.');
+            console.log('Logged out. Wipe auth and wait for new QR after restart.');
           }
           return;
         }
 
-        failCount += 1;
-        // عند 500/408 لا تمسح الجلسة بسرعة — أعد الاتصال فقط
-        let waitMs = 5000;
-        if (code === 500 || code === 515 || code === 408 || code === 428 || code === 405 || code === 440) {
-          waitMs = Math.min(120000, 12000 * failCount);
-        } else {
-          waitMs = Math.min(45000, 5000 * failCount);
+        // 515 = WhatsApp يطلب إعادة تشغيل فورية — لا تنتظر هدوء QR (يضيّع فرصة المسح)
+        if (code === 515 || code === DisconnectReason.restartRequired) {
+          console.log('515 restart required — reconnect in 3s (QR kept if present)');
+          failCount = 0;
+          scheduleReconnect(3000, false);
+          return;
         }
-        // امسح الجلسة فقط بعد محاولات كثيرة جداً (تقليل طلب QR)
-        const wipe = failCount >= 12;
+
+        // 405 = نسخة عميل قديمة
+        if (code === 405) {
+          console.log('405 client too old — reconnect in 5s with fresh WA version');
+          failCount = 0;
+          scheduleReconnect(5000, false);
+          return;
+        }
+
+        // certificate expired: غالباً أنتيفايروس/بروكسي — لا تمسح auth كل ثانية (يمنع QR)
+        if (certExpired || badSession) {
+          if (!useInsecureTls) {
+            useInsecureTls = true;
+            console.log('Cert/TLS error — enabling insecure TLS agent (common with AV HTTPS scan). No auth wipe.');
+            failCount = 0;
+            lastStatusMsg = 'tls_retry';
+            scheduleReconnect(4000, false);
+            return;
+          }
+          const nowWipe = Date.now();
+          const canWipe = (nowWipe - lastWipeAt) > 15 * 60 * 1000;
+          if (canWipe) {
+            console.log('Still failing after insecure TLS — wipe auth once (max every 15 min)...');
+            lastWipeAt = nowWipe;
+            wipeAuthDir();
+            lastQr = null;
+            lastQrDataUrl = null;
+            lastQrAt = 0;
+            qrHoldUntil = 0;
+            pairingQuietUntil = 0;
+            failCount = 0;
+            lastStatusMsg = 'cert_expired';
+            scheduleReconnect(20000, false);
+            return;
+          }
+          failCount += 1;
+          const waitMs = Math.min(300000, 45000 * Math.max(1, failCount));
+          console.log('Cert/TLS still failing — wait', Math.round(waitMs / 1000), 's (no wipe loop)');
+          lastStatusMsg = 'cert_expired';
+          scheduleReconnect(waitMs, false);
+          return;
+        }
+
+        // أثناء انتظار المسح: لا تعِد الاتصال بسرعة (كل إعادة = محاولة ربط يحظرها واتساب)
+        const nowClose = Date.now();
+        if (pairingQuietUntil > nowClose || qrHoldUntil > nowClose) {
+          const waitHold = Math.max(pairingQuietUntil, qrHoldUntil) - nowClose + 3000;
+          console.log('QR quiet — reconnect in', Math.round(waitHold / 1000), 's');
+          scheduleReconnect(waitHold, false);
+          return;
+        }
+
+        failCount += 1;
+        let waitMs = Math.min(180000, 20000 * failCount);
+        if (code === 408 || code === 428 || code === 440) {
+          waitMs = Math.min(300000, 30000 * failCount);
+        }
+        const wipe = failCount >= 40;
         console.log(
-          'فشل اتصال WhatsApp. انتظار',
+          'WhatsApp connect failed. Wait',
           Math.round(waitMs / 1000),
-          'ثواني...',
-          wipe ? '(مسح جلسة)' : ''
+          's...',
+          wipe ? '(wipe session)' : ''
         );
         scheduleReconnect(waitMs, wipe);
       }
@@ -226,7 +329,7 @@ async function startSocket() {
   } catch (e) {
     console.error('startSocket error', e);
     lastStatusMsg = 'error';
-    scheduleReconnect(10000, false);
+    scheduleReconnect(20000, false);
   } finally {
     starting = false;
   }
@@ -238,9 +341,12 @@ async function hardLogout() {
   ready = false;
   lastQr = null;
   lastQrDataUrl = null;
+  lastQrAt = 0;
+  qrHoldUntil = 0;
+  pairingQuietUntil = Date.now() + 20000;
   connectedPhone = null;
   failCount = 0;
-  lastStatusMsg = 'logout';
+  lastStatusMsg = 'logout_cooldown';
 
   if (sock) {
     try { await sock.logout(); } catch (e) {}
@@ -253,9 +359,9 @@ async function hardLogout() {
   setTimeout(function () {
     ignoreReconnect = false;
     startSocket().catch(console.error);
-  }, 3000);
+  }, 12000);
 
-  return { success: true, message: 'Logged out. Waiting for new QR...' };
+  return { success: true, message: 'Logged out. Wait ~12s for new QR...' };
 }
 
 async function sendText(phone, message) {
@@ -294,9 +400,10 @@ app.get('/status', checkKey, (req, res) => {
   res.json({
     success: true,
     ready: ready,
-    has_qr: !!lastQr,
+    has_qr: !!(lastQr || lastQrDataUrl),
     phone: connectedPhone,
-    status: lastStatusMsg
+    status: lastStatusMsg,
+    tls_insecure: !!useInsecureTls
   });
 });
 
@@ -328,7 +435,7 @@ app.get('/link', checkKey, (req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.end(
     '<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">' +
-    '<meta http-equiv="refresh" content="3">' +
+    '<meta http-equiv="refresh" content="20">' +
     '<title>WhatsApp QR</title>' +
     '<style>body{font-family:Tahoma,Arial;display:grid;place-items:center;min-height:100vh;background:#eef2f6;margin:0}' +
     '.box{background:#fff;padding:24px;border-radius:16px;box-shadow:0 8px 24px rgba(0,0,0,.08);text-align:center}</style></head><body>' +

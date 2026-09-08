@@ -7,6 +7,7 @@ require_login();
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
     header('Content-Type: application/json; charset=utf-8');
     $en = (isset($lang) && $lang === 'en');
+    $force = (isset($_GET['refresh']) && $_GET['refresh'] === '1');
     $out = array(
         'ok' => true,
         'points' => '—',
@@ -15,9 +16,37 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
         'cards' => array(),
         'card_total' => 0,
         'card_sub' => $en ? 'Unused' : 'شاغرة',
+        'from_cache' => false,
     );
+
+    // قيم الكروت المخزّنة على السيرفر تظهر فوراً (يفضّل جرد الكروت الأدق)
+    if (function_exists('sas_dash_cards_preferred_persisted')) {
+        $persisted = sas_dash_cards_preferred_persisted();
+        if ($persisted) {
+            $out['cards'] = isset($persisted['groups']) ? $persisted['groups'] : array();
+            $out['card_total'] = isset($persisted['card_total']) ? (int) $persisted['card_total'] : 0;
+            if (!empty($persisted['card_sub'])) {
+                $out['card_sub'] = (string) $persisted['card_sub'];
+            } elseif (!$out['card_sub']) {
+                $out['card_sub'] = $en ? 'Unused' : 'شاغرة';
+            }
+            $out['from_cache'] = true;
+            $out['source'] = isset($persisted['source']) ? $persisted['source'] : '';
+        }
+    } elseif (function_exists('sas_dash_cards_load_persisted')) {
+        $persisted = sas_dash_cards_load_persisted();
+        if ($persisted) {
+            $out['cards'] = isset($persisted['groups']) ? $persisted['groups'] : array();
+            $out['card_total'] = isset($persisted['card_total']) ? (int) $persisted['card_total'] : 0;
+            if (!empty($persisted['card_sub'])) {
+                $out['card_sub'] = (string) $persisted['card_sub'];
+            }
+            $out['from_cache'] = true;
+        }
+    }
+
     if (function_exists('sas_is_ready') && sas_is_ready($config)) {
-        if (isset($_GET['refresh']) && $_GET['refresh'] === '1') {
+        if ($force) {
             $_SESSION['sas_rp_at'] = 0;
             if (function_exists('sas_clear_unused_card_cache')) {
                 sas_clear_unused_card_cache();
@@ -43,30 +72,43 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
             $out['sas_ms'] = (int) $_SESSION['sas_latency_ms'];
             $out['balance'] = number_format((float) $_SESSION['sas_latency_ms'], 0) . ' ms';
         }
-        if (function_exists('sas_page_connector') && function_exists('sas_dash_card_groups')) {
+
+        $needCardsRefresh = $force;
+        if (!$needCardsRefresh) {
+            $p2 = function_exists('sas_dash_cards_preferred_persisted')
+                ? sas_dash_cards_preferred_persisted()
+                : (function_exists('sas_dash_cards_load_persisted') ? sas_dash_cards_load_persisted() : null);
+            $pat = ($p2 && isset($p2['updated_at'])) ? (int) $p2['updated_at'] : 0;
+            $hasGroups = ($p2 && !empty($p2['groups']) && is_array($p2['groups']));
+            $src = ($p2 && isset($p2['source'])) ? (string) $p2['source'] : '';
+            // إذا المخزون من inventory ودقيق، لا تعِد الجلب كل 3 دقائق بدون داعٍ
+            if ($hasGroups && $pat > 0 && (time() - $pat) < ($src === 'inventory' ? 300 : 180)) {
+                $needCardsRefresh = false;
+            } else {
+                $needCardsRefresh = true;
+            }
+        }
+
+        if ($needCardsRefresh && function_exists('sas_page_connector') && function_exists('sas_dash_card_groups')) {
             try {
                 $apiDash = sas_page_connector($config);
                 if ($apiDash && method_exists($apiDash, 'setTimeout')) {
-                    $apiDash->setTimeout(12);
+                    $apiDash->setTimeout(28);
                 }
                 if ($apiDash) {
-                    $groups = sas_dash_card_groups($apiDash);
-                    $_SESSION['sas_card_groups_v2'] = $groups;
-                    $_SESSION['sas_card_groups_v2_at'] = time();
-                    $parts = array();
-                    $total = 0;
-                    foreach ($groups as $g) {
-                        $n = isset($g['count']) ? (int) $g['count'] : 0;
-                        if ($n <= 0) {
-                            continue;
-                        }
-                        $total += $n;
-                        $nm = isset($g['name']) ? (string) $g['name'] : '';
-                        $parts[] = trim($nm . ' ' . $n);
+                    $groups = sas_dash_card_groups($apiDash, true);
+                    if (function_exists('sas_store_dash_card_groups')) {
+                        sas_store_dash_card_groups($groups);
                     }
+                    $payload = function_exists('sas_dash_cards_build_payload')
+                        ? sas_dash_cards_build_payload($groups)
+                        : array('groups' => $groups, 'card_total' => 0, 'card_sub' => '');
                     $out['cards'] = $groups;
-                    $out['card_total'] = $total;
-                    $out['card_sub'] = $parts ? implode(' · ', $parts) : ($en ? 'Unused' : 'شاغرة');
+                    $out['card_total'] = isset($payload['card_total']) ? (int) $payload['card_total'] : 0;
+                    $out['card_sub'] = !empty($payload['card_sub'])
+                        ? (string) $payload['card_sub']
+                        : ($en ? 'Unused' : 'شاغرة');
+                    $out['from_cache'] = false;
                 }
             } catch (Exception $e) {
             }
@@ -183,7 +225,21 @@ if ($sasReadyDash) {
     if (function_exists('sas_dash_user_counts')) {
         $sasCounts = sas_dash_user_counts($pdo);
     }
-    if (isset($_SESSION['sas_card_groups_v2']) && is_array($_SESSION['sas_card_groups_v2'])) {
+    // أولاً: كاش السيرفر الأدق (جرد الكروت) — بدون انتظار SAS
+    if (function_exists('sas_dash_cards_preferred_persisted')) {
+        $persistedCards = sas_dash_cards_preferred_persisted();
+        if ($persistedCards && !empty($persistedCards['groups']) && is_array($persistedCards['groups'])) {
+            $sasCardGroups = $persistedCards['groups'];
+        }
+    } elseif (function_exists('sas_dash_cards_load_persisted')) {
+        $persistedCards = sas_dash_cards_load_persisted();
+        if ($persistedCards && !empty($persistedCards['groups']) && is_array($persistedCards['groups'])) {
+            $sasCardGroups = $persistedCards['groups'];
+        }
+    }
+    if (!$sasCardGroups && isset($_SESSION['sas_card_groups_v5']) && is_array($_SESSION['sas_card_groups_v5'])) {
+        $sasCardGroups = $_SESSION['sas_card_groups_v5'];
+    } elseif (!$sasCardGroups && isset($_SESSION['sas_card_groups_v2']) && is_array($_SESSION['sas_card_groups_v2'])) {
         $sasCardGroups = $_SESSION['sas_card_groups_v2'];
     }
     if (isset($_SESSION['sas_rp_val']) && $_SESSION['sas_rp_val'] !== null) {
@@ -193,14 +249,9 @@ if ($sasReadyDash) {
             ? number_format((int) $sasPointsVal)
             : number_format((float) $sasPointsVal, 2);
     }
+    // لا نعمل ping للساس عند فتح الصفحة — فقط من الكاش/الأجاكس (يمنع صفنة التنقل)
     if (isset($_SESSION['sas_latency_ms']) && $_SESSION['sas_latency_ms'] !== null && $_SESSION['sas_latency_ms'] !== '') {
         $sasBalanceDisp = number_format((float) $_SESSION['sas_latency_ms'], 0) . ' ms';
-    } elseif (function_exists('system_sas_latency')) {
-        $lat0 = system_sas_latency($config);
-        if (isset($lat0['ms']) && $lat0['ms'] !== null) {
-            $sasBalanceDisp = number_format((float) $lat0['ms'], 0) . ' ms';
-            $_SESSION['sas_latency_ms'] = (int) $lat0['ms'];
-        }
     }
 }
 
@@ -291,28 +342,28 @@ body:has(.sas-dash) .container {
   position: relative;
   z-index: 1;
   font-family: inherit;
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 800;
   line-height: 1.35;
-  color: rgba(255,255,255,0.92);
+  color: rgba(255,255,255,0.94);
   letter-spacing: 0.01em;
 }
 .sas-box-sub {
   position: relative;
   z-index: 1;
   font-family: inherit;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 600;
-  color: rgba(255,255,255,0.72);
+  color: rgba(255,255,255,0.78);
   margin-top: 3px;
   line-height: 1.35;
 }
-#dashCardsSub { font-size: 11px; line-height: 1.3; max-height: 2.7em; overflow: hidden; }
+#dashCardsSub { font-size: 13px; line-height: 1.3; max-height: 2.7em; overflow: hidden; }
 .sas-box-val {
   position: relative;
   z-index: 1;
   font-family: inherit;
-  font-size: 26px;
+  font-size: 32px;
   font-weight: 800;
   margin-top: 16px;
   line-height: 1;
@@ -391,18 +442,26 @@ if ($sasReadyDash) {
     var b = document.getElementById('dashBankVal');
     if (b && d.balance) b.textContent = d.balance;
     var c = document.getElementById('dashCardsVal');
-    if (c) c.textContent = String(d.card_total || 0);
+    if (c && typeof d.card_total === 'number') {
+      var cur = parseInt(c.textContent, 10) || 0;
+      // لا تستبدل رقم صحيح بـ 0 أثناء تحديث فاشل/جزئي
+      if (d.card_total > 0 || cur <= 0 || d.from_cache) {
+        c.textContent = String(d.card_total);
+      }
+    }
     var cs = document.getElementById('dashCardsSub');
     if (cs && d.card_sub) cs.textContent = d.card_sub;
   }
-  function loadDash() {
-    fetch('index.php?ajax=dash_sas&refresh=1', { credentials: 'same-origin' })
+  function loadDash(force) {
+    var url = 'index.php?ajax=dash_sas' + (force ? '&refresh=1' : '');
+    fetch(url, { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(applyDash)
       .catch(function () {});
   }
-  loadDash();
-  setInterval(loadDash, 12000);
+  loadDash(false);
+  setTimeout(function () { loadDash(false); }, 1500);
+  setInterval(function () { loadDash(false); }, 120000);
 })();
 </script>
 <?php endif; ?>

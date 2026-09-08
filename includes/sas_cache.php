@@ -1155,41 +1155,315 @@ function sas_clear_unused_card_cache()
         $_SESSION['sas_unused_ui_at'],
         $_SESSION['sas_unused_ui_v3'],
         $_SESSION['sas_unused_ui_v3_at'],
+        $_SESSION['sas_unused_ui_v4'],
+        $_SESSION['sas_unused_ui_v4_at'],
+        $_SESSION['sas_unused_ui_v5'],
+        $_SESSION['sas_unused_ui_v5_at'],
+        $_SESSION['sas_unused_ui_v6'],
+        $_SESSION['sas_unused_ui_v6_at'],
         $_SESSION['sas_card_groups'],
         $_SESSION['sas_card_groups_at'],
         $_SESSION['sas_card_groups_v2'],
-        $_SESSION['sas_card_groups_v2_at']
+        $_SESSION['sas_card_groups_v2_at'],
+        $_SESSION['sas_card_groups_v5'],
+        $_SESSION['sas_card_groups_v5_at']
     );
+}
+
+function sas_cards_server_cache_dir()
+{
+    $dir = dirname(__DIR__) . '/storage/cache';
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0755, true);
+    }
+    return $dir;
+}
+
+function sas_cards_server_cache_path()
+{
+    return sas_cards_server_cache_dir() . '/dash_cards.json';
+}
+
+function sas_cards_inventory_cache_path()
+{
+    return sas_cards_server_cache_dir() . '/cards_inventory.json';
+}
+
+function sas_dash_cards_build_payload($groups, $source = 'dash')
+{
+    if (!is_array($groups)) {
+        $groups = array();
+    }
+    $total = 0;
+    $parts = array();
+    foreach ($groups as $g) {
+        if (!is_array($g)) {
+            continue;
+        }
+        $n = isset($g['count']) ? (int) $g['count'] : 0;
+        if ($n <= 0) {
+            continue;
+        }
+        $total += $n;
+        $nm = isset($g['name']) ? (string) $g['name'] : '';
+        $parts[] = trim($nm . ' ' . $n);
+    }
+    return array(
+        'updated_at' => time(),
+        'source' => (string) $source,
+        'card_total' => $total,
+        'card_sub' => $parts ? implode(' · ', $parts) : '',
+        'groups' => array_values($groups),
+    );
+}
+
+function sas_dash_cards_load_persisted()
+{
+    $path = sas_cards_server_cache_path();
+    if (!is_file($path)) {
+        return null;
+    }
+    $raw = @file_get_contents($path);
+    if ($raw === false || $raw === '') {
+        return null;
+    }
+    $data = json_decode($raw, true);
+    if (!is_array($data) || !isset($data['groups']) || !is_array($data['groups'])) {
+        return null;
+    }
+    return $data;
+}
+
+/**
+ * يفضّل جرد صفحة الكروت (المصدر الأدق) على عدّ الداش القديم.
+ */
+function sas_dash_cards_preferred_persisted()
+{
+    $inv = function_exists('sas_cards_inventory_load_persisted')
+        ? sas_cards_inventory_load_persisted(0)
+        : null;
+    if ($inv && !empty($inv['groups']) && is_array($inv['groups'])) {
+        $groups = sas_dash_groups_from_inventory($inv['groups']);
+        $payload = sas_dash_cards_build_payload($groups, 'inventory');
+        $payload['updated_at'] = isset($inv['updated_at']) ? (int) $inv['updated_at'] : time();
+        return $payload;
+    }
+    return sas_dash_cards_load_persisted();
+}
+
+function sas_dash_cards_save_persisted($groups, $source = 'dash')
+{
+    $payload = sas_dash_cards_build_payload($groups, $source);
+    // لا نستبدل كاش inventory أدق بعدّ dash أقدم/أعلى خطأً
+    if ($source !== 'inventory') {
+        $cur = sas_dash_cards_load_persisted();
+        if ($cur && isset($cur['source']) && $cur['source'] === 'inventory') {
+            $curAt = isset($cur['updated_at']) ? (int) $cur['updated_at'] : 0;
+            $curTotal = isset($cur['card_total']) ? (int) $cur['card_total'] : 0;
+            $newTotal = isset($payload['card_total']) ? (int) $payload['card_total'] : 0;
+            // إذا inventory حديث (أقل من 30 دقيقة) والرقم الجديد أكبر بكثير → تجاهل الكتابة الخاطئة
+            if ($curAt > 0 && (time() - $curAt) < 1800 && $newTotal > $curTotal && $curTotal > 0) {
+                return $cur;
+            }
+        }
+    }
+    $path = sas_cards_server_cache_path();
+    $json = json_encode($payload);
+    if ($json === false) {
+        return $payload;
+    }
+    @file_put_contents($path, $json, LOCK_EX);
+    return $payload;
+}
+
+function sas_cards_inventory_load_persisted($maxAge = 300)
+{
+    $path = sas_cards_inventory_cache_path();
+    if (!is_file($path)) {
+        return null;
+    }
+    $raw = @file_get_contents($path);
+    if ($raw === false || $raw === '') {
+        return null;
+    }
+    $data = json_decode($raw, true);
+    if (!is_array($data) || !isset($data['groups']) || !is_array($data['groups'])) {
+        return null;
+    }
+    $at = isset($data['updated_at']) ? (int) $data['updated_at'] : 0;
+    if ($maxAge > 0 && $at > 0 && (time() - $at) > $maxAge) {
+        return null;
+    }
+    return $data;
+}
+
+function sas_cards_inventory_save_persisted($groups)
+{
+    if (!is_array($groups)) {
+        $groups = array();
+    }
+    $payload = array(
+        'updated_at' => time(),
+        'groups' => array_values($groups),
+    );
+    $json = json_encode($payload);
+    if ($json === false) {
+        return false;
+    }
+    return @file_put_contents(sas_cards_inventory_cache_path(), $json, LOCK_EX) !== false;
+}
+
+function sas_store_dash_card_groups($groups, $source = 'dash')
+{
+    if (!is_array($groups)) {
+        $groups = array();
+    }
+    $_SESSION['sas_card_groups_v5'] = $groups;
+    $_SESSION['sas_card_groups_v5_at'] = time();
+    $_SESSION['sas_card_groups_v2'] = $groups;
+    $_SESSION['sas_card_groups_v2_at'] = time();
+    sas_dash_cards_save_persisted($groups, $source);
+}
+
+function sas_dash_groups_from_inventory($inventory)
+{
+    $groups = array();
+    if (!is_array($inventory)) {
+        return $groups;
+    }
+    foreach ($inventory as $g) {
+        if (!is_array($g)) {
+            continue;
+        }
+        $n = isset($g['unused']) ? (int) $g['unused'] : 0;
+        if ($n <= 0) {
+            continue;
+        }
+        $groups[] = array(
+            'profile_id' => isset($g['profile_id']) ? (int) $g['profile_id'] : 0,
+            'name' => isset($g['name']) ? (string) $g['name'] : '',
+            'count' => $n,
+        );
+    }
+    usort($groups, function ($a, $b) {
+        if ($a['count'] === $b['count']) {
+            return strcasecmp($a['name'], $b['name']);
+        }
+        return ($a['count'] > $b['count']) ? -1 : 1;
+    });
+    return $groups;
+}
+
+function sas_unused_pins_from_inventory_cache()
+{
+    if (!function_exists('sas_cards_inventory_load_persisted')) {
+        return null;
+    }
+    $inv = sas_cards_inventory_load_persisted(0);
+    if (!$inv || empty($inv['groups']) || !is_array($inv['groups'])) {
+        return null;
+    }
+    $out = array();
+    $seen = array();
+    foreach ($inv['groups'] as $g) {
+        if (!is_array($g) || empty($g['cards']) || !is_array($g['cards'])) {
+            continue;
+        }
+        $pid = isset($g['profile_id']) ? (int) $g['profile_id'] : 0;
+        $pname = isset($g['name']) ? (string) $g['name'] : '';
+        foreach ($g['cards'] as $c) {
+            if (!is_array($c) || !empty($c['used'])) {
+                continue;
+            }
+            $pin = isset($c['pin']) ? trim((string) $c['pin']) : '';
+            if ($pin === '' || strlen($pin) < 6) {
+                continue;
+            }
+            $key = strtolower($pin);
+            if (isset($seen[$key])) {
+                continue;
+            }
+            $seen[$key] = 1;
+            $out[] = array(
+                'id' => 0,
+                'pin' => $pin,
+                'profile_id' => $pid,
+                'profile_name' => $pname,
+                'label' => $pin . ($pname !== '' ? (' — ' . $pname) : ''),
+            );
+        }
+    }
+    return $out;
 }
 
 function sas_unused_cards_cached($api, $force = false)
 {
-    $ttl = 90;
-    $at = isset($_SESSION['sas_unused_ui_v3_at']) ? (int) $_SESSION['sas_unused_ui_v3_at'] : 0;
-    if (!$force && $at > 0 && isset($_SESSION['sas_unused_ui_v3']) && is_array($_SESSION['sas_unused_ui_v3'])) {
+    $ttl = 120;
+    $at = isset($_SESSION['sas_unused_ui_v6_at']) ? (int) $_SESSION['sas_unused_ui_v6_at'] : 0;
+    if (!$force && $at > 0 && isset($_SESSION['sas_unused_ui_v6']) && is_array($_SESSION['sas_unused_ui_v6'])) {
         $age = time() - $at;
-        $empty = !$_SESSION['sas_unused_ui_v3'];
+        $empty = !$_SESSION['sas_unused_ui_v6'];
         if ((!$empty && $age < $ttl) || ($empty && $age < 20)) {
-            return $_SESSION['sas_unused_ui_v3'];
+            return $_SESSION['sas_unused_ui_v6'];
         }
     }
+
+    // جرد صفحة الكروت هو المصدر الوحيد الموثوق (حتى لو 0 شاغر)
+    if (!$force && function_exists('sas_cards_inventory_load_persisted')) {
+        $invFile = sas_cards_inventory_load_persisted(0);
+        if ($invFile && isset($invFile['groups']) && is_array($invFile['groups'])) {
+            $fromInv = sas_unused_pins_from_inventory_cache();
+            $out = is_array($fromInv) ? $fromInv : array();
+            $_SESSION['sas_unused_ui_v6'] = $out;
+            $_SESSION['sas_unused_ui_v6_at'] = time();
+            return $out;
+        }
+    }
+
     $wasOpen = (session_status() === PHP_SESSION_ACTIVE);
     if ($wasOpen) {
         session_write_close();
     }
-    $rows = array();
-    if ($api && method_exists($api, 'listUnusedCards')) {
-        $rows = $api->listUnusedCards(0, '');
+    $out = array();
+    $fromInventory = false;
+    // تحديث/بناء الجرد — نفس listCardsInventory — لا listUnusedCards (يضخّم الشاغر)
+    if ($api && method_exists($api, 'listCardsInventory')) {
+        $inv = $api->listCardsInventory(14);
+        if (is_array($inv)) {
+            if (function_exists('sas_cards_inventory_save_persisted')) {
+                sas_cards_inventory_save_persisted($inv);
+            }
+            if (function_exists('sas_dash_groups_from_inventory') && function_exists('sas_store_dash_card_groups')) {
+                sas_store_dash_card_groups(sas_dash_groups_from_inventory($inv), 'inventory');
+            }
+            $fromInventory = true;
+        }
     }
-    $out = sas_cards_rows_to_ui($rows);
+    if (!$fromInventory && $api && method_exists($api, 'listUnusedCards')) {
+        $out = sas_cards_rows_to_ui($api->listUnusedCards(0, ''));
+    }
     if (session_status() !== PHP_SESSION_ACTIVE) {
         @session_start();
     }
-    $_SESSION['sas_unused_ui_v3'] = $out;
-    $_SESSION['sas_unused_ui_v3_at'] = time();
-    unset($_SESSION['sas_unused_ui'], $_SESSION['sas_unused_ui_at']);
-    $_SESSION['sas_card_groups_v2'] = sas_group_unused_cards($out);
-    $_SESSION['sas_card_groups_v2_at'] = time();
+    if ($fromInventory) {
+        $fromInv = sas_unused_pins_from_inventory_cache();
+        $out = is_array($fromInv) ? $fromInv : array();
+    }
+    if (!is_array($out)) {
+        $out = array();
+    }
+    $_SESSION['sas_unused_ui_v6'] = $out;
+    $_SESSION['sas_unused_ui_v6_at'] = time();
+    unset(
+        $_SESSION['sas_unused_ui'],
+        $_SESSION['sas_unused_ui_at'],
+        $_SESSION['sas_unused_ui_v3'],
+        $_SESSION['sas_unused_ui_v3_at'],
+        $_SESSION['sas_unused_ui_v4'],
+        $_SESSION['sas_unused_ui_v4_at'],
+        $_SESSION['sas_unused_ui_v5'],
+        $_SESSION['sas_unused_ui_v5_at']
+    );
     return $out;
 }
 
@@ -1219,11 +1493,11 @@ function sas_cards_filter_cached($cards, $profileId, $profileName)
         }
         $pid = isset($c['profile_id']) ? (int) $c['profile_id'] : 0;
         $pn = sas_profile_norm(isset($c['profile_name']) ? $c['profile_name'] : '');
-        if ($profileId > 0 && $pid === $profileId) {
+        if ($profileId > 0 && $pid > 0 && $pid === $profileId) {
             $hit[] = $c;
             continue;
         }
-        if ($want !== '' && $pn !== '' && ($pn === $want || strpos($pn, $want) !== false || strpos($want, $pn) !== false)) {
+        if ($want !== '' && $pn !== '' && $pn === $want) {
             $hit[] = $c;
         }
     }
@@ -1236,10 +1510,53 @@ function sas_cards_for_ui($api, $profileId, $sasUserId = 0, $profileName = '')
     return sas_cards_filter_cached($all, $profileId, $profileName);
 }
 
-function sas_dash_card_groups($api)
+function sas_dash_card_groups($api, $force = false)
 {
-    $cards = sas_unused_cards_cached($api, false);
-    return sas_group_unused_cards($cards);
+    $ttl = 180;
+    if (!$force) {
+        $preferred = function_exists('sas_dash_cards_preferred_persisted')
+            ? sas_dash_cards_preferred_persisted()
+            : sas_dash_cards_load_persisted();
+        if ($preferred && !empty($preferred['groups']) && is_array($preferred['groups'])) {
+            $pat = isset($preferred['updated_at']) ? (int) $preferred['updated_at'] : 0;
+            if ($pat > 0 && (time() - $pat) < $ttl) {
+                $_SESSION['sas_card_groups_v5'] = $preferred['groups'];
+                $_SESSION['sas_card_groups_v5_at'] = $pat;
+                $_SESSION['sas_card_groups_v2'] = $preferred['groups'];
+                $_SESSION['sas_card_groups_v2_at'] = $pat;
+                return $preferred['groups'];
+            }
+        }
+    }
+    $wasOpen = (session_status() === PHP_SESSION_ACTIVE);
+    if ($wasOpen) {
+        session_write_close();
+    }
+    $groups = array();
+    $source = 'dash';
+    // المصدر الأدق = نفس جرد صفحة الكروت
+    if ($api && method_exists($api, 'listCardsInventory')) {
+        $inv = $api->listCardsInventory(14);
+        if (is_array($inv)) {
+            if (function_exists('sas_cards_inventory_save_persisted')) {
+                sas_cards_inventory_save_persisted($inv);
+            }
+            $groups = sas_dash_groups_from_inventory($inv);
+            $source = 'inventory';
+        }
+    }
+    if (!$groups && $api && method_exists($api, 'listDashUnusedCardGroups')) {
+        $groups = $api->listDashUnusedCardGroups(40);
+        $source = 'dash';
+    }
+    if (!is_array($groups)) {
+        $groups = array();
+    }
+    if (session_status() !== PHP_SESSION_ACTIVE) {
+        @session_start();
+    }
+    sas_store_dash_card_groups($groups, $source);
+    return $groups;
 }
 
 function sas_activation_quote($pdo, $config, $username, $profileId = 0)

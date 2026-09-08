@@ -31,10 +31,13 @@ Function FindNode()
   FindNode = ""
 End Function
 
-' Prevent duplicate gateway (same folder) — optional soft check via port later
 LogLine "==== hidden start ===="
 LogLine "dir=" & dir
 sh.CurrentDirectory = dir
+
+' Help AV HTTPS inspection / expired intermediate on some PCs
+sh.Environment("Process")("WA_TLS_INSECURE") = "1"
+sh.Environment("Process")("PORT") = "3001"
 
 nodeExe = FindNode()
 If nodeExe = "" Then
@@ -48,8 +51,13 @@ If Not fso.FileExists(dir & "\index.js") Then
   WScript.Quit 1
 End If
 
-' WindowStyle 0 = completely hidden (no black console)
+' Soft-stop previous instance on this port (best-effort)
+On Error Resume Next
+sh.Run "cmd /c for /f ""tokens=5"" %a in ('netstat -ano ^| findstr :3001 ^| findstr LISTENING') do taskkill /F /PID %a", 0, True
+On Error GoTo 0
+WScript.Sleep 800
+
 cmd = """" & nodeExe & """ """ & dir & "\index.js"""
-LogLine "launch hidden: " & cmd
+LogLine "launch hidden: " & cmd & " WA_TLS_INSECURE=1"
 sh.Run cmd, 0, False
 LogLine "Launched OK (fully hidden)"

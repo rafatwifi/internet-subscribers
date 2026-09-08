@@ -128,21 +128,26 @@ function login_bg_delete_files()
     }
 }
 
-function login_bg_store_upload($fileInfo)
+function login_bg_store_upload($fileInfo, &$failReason = null)
 {
-    if (!is_array($fileInfo) || empty($fileInfo['tmp_name']) || !is_uploaded_file($fileInfo['tmp_name'])) {
+    $failReason = '';
+    if (!is_array($fileInfo) || empty($fileInfo['tmp_name'])) {
+        $failReason = 'no_file';
+        return false;
+    }
+    if (!is_uploaded_file($fileInfo['tmp_name'])) {
+        $failReason = 'upload';
         return false;
     }
     if (!empty($fileInfo['error']) && (int) $fileInfo['error'] !== 0) {
+        $failReason = 'php_' . (int) $fileInfo['error'];
         return false;
     }
-    if ((int) $fileInfo['size'] > 5 * 1024 * 1024) {
+    if ((int) $fileInfo['size'] > 8 * 1024 * 1024) {
+        $failReason = 'size';
         return false;
     }
     $info = @getimagesize($fileInfo['tmp_name']);
-    if (!is_array($info) || empty($info[2])) {
-        return false;
-    }
     $map = array(
         IMAGETYPE_JPEG => 'jpg',
         IMAGETYPE_PNG => 'png',
@@ -151,19 +156,46 @@ function login_bg_store_upload($fileInfo)
     if (defined('IMAGETYPE_WEBP')) {
         $map[IMAGETYPE_WEBP] = 'webp';
     }
-    $type = (int) $info[2];
-    if (!isset($map[$type])) {
+    $ext = '';
+    if (is_array($info) && !empty($info[2]) && isset($map[(int) $info[2]])) {
+        $ext = $map[(int) $info[2]];
+    } else {
+        $orig = isset($fileInfo['name']) ? strtolower((string) $fileInfo['name']) : '';
+        if (preg_match('/\.(jpe?g)$/', $orig)) {
+            $ext = 'jpg';
+        } elseif (preg_match('/\.png$/', $orig)) {
+            $ext = 'png';
+        } elseif (preg_match('/\.gif$/', $orig)) {
+            $ext = 'gif';
+        } elseif (preg_match('/\.webp$/', $orig)) {
+            $ext = 'webp';
+        }
+    }
+    if ($ext === '') {
+        $failReason = 'type';
         return false;
     }
     $dir = login_uploads_dir();
     if (!is_dir($dir) && !@mkdir($dir, 0755, true)) {
+        $failReason = 'mkdir';
+        return false;
+    }
+    if (!is_writable($dir)) {
+        @chmod($dir, 0755);
+    }
+    if (!is_writable($dir)) {
+        $failReason = 'writable';
         return false;
     }
     login_bg_delete_files();
-    $name = 'login-bg.' . $map[$type];
+    $name = 'login-bg.' . $ext;
     $dest = $dir . DIRECTORY_SEPARATOR . $name;
     if (!@move_uploaded_file($fileInfo['tmp_name'], $dest)) {
-        return false;
+        if (!@copy($fileInfo['tmp_name'], $dest)) {
+            $failReason = 'move';
+            return false;
+        }
+        @unlink($fileInfo['tmp_name']);
     }
     @chmod($dest, 0644);
     return $name;
@@ -217,21 +249,26 @@ function brand_icon_delete_files()
     }
 }
 
-function brand_icon_store_upload($fileInfo)
+function brand_icon_store_upload($fileInfo, &$failReason = null)
 {
-    if (!is_array($fileInfo) || empty($fileInfo['tmp_name']) || !is_uploaded_file($fileInfo['tmp_name'])) {
+    $failReason = '';
+    if (!is_array($fileInfo) || empty($fileInfo['tmp_name'])) {
+        $failReason = 'no_file';
+        return false;
+    }
+    if (!is_uploaded_file($fileInfo['tmp_name'])) {
+        $failReason = 'upload';
         return false;
     }
     if (!empty($fileInfo['error']) && (int) $fileInfo['error'] !== 0) {
+        $failReason = 'php_' . (int) $fileInfo['error'];
         return false;
     }
-    if ((int) $fileInfo['size'] > 2 * 1024 * 1024) {
+    if ((int) $fileInfo['size'] > 4 * 1024 * 1024) {
+        $failReason = 'size';
         return false;
     }
     $info = @getimagesize($fileInfo['tmp_name']);
-    if (!is_array($info) || empty($info[2])) {
-        return false;
-    }
     $map = array(
         IMAGETYPE_JPEG => 'jpg',
         IMAGETYPE_PNG => 'png',
@@ -240,19 +277,46 @@ function brand_icon_store_upload($fileInfo)
     if (defined('IMAGETYPE_WEBP')) {
         $map[IMAGETYPE_WEBP] = 'webp';
     }
-    $type = (int) $info[2];
-    if (!isset($map[$type])) {
+    $ext = '';
+    if (is_array($info) && !empty($info[2]) && isset($map[(int) $info[2]])) {
+        $ext = $map[(int) $info[2]];
+    } else {
+        $orig = isset($fileInfo['name']) ? strtolower((string) $fileInfo['name']) : '';
+        if (preg_match('/\.(jpe?g)$/', $orig)) {
+            $ext = 'jpg';
+        } elseif (preg_match('/\.png$/', $orig)) {
+            $ext = 'png';
+        } elseif (preg_match('/\.gif$/', $orig)) {
+            $ext = 'gif';
+        } elseif (preg_match('/\.webp$/', $orig)) {
+            $ext = 'webp';
+        }
+    }
+    if ($ext === '') {
+        $failReason = 'type';
         return false;
     }
     $dir = login_uploads_dir();
     if (!is_dir($dir) && !@mkdir($dir, 0755, true)) {
+        $failReason = 'mkdir';
+        return false;
+    }
+    if (!is_writable($dir)) {
+        @chmod($dir, 0755);
+    }
+    if (!is_writable($dir)) {
+        $failReason = 'writable';
         return false;
     }
     brand_icon_delete_files();
-    $name = 'brand-icon.' . $map[$type];
+    $name = 'brand-icon.' . $ext;
     $dest = $dir . DIRECTORY_SEPARATOR . $name;
     if (!@move_uploaded_file($fileInfo['tmp_name'], $dest)) {
-        return false;
+        if (!@copy($fileInfo['tmp_name'], $dest)) {
+            $failReason = 'move';
+            return false;
+        }
+        @unlink($fileInfo['tmp_name']);
     }
     @chmod($dest, 0644);
     return $name;

@@ -47,7 +47,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="assets/style.css?v=ui4">
+    <link rel="stylesheet" href="assets/style.css?v=ui5">
     <style>
         <?php if ($bgMode === 'image' && $bgUrl !== ''): ?>
         body.app-bg-image {
@@ -61,6 +61,33 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
         body.app-bg-image .bg-bubbles { display: none; }
         body.app-bg-image .app { background: transparent; }
         body.app-bg-image .main { background: transparent; }
+        body.app-bg-image .panel,
+        body.app-bg-image .sas-table-card,
+        body.app-bg-image .glass-panel,
+        body.app-bg-image .sched-table-wrap,
+        body.app-bg-image .debts-table-wrap,
+        body.app-bg-image .debts-toolbar,
+        body.app-bg-image .debts-add,
+        body.app-bg-image .chart-panel,
+        body.app-bg-image .cat-block,
+        body.app-bg-image .modal-card,
+        body.app-bg-image .ops-modal-card {
+            background: rgba(255,255,255,0.78) !important;
+            backdrop-filter: blur(12px) saturate(1.15);
+            -webkit-backdrop-filter: blur(12px) saturate(1.15);
+            border-color: rgba(255,255,255,0.45) !important;
+        }
+        body.app-bg-image .sas-table-headbar,
+        body.app-bg-image .main-top {
+            background: rgba(255,255,255,0.72) !important;
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+        }
+        <?php elseif ($bgMode === 'color'): ?>
+        body.app-bg-color {
+            background: <?php echo e($bgColor); ?> !important;
+        }
+        body.app-bg-color .bg-bubbles { opacity: .25; }
         <?php endif; ?>
         /* Sidebar modern — text only, centered */
         .sidebar {
@@ -156,7 +183,13 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
         }
     </style>
 </head>
-<body class="<?php echo $isEn ? 'ltr' : 'rtl'; ?> ios-glass<?php echo ($bgMode === 'image' && $bgUrl !== '') ? ' app-bg-image' : ''; ?>">
+<body class="<?php echo $isEn ? 'ltr' : 'rtl'; ?> ios-glass<?php
+    if ($bgMode === 'image' && $bgUrl !== '') {
+        echo ' app-bg-image';
+    } elseif ($bgMode === 'color') {
+        echo ' app-bg-color';
+    }
+?>">
 <div class="bg-bubbles" aria-hidden="true">
     <span></span><span></span><span></span><span></span><span></span>
 </div>
@@ -260,11 +293,8 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
 
 function render_footer()
 {
-    global $siteName, $pdo, $config;
+    global $siteName;
     $name = isset($siteName) ? $siteName : 'WiFi-Net-SALES';
-    if (isset($pdo, $config) && function_exists('maybe_run_expiry_auto_reminders') && function_exists('current_admin') && current_admin()) {
-        @maybe_run_expiry_auto_reminders($pdo, $config);
-    }
     ?>
         </main>
         <footer class="footer"><?php echo e($name); ?> © <?php echo date('Y'); ?></footer>
@@ -274,6 +304,10 @@ function render_footer()
 <button class="fab-menu" type="button" id="sidebarToggle" title="<?php echo e(t('menu')); ?>" aria-label="<?php echo e(t('menu')); ?>">
     <span class="fab-menu-bars" aria-hidden="true"><i></i><i></i><i></i></span>
 </button>
+<style>
+body.nav-pending .main { opacity: .72; transition: opacity .12s ease; pointer-events: none; }
+body.nav-pending .side-links a { opacity: .85; }
+</style>
 <script>
 (function () {
   var app = document.getElementById('app');
@@ -347,6 +381,26 @@ function render_footer()
       setCollapsed(false);
     }
   });
+
+  // إحساس تنقّل فوري — بدون انتظار انتهاء طلبات ثقيلة في الصفحة الحالية
+  document.addEventListener('click', function (e) {
+    var a = e.target.closest ? e.target.closest('a') : null;
+    if (!a) return;
+    var href = a.getAttribute('href') || '';
+    if (!href || href.charAt(0) === '#' || href.indexOf('javascript:') === 0) return;
+    if (a.target && a.target !== '_self') return;
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    if (href.indexOf('logout.php') >= 0) return;
+    try {
+      var u = new URL(href, window.location.href);
+      if (u.origin !== window.location.origin) return;
+      if (u.pathname === window.location.pathname && u.search === window.location.search) return;
+    } catch (err) { return; }
+    document.body.classList.add('nav-pending');
+  }, true);
+  window.addEventListener('pageshow', function () {
+    document.body.classList.remove('nav-pending');
+  });
 })();
 
 (function () {
@@ -359,6 +413,8 @@ function render_footer()
     needQr: isEn ? 'WhatsApp needs QR scan' : 'واتساب يحتاج مسح QR',
     unreachable: isEn ? 'WhatsApp gateway unreachable' : 'بوابة واتساب غير متاحة'
   };
+  var failStreak = 0;
+  var lastKey = '';
 
   function showBar() {
     bar.hidden = false;
@@ -367,9 +423,13 @@ function render_footer()
   function hideBar() {
     bar.hidden = true;
     bar.classList.add('wa-conn-hidden');
+    lastKey = 'ok';
+    failStreak = 0;
   }
-
   function setProblem(cls, msg) {
+    var key = cls + '|' + msg;
+    if (key === lastKey && !bar.hidden) return;
+    lastKey = key;
     showBar();
     bar.className = 'wa-conn-bar ' + cls;
     if (text) text.textContent = msg;
@@ -378,34 +438,50 @@ function render_footer()
   function check() {
     var xhr = new XMLHttpRequest();
     xhr.open('GET', 'wa_proxy.php?action=status&_=' + Date.now(), true);
-    xhr.timeout = 9000;
+    xhr.timeout = 4000;
     xhr.onload = function () {
       var data = null;
       try { data = JSON.parse(xhr.responseText); } catch (e) {}
       if (!data || data.success === false) {
-        setProblem('wa-conn-off', msgs.unreachable);
+        failStreak += 1;
+        if (failStreak >= 3) setProblem('wa-conn-off', msgs.unreachable);
         return;
       }
+      failStreak = 0;
       if (data.ready === true) {
-        // متصل بنجاح — لا نظهر الشريط أبداً (حتى عند الرفرش)
         hideBar();
         return;
       }
-      if (data.has_qr) {
+      if (data.has_qr || data.status === 'qr_ready' || data.status === 'connecting') {
         setProblem('wa-conn-warn', msgs.needQr);
         return;
       }
       setProblem('wa-conn-off', msgs.offline);
     };
     xhr.onerror = xhr.ontimeout = function () {
-      setProblem('wa-conn-off', msgs.unreachable);
+      failStreak += 1;
+      if (failStreak >= 3) setProblem('wa-conn-off', msgs.unreachable);
     };
     xhr.send();
   }
 
-  check();
-  setInterval(check, 15000);
+  // لا تفحص واتساب فور فتح الصفحة — يقلل صفنة التنقل
+  setTimeout(check, 2500);
+  setInterval(check, 60000);
 })();
+
+// تذكير انتهاء الاشتراك بالخلفية — لا يوقف رسم الصفحة
+setTimeout(function () {
+  try {
+    if (navigator.sendBeacon) navigator.sendBeacon('tick.php');
+    else {
+      var x = new XMLHttpRequest();
+      x.open('GET', 'tick.php', true);
+      x.timeout = 8000;
+      x.send();
+    }
+  } catch (e) {}
+}, 4000);
 </script>
 </body>
 </html>

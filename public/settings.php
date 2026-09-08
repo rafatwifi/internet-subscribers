@@ -1118,8 +1118,32 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
 <?php endif; ?>
 
 <?php if ($tab === 'whatsapp'): ?>
-<div class="panel">
+<style>
+.wa-layout { display:grid; grid-template-columns: minmax(0,1fr) minmax(280px,420px); gap:16px; align-items:start; }
+@media (max-width: 960px) { .wa-layout { grid-template-columns: 1fr; } }
+.wa-card { border:1px solid var(--line,#e2e8f0); border-radius:16px; background:rgba(255,255,255,.92); padding:18px; box-shadow:0 8px 28px rgba(15,23,42,.06); }
+.wa-card h2 { margin:0 0 6px; font-size:1.15rem; }
+.wa-card .wa-lead { margin:0 0 14px; color:var(--muted,#64748b); font-weight:600; line-height:1.55; font-size:13px; }
+.wa-tips { margin:0 0 14px; padding:12px 14px; border-radius:12px; background:linear-gradient(135deg,#f0f9ff,#f8fafc); border:1px solid #dbeafe; color:#334155; font-size:13px; font-weight:600; line-height:1.65; }
+.wa-tips strong { color:#0f172a; }
+.wa-status-pill { display:flex; align-items:center; gap:10px; padding:12px 14px; border-radius:12px; font-weight:800; margin-bottom:14px; border:1px solid transparent; }
+.wa-status-pill.ok { background:#ecfdf5; color:#047857; border-color:#a7f3d0; }
+.wa-status-pill.warn { background:#fffbeb; color:#b45309; border-color:#fde68a; }
+.wa-status-pill.err { background:#fef2f2; color:#b91c1c; border-color:#fecaca; }
+.wa-status-dot { width:10px; height:10px; border-radius:50%; background:currentColor; flex:0 0 auto; box-shadow:0 0 0 4px rgba(0,0,0,.06); }
+.wa-qr-stage { border-radius:16px; border:1px dashed #cbd5e1; background:radial-gradient(circle at 30% 20%,#f8fafc,#eef2ff 70%,#f1f5f9); min-height:300px; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:18px; text-align:center; }
+.wa-qr-stage img { max-width:min(280px,100%); border-radius:12px; background:#fff; padding:10px; box-shadow:0 10px 30px rgba(15,23,42,.12); }
+.wa-qr-stage .wa-qr-hint { margin-top:12px; color:#64748b; font-weight:700; font-size:13px; }
+.wa-actions-row { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
+.wa-actions-row .btn { flex:1 1 140px; justify-content:center; }
+</style>
+
+<div class="wa-layout">
+  <div class="wa-card">
     <h2><?php echo e(t('settings_whatsapp')); ?></h2>
+    <p class="wa-lead"><?php echo e($lang === 'en'
+        ? 'Gateway must run on the Windows PC. After reboot it starts hidden if you installed auto-start.'
+        : 'البوابة لازم تشتغل على جهاز الويندوز. بعد الريبوت تشتغل مخفية إذا ثبّت التشغيل التلقائي.'); ?></p>
     <form method="post" id="waForm">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="section" value="whatsapp">
@@ -1144,40 +1168,37 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
                 <input name="whatsapp_sender_note" value="<?php echo e($s['whatsapp_sender_note']); ?>">
             </div>
         </div>
-
-        <div class="actions">
+        <div class="actions" style="margin-top:12px">
             <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
         </div>
     </form>
-</div>
+    <div class="wa-tips" style="margin-top:16px">
+      <?php if ($lang === 'en'): ?>
+        On PC <strong class="ltr" id="gwHost"><?php echo e($hostHint); ?></strong>: run <strong>install-autostart.bat</strong> once so gateway starts after reboot.
+        If phone says linking blocked, wait 15–30 minutes. Use Disconnect only when you want a new QR.
+      <?php else: ?>
+        على الجهاز <strong class="ltr" id="gwHost"><?php echo e($hostHint); ?></strong>: شغّل <strong>install-autostart.bat</strong> مرة واحدة حتى تشتغل البوابة بعد الريبوت تلقائياً.
+        إذا الهاتف قال يتعذر الربط: انتظر 15–30 دقيقة. «قطع الاتصال» فقط لما تريد QR جديد.
+      <?php endif; ?>
+    </div>
+  </div>
 
-<div class="panel">
-    <h2><?php echo e($lang === 'en' ? 'Connect WhatsApp (QR)' : 'ربط واتساب (QR)'); ?></h2>
-    <ol class="wa-steps">
-        <?php if ($lang === 'en'): ?>
-            <li>On Windows PC <strong class="ltr" id="gwHost"><?php echo e($hostHint); ?></strong> run <strong>start-gateway.bat</strong> and keep it open.</li>
-            <li>If the phone says <em>Couldn’t link new devices</em>: stop trying for <strong>15–30 minutes</strong>. That lock is from WhatsApp, not this system.</li>
-            <li>Then press Disconnect once, wait until ONE QR appears, and scan it once — do not press Refresh repeatedly.</li>
-        <?php else: ?>
-            <li>على جهاز الويندوز <strong class="ltr" id="gwHost"><?php echo e($hostHint); ?></strong> شغّل <strong>start-gateway.bat</strong> وخلّ النافذة مفتوحة.</li>
-            <li>إذا طلع بالهاتف <em>يتعذر ربط أجهزة جديدة حالياً</em>: <strong>توقف 15–30 دقيقة</strong> — هذا حظر من واتساب مو من النظام.</li>
-            <li>بعدها اضغط «قطع الاتصال» مرة واحدة، انتظر يطلع QR واحد، وامسحه مرة واحدة فقط — لا تضغط تحديث مرّات.</li>
-        <?php endif; ?>
-    </ol>
-    <div id="wa-status" class="wa-box">...</div>
-    <div id="wa-qr" class="qr-wrap qr-wrap-visible">
-        <p id="wa-qr-title" style="margin:0 0 10px;font-weight:700">
-            <?php echo e($lang === 'en' ? 'QR appears here ↓' : 'رمز QR يظهر هنا ↓'); ?>
-        </p>
-        <div id="wa-qr-placeholder" class="qr-placeholder">
-            <?php echo e($lang === 'en' ? 'Waiting…' : 'بانتظار الرمز…'); ?>
-        </div>
+  <div class="wa-card">
+    <h2><?php echo e($lang === 'en' ? 'Link WhatsApp' : 'ربط واتساب'); ?></h2>
+    <p class="wa-lead"><?php echo e($lang === 'en'
+        ? 'When disconnected, a QR appears here. Scan once — or disconnect to relink.'
+        : 'عند تسجيل الخروج يظهر QR هنا. امسحه مرة واحدة — أو افصل لإعادة الربط.'); ?></p>
+    <div id="wa-status" class="wa-status-pill warn"><span class="wa-status-dot"></span><span id="wa-status-text">...</span></div>
+    <div id="wa-qr" class="wa-qr-stage">
         <img id="wa-qr-img" alt="QR" style="display:none">
+        <div id="wa-qr-placeholder"><?php echo e($lang === 'en' ? 'Waiting for QR…' : 'بانتظار رمز QR…'); ?></div>
+        <div class="wa-qr-hint" id="wa-qr-title"><?php echo e($lang === 'en' ? 'QR shows automatically when gateway is ready' : 'الرمز يظهر تلقائياً لما البوابة جاهزة'); ?></div>
     </div>
-    <div class="actions">
-        <button class="btn secondary" type="button" onclick="checkWhatsApp(true)"><?php echo e($lang === 'en' ? 'Show QR (no spam)' : 'إظهار QR (بدون تحديث متكرر)'); ?></button>
-        <button class="btn danger" type="button" onclick="logoutWhatsApp()"><?php echo e(t('reconnect_wa')); ?></button>
+    <div class="wa-actions-row">
+        <button class="btn" type="button" onclick="checkWhatsApp(true)"><?php echo e($lang === 'en' ? 'Show QR' : 'إظهار QR'); ?></button>
+        <button class="btn danger" type="button" onclick="logoutWhatsApp()"><?php echo e($lang === 'en' ? 'Disconnect & relink' : 'قطع الاتصال وإعادة الربط'); ?></button>
     </div>
+  </div>
 </div>
 
 <script>
@@ -1198,25 +1219,30 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
 var waBusy = false;
 var qrWaitTimer = null;
 var L = {
-  connected: <?php echo json_encode($lang === 'en' ? 'Connected ✓ Ready' : 'متصل ✓ واتساب جاهز للإرسال'); ?>,
-  needDisconnect: <?php echo json_encode($lang === 'en' ? 'Already connected. Press Disconnect to show a new QR.' : 'متصل حالياً. اضغط قطع الاتصال لإظهار QR جديد.'); ?>,
-  fetching: <?php echo json_encode($lang === 'en' ? 'Not connected — fetching QR...' : 'غير متصل — جاري جلب QR...'); ?>,
-  scanBelow: <?php echo json_encode($lang === 'en' ? 'Scan the QR in the box below ↓' : 'امسح رمز QR بالمربع تحت ↓'); ?>,
+  connected: <?php echo json_encode($lang === 'en' ? 'Connected — ready to send' : 'متصل — جاهز للإرسال'); ?>,
+  needDisconnect: <?php echo json_encode($lang === 'en' ? 'Already connected. Press Disconnect for a new QR.' : 'متصل حالياً. اضغط قطع الاتصال لـ QR جديد.'); ?>,
+  fetching: <?php echo json_encode($lang === 'en' ? 'Fetching QR…' : 'جاري جلب QR…'); ?>,
+  scanBelow: <?php echo json_encode($lang === 'en' ? 'Scan the QR below once' : 'امسح رمز QR تحت مرة واحدة'); ?>,
   waiting: <?php echo json_encode($lang === 'en' ? 'Waiting for QR…' : 'بانتظار QR…'); ?>,
   gatewayDown: <?php echo json_encode($lang === 'en'
-    ? 'Cannot reach Windows gateway. On PC ' . $hostHint . ' run start-gateway.bat and keep it open.'
-    : 'ما وصلت لبوابة الويندوز. على جهاز ' . $hostHint . ' شغّل start-gateway.bat وخلّ النافذة مفتوحة.'); ?>,
-  scanNew: <?php echo json_encode($lang === 'en' ? 'New QR ready — scan the box below' : 'طلع QR جديد — صوّر المربع تحت'); ?>,
-  confirmLogout: <?php echo json_encode($lang === 'en' ? 'Disconnect and show new QR?' : 'تقطع الاتصال وتعيد مسح QR برقم ثاني؟'); ?>,
-  loggingOut: <?php echo json_encode($lang === 'en' ? 'Disconnecting… wait ~20 seconds for one QR' : 'جاري قطع الاتصال… انتظر حوالي 20 ثانية لحد يطلع QR واحد'); ?>,
-  pressShow: <?php echo json_encode($lang === 'en' ? 'No QR yet. Wait, then press Show QR once.' : 'ما طلع QR بعد. انتظر شوي، بعدين اضغط إظهار QR مرة واحدة.'); ?>,
-  rateLimit: <?php echo json_encode($lang === 'en' ? 'WhatsApp blocked linking temporarily. Wait 15–30 minutes, then try once.' : 'واتساب حظر الربط مؤقتاً. انتظر 15–30 دقيقة، بعدين حاول مرة واحدة فقط.'); ?>
+    ? 'Cannot reach Windows gateway. On PC ' . $hostHint . ' run install-autostart.bat or start-gateway.bat.'
+    : 'ما وصلت لبوابة الويندوز. على جهاز ' . $hostHint . ' شغّل install-autostart.bat أو start-gateway.bat.'); ?>,
+  scanNew: <?php echo json_encode($lang === 'en' ? 'New QR ready — scan once' : 'QR جديد جاهز — امسحه مرة واحدة'); ?>,
+  confirmLogout: <?php echo json_encode($lang === 'en' ? 'Disconnect and show a new QR?' : 'تقطع الاتصال وتعرض QR جديد؟'); ?>,
+  loggingOut: <?php echo json_encode($lang === 'en' ? 'Disconnecting… QR in ~12 seconds' : 'جاري قطع الاتصال… QR خلال ~12 ثانية'); ?>,
+  pressShow: <?php echo json_encode($lang === 'en' ? 'No QR yet. Wait a moment, then press Show QR once.' : 'ما طلع QR بعد. انتظر شوي، بعدين اضغط إظهار QR مرة واحدة.'); ?>,
+  rateLimit: <?php echo json_encode($lang === 'en' ? 'WhatsApp blocked linking temporarily. Wait 15–30 minutes.' : 'واتساب حظر الربط مؤقتاً. انتظر 15–30 دقيقة.'); ?>,
+  certExpired: <?php echo json_encode($lang === 'en'
+    ? 'TLS/cert issue on the PC (often antivirus). Gateway retries with WA_TLS_INSECURE. Wait for QR — do not spam refresh.'
+    : 'مشكلة شهادة/TLS على الحاسبة (غالباً أنتيفايروس). البوابة تعيد المحاولة تلقائياً. انتظر QR — لا تضغط تحديث مرّات.'); ?>,
+  tlsRetry: <?php echo json_encode($lang === 'en' ? 'Retrying connection (TLS workaround)…' : 'إعادة اتصال (تجاوز TLS)…'); ?>
 };
 
 function setStatus(cls, text) {
   var box = document.getElementById('wa-status');
-  box.className = 'wa-box ' + cls;
-  box.textContent = text;
+  var tx = document.getElementById('wa-status-text');
+  box.className = 'wa-status-pill ' + cls;
+  if (tx) tx.textContent = text; else box.textContent = text;
 }
 function showQr(dataUrl) {
   var img = document.getElementById('wa-qr-img');
@@ -1225,7 +1251,6 @@ function showQr(dataUrl) {
   img.src = dataUrl;
   img.style.display = 'inline-block';
   if (ph) ph.style.display = 'none';
-  document.getElementById('wa-qr').style.display = 'block';
   return true;
 }
 function showWaitingBox(text) {
@@ -1234,10 +1259,9 @@ function showWaitingBox(text) {
   img.style.display = 'none';
   img.removeAttribute('src');
   if (ph) {
-    ph.style.display = 'flex';
+    ph.style.display = 'block';
     ph.textContent = text || L.waiting;
   }
-  document.getElementById('wa-qr').style.display = 'block';
 }
 function checkWhatsApp(forceQr) {
   if (waBusy && !forceQr) return;
@@ -1253,15 +1277,20 @@ function checkWhatsApp(forceQr) {
         var phone = data.phone ? (' — ' + data.phone) : '';
         setStatus('ok', L.connected + phone);
         if (!forceQr) {
-          document.getElementById('wa-qr-img').style.display = 'none';
           showWaitingBox(<?php echo json_encode($lang === 'en' ? 'Connected — disconnect to change number' : 'متصل — اقطع الاتصال لتغيير الرقم'); ?>);
         } else {
           setStatus('warn', L.needDisconnect);
         }
         return null;
       }
+      if (data && (data.status === 'cert_expired' || data.status === 'tls_retry')) {
+        setStatus('warn', data.status === 'tls_retry' ? L.tlsRetry : L.certExpired);
+        showWaitingBox(data.status === 'tls_retry' ? L.tlsRetry : L.certExpired);
+        if (!forceQr && !(data && data.has_qr)) return null;
+      }
       if (!forceQr && !(data && data.has_qr)) {
-        var waitMsg = (data && data.status === 'logout_cooldown') ? L.loggingOut : L.pressShow;
+        var waitMsg = L.pressShow;
+        if (data && data.status === 'logout_cooldown') waitMsg = L.loggingOut;
         setStatus('warn', waitMsg);
         showWaitingBox(waitMsg);
         return null;
@@ -1340,7 +1369,7 @@ function logoutWhatsApp() {
         waBusy = false;
         return;
       }
-      setTimeout(function () { waitForQr(15); }, 12000);
+      setTimeout(function () { waitForQr(20); }, 8000);
     })
     .catch(function () {
       setStatus('err', L.gatewayDown);
@@ -1351,7 +1380,7 @@ function logoutWhatsApp() {
 checkWhatsApp(false);
 setInterval(function () {
   if (!waBusy) checkWhatsApp(false);
-}, 60000);
+}, 20000);
 </script>
 <?php endif; ?>
 

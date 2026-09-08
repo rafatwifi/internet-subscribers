@@ -944,20 +944,29 @@ render_header(t('sas'), 'sas', '');
 }
 .sas-radius-page #subsTable th.col-exp,
 .sas-radius-page #subsTable td.col-exp {
-  text-align: center !important;
+  text-align: left !important;
   vertical-align: middle;
+  white-space: nowrap;
+}
+.sas-radius-page #subsTable th.col-phone,
+.sas-radius-page #subsTable td.col-phone,
+.sas-radius-page #subsTable td.col-phone .cell-edit {
+  text-align: left !important;
+  direction: ltr;
+  unicode-bidi: isolate;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 .sas-expire-dt {
   display: inline-flex;
   flex-direction: row;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 6px;
-  margin: 0 auto;
+  margin: 0;
   white-space: nowrap;
   line-height: 1.2;
-  text-align: center;
+  text-align: left;
   font-size: 14px;
   font-weight: 700;
 }
@@ -968,7 +977,13 @@ render_header(t('sas'), 'sas', '');
   font-size: 14px;
   font-weight: 700;
   opacity: 1;
-  text-align: center;
+  text-align: left;
+}
+#subsTable tbody tr.sas-row-ctx {
+  background: #e2e8f0 !important;
+}
+#subsTable tbody tr.sas-row-ctx td {
+  background: #e2e8f0 !important;
 }
 .sas-user-copywrap,
 .sas-ip-wrap {
@@ -1389,6 +1404,19 @@ render_header(t('sas'), 'sas', '');
   align-items: flex-start;
   gap: 8px;
 }
+.sas-act-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.sas-act-head-actions .btn {
+  min-width: 36px;
+  height: 34px;
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1;
+}
 .sas-radius-page #sasActModal .ops-modal-head h3 { display: none; }
 .sas-act-name { font-weight: 800; font-size: 15px; color: #1e293b; line-height: 1.25; }
 .sas-radius-page #sasActModal .sas-act-body {
@@ -1425,87 +1453,86 @@ render_header(t('sas'), 'sas', '');
   box-sizing: border-box;
   min-height: 28px;
 }
+#sasActModal .sas-act-foot,
 .sas-radius-page #sasActModal .sas-act-foot {
   flex: 0 0 auto;
   position: sticky;
   bottom: 0;
   z-index: 5;
-  display: block !important;
-  width: 100%;
-  max-width: none;
-  margin: 0;
-  padding: 12px 0 14px;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: stretch !important;
+  justify-content: center;
+  align-self: stretch !important;
+  width: 100% !important;
+  max-width: none !important;
+  margin: 0 !important;
+  padding: 10px 0 12px;
   box-sizing: border-box;
-  border-top: 1px solid #e2e8f0;
-  background: #fff;
-  box-shadow: 0 -8px 20px rgba(15, 23, 42, 0.08);
+  border-top: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
 }
+#sasActModal .sas-act-foot .btn,
+#sasActModal #sasActSubmit,
+#sasActModal .sas-act-main-btn,
 .sas-radius-page #sasActModal .sas-act-foot .btn,
-.sas-radius-page #sasActModal #sasActSubmit {
-  display: block !important;
+.sas-radius-page #sasActModal #sasActSubmit,
+.sas-radius-page #sasActModal .sas-act-main-btn {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  align-self: stretch !important;
+  flex: 0 0 auto !important;
+  float: none !important;
   width: 100% !important;
   max-width: none !important;
   min-width: 100% !important;
   margin: 0 !important;
-  height: 56px !important;
-  min-height: 56px !important;
-  border-radius: 12px !important;
-  font-weight: 800;
-  font-size: 17px !important;
+  padding: 0 16px !important;
+  height: 68px !important;
+  min-height: 68px !important;
+  border-radius: 14px !important;
+  font-weight: 800 !important;
+  font-size: 20px !important;
   line-height: 1.2 !important;
-  background: #1e293b !important;
+  background: #0f172a !important;
   color: #fff !important;
   border: 0 !important;
-  box-shadow: none;
-  transition: background .12s ease, transform .12s ease, box-shadow .12s ease;
+  box-shadow: 0 8px 0 rgba(15, 23, 42, 0.18);
+  text-align: center !important;
+  box-sizing: border-box !important;
 }
-.sas-act-fab {
+.sas-act-confirm-layer {
   position: fixed;
-  left: 50%;
-  transform: translateX(-50%) translateY(120%);
-  bottom: calc(18px + env(safe-area-inset-bottom, 0px));
-  z-index: 120;
+  inset: 0;
+  z-index: 200;
   display: flex;
-  gap: 8px;
   align-items: center;
-  width: min(420px, calc(100vw - 24px));
-  padding: 10px;
-  border-radius: 16px;
-  background: #0f172a;
-  box-shadow: 0 12px 36px rgba(15, 23, 42, 0.35);
-  opacity: 0;
-  pointer-events: none;
-  transition: transform .2s ease, opacity .2s ease;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(15, 23, 42, 0.45);
+  box-sizing: border-box;
 }
-.sas-act-fab.is-on {
-  transform: translateX(-50%) translateY(0);
-  opacity: 1;
-  pointer-events: auto;
+.sas-act-confirm-layer.hidden,
+.sas-act-confirm-layer[hidden] {
+  display: none !important;
 }
-.sas-act-fab .sas-act-fab-confirm {
-  flex: 1 1 auto;
-  height: 52px;
-  min-height: 52px;
+.sas-act-confirm-layer .sas-act-fab-confirm {
+  min-width: min(280px, 86vw);
+  height: 64px;
+  padding: 0 28px;
   border: 0;
-  border-radius: 12px;
+  border-radius: 18px;
   background: #16a34a;
   color: #fff;
   font-weight: 800;
-  font-size: 16px;
+  font-size: 20px;
   cursor: pointer;
+  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.35);
 }
-.sas-act-fab .sas-act-fab-cancel {
-  flex: 0 0 auto;
-  height: 52px;
-  min-width: 72px;
-  border: 0;
-  border-radius: 12px;
-  background: #334155;
-  color: #fff;
-  font-weight: 700;
-  font-size: 14px;
-  cursor: pointer;
-}
+.sas-act-confirm,
+.sas-act-fab { display: none !important; }
 .sas-act-pts {
   display: inline-block;
   margin-inline-start: 4px;
@@ -1648,16 +1675,24 @@ render_header(t('sas'), 'sas', '');
     padding: 10px 12px 0;
     border-radius: 16px 16px 0 0;
   }
+  #sasActModal .sas-act-foot,
   .sas-radius-page #sasActModal .sas-act-foot {
-    margin: 0;
-    width: 100%;
-    padding: 12px 0 calc(16px + env(safe-area-inset-bottom, 0px));
+    margin: 0 !important;
+    width: 100% !important;
+    align-items: stretch !important;
+    padding: 12px 0 calc(14px + env(safe-area-inset-bottom, 0px));
   }
-  .sas-radius-page #sasActModal #sasActSubmit {
-    border-radius: 12px !important;
-    height: 58px !important;
-    min-height: 58px !important;
-    font-size: 18px !important;
+  #sasActModal #sasActSubmit,
+  #sasActModal .sas-act-main-btn,
+  .sas-radius-page #sasActModal #sasActSubmit,
+  .sas-radius-page #sasActModal .sas-act-main-btn {
+    width: 100% !important;
+    min-width: 100% !important;
+    max-width: none !important;
+    border-radius: 14px !important;
+    height: 66px !important;
+    min-height: 66px !important;
+    font-size: 19px !important;
   }
   .sas-radius-page #sasProfModal .ops-modal-card {
     max-width: 100%;
@@ -2267,21 +2302,20 @@ render_header(t('sas'), 'sas', '');
 </div>
 
 <div class="ops-dropdown hidden" id="opsDropdown" role="menu">
-    <button type="button" class="ops-item" data-ops="new" id="opsItemNew"><?php echo e($lang === 'en' ? '+ New' : '+ مشترك جديد'); ?></button>
     <div class="ops-item" id="opsItemHint" style="cursor:default;color:#64748b"><?php echo e($lang === 'en' ? 'Select a subscriber first' : 'حدد مشتركاً من الجدول أولاً'); ?></div>
     <button type="button" class="ops-item" data-ops="open" id="opsItemOpen" hidden><?php echo e($lang === 'en' ? 'Edit' : 'تعديل'); ?></button>
     <button type="button" class="ops-item" data-ops="activate" id="opsItemActivate" hidden><?php echo e(t('activate')); ?></button>
-    <button type="button" class="ops-item" data-ops="change_profile" id="opsItemProfile" hidden><?php echo e($lang === 'en' ? 'Change package' : 'تغيير نوع الاشتراك'); ?></button>
-    <button type="button" class="ops-item" data-ops="enable" id="opsItemEnable" hidden><?php echo e($lang === 'en' ? 'Enable' : 'تشغيل'); ?></button>
-    <button type="button" class="ops-item" data-ops="disable" id="opsItemDisable" hidden><?php echo e($lang === 'en' ? 'Disable' : 'إيقاف'); ?></button>
-    <button type="button" class="ops-item" data-ops="disconnect" id="opsItemDisconnect" hidden><?php echo e($lang === 'en' ? 'Disconnect' : 'قطع الاتصال (Disconnect)'); ?></button>
     <button type="button" class="ops-item" data-ops="give_test" id="opsItemGiveTest" hidden><?php echo e(t('give_test')); ?></button>
+    <button type="button" class="ops-item" data-ops="change_profile" id="opsItemProfile" hidden><?php echo e($lang === 'en' ? 'Change package' : 'تغيير نوع الاشتراك'); ?></button>
+    <button type="button" class="ops-item" data-ops="disable" id="opsItemDisable" hidden><?php echo e($lang === 'en' ? 'Disable' : 'تعطيل'); ?></button>
+    <button type="button" class="ops-item" data-ops="enable" id="opsItemEnable" hidden><?php echo e($lang === 'en' ? 'Enable' : 'تشغيل'); ?></button>
+    <button type="button" class="ops-item" data-ops="disconnect" id="opsItemDisconnect" hidden><?php echo e($lang === 'en' ? 'Disconnect' : 'قطع الاتصال'); ?></button>
+    <button type="button" class="ops-item" data-ops="retry" id="opsItemRetry" hidden><?php echo e(t('retry_send')); ?></button>
+    <button type="button" class="ops-item" data-ops="remind_debt" id="opsItemRemind" hidden><?php echo e($lang === 'en' ? 'Send debt notice' : 'إرسال رسالة بالدين'); ?></button>
+    <button type="button" class="ops-item" data-ops="remind_days" id="opsItemDays" hidden><?php echo e($lang === 'en' ? 'Send days left' : 'إرسال رسالة بالأيام المتبقية'); ?></button>
+    <button type="button" class="ops-item" data-ops="pay" id="opsItemPay" hidden><?php echo e($lang === 'en' ? 'Debts' : 'الديون'); ?></button>
     <button type="button" class="ops-item" data-ops="bulk_activate" id="opsItemBulkActivate" hidden><?php echo e(t('bulk_activate')); ?></button>
     <button type="button" class="ops-item" data-ops="bulk_disconnect" id="opsItemBulkDisconnect" hidden><?php echo e($lang === 'en' ? 'Disconnect selected' : 'قطع اتصال المحددين'); ?></button>
-    <button type="button" class="ops-item" data-ops="pay" id="opsItemPay" hidden><?php echo e($lang === 'en' ? 'Debts' : 'الديون'); ?></button>
-    <button type="button" class="ops-item" data-ops="remind_debt" id="opsItemRemind" hidden><?php echo e($lang === 'en' ? 'Send WhatsApp notice' : 'إرسال إشعار واتساب'); ?></button>
-    <button type="button" class="ops-item" data-ops="remind_days" id="opsItemDays" hidden><?php echo e($lang === 'en' ? 'Send days left' : 'إرسال الأيام المتبقية'); ?></button>
-    <button type="button" class="ops-item" data-ops="retry" id="opsItemRetry" hidden><?php echo e(t('retry_send')); ?></button>
 </div>
 <div class="ops-dropdown cols-dropdown hidden" id="colsDropdown">
     <div class="sas-filter-label"><?php echo e($lang === 'en' ? 'Show / reorder columns' : 'إظهار وترتيب الأعمدة'); ?></div>
@@ -2477,7 +2511,10 @@ render_header(t('sas'), 'sas', '');
                     </div>
                 </div>
             </div>
-            <button type="button" class="btn ghost sm" id="sasActClose">×</button>
+            <div class="sas-act-head-actions">
+                <button type="button" class="btn ghost sm" id="sasActRefresh" title="<?php echo e($lang === 'en' ? 'Refresh cards' : 'تحديث الكروت'); ?>">↻</button>
+                <button type="button" class="btn ghost sm" id="sasActClose">×</button>
+            </div>
         </div>
         <div class="sas-act-body">
         <label class="sas-act-field"><?php echo e($lang === 'en' ? 'Package' : 'نوع الاشتراك'); ?>
@@ -2554,8 +2591,8 @@ render_header(t('sas'), 'sas', '');
         </div>
         <p class="sas-modal-err" id="sasActErr"></p>
         </div>
-        <div class="sas-act-foot">
-            <button type="button" class="btn" id="sasActSubmit"><?php echo e($lang === 'en' ? 'Activate' : 'تفعيل'); ?></button>
+        <div class="sas-act-foot" style="display:flex;flex-direction:column;align-items:stretch;width:100%;margin:0;padding:10px 0 12px;box-sizing:border-box;border-top:0;background:transparent">
+            <button type="button" class="btn sas-act-main-btn" id="sasActSubmit" style="display:flex;align-items:center;justify-content:center;width:100%;min-width:100%;max-width:none;height:68px;min-height:68px;margin:0;padding:0 16px;border:0;border-radius:14px;background:#0f172a;color:#fff;font-weight:800;font-size:20px;box-sizing:border-box"><?php echo e($lang === 'en' ? 'Activate' : 'تفعيل'); ?></button>
         </div>
         <div class="sas-act-lock hidden" id="sasActLock" aria-hidden="true">
             <div class="sas-act-lock-spin"></div>
@@ -2563,9 +2600,8 @@ render_header(t('sas'), 'sas', '');
         </div>
     </div>
 </div>
-<div class="sas-act-fab" id="sasActFab" aria-hidden="true">
-    <button type="button" class="sas-act-fab-confirm" id="sasActFabConfirm"><?php echo e($lang === 'en' ? 'Confirm activate' : 'تأكيد التفعيل'); ?></button>
-    <button type="button" class="sas-act-fab-cancel" id="sasActFabCancel"><?php echo e($lang === 'en' ? 'Cancel' : 'إلغاء'); ?></button>
+<div class="sas-act-confirm-layer hidden" id="sasActFab" aria-hidden="true" hidden>
+    <button type="button" class="sas-act-fab-confirm" id="sasActFabConfirm"><?php echo e($lang === 'en' ? 'Confirm' : 'تأكيد'); ?></button>
 </div>
 <div class="modal-backdrop hidden" id="sasProfModal">
     <div class="modal-card ops-modal-card">
@@ -2670,7 +2706,19 @@ render_header(t('sas'), 'sas', '');
   var rentNoneLabel = <?php echo json_encode($lang === 'en' ? 'No rental' : 'بدون إيجار'); ?>;
   var actUser = null;
   var profilesCache = null;
-  var cardsCacheAll = null;
+  var cardsCacheAll = <?php
+    $seedActCards = array();
+    if (function_exists('sas_unused_pins_from_inventory_cache')) {
+        $tmpSeed = sas_unused_pins_from_inventory_cache();
+        if (is_array($tmpSeed)) {
+            $seedActCards = $tmpSeed;
+        }
+    }
+    if (!$seedActCards && !empty($_SESSION['sas_unused_ui_v6']) && is_array($_SESSION['sas_unused_ui_v6'])) {
+        $seedActCards = $_SESSION['sas_unused_ui_v6'];
+    }
+    echo json_encode($seedActCards);
+  ?>;
   var cardsPrefetch = null;
   var rewardPtsDisp = <?php
     $rpShow = '';
@@ -2772,6 +2820,7 @@ render_header(t('sas'), 'sas', '');
       d.style.visibility = '';
     });
     if (opsBtn) opsBtn.setAttribute('aria-expanded', 'false');
+    if (tbody) tbody.querySelectorAll('tr.sas-row-ctx').forEach(function (r) { r.classList.remove('sas-row-ctx'); });
   }
   function placeMenu(drop, anchor) {
     if (!drop || !anchor) return;
@@ -2854,10 +2903,6 @@ render_header(t('sas'), 'sas', '');
     var rows = selectedRows();
     var one = rows.length === 1 ? rows[0] : null;
     closeMenus();
-    if (action === 'new') {
-      window.location.href = 'sas_user.php?new=1';
-      return;
-    }
     if (action === 'open' && one) {
       window.location.href = 'sas_user.php?u=' + encodeURIComponent(one.id);
       return;
@@ -2989,6 +3034,8 @@ render_header(t('sas'), 'sas', '');
       if (!tr || !tbody.contains(tr)) return;
       e.preventDefault();
       e.stopPropagation();
+      tbody.querySelectorAll('tr.sas-row-ctx').forEach(function (r) { r.classList.remove('sas-row-ctx'); });
+      tr.classList.add('sas-row-ctx');
       var chk = tr.querySelector('input.sub-check');
       if (chk && !chk.checked) selectOnlyRow(tr);
       else syncBulk();
@@ -3121,8 +3168,8 @@ render_header(t('sas'), 'sas', '');
     if (!force && cardsCacheAll && cardsCacheAll.length) {
       return Promise.resolve(cardsCacheAll);
     }
-    var needFresh = !!force || !cardsCacheAll;
-    var url = 'sas.php?ajax=cards&preload=1' + (needFresh ? '&refresh=1' : '');
+    // بدون force: كاش الجرد فقط — لا refresh=1 (كان يفرّغ ثم يضخّم العدد)
+    var url = 'sas.php?ajax=cards&preload=1' + (force ? '&refresh=1' : '');
     cardsPrefetch = fetch(url, { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(function (d) {
@@ -3132,19 +3179,21 @@ render_header(t('sas'), 'sas', '');
       })
       .catch(function () {
         cardsPrefetch = null;
-        if (!cardsCacheAll) cardsCacheAll = [];
+        if (!Array.isArray(cardsCacheAll)) cardsCacheAll = [];
         return cardsCacheAll;
       });
     return cardsPrefetch;
   }
-  function softRefreshCards() {
-    return fetch('sas.php?ajax=cards&preload=1&refresh=1', { credentials: 'same-origin' })
+  function softRefreshCards(force) {
+    var url = 'sas.php?ajax=cards&preload=1' + (force ? '&refresh=1' : '');
+    return fetch(url, { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(function (d) {
-        cardsCacheAll = (d && d.cards) ? d.cards : (cardsCacheAll || []);
+        if (d && d.cards) cardsCacheAll = d.cards;
+        else if (!Array.isArray(cardsCacheAll)) cardsCacheAll = [];
         return cardsCacheAll;
       })
-      .catch(function () { return cardsCacheAll || []; });
+      .catch(function () { return Array.isArray(cardsCacheAll) ? cardsCacheAll : []; });
   }
   function refreshActCardsIfOpen() {
     var modal = document.getElementById('sasActModal');
@@ -3158,24 +3207,35 @@ render_header(t('sas'), 'sas', '');
     return String(s || '').toLowerCase().replace(/[\s_\-]+/g, '').replace(/msl$/, '');
   }
   function cardsForProfile(profileId, profileName) {
-    var all = cardsCacheAll || [];
+    var all = Array.isArray(cardsCacheAll) ? cardsCacheAll : [];
     if (!all.length) return [];
     var pid = String(profileId || '0');
     var pn = normProf(profileName);
-    var hit = [];
+    var byId = [];
+    var byName = [];
+    var seen = {};
     all.forEach(function (c) {
+      var pin = String(c.pin || '');
+      if (!pin || seen[pin]) return;
+      var cid = String(c.profile_id || '0');
       var cn = normProf(c.profile_name);
-      if (pid !== '0' && String(c.profile_id || '0') === pid) hit.push(c);
-      else if (pn && cn && (cn === pn || cn.indexOf(pn) !== -1 || pn.indexOf(cn) !== -1)) hit.push(c);
+      if (pid !== '0' && cid === pid) {
+        seen[pin] = 1;
+        byId.push(c);
+      } else if (pn && cn && cn === pn) {
+        seen[pin] = 1;
+        byName.push(c);
+      }
     });
-    return hit;
+    // تطابق صارم فقط — بدون indexOf (كان يضمّ كروت فئات أخرى)
+    return byId.length ? byId : byName;
   }
   function loadCards(username, profileId, profileName) {
     loadQuote(username, profileId);
-    if (cardsCacheAll) {
+    if (Array.isArray(cardsCacheAll) && cardsCacheAll.length) {
       return Promise.resolve(cardsForProfile(profileId, profileName));
     }
-    return prefetchCards(true).then(function () {
+    return prefetchCards(false).then(function () {
       return cardsForProfile(profileId, profileName);
     });
   }
@@ -3333,7 +3393,8 @@ render_header(t('sas'), 'sas', '');
     setActMode('card');
     paintRewardPts(rewardPtsDisp);
     loadQuote(row.id, row.profileId);
-    // الباقات والكروت من الكاش فوراً — بدون انتظار SAS
+    // اعرض كروت الجرد فوراً (نفس صفحة الكروت) — بدون تفريغ القائمة
+    renderCards(cardsForProfile(row.profileId, row.profileName));
     loadProfiles().then(function (ps) {
       fillSelect(document.getElementById('sasActProfile'), ps, row.profileId);
       var sel = document.getElementById('sasActProfile');
@@ -3341,15 +3402,13 @@ render_header(t('sas'), 'sas', '');
     }).catch(function () {
       renderCards(cardsForProfile(row.profileId, row.profileName));
     });
-    if (cardsCacheAll && cardsCacheAll.length) {
-      renderCards(cardsForProfile(row.profileId, row.profileName));
-      softRefreshCards().then(function () { refreshActCardsIfOpen(); });
+    if (Array.isArray(cardsCacheAll) && cardsCacheAll.length) {
+      softRefreshCards(false).then(function () { refreshActCardsIfOpen(); });
     } else {
       if (hint) {
         hint.className = 'sas-sync-note';
         hint.textContent = <?php echo json_encode($lang === 'en' ? 'Loading unused cards…' : 'جاري جلب الكروت الشاغرة…'); ?>;
       }
-      if (cardSel) { cardSel.innerHTML = ''; cardSel.disabled = true; }
       prefetchCards(true).then(function () { refreshActCardsIfOpen(); });
     }
     syncActWa();
@@ -3530,18 +3589,26 @@ render_header(t('sas'), 'sas', '');
     actSubmit.addEventListener('mouseleave', clearActPressed);
     var actFab = document.getElementById('sasActFab');
     var actFabConfirm = document.getElementById('sasActFabConfirm');
-    var actFabCancel = document.getElementById('sasActFabCancel');
     function showActFab() {
       if (!actFab) return;
+      actFab.hidden = false;
+      actFab.classList.remove('hidden');
       actFab.classList.add('is-on');
       actFab.setAttribute('aria-hidden', 'false');
     }
     function hideActFab() {
       if (!actFab) return;
+      actFab.hidden = true;
+      actFab.classList.add('hidden');
       actFab.classList.remove('is-on');
       actFab.setAttribute('aria-hidden', 'true');
     }
     window.hideActFab = hideActFab;
+    if (actFab) {
+      actFab.addEventListener('click', function (e) {
+        if (e.target === actFab) hideActFab();
+      });
+    }
     function runActivateNow() {
       if (!actUser) return;
       hideActFab();
@@ -3626,8 +3693,26 @@ render_header(t('sas'), 'sas', '');
       }
       showActFab();
     });
-    if (actFabConfirm) actFabConfirm.addEventListener('click', runActivateNow);
-    if (actFabCancel) actFabCancel.addEventListener('click', hideActFab);
+    if (actFabConfirm) actFabConfirm.addEventListener('click', function (e) {
+      e.stopPropagation();
+      runActivateNow();
+    });
+    var actRefresh = document.getElementById('sasActRefresh');
+    if (actRefresh) {
+      actRefresh.addEventListener('click', function () {
+        if (!actUser) return;
+        var hint = document.getElementById('sasActCardHint');
+        if (hint) {
+          hint.textContent = <?php echo json_encode($lang === 'en' ? 'Refreshing…' : 'جاري التحديث…'); ?>;
+        }
+        softRefreshCards(true).then(function () {
+          return loadProfiles();
+        }).then(function (ps) {
+          fillSelect(document.getElementById('sasActProfile'), ps, actUser.profileId);
+          refreshActCardsIfOpen();
+        }).catch(function () { refreshActCardsIfOpen(); });
+      });
+    }
   }
   var profSubmit = document.getElementById('sasProfSubmit');
   if (profSubmit) {
@@ -4330,7 +4415,7 @@ render_header(t('sas'), 'sas', '');
     }
   })();
 
-  prefetchCards(true).then(function () {
+  prefetchCards(false).then(function () {
     loadProfiles();
     if (stale) runDiagThenSync();
   }).catch(function () {
@@ -4338,8 +4423,8 @@ render_header(t('sas'), 'sas', '');
     if (stale) runDiagThenSync();
   });
   setInterval(function () {
-    softRefreshCards().then(function () { refreshActCardsIfOpen(); });
-  }, 40000);
+    softRefreshCards(false).then(function () { refreshActCardsIfOpen(); });
+  }, 90000);
   if (window.location.hash) {
     var hid = window.location.hash.replace(/^#/, '');
     var rowEl = hid ? document.getElementById(hid) : null;

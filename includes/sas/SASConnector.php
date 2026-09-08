@@ -1308,7 +1308,7 @@ class SASConnector
         }
         $page = array(
             'page' => 1,
-            'count' => $unusedOnly ? 50 : 120,
+            'count' => $unusedOnly ? 100 : 120,
             'sortBy' => 'id',
             'direction' => 'desc',
             'search' => '',
@@ -1324,22 +1324,36 @@ class SASConnector
         if ($seriesId > 0) {
             $routes[] = 'index/card/' . $seriesId;
         }
-        $payloads = $unusedOnly ? array($pageUnused, $page) : array($page, $pageUnused, $pageUsed);
+        $payloads = $unusedOnly ? array($pageUnused) : array($page, $pageUnused, $pageUsed);
         foreach ($payloads as $payload) {
             if ($routes) {
-                $paged = $this->sasCardFetchPaged($routes, $payload, $unusedOnly ? 2 : 3);
+                $paged = $this->sasCardFetchPaged($routes, $payload, $unusedOnly ? 8 : 3);
                 if ($this->sasCardListHasPin($paged)) {
+                    // عند unusedOnly: لا نرجع قائمة عامة قد تخلط المستخدم مع الشاغر
+                    if ($unusedOnly) {
+                        $clean = array();
+                        foreach ($paged as $pr) {
+                            if (is_array($pr) && !$this->sasCardLooksLikeSeries($pr)
+                                && $this->sasCardPinValue($pr) !== '' && !$this->sasCardIsUsed($pr)) {
+                                $clean[] = $pr;
+                            }
+                        }
+                        return $clean;
+                    }
                     return $paged;
                 }
             }
         }
+        if ($unusedOnly) {
+            return array();
+        }
         $tries = array();
         if ($seriesCode !== '' && $this->sasLooksLikeSeriesCode($seriesCode)) {
-            $tries[] = array('index/card/' . $seriesCode, $unusedOnly ? $pageUnused : $page);
+            $tries[] = array('index/card/' . $seriesCode, $page);
         }
         if ($seriesId > 0) {
-            $tries[] = array('index/card/' . $seriesId, $unusedOnly ? $pageUnused : $page);
-            $tries[] = array('list/card/' . $seriesId, $unusedOnly ? $pageUnused : $page);
+            $tries[] = array('index/card/' . $seriesId, $page);
+            $tries[] = array('list/card/' . $seriesId, $page);
         }
         foreach ($tries as $t) {
             $full = $this->decodeApiBody($this->post($t[0], $t[1], true), false);
@@ -1489,40 +1503,23 @@ class SASConnector
             return true;
         }
         $sPid = $this->sasCardSeriesProfileId($row);
-        if ($profileId > 0 && $sPid === $profileId) {
+        if ($profileId > 0 && $sPid > 0 && $sPid === $profileId) {
             return true;
         }
         if ($profileName === '') {
+            return $profileId > 0 ? false : true;
+        }
+        $pn = $this->sasRowProfileName($row);
+        if ($pn === '') {
             return false;
         }
-        $names = array();
-        $pn = $this->sasRowProfileName($row);
-        if ($pn !== '') {
-            $names[] = $pn;
-        }
-        $want = strtolower($profileName);
-        foreach ($names as $n) {
-            $have = strtolower($n);
-            if ($have === $want || strpos($have, $want) !== false || strpos($want, $have) !== false) {
-                return true;
-            }
-        }
-        $val = null;
-        if (isset($row['value']) && is_numeric($row['value'])) {
-            $val = (float) $row['value'];
-        } elseif (isset($row['price']) && is_numeric($row['price'])) {
-            $val = (float) $row['price'];
-        }
-        if ($val !== null) {
-            if ((strpos($want, 'max') !== false || strpos($want, '1.5') !== false || strpos($want, '1,5') !== false)
-                && abs($val - 1.5) < 0.06) {
-                return true;
-            }
-            if ((strpos($want, 'nb2') !== false || strpos($want, 'nb-2') !== false) && abs($val - 2) < 0.06) {
-                return true;
-            }
-        }
-        return false;
+        $norm = function ($s) {
+            $s = strtolower(trim((string) $s));
+            $s = preg_replace('/[\s_\-]+/', '', $s);
+            $s = preg_replace('/msl$/', '', $s);
+            return $s;
+        };
+        return $norm($pn) === $norm($profileName);
     }
 
     public function listUnusedCards($profileId = 0, $profileName = '')
@@ -1552,22 +1549,12 @@ class SASConnector
                 continue;
             }
             $unusedHint = $this->sasCardSeriesUnusedCount($srow);
-            if ($unusedHint <= 0) {
+            if ($unusedHint === 0) {
                 continue;
             }
-            $usedCnt = -1;
-            if (array_key_exists('used', $srow)) {
-                if ($srow['used'] === '' || $srow['used'] === null || $srow['used'] === false
-                    || (is_array($srow['used']) && !$srow['used'])) {
-                    $usedCnt = 0;
-                } elseif (is_numeric($srow['used'])) {
-                    $usedCnt = (int) $srow['used'];
-                }
-            } elseif (isset($srow['used_count']) && is_numeric($srow['used_count'])) {
-                $usedCnt = (int) $srow['used_count'];
-            }
-            if ($usedCnt !== 0) {
-                continue;
+            // بدون عدّاد واضح نجلب pins فعلياً بدون تضخيم وهمي
+            if ($unusedHint < 0) {
+                $unusedHint = 0;
             }
             $srow['_unused_hint'] = $unusedHint;
             $unused[] = $srow;
@@ -1581,32 +1568,12 @@ class SASConnector
                 $rest[] = $srow;
             }
         }
-        $ordered = $hasFilter ? array_merge($prefer, $rest) : array_merge($prefer, $rest);
-        if ($hasFilter && $prefer) {
-            $ordered = $prefer;
-        }
+        $ordered = $hasFilter ? ($prefer ? $prefer : array()) : array_merge($prefer, $rest);
         usort($ordered, function ($a, $b) {
             $ua = isset($a['_unused_hint']) ? (int) $a['_unused_hint'] : 0;
             $ub = isset($b['_unused_hint']) ? (int) $b['_unused_hint'] : 0;
-            $qa = 0;
-            $qb = 0;
-            if (isset($a['qty']) && is_numeric($a['qty'])) {
-                $qa = (int) $a['qty'];
-            } elseif (isset($a['quantity']) && is_numeric($a['quantity'])) {
-                $qa = (int) $a['quantity'];
-            }
-            if (isset($b['qty']) && is_numeric($b['qty'])) {
-                $qb = (int) $b['qty'];
-            } elseif (isset($b['quantity']) && is_numeric($b['quantity'])) {
-                $qb = (int) $b['quantity'];
-            }
-            $fa = ($qa > 0 && $ua === $qa) ? 0 : 1;
-            $fb = ($qb > 0 && $ub === $qb) ? 0 : 1;
-            if ($fa !== $fb) {
-                return ($fa < $fb) ? -1 : 1;
-            }
             if ($ua !== $ub) {
-                return ($ua < $ub) ? -1 : 1;
+                return ($ua > $ub) ? -1 : 1;
             }
             return 0;
         });
@@ -1622,24 +1589,18 @@ class SASConnector
             $sid = (isset($srow['id']) && is_numeric($srow['id'])) ? (int) $srow['id'] : 0;
             $scode = $this->sasCardSeriesCode($srow);
             $nested = array();
-            foreach (array('pins', 'cards', 'unused', 'items') as $nk) {
-                if (isset($srow[$nk]) && is_array($srow[$nk]) && isset($srow[$nk][0])) {
-                    $nested = $srow[$nk];
-                    break;
-                }
-            }
-            if (!$nested && ($sid > 0 || $scode !== '') && $seriesTried < 8) {
+            // نجلب كل الـ pins ونصفّي الشاغر محلياً — فلتر used=0 من الساس يخلط المستخدمة
+            if (($sid > 0 || $scode !== '') && $seriesTried < 40) {
                 $seriesTried++;
-                $nested = $this->sasCardPinsFromSeries($sid, $sPid > 0 ? $sPid : $profileId, $scode);
+                $nested = $this->sasCardPinsFromSeries($sid, $sPid > 0 ? $sPid : $profileId, $scode, false);
             }
-            $taken = 0;
-            $limit = isset($srow['_unused_hint']) ? (int) $srow['_unused_hint'] : 0;
             foreach ($nested as $pinRow) {
-                if (!is_array($pinRow) || $this->sasCardPinValue($pinRow) === '' || $this->sasCardIsUsed($pinRow)) {
+                if (!is_array($pinRow) || $this->sasCardLooksLikeSeries($pinRow)) {
                     continue;
                 }
-                if ($limit > 0 && $taken >= $limit) {
-                    break;
+                $pin = $this->sasCardPinValue($pinRow);
+                if ($pin === '' || strlen($pin) < 6 || $this->sasCardIsUsed($pinRow)) {
+                    continue;
                 }
                 if (empty($pinRow['profile_name']) && $sName !== '') {
                     $pinRow['profile_name'] = $sName;
@@ -1649,7 +1610,6 @@ class SASConnector
                 }
                 $pinRow['_from_matched_series'] = 1;
                 $rows[] = $pinRow;
-                $taken++;
             }
         }
 
@@ -1659,22 +1619,16 @@ class SASConnector
             if (!is_array($row)) {
                 continue;
             }
-            if (!empty($row['qty']) || !empty($row['quantity'])) {
+            if (!empty($row['qty']) || !empty($row['quantity']) || $this->sasCardLooksLikeSeries($row)) {
                 continue;
             }
             $pin = $this->sasCardPinValue($row);
-            if ($pin === '' || $this->sasCardIsUsed($row)) {
+            if ($pin === '' || strlen($pin) < 6 || $this->sasCardIsUsed($row)) {
                 continue;
             }
             $fromMatched = !empty($row['_from_matched_series']);
             if ($hasFilter && !$fromMatched && !$this->sasSeriesMatchesProfile($row, $profileId, $profileName)) {
-                $rowPid = $this->sasCardSeriesProfileId($row);
-                if ($rowPid > 0 && $profileId > 0 && $rowPid !== $profileId) {
-                    continue;
-                }
-                if ($rowPid > 0 || $this->sasCardSeriesName($row) !== '') {
-                    continue;
-                }
+                continue;
             }
             $key = strtolower($pin);
             if (isset($seen[$key])) {
@@ -1690,6 +1644,115 @@ class SASConnector
                 return 0;
             }
             return ($ia > $ib) ? -1 : 1;
+        });
+        return $out;
+    }
+
+    /**
+     * عدّاد ويدجت الداشبورد: كروت شاغرة فقط، مجمّعة بالفئة.
+     * يعتمد pins حقيقية (مو qty الوصفي) ويمر على أكبر السلاسل أولاً.
+     */
+    public function listDashUnusedCardGroups($maxSeries = 40)
+    {
+        if (!$this->token && !$this->login()) {
+            return array();
+        }
+        $maxSeries = max(8, min(60, (int) $maxSeries));
+        $payload = array(
+            'page' => 1,
+            'count' => 200,
+            'sortBy' => 'series_date',
+            'direction' => 'desc',
+            'search' => '',
+        );
+        $series = $this->sasCardFetchPaged(array('index/series', 'index/card', 'index/cards', 'index/cardSeries'), $payload, 12);
+        $candidates = array();
+        foreach ($series as $srow) {
+            if (!is_array($srow)) {
+                continue;
+            }
+            if (!empty($srow['suspended']) && (string) $srow['suspended'] === '1') {
+                continue;
+            }
+            $hint = $this->sasCardSeriesUnusedCount($srow);
+            if ($hint === 0) {
+                continue;
+            }
+            $srow['_unused_hint'] = ($hint > 0) ? $hint : 0;
+            $candidates[] = $srow;
+        }
+        usort($candidates, function ($a, $b) {
+            $ua = isset($a['_unused_hint']) ? (int) $a['_unused_hint'] : 0;
+            $ub = isset($b['_unused_hint']) ? (int) $b['_unused_hint'] : 0;
+            if ($ua !== $ub) {
+                return ($ua > $ub) ? -1 : 1;
+            }
+            return 0;
+        });
+
+        $groups = array();
+        $seenPin = array();
+        $tried = 0;
+        foreach ($candidates as $srow) {
+            if ($tried >= $maxSeries) {
+                break;
+            }
+            $sid = (isset($srow['id']) && is_numeric($srow['id'])) ? (int) $srow['id'] : 0;
+            $scode = $this->sasCardSeriesCode($srow);
+            if ($sid <= 0 && $scode === '') {
+                continue;
+            }
+            $tried++;
+            $sPid = $this->sasCardSeriesProfileId($srow);
+            $sName = $this->sasRowProfileName($srow);
+            if ($sName === '') {
+                $sName = $sPid > 0 ? ('#' . $sPid) : ($scode !== '' ? $scode : 'كروت');
+            }
+            // نفس منطق صفحة الكروت: نجلب كل الـ pins ونصفّي الشاغر محلياً
+            // (فلتر used=0 من الساس أحياناً يرجع مستخدمة → رقم وهمي مثل 7 بدل 2)
+            $pins = $this->sasCardPinsFromSeries($sid, $sPid, $scode, false);
+            $n = 0;
+            foreach ($pins as $pinRow) {
+                if (!is_array($pinRow) || $this->sasCardLooksLikeSeries($pinRow)) {
+                    continue;
+                }
+                $pin = $this->sasCardPinValue($pinRow);
+                if ($pin === '' || strlen($pin) < 6) {
+                    continue;
+                }
+                if ($this->sasCardIsUsed($pinRow)) {
+                    continue;
+                }
+                $pkey = strtolower($pin);
+                if (isset($seenPin[$pkey])) {
+                    continue;
+                }
+                $seenPin[$pkey] = 1;
+                $n++;
+            }
+            if ($n <= 0) {
+                continue;
+            }
+            $key = strtolower($sName);
+            if (!isset($groups[$key])) {
+                $groups[$key] = array(
+                    'profile_id' => $sPid,
+                    'name' => $sName,
+                    'count' => 0,
+                );
+            }
+            $groups[$key]['count'] += $n;
+            if ($groups[$key]['profile_id'] <= 0 && $sPid > 0) {
+                $groups[$key]['profile_id'] = $sPid;
+            }
+        }
+
+        $out = array_values($groups);
+        usort($out, function ($a, $b) {
+            if ($a['count'] === $b['count']) {
+                return strcasecmp($a['name'], $b['name']);
+            }
+            return ($a['count'] > $b['count']) ? -1 : 1;
         });
         return $out;
     }
@@ -1759,6 +1822,50 @@ class SASConnector
             return array();
         }
         $maxSeries = max(1, min(30, (int) $maxSeries));
+        $groups = array();
+
+        // ابدأ من بروفايلات الساس حتى تظهر الفئات الفارغة
+        if (method_exists($this, 'getProfiles')) {
+            $profiles = $this->getProfiles();
+            if (is_array($profiles)) {
+                if (isset($profiles['data']) && is_array($profiles['data'])) {
+                    $profiles = $profiles['data'];
+                }
+                foreach ($profiles as $pr) {
+                    if (!is_array($pr)) {
+                        continue;
+                    }
+                    $pid = 0;
+                    if (isset($pr['id']) && is_numeric($pr['id'])) {
+                        $pid = (int) $pr['id'];
+                    }
+                    $pname = '';
+                    if (!empty($pr['name']) && !is_array($pr['name'])) {
+                        $pname = trim((string) $pr['name']);
+                    } elseif (!empty($pr['profile_name']) && !is_array($pr['profile_name'])) {
+                        $pname = trim((string) $pr['profile_name']);
+                    }
+                    if ($pname === '' && $pid <= 0) {
+                        continue;
+                    }
+                    if ($pname === '') {
+                        $pname = '#' . $pid;
+                    }
+                    $key = strtolower($pname);
+                    if (!isset($groups[$key])) {
+                        $groups[$key] = array(
+                            'name' => $pname,
+                            'profile_id' => $pid,
+                            'total' => 0,
+                            'used' => 0,
+                            'unused' => 0,
+                            'cards' => array(),
+                        );
+                    }
+                }
+            }
+        }
+
         $payload = array(
             'page' => 1,
             'count' => 100,
@@ -1767,7 +1874,6 @@ class SASConnector
             'search' => '',
         );
         $series = $this->sasCardFetchPaged(array('index/series', 'index/card', 'index/cards', 'index/cardSeries'), $payload, 20);
-        $groups = array();
         $tried = 0;
         foreach ($series as $srow) {
             if (!is_array($srow)) {
@@ -1787,19 +1893,6 @@ class SASConnector
             if ($name === '') {
                 $name = 'كروت';
             }
-            $total = null;
-            $usedMeta = null;
-            if (isset($srow['qty']) && is_numeric($srow['qty'])) {
-                $total = (int) $srow['qty'];
-            } elseif (isset($srow['quantity']) && is_numeric($srow['quantity'])) {
-                $total = (int) $srow['quantity'];
-            }
-            if (array_key_exists('used', $srow) && is_numeric($srow['used'])) {
-                $usedMeta = (int) $srow['used'];
-            } elseif (isset($srow['used_count']) && is_numeric($srow['used_count'])) {
-                $usedMeta = (int) $srow['used_count'];
-            }
-            $unusedMeta = $this->sasCardSeriesUnusedCount($srow);
             $sid = (isset($srow['id']) && is_numeric($srow['id'])) ? (int) $srow['id'] : 0;
             $scode = $this->sasCardSeriesCode($srow);
             $sPid = $this->sasCardSeriesProfileId($srow);
@@ -1811,17 +1904,25 @@ class SASConnector
                     if (!is_array($pinRow)) {
                         continue;
                     }
+                    // تجاهل صفوف السلسلة الوصفية (qty/unused_count) حتى لا تظهر أعداد وهمية
+                    if ($this->sasCardLooksLikeSeries($pinRow)) {
+                        continue;
+                    }
                     $pin = $this->sasCardPinValue($pinRow);
-                    if ($pin === '') {
+                    if ($pin === '' || strlen($pin) < 4) {
                         continue;
                     }
                     $pins[] = array(
                         'pin' => $pin,
                         'used' => $this->sasCardIsUsed($pinRow) ? 1 : 0,
-                        'used_by' => isset($pinRow['used_by']) ? (string) $pinRow['used_by']
-                            : (isset($pinRow['used_username']) ? (string) $pinRow['used_username'] : ''),
+                        'used_by' => $this->sasCardUsedBy($pinRow),
+                        'used_at' => $this->sasCardUsedAt($pinRow),
                     );
                 }
+            }
+            // بدون pins حقيقية لا نعتمد أرقام الساس الوصفية (تسبب عدّ خاطئ مثل 34)
+            if (!$pins) {
+                continue;
             }
             $key = strtolower($name);
             if (!isset($groups[$key])) {
@@ -1833,15 +1934,6 @@ class SASConnector
                     'unused' => 0,
                     'cards' => array(),
                 );
-            }
-            if ($total !== null) {
-                $groups[$key]['total'] += $total;
-            }
-            if ($usedMeta !== null) {
-                $groups[$key]['used'] += $usedMeta;
-            }
-            if ($unusedMeta >= 0) {
-                $groups[$key]['unused'] += $unusedMeta;
             }
             foreach ($pins as $pc) {
                 $pk = $pc['pin'];
@@ -1858,35 +1950,80 @@ class SASConnector
             }
         }
         foreach ($groups as &$g) {
-            if ($g['cards']) {
-                $u = 0;
-                $nu = 0;
-                foreach ($g['cards'] as $c) {
-                    if (!empty($c['used'])) {
-                        $u++;
-                    } else {
-                        $nu++;
-                    }
+            $u = 0;
+            $nu = 0;
+            foreach ($g['cards'] as $c) {
+                if (!empty($c['used'])) {
+                    $u++;
+                } else {
+                    $nu++;
                 }
-                $g['used'] = $u;
-                $g['unused'] = $nu;
-                $g['total'] = $u + $nu;
-                usort($g['cards'], function ($a, $b) {
-                    if ((int) $a['used'] !== (int) $b['used']) {
-                        return ((int) $a['used'] < (int) $b['used']) ? -1 : 1;
-                    }
-                    return strcmp($a['pin'], $b['pin']);
-                });
-            } elseif ($g['total'] <= 0 && ($g['used'] > 0 || $g['unused'] > 0)) {
-                $g['total'] = $g['used'] + $g['unused'];
             }
+            $g['used'] = $u;
+            $g['unused'] = $nu;
+            $g['total'] = $u + $nu;
+            usort($g['cards'], function ($a, $b) {
+                if ((int) $a['used'] !== (int) $b['used']) {
+                    return ((int) $a['used'] < (int) $b['used']) ? -1 : 1;
+                }
+                return strcmp($a['pin'], $b['pin']);
+            });
         }
         unset($g);
         $out = array_values($groups);
         usort($out, function ($a, $b) {
+            if ($a['total'] !== $b['total']) {
+                return ($a['total'] > $b['total']) ? -1 : 1;
+            }
             return strcasecmp($a['name'], $b['name']);
         });
         return $out;
+    }
+
+    private function sasCardUsedBy($row)
+    {
+        if (!is_array($row)) {
+            return '';
+        }
+        foreach (array('used_by', 'usedBy', 'used_username', 'used_user', 'username', 'user_name') as $k) {
+            if (!empty($row[$k]) && !is_array($row[$k])) {
+                $v = trim((string) $row[$k]);
+                if ($v !== '' && strpos($v, '@') === false) {
+                    return $v;
+                }
+            }
+        }
+        if (isset($row['user_details']) && is_array($row['user_details'])
+            && !empty($row['user_details']['username']) && !is_array($row['user_details']['username'])) {
+            return trim((string) $row['user_details']['username']);
+        }
+        if (isset($row['user']) && is_array($row['user'])
+            && !empty($row['user']['username']) && !is_array($row['user']['username'])) {
+            return trim((string) $row['user']['username']);
+        }
+        return '';
+    }
+
+    private function sasCardUsedAt($row)
+    {
+        if (!is_array($row)) {
+            return '';
+        }
+        foreach (array('used_at', 'usedAt', 'used_date', 'date_used', 'activated_at', 'used_time', 'use_date') as $k) {
+            if (empty($row[$k]) || is_array($row[$k])) {
+                continue;
+            }
+            $v = trim((string) $row[$k]);
+            if ($v === '' || $v === '0' || $v === '0000-00-00' || $v === '0000-00-00 00:00:00') {
+                continue;
+            }
+            $ts = strtotime($v);
+            if ($ts > 0) {
+                return date('Y-m-d H:i', $ts);
+            }
+            return $v;
+        }
+        return '';
     }
 
     public function listOnlineUsers()
@@ -2056,17 +2193,16 @@ class SASConnector
                 foreach ($group['payloads'] as $payload) {
                     $last = $this->postActivate($route, $payload);
                     if ($this->isActivateOk($last)) {
+                        // نجاح الساس يكفي — لا ننتظر تحقق الانتهاء حتى لا يتأخر التفعيل
                         $afterTs = $this->liveExpireTs($userId, $username);
                         if ($this->expireMoved($beforeTs, $afterTs)) {
-                            $this->setTimeout($oldTimeout);
                             $last['_verified'] = 1;
-                            return $last;
+                        } else {
+                            $last['_verified'] = 0;
+                            $last['_accepted'] = 1;
                         }
-                        if ($group['kind'] === 'refill') {
-                            $refillOk = $last;
-                            break 3;
-                        }
-                        continue;
+                        $this->setTimeout($oldTimeout);
+                        return $last;
                     }
                     if ($this->isRouteMissing($last)) {
                         break;
