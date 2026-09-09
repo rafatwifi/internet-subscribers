@@ -121,6 +121,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('debts.php?status=paid');
     }
 
+    if ($action === 'delete_invoice') {
+        if (!user_can_edit_debts()) {
+            flash('error', debt_edit_denied_message());
+            redirect('debts.php?status=unpaid');
+        }
+        $sid = (int) post('subscriber_id', '0');
+        if ($sid <= 0) {
+            $peek = $pdo->prepare('SELECT subscriber_id FROM invoices WHERE id = :id');
+            $peek->execute(array(':id' => $id));
+            $sid = (int) $peek->fetchColumn();
+        }
+        list($ok, $msg) = apply_unpaid_invoice_delete($pdo, $id, $sid);
+        flash($ok ? 'success' : 'error', $msg);
+        $ret = (int) post('return_subscriber', '0');
+        if ($ret <= 0) {
+            $ret = $sid;
+        }
+        redirect('debts.php?status=unpaid' . ($ret > 0 ? ('&subscriber_id=' . $ret) : ''));
+    }
+
     if ($action === 'update_invoice_amount') {
         $wantJson = post('ajax') === '1';
         if (!user_can_edit_debts()) {
@@ -514,7 +534,7 @@ render_header(t('debts'), 'debts');
 
 <div class="debts-toolbar">
         <?php if ($canEditDebts): ?>
-        <button class="btn secondary" type="button" onclick="document.getElementById('addDebtBox').classList.toggle('hidden')"><?php echo e($lang === 'en' ? 'Add debt' : 'إضافة دين'); ?></button>
+        <button class="btn secondary" type="button" id="debtsAddBtn"><?php echo e($lang === 'en' ? 'Add debt' : 'إضافة دين'); ?></button>
         <?php endif; ?>
         <input id="debtFilter" placeholder="<?php echo e($lang === 'en' ? 'Instant search...' : 'بحث فوري اسم أو رقم...'); ?>" value="<?php echo e($q); ?>">
         <div class="debts-tabs">
@@ -523,18 +543,9 @@ render_header(t('debts'), 'debts');
         <a class="<?php echo $status === 'all' ? 'is-on' : ''; ?>" href="?status=all<?php echo $filterSubscriberId ? '&subscriber_id=' . $filterSubscriberId : ''; ?>"><?php echo e(t('show_all')); ?></a>
         </div>
         <?php if ($filterSubscriberId > 0): ?>
-            <?php if ($cardDebt > 0 && $status !== 'paid'): ?>
-                <button type="button" class="btn js-pay-open"
-                    data-mode="all"
-                    data-invoice="0"
-                    data-sub="<?php echo (int) $filterSubscriberId; ?>"
-                    data-amount="<?php echo (int) $cardDebt; ?>"
-                    data-name="<?php echo e($filterName); ?>">
-                    <?php echo e(t('pay_all_debts')); ?>
-                </button>
-            <?php endif; ?>
             <a class="btn ghost" href="debts.php?status=unpaid"><?php echo e(t('show_all')); ?></a>
         <?php endif; ?>
+        <span class="meta" style="margin-inline-start:auto"><?php echo e($lang === 'en' ? 'Right-click a row for actions' : 'كلك يمين على السطر للإجراءات'); ?></span>
 </div>
 
 <?php if ($canEditDebts): ?>
@@ -606,8 +617,8 @@ render_header(t('debts'), 'debts');
                 <?php if ($status !== 'unpaid'): ?>
                 <th><?php echo e(t('profit')); ?></th>
                 <th><?php echo e($lang === 'en' ? 'Status' : 'الحالة'); ?></th>
-                <?php endif; ?>
                 <th><?php echo e($lang === 'en' ? 'Actions' : 'إجراءات'); ?></th>
+                <?php endif; ?>
             </tr>
             </thead>
             <tbody>
@@ -615,9 +626,22 @@ render_header(t('debts'), 'debts');
                 <tr><td colspan="7"><?php echo e($lang === 'en' ? 'No debts' : 'لا توجد ديون'); ?></td></tr>
             <?php endif; ?>
             <?php foreach ($rows as $row): ?>
-                <tr data-filter="<?php echo e($row['name'] . ' ' . $row['phone'] . ' ' . (isset($row['notes']) ? $row['notes'] : '') . ' ' . $row['month_label']); ?>">
+                <?php
+                $rowSubId = (int) $row['subscriber_id'];
+                $rowAmt = (int) round((float) $row['amount']);
+                $rowSubTotal = isset($unpaidBySub[$rowSubId]) ? (int) round((float) $unpaidBySub[$rowSubId]) : $rowAmt;
+                ?>
+                <tr
+                    data-filter="<?php echo e($row['name'] . ' ' . $row['phone'] . ' ' . (isset($row['notes']) ? $row['notes'] : '') . ' ' . $row['month_label']); ?>"
+                    data-invoice="<?php echo (int) $row['id']; ?>"
+                    data-sub="<?php echo $rowSubId; ?>"
+                    data-amount="<?php echo $rowAmt; ?>"
+                    data-sub-total="<?php echo $rowSubTotal; ?>"
+                    data-name="<?php echo e($row['name']); ?>"
+                    data-status="<?php echo e($row['status']); ?>"
+                >
                     <td>
-                        <a href="subscriber.php?id=<?php echo (int) $row['subscriber_id']; ?>"><strong><?php echo e($row['name']); ?></strong></a>
+                        <a href="subscriber.php?id=<?php echo $rowSubId; ?>"><strong><?php echo e($row['name']); ?></strong></a>
                         <div class="meta"><?php echo e(format_phone_display($row['phone'])); ?></div>
                     </td>
                     <td>
@@ -628,8 +652,8 @@ render_header(t('debts'), 'debts');
                         <?php if ($row['status'] === 'unpaid' && !empty($canEditDebts)): ?>
                             <button type="button" class="debt-amt debt-due debt-edit-btn"
                                 data-invoice="<?php echo (int) $row['id']; ?>"
-                                data-sub="<?php echo (int) $row['subscriber_id']; ?>"
-                                data-amount="<?php echo (int) round((float) $row['amount']); ?>"
+                                data-sub="<?php echo $rowSubId; ?>"
+                                data-amount="<?php echo $rowAmt; ?>"
                                 title="<?php echo e($lang === 'en' ? 'Click to edit debt' : 'اضغط لتعديل الدين'); ?>"
                             ><?php echo e(money_format_iqd($row['amount'], $config['currency'])); ?></button>
                         <?php else: ?>
@@ -640,35 +664,8 @@ render_header(t('debts'), 'debts');
                     <?php if ($status !== 'unpaid'): ?>
                     <td><?php echo e(money_format_iqd(isset($row['profit']) ? $row['profit'] : 0, $config['currency'])); ?></td>
                     <td><span class="badge <?php echo e($row['status']); ?>"><?php echo $row['status'] === 'paid' ? ($lang === 'en' ? 'Paid' : 'مسدد') : ($lang === 'en' ? 'Unpaid' : 'غير مسدد'); ?></span></td>
-                    <?php endif; ?>
                     <td>
-                        <?php if ($row['status'] === 'unpaid'): ?>
-                        <?php
-                        $rowSubId = (int) $row['subscriber_id'];
-                        ?>
-                        <div class="pay-inline-form">
-                            <div class="pay-inline-row">
-                                <input type="number" class="js-pay-amt" min="1" step="1" value="<?php echo (int) $row['amount']; ?>" title="<?php echo e(t('partial_pay')); ?>">
-                                <button type="button" class="btn money sm js-pay-open"
-                                    data-mode="one"
-                                    data-invoice="<?php echo (int) $row['id']; ?>"
-                                    data-sub="<?php echo $rowSubId; ?>"
-                                    data-amount="<?php echo (int) $row['amount']; ?>"
-                                    data-name="<?php echo e($row['name']); ?>">
-                                    <?php echo e(t('pay_this_amount')); ?>
-                                </button>
-                            </div>
-                        </div>
-                        <form method="post" style="margin-top:4px">
-                            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
-                            <input type="hidden" name="action" value="remind">
-                            <input type="hidden" name="id" value="<?php echo (int) $row['id']; ?>">
-                            <?php if ($filterSubscriberId > 0): ?>
-                                <input type="hidden" name="return_subscriber" value="<?php echo (int) $filterSubscriberId; ?>">
-                            <?php endif; ?>
-                            <button class="btn ghost sm" type="submit"><?php echo e(t('remind')); ?></button>
-                        </form>
-                        <?php elseif ($row['status'] === 'paid' && $canEditDebts): ?>
+                        <?php if ($row['status'] === 'paid' && $canEditDebts): ?>
                         <form method="post">
                             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                             <input type="hidden" name="action" value="unpay">
@@ -677,12 +674,38 @@ render_header(t('debts'), 'debts');
                         </form>
                         <?php endif; ?>
                     </td>
+                    <?php endif; ?>
                 </tr>
             <?php endforeach; ?>
             </tbody>
         </table>
 </div>
 </div>
+
+<div class="ops-dropdown hidden" id="debtsOpsMenu" role="menu">
+    <button type="button" class="ops-item" data-debt-ops="add" id="debtsOpsAdd"><?php echo e($lang === 'en' ? 'Add debt' : 'إضافة دين'); ?></button>
+    <button type="button" class="ops-item" data-debt-ops="pay_one" id="debtsOpsPayOne"><?php echo e(t('pay_this_amount')); ?></button>
+    <button type="button" class="ops-item" data-debt-ops="pay_all" id="debtsOpsPayAll"><?php echo e(t('pay_all_debts')); ?></button>
+    <button type="button" class="ops-item" data-debt-ops="delete" id="debtsOpsDelete"><?php echo e($lang === 'en' ? 'Delete debt' : 'حذف دين'); ?></button>
+    <button type="button" class="ops-item" data-debt-ops="remind" id="debtsOpsRemind"><?php echo e(t('remind')); ?></button>
+</div>
+<form method="post" id="debtDeleteForm" class="hidden" hidden>
+    <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+    <input type="hidden" name="action" value="delete_invoice">
+    <input type="hidden" name="id" id="debtDeleteId" value="">
+    <input type="hidden" name="subscriber_id" id="debtDeleteSub" value="">
+    <?php if ($filterSubscriberId > 0): ?>
+        <input type="hidden" name="return_subscriber" value="<?php echo (int) $filterSubscriberId; ?>">
+    <?php endif; ?>
+</form>
+<form method="post" id="debtRemindForm" class="hidden" hidden>
+    <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+    <input type="hidden" name="action" value="remind">
+    <input type="hidden" name="id" id="debtRemindId" value="">
+    <?php if ($filterSubscriberId > 0): ?>
+        <input type="hidden" name="return_subscriber" value="<?php echo (int) $filterSubscriberId; ?>">
+    <?php endif; ?>
+</form>
 <script>
 (function () {
   var csrf = <?php echo json_encode(csrf_token()); ?>;
@@ -743,10 +766,7 @@ render_header(t('debts'), 'debts');
           btn.textContent = data.debt_text || String(n);
           btn.setAttribute('data-amount', String(Math.round(Number(data.debt) || n)));
           var row = btn.closest('tr');
-          var payInp = row ? row.querySelector('.js-pay-amt') : null;
-          if (payInp) payInp.value = String(Math.round(Number(data.debt) || n));
-          var payBtn = row ? row.querySelector('.js-pay-open') : null;
-          if (payBtn) payBtn.setAttribute('data-amount', String(Math.round(Number(data.debt) || n)));
+          if (row) row.setAttribute('data-amount', String(Math.round(Number(data.debt) || n)));
         })
         .catch(function () {
           alert(<?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>);
@@ -772,6 +792,13 @@ render_header(t('debts'), 'debts');
         var hay = (items[i].getAttribute('data-filter') || '').toLowerCase();
         items[i].style.display = (!q || hay.indexOf(q) !== -1) ? '' : 'none';
       }
+    });
+  }
+  var addBtn = document.getElementById('debtsAddBtn');
+  if (addBtn) {
+    addBtn.addEventListener('click', function () {
+      var box = document.getElementById('addDebtBox');
+      if (box) box.classList.toggle('hidden');
     });
   }
   var kind = document.getElementById('debtKind');
@@ -880,19 +907,20 @@ render_header(t('debts'), 'debts');
     if (box) box.classList.add('hidden');
     pending = null;
   }
-  function openPay(btn) {
-    var row = btn.closest('tr');
-    var mode = btn.getAttribute('data-mode');
-    var amtInp = row ? row.querySelector('.js-pay-amt') : null;
-    var amount = mode === 'all'
-      ? (parseFloat(btn.getAttribute('data-amount') || '0') || 0)
-      : (amtInp ? (parseFloat(amtInp.value) || parseFloat(btn.getAttribute('data-amount') || '0') || 0) : 0);
+  function openPay(opts) {
+    opts = opts || {};
+    var mode = opts.mode || 'one';
+    var amount = parseFloat(opts.amount || '0') || 0;
+    if (!(amount > 0)) {
+      alert(<?php echo json_encode($lang === 'en' ? 'No amount to pay' : 'ماكو مبلغ للتسديد'); ?>);
+      return;
+    }
     pending = {
       mode: mode,
-      invoice: btn.getAttribute('data-invoice') || '',
-      sub: btn.getAttribute('data-sub') || '',
+      invoice: opts.invoice || '',
+      sub: opts.sub || '',
       amount: amount,
-      name: btn.getAttribute('data-name') || ''
+      name: opts.name || ''
     };
     if (title) title.textContent = mode === 'all' ? txtAll : txtOne;
     if (who) who.textContent = pending.name;
@@ -900,11 +928,18 @@ render_header(t('debts'), 'debts');
     if (tog) tog.checked = true;
     if (box) box.classList.remove('hidden');
   }
+  window.openDebtPay = openPay;
   document.addEventListener('click', function (e) {
     var btn = e.target && e.target.closest ? e.target.closest('.js-pay-open') : null;
     if (btn) {
       e.preventDefault();
-      openPay(btn);
+      openPay({
+        mode: btn.getAttribute('data-mode') || 'one',
+        invoice: btn.getAttribute('data-invoice') || '',
+        sub: btn.getAttribute('data-sub') || '',
+        amount: btn.getAttribute('data-amount') || '0',
+        name: btn.getAttribute('data-name') || ''
+      });
     }
   });
   var okBtn = document.getElementById('payFloatOk');
@@ -929,6 +964,127 @@ render_header(t('debts'), 'debts');
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') closePay();
   });
+})();
+</script>
+<script>
+(function () {
+  var menu = document.getElementById('debtsOpsMenu');
+  var table = document.getElementById('debtTable');
+  var canEdit = <?php echo json_encode(!empty($canEditDebts)); ?>;
+  var ctx = null;
+  function hideMenu() {
+    if (menu) menu.classList.add('hidden');
+  }
+  function placeMenu(x, y) {
+    if (!menu) return;
+    menu.classList.remove('hidden');
+    menu.classList.add('ops-float');
+    var w = menu.offsetWidth || 200;
+    var h = menu.offsetHeight || 160;
+    var left = Math.min(x, (window.innerWidth || 800) - w - 8);
+    var top = Math.min(y, (window.innerHeight || 600) - h - 8);
+    if (left < 8) left = 8;
+    if (top < 8) top = 8;
+    menu.style.left = left + 'px';
+    menu.style.top = top + 'px';
+    menu.style.position = 'fixed';
+    menu.style.zIndex = '9999';
+  }
+  function showMenuForRow(tr, x, y) {
+    if (!tr || !menu) return;
+    ctx = {
+      invoice: tr.getAttribute('data-invoice') || '',
+      sub: tr.getAttribute('data-sub') || '',
+      amount: tr.getAttribute('data-amount') || '0',
+      subTotal: tr.getAttribute('data-sub-total') || tr.getAttribute('data-amount') || '0',
+      name: tr.getAttribute('data-name') || '',
+      status: tr.getAttribute('data-status') || ''
+    };
+    var unpaid = ctx.status === 'unpaid';
+    function vis(id, on) {
+      var el = document.getElementById(id);
+      if (el) el.hidden = !on;
+    }
+    vis('debtsOpsAdd', canEdit);
+    vis('debtsOpsPayOne', canEdit && unpaid);
+    vis('debtsOpsPayAll', canEdit && unpaid && Number(ctx.subTotal) > 0);
+    vis('debtsOpsDelete', canEdit && unpaid);
+    vis('debtsOpsRemind', unpaid);
+    placeMenu(x, y);
+  }
+  if (table) {
+    table.addEventListener('contextmenu', function (e) {
+      var tr = e.target && e.target.closest ? e.target.closest('tbody tr[data-invoice]') : null;
+      if (!tr || !table.contains(tr)) return;
+      if (e.target.closest('a, input, select, textarea, form')) return;
+      e.preventDefault();
+      showMenuForRow(tr, e.clientX, e.clientY);
+    });
+  }
+  document.addEventListener('click', function (e) {
+    if (menu && !menu.classList.contains('hidden') && !e.target.closest('#debtsOpsMenu')) hideMenu();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') hideMenu();
+  });
+  if (menu) {
+    menu.addEventListener('click', function (e) {
+      var btn = e.target && e.target.closest ? e.target.closest('[data-debt-ops]') : null;
+      if (!btn || !ctx) return;
+      var op = btn.getAttribute('data-debt-ops');
+      hideMenu();
+      if (op === 'add') {
+        var box = document.getElementById('addDebtBox');
+        var sel = document.getElementById('debtSubSelect');
+        if (sel && ctx.sub) sel.value = String(ctx.sub);
+        if (box) {
+          box.classList.remove('hidden');
+          try { box.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (err) {}
+        }
+        return;
+      }
+      if (op === 'pay_one') {
+        if (typeof window.openDebtPay === 'function') {
+          window.openDebtPay({
+            mode: 'one',
+            invoice: ctx.invoice,
+            sub: ctx.sub,
+            amount: ctx.amount,
+            name: ctx.name
+          });
+        }
+        return;
+      }
+      if (op === 'pay_all') {
+        if (typeof window.openDebtPay === 'function') {
+          window.openDebtPay({
+            mode: 'all',
+            invoice: '0',
+            sub: ctx.sub,
+            amount: ctx.subTotal,
+            name: ctx.name
+          });
+        }
+        return;
+      }
+      if (op === 'delete') {
+        if (!window.confirm(<?php echo json_encode($lang === 'en' ? 'Delete this debt? It will be removed from totals and logged.' : 'تحذف هذا الدين؟ ينشال من المجموع وينحفظ بالسجل.'); ?>)) return;
+        var f = document.getElementById('debtDeleteForm');
+        var idEl = document.getElementById('debtDeleteId');
+        var subEl = document.getElementById('debtDeleteSub');
+        if (idEl) idEl.value = ctx.invoice;
+        if (subEl) subEl.value = ctx.sub;
+        if (f) f.submit();
+        return;
+      }
+      if (op === 'remind') {
+        var rf = document.getElementById('debtRemindForm');
+        var rid = document.getElementById('debtRemindId');
+        if (rid) rid.value = ctx.invoice;
+        if (rf) rf.submit();
+      }
+    });
+  }
 })();
 </script>
 <?php render_footer(); ?>

@@ -281,39 +281,193 @@ function retry_failed_message($pdo, $config, $logId, $subscriberId = 0)
     return array(false, whatsapp_fail_user_message($result, 'فشلت إعادة الإرسال — تأكد أن واتساب متصل'));
 }
 
-function wa_template_choices($lang = 'ar')
+function wa_template_choices($lang = 'ar', $cfg = null)
 {
-    $en = ($lang === 'en');
-    return array(
-        'activation' => $en ? 'Activation (cash)' : 'قالب التفعيل (نقد)',
-        'activation_credit' => $en ? 'Activation (credit)' : 'قالب التفعيل (آجل)',
-        'activation_debts' => $en ? 'Old debts appendix' : 'قالب ملحق الديون السابقة',
-        'debt_created' => $en ? 'New debt' : 'قالب إضافة دين',
-        'debt_remind' => $en ? 'Debt reminder' : 'قالب تذكير الدين',
-        'days_left' => $en ? 'Days left' : 'قالب الأيام المتبقية',
-        'unpaid_overdue' => $en ? 'Unpaid warning' : 'قالب المتأخرين',
-        'expiry_soon' => $en ? 'Expiry soon' : 'قالب قرب الانتهاء',
-        'payment_ok' => $en ? 'Payment received' : 'قالب التسديد',
-        'schedule_cut' => $en ? 'Auto cut (unpaid)' : 'قالب القطع التلقائي',
-    );
+    if ($cfg === null) {
+        global $config;
+        $cfg = (isset($config) && is_array($config)) ? $config : null;
+    }
+    if (is_array($cfg) && !empty($cfg['template_labels']) && is_array($cfg['template_labels'])) {
+        return $cfg['template_labels'];
+    }
+    if (is_array($cfg) && !empty($cfg['wa_templates']) && is_array($cfg['wa_templates'])) {
+        $out = array();
+        foreach ($cfg['wa_templates'] as $k => $row) {
+            $out[$k] = is_array($row) && isset($row['label']) && $row['label'] !== ''
+                ? (string) $row['label']
+                : $k;
+        }
+        if ($out) {
+            return $out;
+        }
+    }
+    return function_exists('wa_default_template_labels')
+        ? wa_default_template_labels($lang)
+        : array();
 }
 
 function wa_case_labels($lang = 'ar')
 {
     $en = ($lang === 'en');
     return array(
-        'activation_cash' => $en ? 'Activation — cash' : 'تفعيل نقدي',
-        'activation_credit' => $en ? 'Activation — credit' : 'تفعيل آجل',
-        'activation_debts' => $en ? 'Appendix: previous debts on activation' : 'ملحق الديون السابقة مع التفعيل',
-        'debt_created' => $en ? 'New debt notice' : 'إشعار إضافة دين',
-        'payment_ok' => $en ? 'Payment received' : 'إشعار التسديد',
-        'debt_remind' => $en ? 'Manual debt reminder' : 'تذكير دين يدوي',
-        'reminder_auto' => $en ? 'Automatic debt reminder' : 'تذكير دين تلقائي',
-        'days_left' => $en ? 'Days left reminder' : 'تذكير الأيام المتبقية',
-        'unpaid_overdue' => $en ? 'Unpaid / delay warning' : 'تنبيه تأخير التسديد',
-        'expiry_soon' => $en ? 'Expiry soon (auto)' : 'قرب الانتهاء (تلقائي)',
-        'schedule_cut' => $en ? 'Auto cut after grace' : 'قطع تلقائي بعد السماح',
+        'activation_cash' => $en ? 'Cash activation' : 'التفعيل النقدي',
+        'activation_credit' => $en ? 'Credit activation' : 'التفعيل الآجل',
+        'activation_debts' => $en ? 'Prior debts on activation' : 'ملحق الديون مع التفعيل',
+        'debt_created' => $en ? 'Debt added' : 'إضافة دين',
+        'payment_ok' => $en ? 'Payment received' : 'استلام التسديد',
+        'debt_remind' => $en ? 'Debt reminder (manual / bulk)' : 'تذكير دين (يدوي / جماعي)',
+        'reminder_auto' => $en ? 'Debt reminder (automatic)' : 'تذكير دين (تلقائي)',
+        'days_left' => $en ? 'Days left (manual send)' : 'أيام متبقية (إرسال يدوي)',
+        'unpaid_overdue' => $en ? 'Late payers warning' : 'تحذير المتأخرين بالدفع',
+        'expiry_soon' => $en ? 'Expiry soon (auto cron)' : 'قرب الانتهاء (تلقائي)',
+        'schedule_cut' => $en ? 'Auto-cut after grace' : 'القطع التلقائي بعد السماح',
     );
+}
+
+/**
+ * Fixed system events that must be mapped to a template.
+ */
+function wa_system_cases($lang = 'ar')
+{
+    $en = ($lang === 'en');
+    $labels = wa_case_labels($lang);
+    return array(
+        array(
+            'group' => $en ? 'Activation' : 'التفعيل',
+            'cases' => array(
+                array(
+                    'key' => 'activation_cash',
+                    'label' => $labels['activation_cash'],
+                    'vars' => '{name} {package} {from} {to} {amount}',
+                    'hint' => $en ? 'Sent when activating and payment is cash.' : 'عند تفعيل الاشتراك نقداً.',
+                    'required' => true,
+                ),
+                array(
+                    'key' => 'activation_credit',
+                    'label' => $labels['activation_credit'],
+                    'vars' => '{name} {package} {from} {to} {amount}',
+                    'hint' => $en ? 'Sent when activating on credit (new debt).' : 'عند التفعيل الآجل مع إنشاء دين.',
+                    'required' => true,
+                ),
+                array(
+                    'key' => 'activation_debts',
+                    'label' => $labels['activation_debts'],
+                    'vars' => '{name} {debt} {amount} {month} {notes}',
+                    'hint' => $en ? 'Appendix when “include old debts” is enabled.' : 'ملحق يُضاف عند تفعيل «تضمين الديون القديمة».',
+                    'required' => true,
+                ),
+            ),
+        ),
+        array(
+            'group' => $en ? 'Debts & payments' : 'الديون والتسديد',
+            'cases' => array(
+                array(
+                    'key' => 'debt_created',
+                    'label' => $labels['debt_created'],
+                    'vars' => '{name} {amount} {month} {notes}',
+                    'hint' => $en ? 'When staff add a debt.' : 'عند إضافة دين من النظام.',
+                    'required' => true,
+                ),
+                array(
+                    'key' => 'payment_ok',
+                    'label' => $labels['payment_ok'],
+                    'vars' => '{name} {amount} {month} {remaining}',
+                    'hint' => $en ? 'After a successful payment.' : 'بعد تسجيل تسديد ناجح.',
+                    'required' => true,
+                ),
+                array(
+                    'key' => 'debt_remind',
+                    'label' => $labels['debt_remind'],
+                    'vars' => '{name} {debt} {amount} {month}',
+                    'hint' => $en ? 'Manual remind and bulk “has debt”.' : 'تذكير يدوي والإرسال الجماعي لمن عليهم دين.',
+                    'required' => true,
+                ),
+                array(
+                    'key' => 'reminder_auto',
+                    'label' => $labels['reminder_auto'],
+                    'vars' => '{name} {debt} {amount} {month}',
+                    'hint' => $en ? 'Automatic cron debt reminders.' : 'تذكير الديون التلقائي بالكرون.',
+                    'required' => true,
+                ),
+            ),
+        ),
+        array(
+            'group' => $en ? 'Reminders & cuts' : 'التذكيرات والقطع',
+            'cases' => array(
+                array(
+                    'key' => 'days_left',
+                    'label' => $labels['days_left'],
+                    'vars' => '{name} {days} {package} {from} {to} {debt}',
+                    'hint' => $en ? 'Manual bulk from Messages → Expiring.' : 'الإرسال اليدوي من تبويب قرب الانتهاء.',
+                    'required' => true,
+                ),
+                array(
+                    'key' => 'expiry_soon',
+                    'label' => $labels['expiry_soon'],
+                    'vars' => '{name} {days} {package} {to}',
+                    'hint' => $en ? 'Automatic expiry reminder cron.' : 'تذكير قرب الانتهاء التلقائي.',
+                    'required' => true,
+                ),
+                array(
+                    'key' => 'unpaid_overdue',
+                    'label' => $labels['unpaid_overdue'],
+                    'vars' => '{name} {days_passed} {debt} {package}',
+                    'hint' => $en ? 'Late after activation (Messages → Late payers).' : 'المتأخرون بعد التفعيل (تبويب متأخرون).',
+                    'required' => true,
+                    'extra' => 'unpaid_days',
+                ),
+                array(
+                    'key' => 'schedule_cut',
+                    'label' => $labels['schedule_cut'],
+                    'vars' => '{name} {debt} {grace} {package}',
+                    'hint' => $en ? 'When auto-cut disconnects unpaid lines.' : 'عند القطع التلقائي بسبب الدين.',
+                    'required' => true,
+                ),
+            ),
+        ),
+    );
+}
+
+function wa_case_issue_message($issue, $caseLabel, $lang = 'ar')
+{
+    $en = ($lang === 'en');
+    if ($issue === 'unassigned') {
+        return $en
+            ? ('Choose a template for: ' . $caseLabel)
+            : ('لازم تختار قالب لـ: ' . $caseLabel);
+    }
+    if ($issue === 'missing_template') {
+        return $en
+            ? ('Template missing for: ' . $caseLabel . ' — pick another.')
+            : ('القالب المربوط غير موجود لـ: ' . $caseLabel . ' — اختر قالباً آخر.');
+    }
+    if ($issue === 'empty_body') {
+        return $en
+            ? ('Template text is empty for: ' . $caseLabel)
+            : ('نص القالب فارغ لـ: ' . $caseLabel . ' — اكتب النص أو غيّر القالب.');
+    }
+    return $en ? ('Check template for: ' . $caseLabel) : ('راجع القالب لـ: ' . $caseLabel);
+}
+
+/** @deprecated kept for compatibility */
+function wa_template_editor_groups($lang = 'ar')
+{
+    return array();
+}
+
+/** @deprecated kept for compatibility */
+function wa_case_editor_groups($lang = 'ar')
+{
+    $groups = wa_system_cases($lang);
+    $out = array();
+    foreach ($groups as $g) {
+        $keys = array();
+        foreach ($g['cases'] as $c) {
+            $keys[] = $c['key'];
+        }
+        $out[] = array('title' => $g['group'], 'keys' => $keys);
+    }
+    return $out;
 }
 
 function wa_case_template_key($config, $case)

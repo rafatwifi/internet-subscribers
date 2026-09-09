@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 
 require_once __DIR__ . '/../includes/bootstrap.php';
 require_once __DIR__ . '/../includes/layout.php';
@@ -70,44 +70,105 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($afterDaysSave > 365) {
             $afterDaysSave = 365;
         }
-        $tplAllowed = array(
-            'activation', 'activation_credit', 'activation_debts',
-            'debt_created', 'payment_ok', 'debt_remind', 'days_left', 'unpaid_overdue', 'expiry_soon'
-        );
+
         $caseKeys = array(
             'activation_cash', 'activation_credit', 'activation_debts', 'debt_created', 'payment_ok',
-            'debt_remind', 'reminder_auto', 'days_left', 'unpaid_overdue', 'expiry_soon'
+            'debt_remind', 'reminder_auto', 'days_left', 'unpaid_overdue', 'expiry_soon', 'schedule_cut'
         );
+
+        $keysIn = isset($_POST['tpl_key']) && is_array($_POST['tpl_key']) ? $_POST['tpl_key'] : array();
+        $labelsIn = isset($_POST['tpl_label']) && is_array($_POST['tpl_label']) ? $_POST['tpl_label'] : array();
+        $bodiesIn = isset($_POST['tpl_body']) && is_array($_POST['tpl_body']) ? $_POST['tpl_body'] : array();
+
+        $catalog = array();
+        $n = max(count($keysIn), count($labelsIn), count($bodiesIn));
+        for ($i = 0; $i < $n; $i++) {
+            $rawKey = isset($keysIn[$i]) ? (string) $keysIn[$i] : '';
+            $label = isset($labelsIn[$i]) ? trim((string) $labelsIn[$i]) : '';
+            $body = isset($bodiesIn[$i]) ? (string) $bodiesIn[$i] : '';
+            $key = function_exists('wa_sanitize_tpl_key') ? wa_sanitize_tpl_key($rawKey) : preg_replace('/[^a-z0-9_]/', '', strtolower($rawKey));
+            if ($key === '' && $label !== '') {
+                $slug = function_exists('wa_sanitize_tpl_key') ? wa_sanitize_tpl_key($label) : '';
+                if ($slug === '') {
+                    $slug = 'tpl_' . substr(md5($label . '|' . $i . '|' . microtime(true)), 0, 8);
+                }
+                $key = $slug;
+            }
+            if ($key === '') {
+                continue;
+            }
+            if ($label === '') {
+                $label = $key;
+            }
+            // Avoid collisions: keep first, rename later duplicates.
+            $base = $key;
+            $suffix = 2;
+            while (isset($catalog[$key])) {
+                $key = $base . '_' . $suffix;
+                $suffix++;
+                if ($suffix > 50) {
+                    $key = $base . '_' . substr(md5(uniqid('', true)), 0, 6);
+                    break;
+                }
+            }
+            $catalog[$key] = array(
+                'label' => $label,
+                'body' => $body,
+            );
+        }
+
+        // Optional single "add new" fields.
+        $newLabel = trim((string) post('tpl_new_label', ''));
+        $newBody = (string) post('tpl_new_body', '');
+        $newKeyRaw = trim((string) post('tpl_new_key', ''));
+        if ($newLabel !== '' || trim($newBody) !== '') {
+            $nk = function_exists('wa_sanitize_tpl_key') ? wa_sanitize_tpl_key($newKeyRaw !== '' ? $newKeyRaw : $newLabel) : '';
+            if ($nk === '') {
+                $nk = 'tpl_' . substr(md5($newLabel . microtime(true)), 0, 8);
+            }
+            $base = $nk;
+            $suffix = 2;
+            while (isset($catalog[$nk])) {
+                $nk = $base . '_' . $suffix;
+                $suffix++;
+            }
+            $catalog[$nk] = array(
+                'label' => $newLabel !== '' ? $newLabel : $nk,
+                'body' => $newBody,
+            );
+        }
+
+        if (!$catalog) {
+            flash('error', $lang === 'en' ? 'Keep at least one template.' : 'لازم يبقى قالب واحد على الأقل.');
+            redirect('messages.php?mode=templates');
+        }
+
+        $allowedKeys = array_keys($catalog);
         $payload = array(
-            'tpl_debt_remind' => (string) post('tpl_debt_remind', ''),
-            'tpl_payment_ok' => (string) post('tpl_payment_ok', ''),
-            'tpl_debt_created' => (string) post('tpl_debt_created', ''),
-            'tpl_activation' => (string) post('tpl_activation', ''),
-            'tpl_activation_credit' => (string) post('tpl_activation_credit', ''),
-            'tpl_activation_debts' => (string) post('tpl_activation_debts', ''),
-            'tpl_days_left' => (string) post('tpl_days_left', ''),
-            'tpl_unpaid_overdue' => (string) post('tpl_unpaid_overdue', ''),
-            'tpl_expiry_soon' => (string) post('tpl_expiry_soon', ''),
-            'unpaid_remind_after_days' => $afterDaysSave
+            'wa_templates' => $catalog,
+            'unpaid_remind_after_days' => $afterDaysSave,
         );
+
+        // Mirror legacy tpl_* for schedule/settings pages that still edit those fields.
+        $legacyMap = function_exists('wa_legacy_tpl_field_map') ? wa_legacy_tpl_field_map() : array();
+        foreach ($legacyMap as $tKey => $field) {
+            $payload[$field] = isset($catalog[$tKey]['body']) ? $catalog[$tKey]['body'] : '';
+        }
+
         foreach ($caseKeys as $ck) {
             $v = trim((string) post('wa_case_' . $ck, ''));
-            if (!in_array($v, $tplAllowed, true)) {
-                if ($ck === 'activation_cash') {
-                    $v = 'activation';
-                } elseif ($ck === 'activation_credit') {
-                    $v = 'activation_credit';
-                } elseif ($ck === 'activation_debts' || $ck === 'reminder_auto') {
-                    $v = ($ck === 'activation_debts') ? 'activation_debts' : 'debt_remind';
-                } else {
-                    $v = $ck;
-                }
-                if (!in_array($v, $tplAllowed, true)) {
-                    $v = 'activation';
-                }
+            if ($v === '' || $v === '__none__') {
+                $payload['wa_case_' . $ck] = '__none__';
+                continue;
+            }
+            $v = function_exists('wa_sanitize_tpl_key') ? wa_sanitize_tpl_key($v) : $v;
+            if (!in_array($v, $allowedKeys, true)) {
+                $payload['wa_case_' . $ck] = '__none__';
+                continue;
             }
             $payload['wa_case_' . $ck] = $v;
         }
+
         $okSave = settings_save($payload);
         flash($okSave ? 'success' : 'error', $okSave ? t('saved') : 'Cannot write settings.json');
         redirect('messages.php?mode=templates');
@@ -460,132 +521,310 @@ render_header(t('messages'), 'messages');
         $sTpl = settings_load();
     }
     $isEnMsg = ($lang === 'en');
+    $catalog = isset($config['wa_templates']) && is_array($config['wa_templates'])
+        ? $config['wa_templates']
+        : (function_exists('wa_build_templates_catalog') ? wa_build_templates_catalog($sTpl, $lang) : array());
+    $caseLabels = function_exists('wa_case_labels') ? wa_case_labels($lang) : array();
+    $sysGroups = function_exists('wa_system_cases') ? wa_system_cases($lang) : array();
+    $caseIssues = isset($config['wa_case_issues']) && is_array($config['wa_case_issues']) ? $config['wa_case_issues'] : array();
+    $caseMap = isset($config['wa_cases']) && is_array($config['wa_cases']) ? $config['wa_cases'] : array();
+    $warnMsgs = array();
+    foreach ($sysGroups as $g) {
+        foreach ($g['cases'] as $c) {
+            $ck = $c['key'];
+            $stored = isset($sTpl['wa_case_' . $ck]) ? trim((string) $sTpl['wa_case_' . $ck]) : null;
+            $issue = null;
+            if ($stored === '__none__') {
+                $issue = 'unassigned';
+            } elseif (isset($caseIssues[$ck])) {
+                $issue = $caseIssues[$ck];
+            } elseif ($stored !== null && $stored !== '' && !isset($catalog[$stored])) {
+                $issue = 'missing_template';
+            }
+            $useKey = '';
+            if ($stored !== null && $stored !== '' && $stored !== '__none__') {
+                $useKey = $stored;
+            } elseif (isset($caseMap[$ck])) {
+                $useKey = (string) $caseMap[$ck];
+            }
+            if ($issue !== 'unassigned' && $useKey !== '' && isset($catalog[$useKey])
+                && trim((string) $catalog[$useKey]['body']) === '') {
+                $issue = 'empty_body';
+            }
+            if ($issue) {
+                $warnMsgs[] = array(
+                    'case' => $ck,
+                    'text' => function_exists('wa_case_issue_message')
+                        ? wa_case_issue_message($issue, $c['label'], $lang)
+                        : $c['label'],
+                );
+            }
+        }
+    }
+    $usedBy = array();
+    foreach ($caseMap as $ck => $tk) {
+        if ($ck === 'activation' || $tk === '' || $tk === '__none__') {
+            continue;
+        }
+        if (!isset($usedBy[$tk])) {
+            $usedBy[$tk] = array();
+        }
+        $usedBy[$tk][] = $ck;
+    }
+    $commonVars = '{name} {package} {from} {to} {amount} {debt} {month} {notes} {days} {days_passed} {remaining} {grace}';
     ?>
     <p class="meta tpl-lead">
         <?php echo e($isEnMsg
-            ? 'Edit template texts below, then assign which template each system case uses.'
-            : 'عدّل نصوص القوالب بالأسفل، ثم خصّص أي قالب تُستخدمه كل حالة بالنظام.'); ?>
+            ? 'Edit templates below, add or delete freely, then assign each system action to a template.'
+            : 'عدّل القوالب بالأسفل، أضف أو احذف كما تريد، ثم خصّص كل حركة بالنظام لقالب.'); ?>
     </p>
-    <?php
-    $tplChoices = function_exists('wa_template_choices') ? wa_template_choices($lang) : array();
-    $caseLabels = function_exists('wa_case_labels') ? wa_case_labels($lang) : array();
-    $caseMap = isset($config['wa_cases']) && is_array($config['wa_cases']) ? $config['wa_cases'] : array();
-    ?>
-    <form method="post" class="tpl-form">
+
+    <?php if ($warnMsgs): ?>
+        <div class="tpl-warn" role="alert">
+            <strong><?php echo e($isEnMsg ? 'Missing assignment for important actions:' : 'ماكو تخصيص لأشياء مهمة:'); ?></strong>
+            <ul>
+                <?php foreach ($warnMsgs as $w): ?>
+                    <li><a href="#case-<?php echo e($w['case']); ?>"><?php echo e($w['text']); ?></a></li>
+                <?php endforeach; ?>
+            </ul>
+        </div>
+    <?php endif; ?>
+
+    <form method="post" class="tpl-form" id="tplDynForm">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="action" value="save_templates">
+
         <div class="panel" style="margin:0 0 14px;padding:12px 14px">
-            <h3 style="margin:0 0 8px;font-size:15px"><?php echo e($isEnMsg ? 'Case → template mapping' : 'تخصيص الحالات للقوالب'); ?></h3>
+            <h3 style="margin:0 0 8px;font-size:15px"><?php echo e($isEnMsg ? 'Assign templates to actions' : 'تخصيص القوالب للحركات'); ?></h3>
             <p class="meta" style="margin:0 0 10px"><?php echo e($isEnMsg
-                ? 'Cash and credit activations use different cases. The debts appendix is appended only when “include old debts” is on.'
-                : 'التفعيل النقدي والآجل حالتان منفصلتان. ملحق الديون السابقة يُضاف فقط عند تفعيل خيار تضمين الديون القديمة.'); ?></p>
-            <div class="form-grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px">
+                ? 'Cash and credit activations are separate. Prior-debts appendix is used only when “include old debts” is on.'
+                : 'التفعيل النقدي والآجل منفصلان. ملحق الديون يُستخدم فقط عند تفعيل «تضمين الديون القديمة».'); ?></p>
+            <div class="form-grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px" id="tplCaseMap">
                 <?php foreach ($caseLabels as $caseKey => $caseLab): ?>
                     <?php
-                    $sel = isset($caseMap[$caseKey]) ? $caseMap[$caseKey] : $caseKey;
-                    if ($caseKey === 'activation_cash' && ($sel === 'activation_cash' || $sel === '')) {
-                        $sel = 'activation';
+                    $stored = isset($sTpl['wa_case_' . $caseKey]) ? trim((string) $sTpl['wa_case_' . $caseKey]) : null;
+                    if ($stored === '__none__') {
+                        $sel = '__none__';
+                    } elseif ($stored !== null && $stored !== '' && isset($catalog[$stored])) {
+                        $sel = $stored;
+                    } else {
+                        $sel = isset($caseMap[$caseKey]) ? $caseMap[$caseKey] : '';
+                        if ($sel === '' || !isset($catalog[$sel])) {
+                            $sel = '__none__';
+                        }
                     }
-                    if ($caseKey === 'activation_credit' && ($sel === 'activation_credit' || $sel === '')) {
-                        $sel = 'activation_credit';
-                    }
-                    if ($caseKey === 'activation_debts' && ($sel === 'activation_debts' || $sel === '')) {
-                        $sel = 'activation_debts';
-                    }
-                    if ($caseKey === 'reminder_auto' && ($sel === 'reminder_auto' || $sel === '')) {
-                        $sel = 'debt_remind';
+                    $hasIssue = false;
+                    foreach ($warnMsgs as $w) {
+                        if ($w['case'] === $caseKey) {
+                            $hasIssue = true;
+                            break;
+                        }
                     }
                     ?>
-                    <label style="display:block;font-size:12px;font-weight:700;color:#475569">
+                    <label class="tpl-case-lab<?php echo $hasIssue ? ' is-warn' : ''; ?>" id="case-<?php echo e($caseKey); ?>" style="display:block;font-size:12px;font-weight:700;color:#475569">
                         <?php echo e($caseLab); ?>
-                        <select name="wa_case_<?php echo e($caseKey); ?>" style="width:100%;margin-top:4px;height:36px">
-                            <?php foreach ($tplChoices as $tk => $tl): ?>
-                                <option value="<?php echo e($tk); ?>"<?php echo $sel === $tk ? ' selected' : ''; ?>><?php echo e($tl); ?></option>
+                        <select name="wa_case_<?php echo e($caseKey); ?>" class="js-case-select" style="width:100%;margin-top:4px;height:36px">
+                            <option value="__none__"<?php echo $sel === '__none__' ? ' selected' : ''; ?>><?php echo e($isEnMsg ? '— Choose template —' : '— اختر قالباً —'); ?></option>
+                            <?php foreach ($catalog as $tk => $trow): ?>
+                                <option value="<?php echo e($tk); ?>"<?php echo $sel === $tk ? ' selected' : ''; ?>><?php echo e(isset($trow['label']) ? $trow['label'] : $tk); ?></option>
                             <?php endforeach; ?>
                         </select>
+                        <?php if ($caseKey === 'unpaid_overdue'): ?>
+                            <span class="tpl-inline" style="margin-top:6px;display:inline-flex">
+                                <span><?php echo e($isEnMsg ? 'Warn after (days)' : 'تنبيه بعد (يوم)'); ?></span>
+                                <input type="number" name="unpaid_remind_after_days" min="1" max="365"
+                                    value="<?php echo (int) (isset($sTpl['unpaid_remind_after_days']) ? $sTpl['unpaid_remind_after_days'] : 7); ?>">
+                            </span>
+                        <?php endif; ?>
                     </label>
                 <?php endforeach; ?>
             </div>
         </div>
-        <div class="tpl-grid">
-            <article class="tpl-card">
-                <header class="tpl-card-head">
-                    <h3><?php echo e($isEnMsg ? 'Activation (cash)' : 'رسالة التفعيل — نقد'); ?></h3>
-                    <span class="tpl-vars">{name} {package} {from} {to} {amount}</span>
-                </header>
-                <textarea name="tpl_activation" rows="4"><?php echo e(isset($sTpl['tpl_activation']) ? $sTpl['tpl_activation'] : ''); ?></textarea>
-            </article>
-            <article class="tpl-card">
-                <header class="tpl-card-head">
-                    <h3><?php echo e($isEnMsg ? 'Activation (credit)' : 'رسالة التفعيل — آجل'); ?></h3>
-                    <span class="tpl-vars">{name} {package} {from} {to} {amount}</span>
-                </header>
-                <textarea name="tpl_activation_credit" rows="4"><?php echo e(isset($sTpl['tpl_activation_credit']) ? $sTpl['tpl_activation_credit'] : ''); ?></textarea>
-            </article>
-            <article class="tpl-card">
-                <header class="tpl-card-head">
-                    <h3><?php echo e($isEnMsg ? 'Old debts appendix' : 'ملحق الديون السابقة'); ?></h3>
-                    <span class="tpl-vars">{name} {debt} {amount} {month} {notes}</span>
-                </header>
-                <p class="meta" style="margin:0 0 6px;font-size:11px"><?php echo e($isEnMsg
-                    ? 'Appended under the activation message when old debts are included.'
-                    : 'يُضاف أسفل رسالة التفعيل عند تفعيل «تضمين الديون القديمة».'); ?></p>
-                <textarea name="tpl_activation_debts" rows="4"><?php echo e(isset($sTpl['tpl_activation_debts']) ? $sTpl['tpl_activation_debts'] : ''); ?></textarea>
-            </article>
-            <article class="tpl-card">
-                <header class="tpl-card-head">
-                    <h3><?php echo e(t('msg_debt_created')); ?></h3>
-                    <span class="tpl-vars">{name} {amount} {month} {notes}</span>
-                </header>
-                <textarea name="tpl_debt_created" rows="4"><?php echo e(isset($sTpl['tpl_debt_created']) ? $sTpl['tpl_debt_created'] : ''); ?></textarea>
-            </article>
-            <article class="tpl-card">
-                <header class="tpl-card-head">
-                    <h3><?php echo e(t('msg_payment_ok')); ?></h3>
-                    <span class="tpl-vars">{name} {amount} {month} {remaining}</span>
-                </header>
-                <textarea name="tpl_payment_ok" rows="4"><?php echo e(isset($sTpl['tpl_payment_ok']) ? $sTpl['tpl_payment_ok'] : ''); ?></textarea>
-            </article>
-            <article class="tpl-card">
-                <header class="tpl-card-head">
-                    <h3><?php echo e(t('msg_debt_remind')); ?></h3>
-                    <span class="tpl-vars">{name} {debt} {amount} {month}</span>
-                </header>
-                <textarea name="tpl_debt_remind" rows="4"><?php echo e(isset($sTpl['tpl_debt_remind']) ? $sTpl['tpl_debt_remind'] : ''); ?></textarea>
-            </article>
-            <article class="tpl-card">
-                <header class="tpl-card-head">
-                    <h3><?php echo e($isEnMsg ? 'Days-left reminder' : 'رسالة الأيام المتبقية'); ?></h3>
-                    <span class="tpl-vars">{name} {days} {package} {from} {to} {debt}</span>
-                </header>
-                <textarea name="tpl_days_left" rows="4"><?php echo e(isset($sTpl['tpl_days_left']) ? $sTpl['tpl_days_left'] : ''); ?></textarea>
-            </article>
-            <article class="tpl-card">
-                <header class="tpl-card-head">
-                    <h3><?php echo e($isEnMsg ? 'Expiry auto reminder' : 'تذكير قرب الانتهاء (تلقائي)'); ?></h3>
-                    <span class="tpl-vars">{name} {days} {package} {to}</span>
-                </header>
-                <textarea name="tpl_expiry_soon" rows="4"><?php echo e(isset($sTpl['tpl_expiry_soon']) ? $sTpl['tpl_expiry_soon'] : ''); ?></textarea>
-            </article>
-            <article class="tpl-card">
-                <header class="tpl-card-head">
-                    <h3><?php echo e($isEnMsg ? 'Unpaid / cut warning' : 'رسالة المتأخرين (تفعيل بدون تسديد)'); ?></h3>
-                    <span class="tpl-vars">{name} {days_passed} {debt} {package}</span>
-                </header>
-                <div class="tpl-inline">
-                    <label><?php echo e($isEnMsg ? 'Warn after (days)' : 'تنبيه بعد (يوم)'); ?>
-                        <input type="number" name="unpaid_remind_after_days" min="1" max="365"
-                            value="<?php echo (int) (isset($sTpl['unpaid_remind_after_days']) ? $sTpl['unpaid_remind_after_days'] : 7); ?>">
-                    </label>
-                </div>
-                <textarea name="tpl_unpaid_overdue" rows="4"><?php echo e(isset($sTpl['tpl_unpaid_overdue']) ? $sTpl['tpl_unpaid_overdue'] : ''); ?></textarea>
-            </article>
+
+        <div class="actions actions-tight" style="margin-bottom:8px">
+            <strong style="font-size:14px;margin-inline-end:auto"><?php echo e($isEnMsg ? 'Templates' : 'القوالب'); ?></strong>
+            <button type="button" class="btn secondary sm" id="tplAddBtn"><?php echo e($isEnMsg ? '+ Add template' : '+ إضافة قالب'); ?></button>
         </div>
+
+        <div class="tpl-new panel" id="tplNewBox" style="margin:0 0 10px;padding:12px 14px" hidden>
+            <div class="form-grid" style="grid-template-columns:1.2fr .8fr;gap:8px">
+                <div>
+                    <label><?php echo e($isEnMsg ? 'Name' : 'الاسم'); ?></label>
+                    <input type="text" name="tpl_new_label" id="tplNewLabel" placeholder="<?php echo e($isEnMsg ? 'e.g. Ramadan offer' : 'مثال: عرض رمضان'); ?>">
+                </div>
+                <div>
+                    <label><?php echo e($isEnMsg ? 'Key (optional)' : 'مفتاح (اختياري)'); ?></label>
+                    <input type="text" name="tpl_new_key" id="tplNewKey" dir="ltr" placeholder="my_template">
+                </div>
+            </div>
+            <label style="margin-top:8px;display:block"><?php echo e($isEnMsg ? 'Message text' : 'نص الرسالة'); ?></label>
+            <textarea name="tpl_new_body" id="tplNewBody" rows="3" placeholder="<?php echo e($commonVars); ?>"></textarea>
+            <div class="actions actions-tight" style="margin-top:8px">
+                <button type="button" class="btn sm" id="tplNewConfirm"><?php echo e($isEnMsg ? 'Add to list' : 'أضف للقائمة'); ?></button>
+                <button type="button" class="btn ghost sm" id="tplNewCancel"><?php echo e($isEnMsg ? 'Cancel' : 'إلغاء'); ?></button>
+            </div>
+        </div>
+
+        <div class="tpl-grid" id="tplLib">
+            <?php foreach ($catalog as $tk => $trow): ?>
+                <?php
+                $inUseLabels = array();
+                if (!empty($usedBy[$tk])) {
+                    foreach ($usedBy[$tk] as $uck) {
+                        $inUseLabels[] = isset($caseLabels[$uck]) ? $caseLabels[$uck] : $uck;
+                    }
+                }
+                ?>
+                <article class="tpl-card" data-tpl-card>
+                    <header class="tpl-card-head">
+                        <input type="hidden" name="tpl_key[]" value="<?php echo e($tk); ?>">
+                        <input type="text" name="tpl_label[]" class="tpl-label-input" value="<?php echo e(isset($trow['label']) ? $trow['label'] : $tk); ?>" placeholder="<?php echo e($isEnMsg ? 'Template name' : 'اسم القالب'); ?>">
+                        <span class="tpl-vars" title="<?php echo e($tk); ?>"><?php echo e($tk); ?></span>
+                        <button type="button" class="btn ghost sm js-tpl-del"><?php echo e($isEnMsg ? 'Delete' : 'حذف'); ?></button>
+                    </header>
+                    <?php if ($inUseLabels): ?>
+                        <p class="meta" style="margin:0;font-size:11px"><?php echo e($isEnMsg ? 'Used by: ' : 'مستخدم في: '); ?><?php echo e(implode(' · ', $inUseLabels)); ?></p>
+                    <?php endif; ?>
+                    <textarea name="tpl_body[]" rows="4" placeholder="<?php echo e($commonVars); ?>"><?php echo e(isset($trow['body']) ? $trow['body'] : ''); ?></textarea>
+                </article>
+            <?php endforeach; ?>
+        </div>
+
         <div class="tpl-save">
             <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
         </div>
     </form>
 
+    <template id="tplCardTpl">
+        <article class="tpl-card" data-tpl-card>
+            <header class="tpl-card-head">
+                <input type="hidden" name="tpl_key[]" value="">
+                <input type="text" name="tpl_label[]" class="tpl-label-input" value="" placeholder="<?php echo e($isEnMsg ? 'Template name' : 'اسم القالب'); ?>">
+                <span class="tpl-vars"></span>
+                <button type="button" class="btn ghost sm js-tpl-del"><?php echo e($isEnMsg ? 'Delete' : 'حذف'); ?></button>
+            </header>
+            <textarea name="tpl_body[]" rows="4" placeholder="<?php echo e($commonVars); ?>"></textarea>
+        </article>
+    </template>
+    <script>
+    (function () {
+      var form = document.getElementById('tplDynForm');
+      var lib = document.getElementById('tplLib');
+      var tplNode = document.getElementById('tplCardTpl');
+      var addBtn = document.getElementById('tplAddBtn');
+      var newBox = document.getElementById('tplNewBox');
+      var newConfirm = document.getElementById('tplNewConfirm');
+      var newCancel = document.getElementById('tplNewCancel');
+      var confirmDel = <?php echo json_encode($isEnMsg
+          ? 'Delete this template? Reassign actions that used it.'
+          : 'تحذف هذا القالب؟ عيّن قالباً آخر للحركات اللي كانت تستخدمه.'); ?>;
+      var needOne = <?php echo json_encode($isEnMsg ? 'Keep at least one template.' : 'لازم يبقى قالب واحد على الأقل.'); ?>;
+      var pickLabel = <?php echo json_encode($isEnMsg ? '— Choose template —' : '— اختر قالباً —'); ?>;
+
+      function slugify(s) {
+        s = String(s || '').toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+        if (!s) s = 'tpl_' + Math.random().toString(36).slice(2, 8);
+        if (s.length > 40) s = s.slice(0, 40).replace(/_+$/, '');
+        return s;
+      }
+      function existingKeys() {
+        var keys = {}, inputs = lib ? lib.querySelectorAll('input[name="tpl_key[]"]') : [];
+        for (var i = 0; i < inputs.length; i++) keys[inputs[i].value] = true;
+        return keys;
+      }
+      function uniqueKey(base) {
+        var keys = existingKeys(), k = slugify(base), n = 2;
+        if (!keys[k]) return k;
+        while (keys[k + '_' + n]) n++;
+        return k + '_' + n;
+      }
+      function rebuildCaseOptions() {
+        var cards = lib ? lib.querySelectorAll('[data-tpl-card]') : [];
+        var opts = [{ v: '__none__', t: pickLabel }];
+        for (var i = 0; i < cards.length; i++) {
+          var keyEl = cards[i].querySelector('input[name="tpl_key[]"]');
+          var labEl = cards[i].querySelector('input[name="tpl_label[]"]');
+          if (!keyEl) continue;
+          opts.push({ v: keyEl.value, t: (labEl && labEl.value) ? labEl.value : keyEl.value });
+        }
+        var sels = document.querySelectorAll('.js-case-select');
+        for (var s = 0; s < sels.length; s++) {
+          var cur = sels[s].value;
+          sels[s].innerHTML = '';
+          for (var o = 0; o < opts.length; o++) {
+            var op = document.createElement('option');
+            op.value = opts[o].v;
+            op.textContent = opts[o].t;
+            sels[s].appendChild(op);
+          }
+          var ok = false;
+          for (var o2 = 0; o2 < opts.length; o2++) if (opts[o2].v === cur) ok = true;
+          sels[s].value = ok ? cur : '__none__';
+        }
+      }
+      function bindCard(card) {
+        var del = card.querySelector('.js-tpl-del');
+        if (del) {
+          del.addEventListener('click', function () {
+            var cards = lib.querySelectorAll('[data-tpl-card]');
+            if (cards.length <= 1) { alert(needOne); return; }
+            if (!window.confirm(confirmDel)) return;
+            card.parentNode.removeChild(card);
+            rebuildCaseOptions();
+          });
+        }
+        var lab = card.querySelector('input[name="tpl_label[]"]');
+        if (lab) lab.addEventListener('input', rebuildCaseOptions);
+      }
+      function addTemplateFromNew() {
+        var labelEl = document.getElementById('tplNewLabel');
+        var keyEl = document.getElementById('tplNewKey');
+        var bodyEl = document.getElementById('tplNewBody');
+        var label = labelEl ? String(labelEl.value || '').trim() : '';
+        var keyRaw = keyEl ? String(keyEl.value || '').trim() : '';
+        var body = bodyEl ? String(bodyEl.value || '') : '';
+        if (!label && !body) {
+          alert(<?php echo json_encode($isEnMsg ? 'Enter a name or message text.' : 'اكتب اسم القالب أو نص الرسالة.'); ?>);
+          return;
+        }
+        if (!label) label = keyRaw || 'template';
+        var key = uniqueKey(keyRaw || label);
+        var node = document.importNode(tplNode.content, true);
+        var card = node.querySelector('[data-tpl-card]');
+        card.querySelector('input[name="tpl_key[]"]').value = key;
+        card.querySelector('input[name="tpl_label[]"]').value = label;
+        var badge = card.querySelector('.tpl-vars');
+        if (badge) badge.textContent = key;
+        card.querySelector('textarea[name="tpl_body[]"]').value = body;
+        lib.insertBefore(card, lib.firstChild);
+        bindCard(card);
+        rebuildCaseOptions();
+        if (labelEl) labelEl.value = '';
+        if (keyEl) keyEl.value = '';
+        if (bodyEl) bodyEl.value = '';
+        if (newBox) newBox.setAttribute('hidden', 'hidden');
+      }
+      if (lib) {
+        var cards0 = lib.querySelectorAll('[data-tpl-card]');
+        for (var i = 0; i < cards0.length; i++) bindCard(cards0[i]);
+      }
+      if (addBtn && newBox) {
+        addBtn.addEventListener('click', function () {
+          newBox.removeAttribute('hidden');
+          var labelEl = document.getElementById('tplNewLabel');
+          if (labelEl) try { labelEl.focus(); } catch (e) {}
+        });
+      }
+      if (newConfirm) newConfirm.addEventListener('click', addTemplateFromNew);
+      if (newCancel) {
+        newCancel.addEventListener('click', function () {
+          if (newBox) newBox.setAttribute('hidden', 'hidden');
+        });
+      }
+    })();
+    </script>
+
+<?php elseif ($mode === 'log'): ?>
 <?php elseif ($mode === 'log'): ?>
     <form method="get" class="actions actions-tight" style="margin-bottom:10px">
         <input type="hidden" name="mode" value="log">
@@ -708,7 +947,7 @@ render_header(t('messages'), 'messages');
 <?php else: ?>
 
     <?php if ($mode === 'days'): ?>
-        <form method="get" class="form-grid form-grid-tight" style="margin-bottom:8px">
+        <form method="get" class="form-grid form-grid-tight" style="margin-bottom:10px">
             <input type="hidden" name="mode" value="days">
             <div>
                 <label><?php echo e(t('filter_days')); ?></label>
@@ -721,14 +960,14 @@ render_header(t('messages'), 'messages');
     <?php elseif ($mode === 'overdue'): ?>
         <p class="meta" style="margin-top:0">
             <?php echo e($lang === 'en'
-                ? ('Active + unpaid for ' . $afterDays . '+ days since activation. Uncheck to exclude. Change days/text in Messages → Templates.')
-                : ('مفعّل وعليه دين ومضى ' . $afterDays . '+ يوم من التفعيل. شيل الجك بوكس للاستثناء. الأيام والنص من الرسائل ← القوالب.')); ?>
+                ? ('Active + unpaid for ' . $afterDays . '+ days. Edit days/text in Templates.')
+                : ('مفعّل وعليه دين ومضى ' . $afterDays . '+ يوم. الأيام والنص من القوالب.')); ?>
         </p>
     <?php else: ?>
         <p class="meta" style="margin-top:0">
             <?php echo e($lang === 'en'
-                ? 'All subscribers with unpaid debt. Uncheck anyone you do not want to message.'
-                : 'كل من عليه دين. شيل الجك بوكس عن أي واحد ما تريد ترسل له.'); ?>
+                ? 'Everyone with unpaid debt. Uncheck to exclude.'
+                : 'كل من عليه دين. شيل الجك بوكس للاستثناء.'); ?>
         </p>
     <?php endif; ?>
 

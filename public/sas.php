@@ -256,7 +256,7 @@ if (isset($_GET['prepare']) && (string) $_GET['prepare'] !== '') {
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf(post('csrf'))) {
-        if (in_array(post('action'), array('sas_inline', 'sas_enable', 'sas_disconnect', 'sas_activate_card', 'sas_activate_credit', 'sas_activate_reward', 'sas_change_profile', 'give_test', 'sas_update_rental', 'sas_update_debt', 'sas_update_grace', 'sas_save_cols', 'bulk_disconnect'), true)) {
+        if (in_array(post('action'), array('sas_inline', 'sas_enable', 'sas_disconnect', 'sas_activate_card', 'sas_activate_credit', 'sas_activate_reward', 'sas_change_profile', 'give_test', 'sas_update_rental', 'sas_update_debt', 'sas_update_grace', 'sas_save_cols', 'bulk_disconnect', 'sas_add_debt', 'sas_list_debts', 'sas_delete_debt'), true)) {
             sas_json_out(false, 'طلب غير صالح');
         }
         flash('error', 'طلب غير صالح');
@@ -374,6 +374,142 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'local_id' => $localId,
             'debt' => $total,
             'debt_text' => function_exists('money_format_iqd') ? money_format_iqd($total, $currency) : (string) (int) $total,
+        ));
+    }
+
+    if ($action === 'sas_add_debt' || $action === 'sas_list_debts' || $action === 'sas_delete_debt') {
+        if (function_exists('user_can_edit_debts') && !user_can_edit_debts()) {
+            sas_json_out(false, function_exists('debt_edit_denied_message') ? debt_edit_denied_message() : 'ماكو صلاحية تعديل الديون');
+        }
+        $username = trim((string) post('id', ''));
+        if ($username === '') {
+            sas_json_out(false, 'مشترك غير محدد');
+        }
+        $cache = function_exists('sas_cache_get') ? sas_cache_get($pdo, $username) : null;
+        if (!$cache) {
+            sas_json_out(false, 'المشترك مو موجود بكاش SAS — حدّث القائمة');
+        }
+        list($localId, $err) = function_exists('sas_cache_ensure_local')
+            ? sas_cache_ensure_local($pdo, $config, $cache)
+            : array(0, 'تعذر ربط المشترك');
+        if ($localId <= 0) {
+            sas_json_out(false, $err !== '' ? $err : 'تعذر ربط المشترك');
+        }
+        $currency = isset($config['currency']) ? $config['currency'] : 'IQD';
+
+        if ($action === 'sas_list_debts') {
+            $st = $pdo->prepare(
+                'SELECT id, month_label, amount, notes, due_date
+                 FROM invoices
+                 WHERE subscriber_id = :sid AND status = "unpaid"
+                 ORDER BY id DESC'
+            );
+            $st->execute(array(':sid' => $localId));
+            $rows = $st->fetchAll();
+            $out = array();
+            foreach ($rows as $r) {
+                $amt = (float) $r['amount'];
+                $ml = isset($r['month_label']) ? (string) $r['month_label'] : '';
+                $out[] = array(
+                    'id' => (int) $r['id'],
+                    'month_label' => $ml,
+                    'month_text' => function_exists('month_short_label') ? month_short_label($ml) : $ml,
+                    'amount' => $amt,
+                    'amount_text' => function_exists('money_format_iqd') ? money_format_iqd($amt, $currency) : (string) (int) $amt,
+                    'notes' => isset($r['notes']) ? (string) $r['notes'] : '',
+                    'due_date' => isset($r['due_date']) ? (string) $r['due_date'] : '',
+                );
+            }
+            $total = function_exists('subscriber_unpaid_total') ? subscriber_unpaid_total($pdo, $localId) : 0;
+            sas_json_out(true, '', array(
+                'local_id' => $localId,
+                'debts' => $out,
+                'debt' => $total,
+                'debt_text' => function_exists('money_format_iqd') ? money_format_iqd($total, $currency) : (string) (int) $total,
+            ));
+        }
+
+        if ($action === 'sas_delete_debt') {
+            $invoiceId = (int) post('invoice_id', '0');
+            if ($invoiceId <= 0 || !function_exists('apply_unpaid_invoice_delete')) {
+                sas_json_out(false, 'دين غير صالح');
+            }
+            list($ok, $msg) = apply_unpaid_invoice_delete($pdo, $invoiceId, $localId);
+            $total = function_exists('subscriber_unpaid_total') ? subscriber_unpaid_total($pdo, $localId) : 0;
+            sas_json_out($ok, $msg, array(
+                'local_id' => $localId,
+                'invoice_id' => $invoiceId,
+                'debt' => $total,
+                'debt_text' => function_exists('money_format_iqd') ? money_format_iqd($total, $currency) : (string) (int) $total,
+            ));
+        }
+
+        // sas_add_debt
+        $rawKind = (string) post('debt_kind', 'month');
+        if ($rawKind === 'item') {
+            $debtKind = 'item';
+        } elseif ($rawKind === 'month_rent') {
+            $debtKind = 'month_rent';
+        } else {
+            $debtKind = 'month';
+        }
+        $amount = (float) post('amount', '0');
+        $monthLabel = trim((string) post('month_label', date('Y-m')));
+        $notes = trim((string) post('notes', ''));
+        $sendWa = post('send_whatsapp') === '1';
+        if ($amount <= 0) {
+            sas_json_out(false, 'أدخل مبلغ الدين');
+        }
+        if (!function_exists('insert_opening_debts')) {
+            sas_json_out(false, 'ملف الديون غير مكتمل');
+        }
+        $added = insert_opening_debts($pdo, $localId, array(
+            'debt_kind' => array($debtKind),
+            'debt_amount' => array($amount),
+            'debt_month' => array($monthLabel),
+            'debt_notes' => array($notes),
+        ));
+        if (empty($added['count'])) {
+            sas_json_out(false, $debtKind === 'month_rent' ? 'هذا المشترك ما عنده إيجار أو المبلغ غير صالح' : 'ما انضاف دين — راجع البيانات');
+        }
+        $total = function_exists('subscriber_unpaid_total') ? subscriber_unpaid_total($pdo, $localId) : 0;
+        $waNote = '';
+        if ($sendWa && function_exists('debt_created_message') && function_exists('whatsapp_send')) {
+            $info = $pdo->prepare('SELECT name, phone FROM subscribers WHERE id = :id');
+            $info->execute(array(':id' => $localId));
+            $subRow = $info->fetch();
+            if ($subRow && !empty($subRow['phone'])) {
+                $mlStore = $monthLabel;
+                if ($debtKind === 'item' && ($mlStore === '' || preg_match('/^\d{4}-\d{2}$/', $mlStore))) {
+                    $mlStore = 'غرض';
+                } elseif ($mlStore === '') {
+                    $mlStore = date('Y-m');
+                }
+                $row = array(
+                    'name' => $subRow['name'],
+                    'phone' => $subRow['phone'],
+                    'month_label' => $mlStore,
+                    'amount' => isset($added['sum']) ? $added['sum'] : $amount,
+                    'debt_total' => $total,
+                    'notes' => $notes,
+                );
+                $msgWa = debt_created_message($row, $config);
+                $result = whatsapp_send($config, $subRow['phone'], $msgWa, 'debt_created');
+                if (function_exists('log_message')) {
+                    log_message($pdo, $localId, $result);
+                }
+                if (!empty($result['success'])) {
+                    $waNote = ' + واتساب';
+                } else {
+                    $waNote = ' (واتساب: ' . (function_exists('whatsapp_fail_user_message') ? whatsapp_fail_user_message($result) : 'فشل') . ')';
+                }
+            }
+        }
+        sas_json_out(true, 'تمت إضافة الدين' . $waNote, array(
+            'local_id' => $localId,
+            'debt' => $total,
+            'debt_text' => function_exists('money_format_iqd') ? money_format_iqd($total, $currency) : (string) (int) $total,
+            'added' => isset($added['sum']) ? $added['sum'] : $amount,
         ));
     }
 
@@ -2313,6 +2449,7 @@ render_header(t('sas'), 'sas', '');
     <button type="button" class="ops-item" data-ops="retry" id="opsItemRetry" hidden><?php echo e(t('retry_send')); ?></button>
     <button type="button" class="ops-item" data-ops="remind_debt" id="opsItemRemind" hidden><?php echo e($lang === 'en' ? 'Send debt notice' : 'إرسال رسالة بالدين'); ?></button>
     <button type="button" class="ops-item" data-ops="remind_days" id="opsItemDays" hidden><?php echo e($lang === 'en' ? 'Send days left' : 'إرسال رسالة بالأيام المتبقية'); ?></button>
+    <button type="button" class="ops-item" data-ops="add_debt" id="opsItemAddDebt" hidden><?php echo e($lang === 'en' ? 'Add debt' : 'إضافة دين'); ?></button>
     <button type="button" class="ops-item" data-ops="pay" id="opsItemPay" hidden><?php echo e($lang === 'en' ? 'Debts' : 'الديون'); ?></button>
     <button type="button" class="ops-item" data-ops="bulk_activate" id="opsItemBulkActivate" hidden><?php echo e(t('bulk_activate')); ?></button>
     <button type="button" class="ops-item" data-ops="bulk_disconnect" id="opsItemBulkDisconnect" hidden><?php echo e($lang === 'en' ? 'Disconnect selected' : 'قطع اتصال المحددين'); ?></button>
@@ -2622,6 +2759,58 @@ render_header(t('sas'), 'sas', '');
     </div>
 </div>
 
+<div class="modal-backdrop hidden" id="sasDebtAddModal">
+    <div class="modal-card ops-modal-card">
+        <div class="ops-modal-head">
+            <h3><?php echo e($lang === 'en' ? 'Add debt' : 'إضافة دين'); ?></h3>
+            <button type="button" class="btn ghost sm" id="sasDebtAddClose">×</button>
+        </div>
+        <p class="sas-sync-note" id="sasDebtAddWho"></p>
+        <label><?php echo e($lang === 'en' ? 'Debt type' : 'نوع الدين'); ?>
+            <select id="sasDebtKind" style="width:100%;margin-top:4px">
+                <option value="month"><?php echo e(t('debt_type_month')); ?></option>
+                <option value="item"><?php echo e(t('debt_type_item')); ?></option>
+                <option value="month_rent"><?php echo e(t('debt_type_month_rent')); ?></option>
+            </select>
+        </label>
+        <label id="sasDebtMonthWrap" style="display:block;margin-top:8px"><?php echo e($lang === 'en' ? 'Month (YYYY-MM)' : 'الشهر (YYYY-MM)'); ?>
+            <input id="sasDebtMonth" value="<?php echo e(date('Y-m')); ?>" style="width:100%;margin-top:4px">
+        </label>
+        <label style="display:block;margin-top:8px"><?php echo e($lang === 'en' ? 'Amount' : 'المبلغ'); ?>
+            <input type="number" id="sasDebtAmount" min="1" step="1" style="width:100%;margin-top:4px">
+        </label>
+        <label style="display:block;margin-top:8px"><?php echo e(t('debt_notes')); ?>
+            <input id="sasDebtNotes" placeholder="<?php echo e($lang === 'en' ? 'e.g. router on credit' : 'مثال: راوتر بالدين'); ?>" style="width:100%;margin-top:4px">
+        </label>
+        <label class="toggle" style="margin-top:12px;display:inline-flex;align-items:center;gap:8px">
+            <input type="checkbox" id="sasDebtSendWa" value="1" checked>
+            <span class="toggle-ui"></span>
+            <span class="toggle-text"><?php echo e($lang === 'en' ? 'Notify subscriber (WhatsApp)' : 'إشعار المشترك بهذا الدين (واتساب)'); ?></span>
+        </label>
+        <p class="sas-modal-err" id="sasDebtAddErr"></p>
+        <div style="display:flex;gap:8px;margin-top:12px">
+            <button type="button" class="btn" id="sasDebtAddSubmit" style="flex:1"><?php echo e($lang === 'en' ? 'Save debt' : 'حفظ الدين'); ?></button>
+            <button type="button" class="btn ghost" id="sasDebtAddCancel" style="flex:1"><?php echo e($lang === 'en' ? 'Cancel' : 'إلغاء'); ?></button>
+        </div>
+    </div>
+</div>
+
+<div class="modal-backdrop hidden" id="sasDebtDelModal">
+    <div class="modal-card ops-modal-card">
+        <div class="ops-modal-head">
+            <h3><?php echo e($lang === 'en' ? 'Delete debt' : 'حذف دين'); ?></h3>
+            <button type="button" class="btn ghost sm" id="sasDebtDelClose">×</button>
+        </div>
+        <p class="sas-sync-note" id="sasDebtDelWho"></p>
+        <p class="sas-sync-note" id="sasDebtDelHint"><?php echo e($lang === 'en' ? 'Deleting removes the debt from totals; the action is kept in the activity log.' : 'الحذف يشيل الدين من مجموع الحسابات، والحركة تنحفظ بالسجل.'); ?></p>
+        <div id="sasDebtDelList" style="max-height:280px;overflow:auto;margin-top:8px"></div>
+        <p class="sas-modal-err" id="sasDebtDelErr"></p>
+        <div style="display:flex;gap:8px;margin-top:12px">
+            <button type="button" class="btn ghost" id="sasDebtDelCancel" style="flex:1"><?php echo e($lang === 'en' ? 'Close' : 'إغلاق'); ?></button>
+        </div>
+    </div>
+</div>
+
 <script>
 (function () {
   var filter = document.getElementById('filterInput');
@@ -2638,6 +2827,7 @@ render_header(t('sas'), 'sas', '');
   var bulkModal = document.getElementById('opsBulkModal');
   var countLabel = <?php echo json_encode($lang === 'en' ? 'selected' : 'محدد'); ?>;
   var totalCount = <?php echo (int) $totalRows; ?>;
+  var canEditDebts = <?php echo json_encode(function_exists('user_can_edit_debts') && user_can_edit_debts()); ?>;
   syncBulk();
   var confirmTest = <?php echo json_encode(t('confirm_give_test')); ?>;
   var stale = <?php echo json_encode($syncMode === 'stale'); ?>;
@@ -2895,6 +3085,7 @@ render_header(t('sas'), 'sas', '');
     showEl(document.getElementById('opsItemBulkActivate'), n > 1);
     showEl(document.getElementById('opsItemBulkDisconnect'), n > 1 && rows.some(function (r) { return r.online; }));
     showEl(document.getElementById('opsItemPay'), !!one);
+    showEl(document.getElementById('opsItemAddDebt'), !!(one && canEditDebts));
     showEl(document.getElementById('opsItemRemind'), !!one);
     showEl(document.getElementById('opsItemDays'), !!(one && one.hasDays));
     showEl(document.getElementById('opsItemRetry'), !!(one && one.msgFail));
@@ -2987,6 +3178,10 @@ render_header(t('sas'), 'sas', '');
       } else if (one) {
         window.location.href = 'debts.php?sas_user=' + encodeURIComponent(one.id);
       }
+      return;
+    }
+    if (action === 'add_debt' && one) {
+      openDebtAddModal(one);
       return;
     }
     if (action === 'remind_debt') {
@@ -3493,6 +3688,122 @@ render_header(t('sas'), 'sas', '');
       fillSelect(document.getElementById('sasProfSelect'), ps, row.profileId);
     });
   }
+  function paintRowDebtTotal(tr, debt, debtText, localId) {
+    if (!tr) return;
+    var n = Number(debt) || 0;
+    tr.setAttribute('data-debt', n > 0 ? '1' : '0');
+    if (localId) tr.setAttribute('data-local-id', String(localId));
+    var btn = tr.querySelector('.debt-edit-btn');
+    if (btn) {
+      btn.textContent = debtText || String(Math.round(n));
+      btn.setAttribute('data-amount', String(Math.round(n)));
+      btn.className = (n > 0 ? 'debt-amt debt-due' : 'debt-amt debt-zero') + ' debt-edit-btn';
+      return;
+    }
+    var cell = tr.querySelector('.col-debt');
+    if (cell) {
+      var el = cell.querySelector('.debt-amt');
+      if (el) el.textContent = debtText || String(Math.round(n));
+    }
+  }
+  function syncDebtKindUi() {
+    var kind = document.getElementById('sasDebtKind');
+    var wrap = document.getElementById('sasDebtMonthWrap');
+    if (!kind || !wrap) return;
+    wrap.style.display = (kind.value === 'item') ? 'none' : 'block';
+  }
+  function openDebtAddModal(row) {
+    actUser = row;
+    var modal = document.getElementById('sasDebtAddModal');
+    var who = document.getElementById('sasDebtAddWho');
+    var err = document.getElementById('sasDebtAddErr');
+    var amt = document.getElementById('sasDebtAmount');
+    var notes = document.getElementById('sasDebtNotes');
+    var month = document.getElementById('sasDebtMonth');
+    var kind = document.getElementById('sasDebtKind');
+    var wa = document.getElementById('sasDebtSendWa');
+    if (who) who.textContent = (row.name || row.id) + ' · ' + row.id;
+    if (err) err.textContent = '';
+    if (amt) amt.value = '';
+    if (notes) notes.value = '';
+    if (month) month.value = <?php echo json_encode(date('Y-m')); ?>;
+    if (kind) kind.value = 'month';
+    if (wa) wa.checked = true;
+    syncDebtKindUi();
+    if (modal) modal.classList.remove('hidden');
+    if (amt) setTimeout(function () { amt.focus(); }, 50);
+  }
+  function closeDebtAddModal() {
+    var m = document.getElementById('sasDebtAddModal');
+    if (m) m.classList.add('hidden');
+  }
+  function openDebtDelModal(row) {
+    actUser = row;
+    var modal = document.getElementById('sasDebtDelModal');
+    var who = document.getElementById('sasDebtDelWho');
+    var err = document.getElementById('sasDebtDelErr');
+    var list = document.getElementById('sasDebtDelList');
+    if (who) who.textContent = (row.name || row.id) + ' · ' + row.id;
+    if (err) err.textContent = '';
+    if (list) list.innerHTML = '<p class="sas-sync-note">' + <?php echo json_encode($lang === 'en' ? 'Loading…' : 'جاري التحميل…'); ?> + '</p>';
+    if (modal) modal.classList.remove('hidden');
+    postSas('sas_list_debts', { id: row.id }).then(function (d) {
+      if (!list) return;
+      if (!d || !d.ok) {
+        list.innerHTML = '';
+        if (err) err.textContent = (d && d.message) || <?php echo json_encode($lang === 'en' ? 'Failed' : 'فشل'); ?>;
+        return;
+      }
+      if (d.local_id && row.tr) row.tr.setAttribute('data-local-id', String(d.local_id));
+      paintRowDebtTotal(row.tr, d.debt, d.debt_text, d.local_id);
+      var debts = (d && d.debts) ? d.debts : [];
+      if (!debts.length) {
+        list.innerHTML = '<p class="sas-sync-note">' + <?php echo json_encode($lang === 'en' ? 'No unpaid debts' : 'ماكو ديون غير مسددة'); ?> + '</p>';
+        return;
+      }
+      list.innerHTML = '';
+      debts.forEach(function (inv) {
+        var rowEl = document.createElement('div');
+        rowEl.style.cssText = 'display:flex;align-items:center;gap:8px;justify-content:space-between;padding:8px 0;border-bottom:1px solid #e2e8f0';
+        var info = document.createElement('div');
+        info.style.cssText = 'flex:1;min-width:0';
+        info.innerHTML = '<strong></strong><div class="sas-sync-note" style="margin:2px 0 0"></div>';
+        info.querySelector('strong').textContent = (inv.month_text || inv.month_label || '') + ' — ' + (inv.amount_text || inv.amount);
+        info.querySelector('div').textContent = inv.notes || '';
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn ghost sm';
+        btn.textContent = <?php echo json_encode($lang === 'en' ? 'Delete' : 'حذف'); ?>;
+        btn.addEventListener('click', function () {
+          if (!window.confirm(<?php echo json_encode($lang === 'en' ? 'Delete this debt? Logged in activity log.' : 'تحذف هذا الدين؟ الحركة تنحفظ بالسجل.'); ?>)) return;
+          btn.disabled = true;
+          postSas('sas_delete_debt', { id: row.id, invoice_id: String(inv.id) }).then(function (res) {
+            if (!res || !res.ok) {
+              btn.disabled = false;
+              if (err) err.textContent = (res && res.message) || <?php echo json_encode($lang === 'en' ? 'Delete failed' : 'فشل الحذف'); ?>;
+              return;
+            }
+            showAppToast((res && res.message) || <?php echo json_encode($lang === 'en' ? 'Debt deleted' : 'تم حذف الدين'); ?>, 'ok');
+            paintRowDebtTotal(row.tr, res.debt, res.debt_text, res.local_id);
+            openDebtDelModal(row);
+          }).catch(function () {
+            btn.disabled = false;
+            if (err) err.textContent = <?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>;
+          });
+        });
+        rowEl.appendChild(info);
+        rowEl.appendChild(btn);
+        list.appendChild(rowEl);
+      });
+    }).catch(function () {
+      if (list) list.innerHTML = '';
+      if (err) err.textContent = <?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>;
+    });
+  }
+  function closeDebtDelModal() {
+    var m = document.getElementById('sasDebtDelModal');
+    if (m) m.classList.add('hidden');
+  }
   document.querySelectorAll('#sasActModal input[name="sas_act_mode"]').forEach(function (el) {
     el.addEventListener('change', toggleActMode);
   });
@@ -3557,6 +3868,67 @@ render_header(t('sas'), 'sas', '');
   }
   if (profClose) profClose.addEventListener('click', closeProfModal);
   if (profCancel) profCancel.addEventListener('click', closeProfModal);
+  var debtKindSel = document.getElementById('sasDebtKind');
+  if (debtKindSel) debtKindSel.addEventListener('change', syncDebtKindUi);
+  var debtAddClose = document.getElementById('sasDebtAddClose');
+  var debtAddCancel = document.getElementById('sasDebtAddCancel');
+  if (debtAddClose) debtAddClose.addEventListener('click', closeDebtAddModal);
+  if (debtAddCancel) debtAddCancel.addEventListener('click', closeDebtAddModal);
+  var debtAddModal = document.getElementById('sasDebtAddModal');
+  if (debtAddModal) {
+    debtAddModal.addEventListener('click', function (e) {
+      if (e.target === debtAddModal) closeDebtAddModal();
+    });
+  }
+  var debtAddSubmit = document.getElementById('sasDebtAddSubmit');
+  if (debtAddSubmit) {
+    debtAddSubmit.addEventListener('click', function () {
+      if (!actUser) return;
+      var err = document.getElementById('sasDebtAddErr');
+      var kind = document.getElementById('sasDebtKind');
+      var amount = document.getElementById('sasDebtAmount');
+      var month = document.getElementById('sasDebtMonth');
+      var notes = document.getElementById('sasDebtNotes');
+      var wa = document.getElementById('sasDebtSendWa');
+      if (err) err.textContent = '';
+      var amt = amount ? Number(amount.value) : 0;
+      if (!(amt > 0)) {
+        if (err) err.textContent = <?php echo json_encode($lang === 'en' ? 'Enter amount' : 'أدخل المبلغ'); ?>;
+        return;
+      }
+      debtAddSubmit.disabled = true;
+      postSas('sas_add_debt', {
+        id: actUser.id,
+        debt_kind: kind ? kind.value : 'month',
+        amount: String(amt),
+        month_label: month ? month.value : '',
+        notes: notes ? notes.value : '',
+        send_whatsapp: (wa && wa.checked) ? '1' : '0'
+      }).then(function (d) {
+        debtAddSubmit.disabled = false;
+        if (!d || !d.ok) {
+          if (err) err.textContent = (d && d.message) || <?php echo json_encode($lang === 'en' ? 'Failed' : 'فشل'); ?>;
+          return;
+        }
+        paintRowDebtTotal(actUser.tr, d.debt, d.debt_text, d.local_id);
+        showAppToast((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Debt added' : 'تمت إضافة الدين'); ?>, 'ok');
+        closeDebtAddModal();
+      }).catch(function () {
+        debtAddSubmit.disabled = false;
+        if (err) err.textContent = <?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>;
+      });
+    });
+  }
+  var debtDelClose = document.getElementById('sasDebtDelClose');
+  var debtDelCancel = document.getElementById('sasDebtDelCancel');
+  if (debtDelClose) debtDelClose.addEventListener('click', closeDebtDelModal);
+  if (debtDelCancel) debtDelCancel.addEventListener('click', closeDebtDelModal);
+  var debtDelModal = document.getElementById('sasDebtDelModal');
+  if (debtDelModal) {
+    debtDelModal.addEventListener('click', function (e) {
+      if (e.target === debtDelModal) closeDebtDelModal();
+    });
+  }
   var actSubmit = document.getElementById('sasActSubmit');
   if (actSubmit) {
     var actSubmitLabel = actSubmit.textContent;

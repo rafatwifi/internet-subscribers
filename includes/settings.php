@@ -341,13 +341,157 @@ function settings_save($data)
 {
     $current = settings_load();
     $merged = array_merge($current, $data);
+    // Nested catalog must replace wholly when provided (not deep-merge leftovers).
+    if (array_key_exists('wa_templates', $data)) {
+        $merged['wa_templates'] = is_array($data['wa_templates']) ? $data['wa_templates'] : array();
+    }
     $path = settings_path();
     $dir = dirname($path);
     if (!is_dir($dir)) {
-        mkdir($dir, 0755, true);
+        @mkdir($dir, 0755, true);
     }
-    $json = json_encode($merged, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+    $flags = 0;
+    if (defined('JSON_UNESCAPED_UNICODE')) {
+        $flags |= JSON_UNESCAPED_UNICODE;
+    }
+    if (defined('JSON_PRETTY_PRINT')) {
+        $flags |= JSON_PRETTY_PRINT;
+    }
+    $json = json_encode($merged, $flags);
     return file_put_contents($path, $json) !== false;
+}
+
+/**
+ * When a legacy tpl_* field is saved elsewhere, keep wa_templates in sync if present.
+ */
+function wa_patch_catalog_body($settings, $tplKey, $body, $label = '')
+{
+    if (!is_array($settings)) {
+        $settings = array();
+    }
+    $tplKey = wa_sanitize_tpl_key($tplKey);
+    if ($tplKey === '') {
+        return $settings;
+    }
+    if (empty($settings['wa_templates']) || !is_array($settings['wa_templates'])) {
+        return $settings;
+    }
+    $labels = wa_default_template_labels(isset($settings['language']) ? $settings['language'] : 'ar');
+    if (!isset($settings['wa_templates'][$tplKey]) || !is_array($settings['wa_templates'][$tplKey])) {
+        $settings['wa_templates'][$tplKey] = array(
+            'label' => $label !== '' ? $label : (isset($labels[$tplKey]) ? $labels[$tplKey] : $tplKey),
+            'body' => (string) $body,
+        );
+    } else {
+        $settings['wa_templates'][$tplKey]['body'] = (string) $body;
+        if ($label !== '') {
+            $settings['wa_templates'][$tplKey]['label'] = $label;
+        }
+    }
+    return $settings;
+}
+
+function wa_sanitize_tpl_key($key)
+{
+    $key = strtolower(trim((string) $key));
+    $key = preg_replace('/[^a-z0-9_]+/', '_', $key);
+    $key = preg_replace('/_+/', '_', $key);
+    $key = trim($key, '_');
+    if ($key === '') {
+        return '';
+    }
+    if (strlen($key) > 48) {
+        $key = substr($key, 0, 48);
+        $key = rtrim($key, '_');
+    }
+    return $key;
+}
+
+function wa_legacy_tpl_field_map()
+{
+    return array(
+        'activation' => 'tpl_activation',
+        'activation_credit' => 'tpl_activation_credit',
+        'activation_debts' => 'tpl_activation_debts',
+        'debt_created' => 'tpl_debt_created',
+        'payment_ok' => 'tpl_payment_ok',
+        'debt_remind' => 'tpl_debt_remind',
+        'days_left' => 'tpl_days_left',
+        'unpaid_overdue' => 'tpl_unpaid_overdue',
+        'expiry_soon' => 'tpl_expiry_soon',
+        'schedule_cut' => 'tpl_schedule_cut',
+    );
+}
+
+function wa_default_template_labels($lang = 'ar')
+{
+    $en = ($lang === 'en');
+    return array(
+        'activation' => $en ? 'Cash activation' : 'تفعيل نقدي',
+        'activation_credit' => $en ? 'Credit activation' : 'تفعيل آجل',
+        'activation_debts' => $en ? 'Prior-debts appendix' : 'ملحق ديون سابقة',
+        'debt_created' => $en ? 'Debt added' : 'إضافة دين',
+        'payment_ok' => $en ? 'Payment confirmed' : 'تأكيد التسديد',
+        'debt_remind' => $en ? 'Debt reminder' : 'تذكير بالدين',
+        'days_left' => $en ? 'Days left (manual)' : 'أيام متبقية (يدوي)',
+        'expiry_soon' => $en ? 'Expiry soon (auto)' : 'قرب الانتهاء (تلقائي)',
+        'unpaid_overdue' => $en ? 'Late after activation' : 'تأخير الدفع بعد التفعيل',
+        'schedule_cut' => $en ? 'Cut after grace' : 'قطع بعد انتهاء السماح',
+    );
+}
+
+/**
+ * Build dynamic template catalog from settings.
+ * Returns: key => array('label' => ..., 'body' => ..., 'builtin' => bool)
+ */
+function wa_build_templates_catalog($settings, $lang = 'ar')
+{
+    if (!is_array($settings)) {
+        $settings = array();
+    }
+    $labels = wa_default_template_labels($lang);
+    $legacy = wa_legacy_tpl_field_map();
+    $out = array();
+    $hasCatalog = !empty($settings['wa_templates']) && is_array($settings['wa_templates']);
+
+    if ($hasCatalog) {
+        foreach ($settings['wa_templates'] as $rawKey => $row) {
+            $key = wa_sanitize_tpl_key($rawKey);
+            if ($key === '') {
+                continue;
+            }
+            if (is_string($row)) {
+                $body = $row;
+                $label = isset($labels[$key]) ? $labels[$key] : $key;
+            } elseif (is_array($row)) {
+                $body = isset($row['body']) ? (string) $row['body'] : '';
+                $label = isset($row['label']) ? trim((string) $row['label']) : '';
+                if ($label === '') {
+                    $label = isset($labels[$key]) ? $labels[$key] : $key;
+                }
+            } else {
+                continue;
+            }
+            $out[$key] = array(
+                'label' => $label,
+                'body' => $body,
+                'builtin' => isset($legacy[$key]),
+            );
+        }
+        return $out;
+    }
+
+    // First-time / legacy installs: seed from tpl_* fields.
+    foreach ($legacy as $key => $field) {
+        $body = isset($settings[$field]) ? (string) $settings[$field] : '';
+        $out[$key] = array(
+            'label' => isset($labels[$key]) ? $labels[$key] : $key,
+            'body' => $body,
+            'builtin' => true,
+        );
+    }
+
+    return $out;
 }
 
 function apply_settings_to_config($config, $settings)
@@ -370,30 +514,33 @@ function apply_settings_to_config($config, $settings)
     $config['whatsapp']['local_url'] = $settings['whatsapp_local_url'];
     $config['whatsapp']['local_key'] = $settings['whatsapp_local_key'];
     $config['whatsapp']['sender_note'] = $settings['whatsapp_sender_note'];
-    $config['templates'] = array(
-        'debt_remind' => isset($settings['tpl_debt_remind']) ? $settings['tpl_debt_remind'] : '',
-        'payment_ok' => isset($settings['tpl_payment_ok']) ? $settings['tpl_payment_ok'] : '',
-        'debt_created' => isset($settings['tpl_debt_created']) ? $settings['tpl_debt_created'] : '',
-        'activation' => isset($settings['tpl_activation']) ? $settings['tpl_activation'] : '',
-        'activation_credit' => isset($settings['tpl_activation_credit']) ? $settings['tpl_activation_credit'] : '',
-        'activation_debts' => isset($settings['tpl_activation_debts']) ? $settings['tpl_activation_debts'] : '',
-        'days_left' => isset($settings['tpl_days_left']) ? $settings['tpl_days_left'] : '',
-        'unpaid_overdue' => isset($settings['tpl_unpaid_overdue']) ? $settings['tpl_unpaid_overdue'] : '',
-        'expiry_soon' => isset($settings['tpl_expiry_soon']) ? $settings['tpl_expiry_soon'] : '',
-        'schedule_cut' => isset($settings['tpl_schedule_cut']) ? $settings['tpl_schedule_cut'] : '',
-    );
-    if (trim((string) $config['templates']['activation_credit']) === '') {
+    $langTpl = isset($settings['language']) ? (string) $settings['language'] : 'ar';
+    $catalog = wa_build_templates_catalog($settings, $langTpl);
+    $config['templates'] = array();
+    $config['template_labels'] = array();
+    $config['wa_templates'] = array();
+    foreach ($catalog as $tKey => $tRow) {
+        $config['templates'][$tKey] = isset($tRow['body']) ? (string) $tRow['body'] : '';
+        $config['template_labels'][$tKey] = isset($tRow['label']) ? (string) $tRow['label'] : $tKey;
+        $config['wa_templates'][$tKey] = array(
+            'label' => $config['template_labels'][$tKey],
+            'body' => $config['templates'][$tKey],
+            'builtin' => !empty($tRow['builtin']),
+        );
+    }
+    // Soft fallbacks for older installs that left credit/debts empty (runtime send only).
+    if (isset($config['templates']['activation_credit']) && trim((string) $config['templates']['activation_credit']) === ''
+        && isset($config['templates']['activation'])) {
         $config['templates']['activation_credit'] = $config['templates']['activation'];
     }
-    if (trim((string) $config['templates']['activation_debts']) === '') {
-        $config['templates']['activation_debts'] = isset($settings['tpl_debt_remind'])
-            ? $settings['tpl_debt_remind']
-            : '';
+    if (isset($config['templates']['activation_debts']) && trim((string) $config['templates']['activation_debts']) === ''
+        && isset($config['templates']['debt_remind'])) {
+        $config['templates']['activation_debts'] = $config['templates']['debt_remind'];
     }
     $tplKeys = array_keys($config['templates']);
     $legacyAct = isset($settings['wa_case_activation']) ? trim((string) $settings['wa_case_activation']) : 'activation';
     if ($legacyAct === '' || !in_array($legacyAct, $tplKeys, true)) {
-        $legacyAct = 'activation';
+        $legacyAct = in_array('activation', $tplKeys, true) ? 'activation' : (isset($tplKeys[0]) ? $tplKeys[0] : '');
     }
     $caseDefaults = array(
         'activation_cash' => $legacyAct,
@@ -409,18 +556,31 @@ function apply_settings_to_config($config, $settings)
         'schedule_cut' => 'schedule_cut',
     );
     $config['wa_cases'] = array();
+    $config['wa_case_issues'] = array();
     foreach ($caseDefaults as $case => $def) {
         $raw = isset($settings['wa_case_' . $case]) ? trim((string) $settings['wa_case_' . $case]) : $def;
-        if ($case === 'activation_debts' && ($raw === 'activation_debts' || $raw === '') && !in_array('activation_debts', $tplKeys, true)) {
-            $raw = 'debt_remind';
+        if ($raw === '__none__') {
+            $raw = '';
         }
-        $config['wa_cases'][$case] = in_array($raw, $tplKeys, true) ? $raw : $def;
-        if (!in_array($config['wa_cases'][$case], $tplKeys, true)) {
-            $config['wa_cases'][$case] = in_array($def, $tplKeys, true) ? $def : 'activation';
+        if ($raw !== '' && !in_array($raw, $tplKeys, true)) {
+            // Deleted template still referenced.
+            $config['wa_case_issues'][$case] = 'missing_template';
+            $raw = in_array($def, $tplKeys, true) ? $def : (isset($tplKeys[0]) ? $tplKeys[0] : '');
         }
+        if ($raw === '') {
+            $config['wa_case_issues'][$case] = 'unassigned';
+            // Runtime fallback so sends do not hard-fail; UI still warns.
+            $raw = in_array($def, $tplKeys, true) ? $def : (isset($tplKeys[0]) ? $tplKeys[0] : '');
+        } elseif (isset($config['templates'][$raw]) && trim((string) $config['templates'][$raw]) === '') {
+            $config['wa_case_issues'][$case] = 'empty_body';
+        }
+        $config['wa_cases'][$case] = $raw;
     }
     // توافق قديم: activation = نقدي
     $config['wa_cases']['activation'] = $config['wa_cases']['activation_cash'];
+    if (isset($config['wa_case_issues']['activation_cash'])) {
+        $config['wa_case_issues']['activation'] = $config['wa_case_issues']['activation_cash'];
+    }
     $config['unpaid_remind_after_days'] = isset($settings['unpaid_remind_after_days'])
         ? max(1, (int) $settings['unpaid_remind_after_days'])
         : 7;

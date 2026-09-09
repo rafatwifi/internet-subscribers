@@ -457,6 +457,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'tpl_schedule_cut' => (string) post('tpl_schedule_cut', ''),
             'wa_case_schedule_cut' => 'schedule_cut',
         );
+        if (function_exists('wa_patch_catalog_body')) {
+            $patched = wa_patch_catalog_body(settings_load(), 'schedule_cut', $data['tpl_schedule_cut']);
+            if (!empty($patched['wa_templates']) && is_array($patched['wa_templates'])) {
+                $data['wa_templates'] = $patched['wa_templates'];
+            }
+        }
         $tab = 'schedule';
         if (post('schedule_run_now') === '1' && function_exists('run_schedule_debt_cuts')) {
             // احفظ أولاً ثم شغّل بالكود المحدّث

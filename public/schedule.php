@@ -33,6 +33,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'expiry_auto_remind_enabled' => post('expiry_auto_remind_enabled') === '1',
             'expiry_auto_remind_days' => $expDays,
         );
+        if (function_exists('wa_patch_catalog_body')) {
+            $patched = wa_patch_catalog_body(settings_load(), 'schedule_cut', $data['tpl_schedule_cut']);
+            if (!empty($patched['wa_templates']) && is_array($patched['wa_templates'])) {
+                $data['wa_templates'] = $patched['wa_templates'];
+            }
+        }
         if (post('schedule_run_now') === '1' && function_exists('run_schedule_debt_cuts')) {
             if (settings_save($data)) {
                 $settings = settings_load();
