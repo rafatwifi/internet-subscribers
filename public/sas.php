@@ -3113,13 +3113,29 @@ render_header(t('sas'), 'sas', '');
       }));
     } catch (e) {}
   }
-  function postSas(action, fields) {
+  function postSas(action, fields, timeoutMs) {
     var body = new FormData();
     body.append('csrf', csrf);
     body.append('action', action);
     Object.keys(fields || {}).forEach(function (k) { body.append(k, fields[k]); });
-    return fetch('sas.php', { method: 'POST', body: body, credentials: 'same-origin' })
-      .then(function (r) { return r.json(); });
+    var opts = { method: 'POST', body: body, credentials: 'same-origin' };
+    var timer = null;
+    if (timeoutMs && typeof AbortController !== 'undefined') {
+      var ctrl = new AbortController();
+      opts.signal = ctrl.signal;
+      timer = setTimeout(function () {
+        try { ctrl.abort(); } catch (e) {}
+      }, timeoutMs);
+    }
+    return fetch('sas.php', opts)
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (timer) clearTimeout(timer);
+        return d;
+      }, function (err) {
+        if (timer) clearTimeout(timer);
+        throw err;
+      });
   }
   function fillSelect(sel, items, selected) {
     if (!sel) return;
@@ -3344,6 +3360,7 @@ render_header(t('sas'), 'sas', '');
       var o = document.createElement('option');
       o.value = String(c.pin || '');
       o.setAttribute('data-card-id', String(c.id || 0));
+      o.setAttribute('data-profile-id', String(c.profile_id || 0));
       o.textContent = (c.pin || c.label || '') + (c.profile_name ? (' — ' + c.profile_name) : '');
       if (i === 0) o.selected = true;
       sel.appendChild(o);
@@ -3638,13 +3655,16 @@ render_header(t('sas'), 'sas', '');
           send_whatsapp: waFields.send_whatsapp,
           send_old_debts: waFields.send_old_debts,
           pay_mode: waFields.pay_mode
-        });
+        }, 55000);
       } else {
         var cardSel = document.getElementById('sasActCardSelect');
         var pin = cardSel ? cardSel.value : '';
         var cardId = '0';
+        var cardProfileId = '0';
         if (cardSel && cardSel.selectedIndex >= 0 && cardSel.options[cardSel.selectedIndex]) {
-          cardId = cardSel.options[cardSel.selectedIndex].getAttribute('data-card-id') || '0';
+          var opt = cardSel.options[cardSel.selectedIndex];
+          cardId = opt.getAttribute('data-card-id') || '0';
+          cardProfileId = opt.getAttribute('data-profile-id') || '0';
         }
         if (!pin) {
           if (err) err.textContent = <?php echo json_encode($lang === 'en' ? 'No unused cards' : 'ماكو كروت شاغرة'); ?>;
@@ -3656,12 +3676,12 @@ render_header(t('sas'), 'sas', '');
           id: actUser.id,
           pin: pin,
           card_id: cardId,
-          profile_id: profileId,
+          profile_id: (cardProfileId && cardProfileId !== '0') ? cardProfileId : profileId,
           profile_name: profileName,
           send_whatsapp: waFields.send_whatsapp,
           send_old_debts: waFields.send_old_debts,
           pay_mode: waFields.pay_mode
-        });
+        }, 35000);
       }
       req.then(function (d) {
         if (!d || !d.ok) {
@@ -3675,7 +3695,7 @@ render_header(t('sas'), 'sas', '');
         window.location.reload();
       }).catch(function () {
         setActBusy(false);
-        var netMsg = <?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>;
+        var netMsg = <?php echo json_encode($lang === 'en' ? 'Activation timed out or network error — check SAS, money was NOT recorded if activate failed' : 'انتهت مهلة التفعيل أو فشل الاتصال — تحقق من الساس؛ المبلغ ما ينسجل إذا التفعيل فشل'); ?>;
         if (err) err.textContent = netMsg;
         showAppToast(netMsg, 'error');
       });

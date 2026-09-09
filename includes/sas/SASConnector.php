@@ -2090,197 +2090,141 @@ class SASConnector
             $pin = (string) $cardId;
         }
         if ($pin === '') {
-            return array('message' => 'ماكو رقم كرت', 'status' => -1);
+            return array('message' => 'ماكو رقم كرت', 'status' => -1, 'success' => false);
+        }
+        if ($userId <= 0) {
+            $userId = $this->connectorUserId($this->findUserByUsername($username));
+        }
+        if ($userId > 0 && method_exists($this, 'getActivationData')) {
+            $this->getActivationData($userId);
+        }
+
+        // باقة الكرت إن لزم — بدون إرسال profile غلط مع كل طلب
+        if ($profileId > 0 && $userId > 0) {
+            $cur = $this->getUserById($userId);
+            $curPid = 0;
+            if (is_array($cur)) {
+                if (isset($cur['profile_id']) && is_numeric($cur['profile_id'])) {
+                    $curPid = (int) $cur['profile_id'];
+                } elseif (isset($cur['profile']['id']) && is_numeric($cur['profile']['id'])) {
+                    $curPid = (int) $cur['profile']['id'];
+                }
+            }
+            if ($curPid !== $profileId) {
+                $ch = $this->changeUserProfile($userId, $profileId);
+                if ($this->isInvalidProfileRes($ch)) {
+                    return array(
+                        'success' => false,
+                        'message' => 'rsp_invalid_profile — ما قدرنا نحوّل المشترك لباقة الكرت',
+                    );
+                }
+            }
         }
 
         $beforeTs = $this->liveExpireTs($userId, $username);
-        $cardPayloads = array();
-        if ($userId > 0) {
-            $cardPayloads[] = array('id' => $userId, 'pin' => $pin);
-            $cardPayloads[] = array('id' => $userId, 'user_id' => $userId, 'pin' => $pin, 'username' => $username);
-            $cardPayloads[] = array('user_id' => $userId, 'pin' => $pin, 'username' => $username);
-        }
-        $cardPayloads[] = array('username' => $username, 'pin' => $pin);
-        $cardPayloads[] = array('username' => $username, 'pin' => $pin, 'serial' => $pin, 'voucher' => $pin);
-        if ($cardId > 0) {
-            $cardPayloads[] = array('username' => $username, 'card_id' => $cardId, 'pin' => $pin);
-        }
-        if ($profileId > 0) {
-            $withProfile = array();
-            foreach ($cardPayloads as $p) {
-                $p['profile_id'] = $profileId;
-                $p['units'] = 1;
-                $withProfile[] = $p;
-            }
-            $cardPayloads = array_merge($withProfile, $cardPayloads);
-        }
+        $oldTimeout = $this->timeout;
+        $this->setTimeout(5);
 
-        $genericPayloads = array(
-            array(
+        // المسار الشائع على NBTel/SAS: user/activate + method=card (مو /pin اللي يرجّع 404)
+        $attempts = array();
+        if ($userId > 0) {
+            $attempts[] = array('user/activate', array(
+                'id' => $userId,
+                'user_id' => $userId,
                 'username' => $username,
                 'pin' => $pin,
                 'method' => 'card',
-                'profile_id' => $profileId,
                 'units' => 1,
-            ),
-            array(
+            ));
+            $attempts[] = array('user/activate', array(
+                'id' => $userId,
+                'user_id' => $userId,
                 'username' => $username,
                 'pin' => $pin,
                 'method' => 'voucher',
-                'profile_id' => $profileId,
                 'units' => 1,
-            ),
-        );
-        if ($userId > 0) {
-            $genericPayloads[] = array(
-                'id' => $userId,
-                'user_id' => $userId,
-                'pin' => $pin,
-                'method' => 'card',
-                'profile_id' => $profileId,
-                'units' => 1,
-            );
-        }
-
-        $refillPayloads = array(
-            array('username' => $username, 'pin' => $pin),
-            array('username' => $username, 'pin' => $pin, 'serial' => $pin),
-        );
-        if ($userId > 0) {
-            $refillPayloads[] = array('user_id' => $userId, 'pin' => $pin, 'username' => $username);
-        }
-
-        $groups = array(
-            array(
-                'routes' => array(
-                    'user/activate/pin',
-                    'user/activate/voucher',
-                    'user/activateCard',
-                    'user/activate/card',
-                ),
-                'payloads' => $cardPayloads,
-                'kind' => 'activate',
-            ),
-            array(
-                'routes' => array('user/activate'),
-                'payloads' => $genericPayloads,
-                'kind' => 'activate',
-            ),
-            array(
-                'routes' => array(
-                    'user/useCard',
-                    'user/usePin',
-                    'user/refill',
-                    'user/redeem',
-                    'user/redeemVoucher',
-                    'card/use',
-                    'card/redeem',
-                ),
-                'payloads' => $refillPayloads,
-                'kind' => 'refill',
-            ),
-        );
-
-        $oldTimeout = $this->timeout;
-        $this->setTimeout(10);
-
-        $last = array();
-        $lastBusiness = null;
-        $refillOk = null;
-
-        foreach ($groups as $group) {
-            foreach ($group['routes'] as $route) {
-                foreach ($group['payloads'] as $payload) {
-                    $last = $this->postActivate($route, $payload);
-                    if ($this->isActivateOk($last)) {
-                        // نجاح الساس يكفي — لا ننتظر تحقق الانتهاء حتى لا يتأخر التفعيل
-                        $afterTs = $this->liveExpireTs($userId, $username);
-                        if ($this->expireMoved($beforeTs, $afterTs)) {
-                            $last['_verified'] = 1;
-                        } else {
-                            $last['_verified'] = 0;
-                            $last['_accepted'] = 1;
-                        }
-                        $this->setTimeout($oldTimeout);
-                        return $last;
-                    }
-                    if ($this->isRouteMissing($last)) {
-                        break;
-                    }
-                    $lastBusiness = $last;
-                    $msg = isset($last['message']) ? strtolower((string) $last['message']) : '';
-                    if (strpos($msg, 'missing') === false && strpos($msg, 'required') === false
-                        && strpos($msg, 'ناقص') === false) {
-                        break;
-                    }
-                }
-            }
-        }
-
-        if (is_array($refillOk)) {
-            $balPayloads = array(
-                array('username' => $username, 'profile_id' => $profileId, 'units' => 1, 'pin' => $pin),
-            );
-            if ($userId > 0) {
-                $balPayloads[] = array(
+            ));
+            if ($profileId > 0) {
+                $attempts[] = array('user/activate', array(
+                    'id' => $userId,
                     'user_id' => $userId,
                     'username' => $username,
+                    'pin' => $pin,
+                    'method' => 'card',
                     'profile_id' => $profileId,
                     'units' => 1,
-                );
+                ));
             }
-            foreach (array('user/activate/userBalance', 'user/activate/user_balance', 'user/activate/balance') as $broute) {
-                foreach ($balPayloads as $bp) {
-                    $last = $this->postActivate($broute, $bp);
-                    if ($this->isActivateOk($last)) {
-                        $afterTs = $this->liveExpireTs($userId, $username);
-                        if ($this->expireMoved($beforeTs, $afterTs)) {
-                            $this->setTimeout($oldTimeout);
-                            $last['_verified'] = 1;
-                            return $last;
-                        }
-                    }
-                    if ($this->isRouteMissing($last)) {
-                        break;
-                    }
-                    $lastBusiness = $last;
+            $attempts[] = array('user/activateCard', array('id' => $userId, 'pin' => $pin));
+            $attempts[] = array('user/usePin', array('id' => $userId, 'pin' => $pin, 'username' => $username));
+        }
+        $attempts[] = array('user/activate', array(
+            'username' => $username,
+            'pin' => $pin,
+            'method' => 'card',
+            'units' => 1,
+        ));
+        $attempts[] = array('user/useCard', array('username' => $username, 'pin' => $pin));
+        if ($userId > 0) {
+            $attempts[] = array('user/activate/pin', array('id' => $userId, 'pin' => $pin));
+        }
+
+        $last = array('success' => false, 'message' => 'فشل تفعيل الكرت');
+        $deadRoutes = array();
+        foreach ($attempts as $pair) {
+            $route = $pair[0];
+            $payload = $pair[1];
+            if (isset($deadRoutes[$route])) {
+                continue;
+            }
+            $last = $this->postActivateOnce($route, $payload);
+
+            if ($this->isRouteMissing($last) || $this->isMethodNotAllowed($last)) {
+                $deadRoutes[$route] = 1;
+                continue;
+            }
+            if ($this->isInvalidProfileRes($last)) {
+                // جرّب بدون profile_id إن كان موجود
+                if (!empty($payload['profile_id'])) {
+                    continue;
                 }
+                $this->setTimeout($oldTimeout);
+                $last['success'] = false;
+                $last['message'] = 'rsp_invalid_profile — الساس رفض باقة هذا الكرت/المشترك';
+                return $last;
+            }
+            if ($this->isHardActivateFail($last)) {
+                $this->setTimeout($oldTimeout);
+                $last['success'] = false;
+                return $last;
+            }
+            if (!$this->isActivateOkStrict($last)) {
+                continue;
+            }
+            $afterTs = $this->liveExpireTs($userId, $username);
+            if ($this->expireMoved($beforeTs, $afterTs)) {
+                $this->setTimeout($oldTimeout);
+                $last['_verified'] = 1;
+                return $last;
             }
             $this->setTimeout($oldTimeout);
-            if ($profileId > 0) {
-                $credit = $this->activateUserCredit($username, $profileId, 1, $userId);
-                if ($this->isActivateOk($credit)) {
-                    $credit['_via'] = 'credit_after_refill';
-                    return $credit;
-                }
-            }
-            return array(
-                'success' => false,
-                'status' => -1,
-                'message' => 'الكرت انشحن أو انقبل، لكن تفعيل الاشتراك على الساس ما اكتمل. ما تم تسجيل المبلغ.',
-            );
+            $last['_verified'] = 0;
+            $last['_api_ok'] = 1;
+            return $last;
         }
 
         $this->setTimeout($oldTimeout);
-        if ($profileId > 0) {
-            $credit = $this->activateUserCredit($username, $profileId, 1, $userId);
-            if ($this->isActivateOk($credit)) {
-                $credit['_via'] = 'credit_fallback';
-                return $credit;
-            }
-            if (is_array($credit) && !$this->isRouteMissing($credit)) {
-                return $credit;
-            }
-        }
-        if (is_array($lastBusiness)) {
-            return $lastBusiness;
-        }
         if (!is_array($last)) {
             $last = array();
         }
+        $last['success'] = false;
         $hint = isset($last['message']) ? trim((string) $last['message']) : '';
+        // لا ترجع 404 كسبب نهائي إذا جرّبنا مسارات ثانية
+        if (strpos($hint, '404') !== false || strpos($hint, 'المسار غير موجود') !== false) {
+            $hint = 'ماكو مسار تفعيل كرت شغّال على هذا الساس';
+        }
         $last['message'] = ($hint !== '' ? ($hint . ' — ') : '')
-            . 'ماكو مسار تفعيل كرت على هذا الساس، وتفعيل رصيد المدير فشل أيضاً.';
+            . 'تفعيل الكرت ما غيّر تاريخ الانتهاء على الساس';
         return $last;
     }
 
@@ -2383,13 +2327,31 @@ class SASConnector
         );
     }
 
+    /** POST مرة واحدة — أسرع لتفعيل الكرت */
+    private function postActivateOnce($route, $payload)
+    {
+        $payload = is_array($payload) ? $payload : array();
+        return $this->parseApiResponse($this->post($route, $payload, true, 'POST'));
+    }
+
     private function isRouteMissing($res)
     {
-        if (!is_array($res) || empty($res['__http_error'])) {
+        if (!is_array($res)) {
             return false;
         }
-        $st = isset($res['status']) ? (int) $res['status'] : 0;
-        return ($st === 404 || $st === 405);
+        if (!empty($res['__http_error'])) {
+            $st = isset($res['status']) ? (int) $res['status'] : 0;
+            if ($st === 404 || $st === 405) {
+                return true;
+            }
+        }
+        $msg = isset($res['message']) ? strtolower((string) $res['message']) : '';
+        if ($msg === '') {
+            return false;
+        }
+        return (strpos($msg, 'http 404') !== false
+            || strpos($msg, 'المسار غير موجود') !== false
+            || strpos($msg, 'not found') !== false);
     }
 
     private function isActivateOk($res)
@@ -2416,13 +2378,53 @@ class SASConnector
             }
         }
         $msg = isset($res['message']) ? strtolower((string) $res['message']) : '';
+        if ($msg !== '' && (strpos($msg, 'invalid_profile') !== false || strpos($msg, 'rsp_invalid_profile') !== false)) {
+            return false;
+        }
         if ($msg !== '' && $this->isHardActivateFail($res)) {
             return false;
         }
         return true;
     }
 
-    private function isHardActivateFail($res)
+    /** نجاح أوضح لتفعيل الكرت — يقلل القبول الوهمي */
+    private function isActivateOkStrict($res)
+    {
+        if ($this->isInvalidProfileRes($res)) {
+            return false;
+        }
+        if (!$this->isActivateOk($res)) {
+            return false;
+        }
+        if ($this->isHardActivateFail($res)) {
+            return false;
+        }
+        if (isset($res['success']) && ($res['success'] === true || $res['success'] === 1 || $res['success'] === '1')) {
+            return true;
+        }
+        if (isset($res['status']) && is_numeric($res['status'])) {
+            $n = (int) $res['status'];
+            if ($n === 200 || $n === 1) {
+                return true;
+            }
+        }
+        $msg = isset($res['message']) ? strtolower(trim((string) $res['message'])) : '';
+        if ($msg !== '' && (
+            strpos($msg, 'success') !== false
+            || strpos($msg, 'activat') !== false
+            || strpos($msg, 'تم') !== false
+            || strpos($msg, 'ok') === 0
+        )) {
+            return true;
+        }
+        // بعض نسخ الساس ترجع data بدون success صريح بعد تفعيل ناجح
+        if (isset($res['data']) && (is_array($res['data']) || $res['data'] === true || $res['data'] === 1)) {
+            return true;
+        }
+        return false;
+    }
+
+    private function isInvalidProfileRes($res)
     {
         if (!is_array($res)) {
             return false;
@@ -2431,10 +2433,29 @@ class SASConnector
         if ($msg === '') {
             return false;
         }
+        return (strpos($msg, 'invalid_profile') !== false
+            || strpos($msg, 'rsp_invalid_profile') !== false
+            || strpos($msg, 'invalid profile') !== false);
+    }
+
+    private function isHardActivateFail($res)
+    {
+        if (!is_array($res)) {
+            return false;
+        }
+        if ($this->isInvalidProfileRes($res)) {
+            return false; // يُعالج بمسار pin بدون profile_id
+        }
+        $msg = isset($res['message']) ? strtolower((string) $res['message']) : '';
+        if ($msg === '') {
+            return false;
+        }
         $needles = array(
             'insufficient', 'not enough', 'no balance', 'no credit',
             'permission', 'forbidden', 'unauthorized',
+            'invalid pin', 'wrong pin', 'already used', 'used card', 'card used',
             'ماكو رصيد', 'رصيد غير', 'غير كاف', 'ماكو صلاح',
+            'كرت مستخدم', 'مستخدم مسبقا', 'غير صالح',
         );
         foreach ($needles as $n) {
             if (strpos($msg, $n) !== false) {
@@ -2504,10 +2525,17 @@ class SASConnector
             return false;
         }
         $beforeTs = (int) $beforeTs;
+        $now = time();
         if ($beforeTs <= 0) {
-            return $afterTs > (time() - 3600);
+            return $afterTs > ($now - 3600);
         }
-        return ($afterTs - $beforeTs) >= (8 * 3600);
+        if (($afterTs - $beforeTs) >= 3600) {
+            return true;
+        }
+        if ($beforeTs < ($now - 60) && $afterTs > ($now + 3600)) {
+            return true;
+        }
+        return false;
     }
 
     public function findUserByUsername($username)
