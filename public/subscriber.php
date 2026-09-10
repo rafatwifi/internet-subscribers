@@ -55,14 +55,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $msg = 'الاسم مكرر — اختر اسماً مختلفاً';
             }
             flash('error', $msg);
+            redirect('subscriber.php?id=' . $id . '&edit=1');
         }
-        redirect('subscriber.php?id=' . $id);
+        // بعد الحفظ: إغلاق والرجوع لقائمة المشتركين
+        redirect('subscribers.php');
     }
 
     if ($action === 'change_plan') {
         $planId = (int) post('plan_id', '0');
         list($ok, $msg) = change_subscriber_plan($pdo, $config, $id, $planId);
         flash($ok ? 'success' : 'error', $msg);
+        if ($ok && post('close_after') === '1') {
+            redirect('subscribers.php');
+        }
         redirect('subscriber.php?id=' . $id);
     }
 
@@ -75,6 +80,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'update_rental') {
         $enabled = post('rental_enabled') === '1';
         $deviceId = trim((string) post('rental_device_id', ''));
+        $chargeRent = post('charge_rent') === '1';
+        $refundRent = post('refund_rent') === '1';
+        $closeAfter = post('close_after') === '1';
         if ($enabled && $deviceId === '') {
             flash('error', 'اختر نوع الجهاز');
             redirect('subscriber.php?id=' . $id . '#rental');
@@ -111,14 +119,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         );
 
         $flashMsg = $enabled ? 'تم حفظ جهاز الإيجار' : 'تم إيقاف جهاز الإيجار';
-        // إذا فعّلنا الإيجار الآن والمشترك نشط — يُضاف مبلغ الإيجار كدين فوراً
-        if ($enabled && !$wasOn && subscriber_is_active($pdo, $id)) {
-            list($debtOk, $debtVal) = add_immediate_rental_debt($pdo, $id, $deviceId);
-            if ($debtOk) {
-                $flashMsg .= ' — أُضيف دين إيجار ' . money_format_iqd($debtVal, $config['currency']) . ' للحساب';
+        if ($enabled && !$wasOn) {
+            if ($chargeRent && subscriber_is_active($pdo, $id)) {
+                list($debtOk, $debtVal) = add_immediate_rental_debt($pdo, $id, $deviceId);
+                if ($debtOk) {
+                    $flashMsg .= ' — أُضيف دين إيجار ' . money_format_iqd($debtVal, $config['currency']) . ' للحساب';
+                }
+            }
+        } elseif (!$enabled && $wasOn && $refundRent && function_exists('remove_immediate_rental_debt')) {
+            list($rmOk, $rmVal) = remove_immediate_rental_debt($pdo, $id);
+            if ($rmOk) {
+                $flashMsg .= ' — خُصم إيجار ' . money_format_iqd($rmVal, $config['currency']) . ' من الحساب';
             }
         }
         flash('success', $flashMsg);
+        if ($closeAfter) {
+            redirect('subscribers.php');
+        }
         redirect('subscriber.php?id=' . $id . '#rental');
     }
 
@@ -454,8 +471,9 @@ if ($editMode):
 ?>
 <div class="panel glass-panel">
     <h2><?php echo e(t('edit')); ?></h2>
-    <form method="post">
+    <form method="post" id="subEditForm">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="action" value="update">
         <div class="form-grid">
             <div>
                 <label><?php echo e(t('name')); ?></label>
@@ -464,7 +482,7 @@ if ($editMode):
             <div>
                 <label><?php echo e(t('phone')); ?></label>
                 <div class="phone-pick-row">
-                    <input id="subPhone" name="phone" type="tel" inputmode="tel" autocomplete="tel" value="<?php echo e(format_phone_display($subscriber['phone'])); ?>" required>
+                    <input id="subPhone" name="phone" type="tel" inputmode="tel" autocomplete="tel" enterkeyhint="done" value="<?php echo e(format_phone_display($subscriber['phone'])); ?>" required>
                     <button type="button" class="btn secondary" id="pickContactBtn"><?php echo e(t('pick_contact')); ?></button>
                 </div>
             </div>
@@ -477,18 +495,30 @@ if ($editMode):
                 <input name="notes" value="<?php echo e($subscriber['notes']); ?>">
             </div>
         </div>
-        <div class="actions">
-            <button class="btn" name="action" value="update" type="submit"><?php echo e(t('save')); ?></button>
-            <button class="btn danger" name="action" value="delete" type="submit" onclick="return confirm('<?php echo e(t('confirm_delete')); ?>');"><?php echo e(t('delete')); ?></button>
-            <a class="btn ghost" href="subscriber.php?id=<?php echo (int) $id; ?>"><?php echo e($lang === 'en' ? 'Cancel' : 'إلغاء'); ?></a>
+        <div class="actions" id="subEditActions" hidden style="display:none">
+            <button class="btn" type="submit" id="subEditSaveBtn"><?php echo e(t('save')); ?></button>
+            <a class="btn ghost" href="subscribers.php"><?php echo e($lang === 'en' ? 'Close' : 'إغلاق'); ?></a>
+        </div>
+        <div class="actions" id="subEditIdle">
+            <button class="btn danger" name="action" value="delete" type="submit" form="subDeleteForm" onclick="return confirm('<?php echo e(t('confirm_delete')); ?>');"><?php echo e(t('delete')); ?></button>
+            <a class="btn ghost" href="subscribers.php"><?php echo e($lang === 'en' ? 'Back to list' : 'رجوع للقائمة'); ?></a>
         </div>
     </form>
+    <form method="post" id="subDeleteForm" class="hidden" hidden>
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="action" value="delete">
+    </form>
+</div>
+<div class="sub-dirty-bar hidden" id="subDirtyBar" hidden>
+    <span><?php echo e($lang === 'en' ? 'Unsaved changes' : 'في تغييرات غير محفوظة'); ?></span>
+    <button type="button" class="btn" id="subDirtySave"><?php echo e(t('save')); ?></button>
 </div>
 <script>
 (function () {
   var pickBtn = document.getElementById('pickContactBtn');
   var phoneInput = document.getElementById('subPhone');
-  var nameInput = document.querySelector('input[name="name"]');
+  var nameInput = document.querySelector('#subEditForm input[name="name"]');
+  var form = document.getElementById('subEditForm');
   var contactsMsg = <?php echo json_encode(t('contacts_unsupported')); ?>;
   if (pickBtn && phoneInput) {
     pickBtn.addEventListener('click', function () {
@@ -507,11 +537,70 @@ if ($editMode):
         if (nameInput && !nameInput.value && c.name && c.name.length) {
           nameInput.value = String(c.name[0] || '');
         }
+        markDirty();
       }).catch(function () {});
     });
   }
+  var snap = {};
+  var dirty = false;
+  function readSnap() {
+    if (!form) return;
+    Array.prototype.slice.call(form.querySelectorAll('input[name],textarea[name],select[name]')).forEach(function (el) {
+      if (el.name === 'csrf' || el.name === 'action') return;
+      snap[el.name] = el.value;
+    });
+  }
+  function setShown(el, on) {
+    if (!el) return;
+    if (on) {
+      el.removeAttribute('hidden');
+      el.style.display = '';
+      el.classList.remove('hidden');
+    } else {
+      el.setAttribute('hidden', 'hidden');
+      el.style.display = 'none';
+      el.classList.add('hidden');
+    }
+  }
+  function markDirty() {
+    if (!form) return;
+    dirty = false;
+    Array.prototype.slice.call(form.querySelectorAll('input[name],textarea[name],select[name]')).forEach(function (el) {
+      if (el.name === 'csrf' || el.name === 'action') return;
+      if (String(el.value) !== String(snap[el.name] || '')) dirty = true;
+    });
+    setShown(document.getElementById('subEditActions'), dirty);
+    setShown(document.getElementById('subEditIdle'), !dirty);
+    setShown(document.getElementById('subDirtyBar'), dirty);
+  }
+  if (form) {
+    readSnap();
+    form.addEventListener('input', markDirty);
+    form.addEventListener('change', markDirty);
+    form.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter') return;
+      var tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
+      if (tag === 'textarea') return;
+      e.preventDefault();
+      if (dirty) form.submit();
+    });
+  }
+  var dirtySave = document.getElementById('subDirtySave');
+  if (dirtySave && form) {
+    dirtySave.addEventListener('click', function () { form.submit(); });
+  }
+  markDirty();
 })();
 </script>
+<style>
+.sub-dirty-bar {
+  position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+  z-index: 60; display: flex; gap: 12px; align-items: center;
+  background: #0f172a; color: #fff; padding: 10px 14px; border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.25); max-width: calc(100% - 24px);
+}
+.sub-dirty-bar.hidden { display: none !important; }
+</style>
 <?php
 render_footer();
 return;
@@ -599,7 +688,7 @@ $isActiveSub = !empty($activeSubCard);
 </div>
 
 <div class="actions sub-toolbar">
-    <a class="btn ghost" href="<?php echo e((!empty($subscriber['sas_username']) && function_exists('sas_user_url')) ? sas_user_url($subscriber['sas_username']) : 'sas.php'); ?>"><?php echo e($lang === 'en' ? 'Back' : 'رجوع'); ?></a>
+    <a class="btn ghost" href="<?php echo e((!empty($subscriber['sas_username']) && function_exists('sas_user_url')) ? sas_user_url($subscriber['sas_username']) : 'subscribers.php'); ?>"><?php echo e($lang === 'en' ? 'Back' : 'رجوع'); ?></a>
     <a class="btn" href="subscriber.php?id=<?php echo (int) $id; ?>&edit=1"><?php echo e(t('edit')); ?></a>
     <a class="btn secondary" href="activate.php?subscriber_id=<?php echo (int) $id; ?>"><?php echo e(t('activate')); ?></a>
     <form method="post" style="display:inline" onsubmit="return confirm(<?php echo json_encode(t('confirm_give_test')); ?>);">
@@ -657,10 +746,47 @@ if ($activeSubCard) {
                     </select>
                 </div>
             </div>
-            <div class="actions" style="margin-top:12px">
-                <button class="btn" type="submit"><?php echo e(t('change_sub_type')); ?></button>
+            <div class="actions" id="changePlanActions" hidden style="margin-top:12px;display:none">
+                <button class="btn" type="submit" id="changePlanSaveBtn"><?php echo e(t('save')); ?></button>
+                <button type="button" class="btn ghost" id="changePlanCancelBtn"><?php echo e($lang === 'en' ? 'Cancel' : 'إلغاء'); ?></button>
             </div>
         </form>
+        <script>
+        (function () {
+          var form = document.querySelector('.change-plan-form');
+          if (!form) return;
+          var sel = form.querySelector('select[name="plan_id"]');
+          var actions = document.getElementById('changePlanActions');
+          var cancel = document.getElementById('changePlanCancelBtn');
+          if (!sel || !actions) return;
+          var initial = String(sel.value || '');
+          function sync() {
+            var dirty = String(sel.value || '') !== initial;
+            if (dirty) {
+              actions.removeAttribute('hidden');
+              actions.style.display = '';
+            } else {
+              actions.setAttribute('hidden', 'hidden');
+              actions.style.display = 'none';
+            }
+          }
+          sel.addEventListener('change', sync);
+          if (cancel) {
+            cancel.addEventListener('click', function () {
+              sel.value = initial;
+              sync();
+            });
+          }
+          form.addEventListener('keydown', function (e) {
+            if (e.key !== 'Enter') return;
+            if (String(sel.value || '') === initial) return;
+            e.preventDefault();
+            if (form.requestSubmit) form.requestSubmit();
+            else form.submit();
+          });
+          sync();
+        })();
+        </script>
     <?php else: ?>
         <p class="meta" style="margin:0">
             <?php echo e($lang === 'en'
@@ -687,6 +813,8 @@ if ($activeSubCard) {
     <form method="post" id="rentalForm">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="action" value="update_rental">
+        <input type="hidden" name="charge_rent" id="rentalChargeRent" value="0">
+        <input type="hidden" name="refund_rent" id="rentalRefundRent" value="0">
         <div class="actions toggle-row" style="margin-top:0">
             <label class="toggle">
                 <input type="checkbox" name="rental_enabled" value="1" id="rentalEnabledChk" <?php echo $hasRent ? 'checked' : ''; ?>>
@@ -717,13 +845,6 @@ if ($activeSubCard) {
                     </div>
                 <?php endif; ?>
             </div>
-            <div class="actions" style="margin-top:12px">
-                <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
-            </div>
-        </div>
-
-        <div id="rentalSaveOff" class="actions"<?php echo $hasRent ? ' hidden' : ''; ?> style="margin-top:12px;<?php echo $hasRent ? 'display:none' : ''; ?>">
-            <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
         </div>
     </form>
 
@@ -738,6 +859,18 @@ if ($activeSubCard) {
             <input type="hidden" name="action" value="msg_rental_return">
             <button class="btn danger" type="submit"><?php echo e($lang === 'en' ? 'Request device return' : 'طلب استرجاع الجهاز'); ?></button>
         </form>
+    </div>
+</div>
+
+<div class="modal-backdrop hidden" id="rentalConfirmModal" role="dialog" aria-modal="true">
+    <div class="modal-card">
+        <h3 id="rentalConfirmTitle"><?php echo e($lang === 'en' ? 'Rental' : 'الإيجار'); ?></h3>
+        <p class="meta" id="rentalConfirmText" style="margin:0 0 14px"></p>
+        <div class="actions" style="margin-top:0;flex-wrap:wrap">
+            <button type="button" class="btn" id="rentalConfirmYes"><?php echo e($lang === 'en' ? 'Yes, apply' : 'نعم، نفّذ'); ?></button>
+            <button type="button" class="btn secondary" id="rentalConfirmNo"><?php echo e($lang === 'en' ? 'Save without amount' : 'حفظ بدون مبلغ'); ?></button>
+            <button type="button" class="btn ghost" id="rentalConfirmCancel"><?php echo e($lang === 'en' ? 'Cancel' : 'إلغاء'); ?></button>
+        </div>
     </div>
 </div>
 
@@ -1209,7 +1342,7 @@ window.DEBT_ENTRY = {
             <input type="hidden" name="action" value="update_invoice_amount">
             <input type="hidden" name="invoice_id" id="amountInvoiceId" value="">
             <label><?php echo e($lang === 'en' ? 'Amount' : 'المبلغ'); ?></label>
-            <input type="number" name="amount" id="amountInput" min="1" step="1" required autofocus>
+            <input type="number" name="amount" id="amountInput" min="1" step="1" required autofocus inputmode="numeric" enterkeyhint="done">
             <div class="actions" style="margin-top:14px;justify-content:flex-end">
                 <button type="button" class="btn ghost" id="amountCancelBtn"><?php echo e($lang === 'en' ? 'Cancel' : 'إلغاء'); ?></button>
                 <button type="submit" class="btn"><?php echo e($lang === 'en' ? 'OK' : 'موافق'); ?></button>
@@ -1357,9 +1490,17 @@ window.DEBT_ENTRY = {
 
   var rentChk = document.getElementById('rentalEnabledChk');
   var rentDetails = document.getElementById('rentalDetails');
-  var rentSaveOff = document.getElementById('rentalSaveOff');
   var rentMsgs = document.getElementById('rentalMsgActions');
   var rentSelect = document.getElementById('rentalDeviceSelect');
+  var rentForm = document.getElementById('rentalForm');
+  var rentModal = document.getElementById('rentalConfirmModal');
+  var rentTitle = document.getElementById('rentalConfirmTitle');
+  var rentText = document.getElementById('rentalConfirmText');
+  var rentCharge = document.getElementById('rentalChargeRent');
+  var rentRefund = document.getElementById('rentalRefundRent');
+  var rentWasOn = <?php echo $hasRent ? 'true' : 'false'; ?>;
+  var rentFeeTxt = <?php echo json_encode(money_format_iqd($rentalFee, $config['currency'])); ?>;
+  var rentPending = null;
   function setShown(el, on) {
     if (!el) return;
     if (on) {
@@ -1376,13 +1517,120 @@ window.DEBT_ENTRY = {
     if (!rentChk) return;
     var on = !!rentChk.checked;
     setShown(rentDetails, on);
-    setShown(rentSaveOff, !on);
     setShown(rentMsgs, on);
     if (rentSelect) rentSelect.disabled = !on;
   }
+  function openRentModal(mode) {
+    rentPending = mode;
+    if (rentTitle) {
+      rentTitle.textContent = mode === 'on'
+        ? <?php echo json_encode($lang === 'en' ? 'Add rental fee?' : 'إضافة أجور الإيجار؟'); ?>
+        : <?php echo json_encode($lang === 'en' ? 'Remove rental fee?' : 'خصم مبلغ الإيجار؟'); ?>;
+    }
+    if (rentText) {
+      rentText.textContent = mode === 'on'
+        ? <?php echo json_encode($lang === 'en'
+          ? 'Add rental fee to this subscriber account?'
+          : 'إضافة أجور الإيجار إلى حساب المشترك؟'); ?> + ' (' + rentFeeTxt + ')'
+        : <?php echo json_encode($lang === 'en'
+          ? 'Deduct rental amount from unpaid debts?'
+          : 'خصم مبلغ الإيجار من ديون المشترك غير المسددة؟'); ?> + ' (' + rentFeeTxt + ')';
+    }
+    var yesBtn = document.getElementById('rentalConfirmYes');
+    var noBtn = document.getElementById('rentalConfirmNo');
+    if (yesBtn) yesBtn.textContent = mode === 'on'
+      ? <?php echo json_encode($lang === 'en' ? 'Add fee' : 'إضافة'); ?>
+      : <?php echo json_encode($lang === 'en' ? 'Deduct' : 'خصم'); ?>;
+    if (noBtn) noBtn.textContent = mode === 'on'
+      ? <?php echo json_encode($lang === 'en' ? 'Without fee' : 'بدون إضافة'); ?>
+      : <?php echo json_encode($lang === 'en' ? 'Without deduct' : 'بدون خصم'); ?>;
+    if (rentModal) {
+      if (rentModal.parentNode !== document.body) {
+        document.body.appendChild(rentModal);
+      }
+      rentModal.classList.remove('hidden');
+      rentModal.style.display = 'flex';
+      rentModal.style.zIndex = '12000';
+    }
+  }
+  function submitRent(applyMoney) {
+    if (!rentForm) return;
+    if (rentPending === 'on' && rentSelect && !rentSelect.value) {
+      alert(<?php echo json_encode($lang === 'en' ? 'Choose device type first' : 'اختر نوع الجهاز أولاً'); ?>);
+      return;
+    }
+    if (rentCharge) rentCharge.value = (rentPending === 'on' && applyMoney) ? '1' : '0';
+    if (rentRefund) rentRefund.value = (rentPending === 'off' && applyMoney) ? '1' : '0';
+    if (rentSelect) rentSelect.disabled = false;
+    closeRentModal();
+    rentForm.submit();
+  }
+  function closeRentModal() {
+    if (rentModal) {
+      rentModal.classList.add('hidden');
+      rentModal.style.display = '';
+    }
+    rentPending = null;
+  }
   if (rentChk) {
-    rentChk.addEventListener('change', syncRentalUi);
+    rentChk.addEventListener('change', function () {
+      var on = !!rentChk.checked;
+      syncRentalUi();
+      if (on && !rentWasOn) {
+        // أظهر اختيار الجهاز أولاً؛ النافذة تطلع بعد اختيار الجهاز أو فوراً إن كان مختار
+        if (rentSelect && rentSelect.value) {
+          openRentModal('on');
+        }
+        return;
+      }
+      if (!on && rentWasOn) {
+        openRentModal('off');
+        return;
+      }
+    });
     syncRentalUi();
+  }
+  if (rentSelect) {
+    rentSelect.addEventListener('change', function () {
+      if (!rentChk || !rentChk.checked) return;
+      if (!rentSelect.value) return;
+      // تفعيل إيجار جديد: نافذة إضافة الأجور بعد اختيار الجهاز
+      if (!rentWasOn) {
+        openRentModal('on');
+        return;
+      }
+      // تغيير نوع الجهاز فقط
+      if (rentCharge) rentCharge.value = '0';
+      if (rentRefund) rentRefund.value = '0';
+      rentSelect.disabled = false;
+      rentForm.submit();
+    });
+  }
+  var rentYes = document.getElementById('rentalConfirmYes');
+  var rentNo = document.getElementById('rentalConfirmNo');
+  var rentCancel = document.getElementById('rentalConfirmCancel');
+  if (rentYes) rentYes.addEventListener('click', function () { submitRent(true); });
+  if (rentNo) rentNo.addEventListener('click', function () { submitRent(false); });
+  if (rentCancel) {
+    rentCancel.addEventListener('click', function () {
+      if (rentChk) rentChk.checked = rentWasOn;
+      if (rentSelect && rentWasOn === false) {
+        try { rentSelect.value = ''; } catch (err) {}
+      }
+      syncRentalUi();
+      closeRentModal();
+    });
+  }
+  if (rentModal) {
+    rentModal.addEventListener('click', function (e) {
+      if (e.target !== rentModal) return;
+      if (rentChk) rentChk.checked = rentWasOn;
+      if (rentSelect && rentWasOn === false) {
+        try { rentSelect.value = ''; } catch (err2) {}
+      }
+      syncRentalUi();
+      closeRentModal();
+    });
   }
 })();
 </script>

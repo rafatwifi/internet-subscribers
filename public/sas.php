@@ -344,10 +344,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $username = trim((string) post('id', ''));
         $deviceId = trim((string) post('device_id', ''));
         $enabled = ($deviceId !== '');
+        $opts = array(
+            'charge_rent' => post('charge_rent', '0') === '1',
+            'refund_rent' => post('refund_rent', '0') === '1',
+        );
+        // إذا ما أُرسلت الخيارات (طلبات قديمة) — سلوك الإضافة التلقائي يبقى كما كان
+        if (!isset($_POST['charge_rent']) && !isset($_POST['refund_rent'])) {
+            $opts = array();
+        }
         if (!function_exists('sas_save_user_rental')) {
             sas_json_out(false, 'ملف الإيجار غير مكتمل');
         }
-        list($ok, $msg, $extra) = sas_save_user_rental($pdo, $config, $username, $enabled, $deviceId);
+        list($ok, $msg, $extra) = sas_save_user_rental($pdo, $config, $username, $enabled, $deviceId, $opts);
         sas_json_out($ok, $msg, is_array($extra) ? $extra : array());
     }
 
@@ -764,6 +772,14 @@ if ($sasReady && !$isLiveReq && $q !== '' && strlen($q) >= 2 && function_exists(
         } catch (Error $e) {
         }
     }
+    // بعد البحث: حدّث أونلاين/IP فوراً حتى ما يطلع فاصل وهو متصل بالساس
+    if (function_exists('sas_refresh_online_flags')) {
+        try {
+            sas_refresh_online_flags($pdo, $config);
+        } catch (Exception $e) {
+        } catch (Error $e) {
+        }
+    }
 }
 
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'refresh_now') {
@@ -817,6 +833,21 @@ if (isset($_GET['live']) && $_GET['live'] === '1') {
     $html = '<tr><td colspan="16">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
     $liveCount = 0;
     try {
+        // بحث حي: حدّث أونلاين/IP من الساس قبل العرض
+        if ($sasReady) {
+            if ($q !== '' && strlen($q) >= 2 && function_exists('sas_cache_pull_search')) {
+                try {
+                    sas_cache_pull_search($pdo, $config, $q);
+                } catch (Exception $e) {
+                } catch (Error $e) {
+                }
+            }
+            if (function_exists('sas_refresh_online_flags_throttled')) {
+                sas_refresh_online_flags_throttled($pdo, $config, 2, false);
+            } elseif (function_exists('sas_refresh_online_flags')) {
+                sas_refresh_online_flags($pdo, $config);
+            }
+        }
         $fromSql = function_exists('sas_cache_list_from_sql')
             ? sas_cache_list_from_sql()
             : ' FROM sas_users_cache c LEFT JOIN subscribers s ON s.id = c.local_subscriber_id';
@@ -917,6 +948,20 @@ if ($showAll) {
 
 $sql = '';
 try {
+    // فتح الصفحة: حدّث حالة الاتصال والـ IP قبل الرسم
+    if ($sasReady && function_exists('sas_refresh_online_flags_throttled')) {
+        try {
+            sas_refresh_online_flags_throttled($pdo, $config, 5, false);
+        } catch (Exception $e) {
+        } catch (Error $e) {
+        }
+    } elseif ($sasReady && function_exists('sas_refresh_online_flags')) {
+        try {
+            sas_refresh_online_flags($pdo, $config);
+        } catch (Exception $e) {
+        } catch (Error $e) {
+        }
+    }
     $sql = sas_cache_list_select_sql() . $fromSql . '
      WHERE ' . $where . '
      ORDER BY ' . $orderSql;
@@ -1116,10 +1161,17 @@ render_header(t('sas'), 'sas', '');
   text-align: left;
 }
 #subsTable tbody tr.sas-row-ctx {
-  background: #e2e8f0 !important;
+  outline: 2px solid #2563eb;
+  outline-offset: -2px;
 }
-#subsTable tbody tr.sas-row-ctx td {
-  background: #e2e8f0 !important;
+#subsTable tbody tr.sas-row-ctx td,
+.sas-radius-page #subsTable tbody tr.sas-row-ctx td,
+.sas-radius-page #subsTable tbody tr.row-status-expired.sas-row-ctx td,
+.sas-radius-page #subsTable tbody tr.row-status-left.sas-row-ctx td,
+.sas-radius-page #subsTable tbody tr.row-status-active.sas-row-ctx td,
+.sas-radius-page #subsTable tbody tr.row-status-expired.sas-row-ctx:hover td,
+.sas-radius-page #subsTable tbody tr.row-status-left.sas-row-ctx:hover td {
+  background: #93c5fd !important;
 }
 .sas-user-copywrap,
 .sas-ip-wrap {
@@ -2307,6 +2359,7 @@ render_header(t('sas'), 'sas', '');
     <?php endif; ?>
 
     <div class="sas-legend">
+        <span class="meta" id="sasBuildStamp" style="font-weight:800;color:#2563eb">build-911c</span>
         <span><i class="status-sq status-online"></i> <?php echo e($lang === 'en' ? 'Active + connected' : 'فعال ومتصل'); ?></span>
         <span><i class="status-sq status-active"></i> <?php echo e($lang === 'en' ? 'Active' : 'فعال غير متصل'); ?></span>
         <span><i class="status-sq status-expired"></i> <?php echo e($lang === 'en' ? 'Expired' : 'منتهي'); ?></span>
@@ -2440,6 +2493,7 @@ render_header(t('sas'), 'sas', '');
 <div class="ops-dropdown hidden" id="opsDropdown" role="menu">
     <div class="ops-item" id="opsItemHint" style="cursor:default;color:#64748b"><?php echo e($lang === 'en' ? 'Select a subscriber first' : 'حدد مشتركاً من الجدول أولاً'); ?></div>
     <button type="button" class="ops-item" data-ops="open" id="opsItemOpen" hidden><?php echo e($lang === 'en' ? 'Edit' : 'تعديل'); ?></button>
+    <button type="button" class="ops-item" data-ops="pay" id="opsItemPay" hidden><?php echo e(t('pay_debts')); ?></button>
     <button type="button" class="ops-item" data-ops="activate" id="opsItemActivate" hidden><?php echo e(t('activate')); ?></button>
     <button type="button" class="ops-item" data-ops="give_test" id="opsItemGiveTest" hidden><?php echo e(t('give_test')); ?></button>
     <button type="button" class="ops-item" data-ops="change_profile" id="opsItemProfile" hidden><?php echo e($lang === 'en' ? 'Change package' : 'تغيير نوع الاشتراك'); ?></button>
@@ -2450,7 +2504,6 @@ render_header(t('sas'), 'sas', '');
     <button type="button" class="ops-item" data-ops="remind_debt" id="opsItemRemind" hidden><?php echo e($lang === 'en' ? 'Send debt notice' : 'إرسال رسالة بالدين'); ?></button>
     <button type="button" class="ops-item" data-ops="remind_days" id="opsItemDays" hidden><?php echo e($lang === 'en' ? 'Send days left' : 'إرسال رسالة بالأيام المتبقية'); ?></button>
     <button type="button" class="ops-item" data-ops="add_debt" id="opsItemAddDebt" hidden><?php echo e($lang === 'en' ? 'Add debt' : 'إضافة دين'); ?></button>
-    <button type="button" class="ops-item" data-ops="pay" id="opsItemPay" hidden><?php echo e($lang === 'en' ? 'Debts' : 'الديون'); ?></button>
     <button type="button" class="ops-item" data-ops="bulk_activate" id="opsItemBulkActivate" hidden><?php echo e(t('bulk_activate')); ?></button>
     <button type="button" class="ops-item" data-ops="bulk_disconnect" id="opsItemBulkDisconnect" hidden><?php echo e($lang === 'en' ? 'Disconnect selected' : 'قطع اتصال المحددين'); ?></button>
 </div>
@@ -2811,6 +2864,18 @@ render_header(t('sas'), 'sas', '');
     </div>
 </div>
 
+<div class="modal-backdrop hidden" id="sasRentConfirmModal" role="dialog" aria-modal="true" style="z-index:12000">
+    <div class="modal-card ops-modal-card">
+        <h3 id="sasRentConfirmTitle"><?php echo e($lang === 'en' ? 'Rental' : 'الإيجار'); ?></h3>
+        <p class="meta" id="sasRentConfirmText" style="margin:0 0 14px"></p>
+        <div style="display:flex;flex-wrap:wrap;gap:8px">
+            <button type="button" class="btn" id="sasRentConfirmYes"><?php echo e($lang === 'en' ? 'Yes, apply' : 'نعم، نفّذ'); ?></button>
+            <button type="button" class="btn secondary" id="sasRentConfirmNo"><?php echo e($lang === 'en' ? 'Save without amount' : 'حفظ بدون مبلغ'); ?></button>
+            <button type="button" class="btn ghost" id="sasRentConfirmCancel"><?php echo e($lang === 'en' ? 'Cancel' : 'إلغاء'); ?></button>
+        </div>
+    </div>
+</div>
+
 <script>
 (function () {
   var filter = document.getElementById('filterInput');
@@ -2894,6 +2959,9 @@ render_header(t('sas'), 'sas', '');
   var csrf = <?php echo json_encode(csrf_token()); ?>;
   var rentalDevices = <?php echo json_encode(function_exists('rental_devices_list') ? rental_devices_list() : array()); ?>;
   var rentNoneLabel = <?php echo json_encode($lang === 'en' ? 'No rental' : 'بدون إيجار'); ?>;
+  var rentFeeTxt = <?php echo json_encode(function_exists('rental_fee_amount') && function_exists('money_format_iqd')
+    ? money_format_iqd(rental_fee_amount(), isset($config['currency']) ? $config['currency'] : 'د.ع')
+    : ''); ?>;
   var actUser = null;
   var profilesCache = null;
   var cardsCacheAll = <?php
@@ -2998,9 +3066,17 @@ render_header(t('sas'), 'sas', '');
   }
   function showEl(el, on) {
     if (!el) return;
-    el.hidden = !on;
-    if (on) el.removeAttribute('hidden');
+    if (on) {
+      el.hidden = false;
+      el.removeAttribute('hidden');
+      el.style.display = 'block';
+    } else {
+      el.hidden = true;
+      el.setAttribute('hidden', 'hidden');
+      el.style.display = 'none';
+    }
   }
+  var opsIgnoreCloseUntil = 0;
   function closeMenus() {
     document.querySelectorAll('.ops-dropdown').forEach(function (d) {
       d.classList.add('hidden');
@@ -3010,7 +3086,12 @@ render_header(t('sas'), 'sas', '');
       d.style.visibility = '';
     });
     if (opsBtn) opsBtn.setAttribute('aria-expanded', 'false');
-    if (tbody) tbody.querySelectorAll('tr.sas-row-ctx').forEach(function (r) { r.classList.remove('sas-row-ctx'); });
+    // لا تمسح تظليل السطر هنا — كان هذا سبب اختفاء التضليل بعد كل كلك
+  }
+  function markSasRowCtx(tr) {
+    if (!tbody) return;
+    tbody.querySelectorAll('tr.sas-row-ctx').forEach(function (r) { r.classList.remove('sas-row-ctx'); });
+    if (tr) tr.classList.add('sas-row-ctx');
   }
   function placeMenu(drop, anchor) {
     if (!drop || !anchor) return;
@@ -3065,7 +3146,14 @@ render_header(t('sas'), 'sas', '');
   }
   function openOpsMenu(clientX, clientY) {
     if (!opsDrop) return;
+    opsIgnoreCloseUntil = Date.now() + 450;
     updateOps();
+    var payBtn = document.getElementById('opsItemPay');
+    if (payBtn && selectedRows().length >= 1) {
+      payBtn.hidden = false;
+      payBtn.removeAttribute('hidden');
+      payBtn.style.display = 'block';
+    }
     placeMenuAt(opsDrop, clientX, clientY, opsBtn);
     if (opsBtn) opsBtn.setAttribute('aria-expanded', 'true');
   }
@@ -3073,9 +3161,9 @@ render_header(t('sas'), 'sas', '');
     var rows = selectedRows();
     var n = rows.length;
     var one = n === 1 ? rows[0] : null;
-    var anyDebt = rows.some(function (r) { return r.debt; });
     showEl(document.getElementById('opsItemHint'), n === 0);
     showEl(document.getElementById('opsItemOpen'), !!one);
+    showEl(document.getElementById('opsItemPay'), n >= 1);
     showEl(document.getElementById('opsItemActivate'), !!one);
     showEl(document.getElementById('opsItemProfile'), !!one);
     showEl(document.getElementById('opsItemEnable'), !!(one && !one.enabled));
@@ -3084,7 +3172,6 @@ render_header(t('sas'), 'sas', '');
     showEl(document.getElementById('opsItemGiveTest'), !!one);
     showEl(document.getElementById('opsItemBulkActivate'), n > 1);
     showEl(document.getElementById('opsItemBulkDisconnect'), n > 1 && rows.some(function (r) { return r.online; }));
-    showEl(document.getElementById('opsItemPay'), !!one);
     showEl(document.getElementById('opsItemAddDebt'), !!(one && canEditDebts));
     showEl(document.getElementById('opsItemRemind'), !!one);
     showEl(document.getElementById('opsItemDays'), !!(one && one.hasDays));
@@ -3224,16 +3311,19 @@ render_header(t('sas'), 'sas', '');
     tbody.addEventListener('change', function (e) {
       if (e.target && e.target.classList.contains('sub-check')) syncBulk();
     });
+    // كلك يسار: تظليل السطر (بدون مسحه من closeMenus)
+    tbody.addEventListener('click', function (e) {
+      var tr = e.target && e.target.closest ? e.target.closest('tr[data-id]') : null;
+      if (!tr || !tbody.contains(tr)) return;
+      markSasRowCtx(tr);
+    });
     tbody.addEventListener('contextmenu', function (e) {
       var tr = e.target && e.target.closest ? e.target.closest('tr[data-id]') : null;
       if (!tr || !tbody.contains(tr)) return;
       e.preventDefault();
       e.stopPropagation();
-      tbody.querySelectorAll('tr.sas-row-ctx').forEach(function (r) { r.classList.remove('sas-row-ctx'); });
-      tr.classList.add('sas-row-ctx');
-      var chk = tr.querySelector('input.sub-check');
-      if (chk && !chk.checked) selectOnlyRow(tr);
-      else syncBulk();
+      markSasRowCtx(tr);
+      selectOnlyRow(tr);
       openOpsMenu(e.clientX, e.clientY);
     });
     var lpTimer = null;
@@ -3246,6 +3336,7 @@ render_header(t('sas'), 'sas', '');
       clearTimeout(lpTimer);
       lpTimer = setTimeout(function () {
         if (!lpStart) return;
+        markSasRowCtx(lpStart.tr);
         selectOnlyRow(lpStart.tr);
         openOpsMenu(lpStart.x, lpStart.y);
         lpStart = null;
@@ -4056,9 +4147,28 @@ render_header(t('sas'), 'sas', '');
         }, 35000);
       }
       req.then(function (d) {
+        if (d && Array.isArray(d.cards)) {
+          cardsCacheAll = d.cards;
+        }
         if (!d || !d.ok) {
           setActBusy(false);
           var failMsg = (d && d.message) || <?php echo json_encode($lang === 'en' ? 'Activate failed' : 'فشل التفعيل'); ?>;
+          // كرت مرفوض/مستخدم: حدّث القائمة واختر الكرت التالي تلقائياً
+          if (actModeNow === 'card' && pin) {
+            cardsCacheAll = (Array.isArray(cardsCacheAll) ? cardsCacheAll : []).filter(function (c) {
+              return String((c && c.pin) || '') !== String(pin);
+            });
+            var profileSel2 = document.getElementById('sasActProfile');
+            var pid2 = profileSel2 ? profileSel2.value : (actUser ? actUser.profileId : '0');
+            var pname2 = selectedProfileName(profileSel2) || (actUser ? actUser.profileName : '') || '';
+            renderCards(cardsForProfile(pid2, pname2));
+            var lm = String(failMsg).toLowerCase();
+            if (lm.indexOf('invalid_profile') !== -1 || failMsg.indexOf('رفض باقة') !== -1) {
+              failMsg = <?php echo json_encode($lang === 'en'
+                ? 'That card was already used — next unused card selected. Try again.'
+                : 'هذا الكرت صار مستخدم — تم اختيار الكرت التالي. حاول مرة ثانية.'); ?>;
+            }
+          }
           if (err) err.textContent = failMsg;
           showAppToast(failMsg, 'error');
           return;
@@ -4150,6 +4260,7 @@ render_header(t('sas'), 'sas', '');
   bindDrop('filterToggleBtn', 'filterDropdown');
   bindDrop('autoRefreshBtn', 'autoRefreshDropdown');
   document.addEventListener('click', function (e) {
+    if (Date.now() < opsIgnoreCloseUntil) return;
     if (e.target.closest('.ops-dropdown') || e.target.closest('.tool-ico') || e.target.closest('#openOpsBtn')) return;
     closeMenus();
   });
@@ -4362,6 +4473,8 @@ render_header(t('sas'), 'sas', '');
     });
   }
   applyAutoRefresh(refreshSec, true);
+  // أول تحديث فوري للأونلاين/IP عند فتح الصفحة
+  setTimeout(function () { refreshTableLive(); }, 200);
 
   function liveSearch() {
     if (!filter || !tbody) return;
@@ -4667,6 +4780,88 @@ render_header(t('sas'), 'sas', '');
       };
       btn.onblur = function () { finish(true); };
     }
+    var rentModal = document.getElementById('sasRentConfirmModal');
+    var rentTitle = document.getElementById('sasRentConfirmTitle');
+    var rentText = document.getElementById('sasRentConfirmText');
+    var rentPending = null;
+    function openSasRentModal(mode, saveCtx, val) {
+      rentPending = { mode: mode, saveCtx: saveCtx, val: val };
+      if (rentTitle) {
+        rentTitle.textContent = mode === 'on'
+          ? <?php echo json_encode($lang === 'en' ? 'Add rental fee?' : 'إضافة أجور الإيجار؟'); ?>
+          : <?php echo json_encode($lang === 'en' ? 'Remove rental fee?' : 'خصم مبلغ الإيجار؟'); ?>;
+      }
+      if (rentText) {
+        rentText.textContent = mode === 'on'
+          ? <?php echo json_encode($lang === 'en'
+            ? 'Add rental fee to this subscriber account?'
+            : 'إضافة أجور الإيجار إلى حساب المشترك؟'); ?> + (rentFeeTxt ? ' (' + rentFeeTxt + ')' : '')
+          : <?php echo json_encode($lang === 'en'
+            ? 'Deduct rental amount from unpaid debts?'
+            : 'خصم مبلغ الإيجار من ديون المشترك غير المسددة؟'); ?> + (rentFeeTxt ? ' (' + rentFeeTxt + ')' : '');
+      }
+      var yesBtn = document.getElementById('sasRentConfirmYes');
+      var noBtn = document.getElementById('sasRentConfirmNo');
+      if (yesBtn) yesBtn.textContent = mode === 'on'
+        ? <?php echo json_encode($lang === 'en' ? 'Add fee' : 'إضافة'); ?>
+        : <?php echo json_encode($lang === 'en' ? 'Deduct' : 'خصم'); ?>;
+      if (noBtn) noBtn.textContent = mode === 'on'
+        ? <?php echo json_encode($lang === 'en' ? 'Without fee' : 'بدون إضافة'); ?>
+        : <?php echo json_encode($lang === 'en' ? 'Without deduct' : 'بدون خصم'); ?>;
+      if (rentModal) {
+        if (rentModal.parentNode !== document.body) document.body.appendChild(rentModal);
+        rentModal.classList.remove('hidden');
+        rentModal.style.display = 'flex';
+        rentModal.style.zIndex = '12000';
+      }
+    }
+    function closeSasRentModal() {
+      if (rentModal) {
+        rentModal.classList.add('hidden');
+        rentModal.style.display = '';
+      }
+      rentPending = null;
+    }
+    function applyRentSave(ctx, val, charge, refund) {
+      var body = new FormData();
+      body.append('csrf', csrf);
+      body.append('action', 'sas_update_rental');
+      body.append('id', ctx.id);
+      body.append('device_id', val);
+      body.append('charge_rent', charge ? '1' : '0');
+      body.append('refund_rent', refund ? '1' : '0');
+      fetch('sas.php', { method: 'POST', body: body, credentials: 'same-origin' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!data || !data.ok) {
+            alert((data && data.message) ? data.message : <?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>);
+            ctx.restore();
+            return;
+          }
+          if (ctx.td && data.cell_html) ctx.td.innerHTML = data.cell_html;
+          var tr = ctx.td ? ctx.td.closest('tr') : null;
+          if (tr) {
+            tr.setAttribute('data-rental', data.rental_device_id || '');
+            if (data.local_id) tr.setAttribute('data-local-id', String(data.local_id));
+            var debtEl = tr.querySelector('.col-debt .debt-amt');
+            if (debtEl && data.debt_text) {
+              debtEl.textContent = data.debt_text;
+              var due = Number(data.debt) > 0;
+              var extra = debtEl.classList.contains('debt-edit-btn') ? ' debt-edit-btn' : '';
+              debtEl.className = (due ? 'debt-amt debt-due' : 'debt-amt debt-zero') + extra;
+              if (debtEl.classList.contains('debt-edit-btn')) {
+                debtEl.setAttribute('data-amount', String(Math.round(Number(data.debt) || 0)));
+              }
+              tr.setAttribute('data-debt', due ? '1' : '0');
+            }
+          }
+          if (data.message) showAppToast(data.message, 'ok');
+        })
+        .catch(function () {
+          alert(<?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>);
+          ctx.restore();
+        });
+    }
     function beginRentEdit(btn) {
       if (!btn || btn.classList.contains('editing')) return;
       var id = btn.getAttribute('data-id');
@@ -4697,46 +4892,28 @@ render_header(t('sas'), 'sas', '');
       }
       function saveRent(val) {
         if (done) return;
-        done = true;
         if (val === current) {
+          done = true;
           restore();
           return;
         }
-        var body = new FormData();
-        body.append('csrf', csrf);
-        body.append('action', 'sas_update_rental');
-        body.append('id', id);
-        body.append('device_id', val);
-        fetch('sas.php', { method: 'POST', body: body, credentials: 'same-origin' })
-          .then(function (r) { return r.json(); })
-          .then(function (data) {
-            if (!data || !data.ok) {
-              alert((data && data.message) ? data.message : <?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>);
-              restore();
-              return;
-            }
-            if (td && data.cell_html) td.innerHTML = data.cell_html;
-            var tr = td ? td.closest('tr') : null;
-            if (tr) {
-              tr.setAttribute('data-rental', data.rental_device_id || '');
-              if (data.local_id) tr.setAttribute('data-local-id', String(data.local_id));
-              var debtEl = tr.querySelector('.col-debt .debt-amt');
-              if (debtEl && data.debt_text) {
-                debtEl.textContent = data.debt_text;
-                var due = Number(data.debt) > 0;
-                var extra = debtEl.classList.contains('debt-edit-btn') ? ' debt-edit-btn' : '';
-                debtEl.className = (due ? 'debt-amt debt-due' : 'debt-amt debt-zero') + extra;
-                if (debtEl.classList.contains('debt-edit-btn')) {
-                  debtEl.setAttribute('data-amount', String(Math.round(Number(data.debt) || 0)));
-                }
-                tr.setAttribute('data-debt', due ? '1' : '0');
-              }
-            }
-          })
-          .catch(function () {
-            alert(<?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>);
-            restore();
-          });
+        var wasOn = current !== '';
+        var nowOn = val !== '';
+        var ctx = { id: id, td: td, restore: restore };
+        // تفعيل جديد أو إيقاف: نافذة تأكيد المبلغ
+        if (nowOn && !wasOn) {
+          done = true;
+          openSasRentModal('on', ctx, val);
+          return;
+        }
+        if (!nowOn && wasOn) {
+          done = true;
+          openSasRentModal('off', ctx, val);
+          return;
+        }
+        // تغيير نوع الجهاز فقط — بدون مبلغ
+        done = true;
+        applyRentSave(ctx, val, false, false);
       }
       sel.addEventListener('click', function (ev) { ev.stopPropagation(); });
       sel.addEventListener('mousedown', function (ev) { ev.stopPropagation(); });
@@ -4745,6 +4922,32 @@ render_header(t('sas'), 'sas', '');
         setTimeout(function () {
           if (!done) saveRent(sel.value);
         }, 120);
+      });
+    }
+    var rentYes = document.getElementById('sasRentConfirmYes');
+    var rentNo = document.getElementById('sasRentConfirmNo');
+    var rentCancel = document.getElementById('sasRentConfirmCancel');
+    if (rentYes) rentYes.addEventListener('click', function () {
+      if (!rentPending) return;
+      var p = rentPending;
+      closeSasRentModal();
+      applyRentSave(p.saveCtx, p.val, p.mode === 'on', p.mode === 'off');
+    });
+    if (rentNo) rentNo.addEventListener('click', function () {
+      if (!rentPending) return;
+      var p = rentPending;
+      closeSasRentModal();
+      applyRentSave(p.saveCtx, p.val, false, false);
+    });
+    if (rentCancel) rentCancel.addEventListener('click', function () {
+      if (rentPending && rentPending.saveCtx) rentPending.saveCtx.restore();
+      closeSasRentModal();
+    });
+    if (rentModal) {
+      rentModal.addEventListener('click', function (e) {
+        if (e.target !== rentModal) return;
+        if (rentPending && rentPending.saveCtx) rentPending.saveCtx.restore();
+        closeSasRentModal();
       });
     }
     if (tbody) {

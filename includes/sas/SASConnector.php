@@ -19,6 +19,7 @@ class SASConnector
     private $timeout = 45;
     private $lastError = '';
     private $lastDebug = array();
+    public $lastOnlineListOk = false;
 
     private $secretKey = 'abcdefghijuklmno0123456789012345';
 
@@ -2033,6 +2034,7 @@ class SASConnector
         }
         $all = array();
         $seen = array();
+        $this->lastOnlineListOk = false;
         foreach (array('index/online', 'index/onlineUser', 'index/session') as $route) {
             $page = 1;
             $gotAny = false;
@@ -2048,6 +2050,8 @@ class SASConnector
                 if (isset($full['__http_error']) || isset($full['__auth_error']) || isset($full['__curl_error'])) {
                     break;
                 }
+                // رد ناجح من الساس (حتى لو الصفحة فاضية)
+                $this->lastOnlineListOk = true;
                 $batch = $this->normalizeUserList($full);
                 if (!is_array($batch) || !$batch) {
                     break;
@@ -2069,7 +2073,7 @@ class SASConnector
                 }
                 $page++;
             }
-            if ($gotAny) {
+            if ($gotAny || $this->lastOnlineListOk) {
                 break;
             }
         }

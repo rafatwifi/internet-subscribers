@@ -125,7 +125,7 @@ function sas_user_is_live($cacheRow)
  * حفظ إيجار مشترك SAS في قاعدة السيرفر (subscribers) — مو في كومنت الساس
  * يرجع array($ok, $message, $extra)
  */
-function sas_save_user_rental($pdo, $config, $username, $enabled, $deviceId)
+function sas_save_user_rental($pdo, $config, $username, $enabled, $deviceId, $opts = array())
 {
     $username = trim((string) $username);
     if ($username === '') {
@@ -187,11 +187,20 @@ function sas_save_user_rental($pdo, $config, $username, $enabled, $deviceId)
     if (!$isLive && function_exists('subscriber_is_active')) {
         $isLive = subscriber_is_active($pdo, $localId);
     }
-    if ($enabled && !$wasOn && $isLive) {
+    $chargeRent = array_key_exists('charge_rent', $opts) ? !empty($opts['charge_rent']) : true;
+    $refundRent = array_key_exists('refund_rent', $opts) ? !empty($opts['refund_rent']) : false;
+    if ($enabled && !$wasOn && $chargeRent && $isLive) {
         list($debtOk, $debtVal) = add_immediate_rental_debt($pdo, $localId, $deviceId);
         if ($debtOk) {
             $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
             $msg .= ' — أُضيف دين إيجار ' . money_format_iqd($debtVal, $currency) . ' للحساب';
+        }
+    }
+    if (!$enabled && $wasOn && $refundRent && function_exists('remove_immediate_rental_debt')) {
+        list($rmOk, $rmVal) = remove_immediate_rental_debt($pdo, $localId);
+        if ($rmOk) {
+            $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
+            $msg .= ' — خُصم إيجار ' . money_format_iqd($rmVal, $currency) . ' من الحساب';
         }
     }
 
@@ -415,6 +424,103 @@ function add_immediate_rental_debt($pdo, $subscriberId, $deviceId = '', $setting
         );
     }
     return array(true, $fee);
+}
+
+/**
+ * خصم/إلغاء مبلغ الإيجار من ديون المشترك عند إيقاف جهاز الإيجار.
+ * - يحذف فواتير الإيجار الصافية غير المسددة
+ * - ينقص رسوم الإيجار من فواتير «اشتراك + إيجار» غير المسددة
+ * يرجع: array($ok, $amountRemovedOrMessage)
+ */
+function remove_immediate_rental_debt($pdo, $subscriberId, $settings = null)
+{
+    $subscriberId = (int) $subscriberId;
+    if ($subscriberId <= 0) {
+        return array(false, 'مشترك غير صالح');
+    }
+    if ($settings === null) {
+        $settings = function_exists('settings_load') ? settings_load() : array();
+    }
+    $fee = (float) rental_fee_amount($settings);
+    if ($fee <= 0) {
+        return array(false, 'رسوم الإيجار صفر');
+    }
+
+    $st = $pdo->prepare(
+        'SELECT id, amount, notes FROM invoices
+         WHERE subscriber_id = :sid AND status = "unpaid"
+         ORDER BY id DESC'
+    );
+    $st->execute(array(':sid' => $subscriberId));
+    $rows = $st->fetchAll();
+    if (!$rows) {
+        return array(false, 'ماكو ديون غير مسددة');
+    }
+
+    $removed = 0.0;
+    $del = $pdo->prepare('DELETE FROM invoices WHERE id = :id AND subscriber_id = :sid AND status = "unpaid"');
+    $upd = $pdo->prepare(
+        'UPDATE invoices SET amount = :amount, profit = 0
+         WHERE id = :id AND subscriber_id = :sid AND status = "unpaid"'
+    );
+
+    foreach ($rows as $r) {
+        $notes = isset($r['notes']) ? (string) $r['notes'] : '';
+        $amt = (float) $r['amount'];
+        $id = (int) $r['id'];
+        $isPureRent = (stripos($notes, 'إيجار') !== false || stripos($notes, 'ايجار') !== false)
+            && stripos($notes, 'اشتراك') === false
+            && strpos($notes, '+') === false;
+        $hasRentPart = (stripos($notes, 'إيجار') !== false || stripos($notes, 'ايجار') !== false);
+
+        if ($isPureRent) {
+            $del->execute(array(':id' => $id, ':sid' => $subscriberId));
+            $removed += $amt;
+            if (function_exists('activity_log')) {
+                activity_log(
+                    $pdo,
+                    $subscriberId,
+                    'invoice',
+                    $id,
+                    'delete',
+                    'حذف دين إيجار عند إيقاف الجهاز #' . $id,
+                    $notes . "\nالمبلغ: " . $amt
+                );
+            }
+            continue;
+        }
+
+        if ($hasRentPart && $amt > $fee) {
+            $newAmt = $amt - $fee;
+            if ($newAmt < 1) {
+                $newAmt = 1;
+            }
+            $upd->execute(array(
+                ':amount' => $newAmt,
+                ':id' => $id,
+                ':sid' => $subscriberId,
+            ));
+            $removed += ($amt - $newAmt);
+            if (function_exists('activity_log')) {
+                activity_log(
+                    $pdo,
+                    $subscriberId,
+                    'invoice',
+                    $id,
+                    'update',
+                    'خصم إيجار من دين #' . $id,
+                    'من ' . $amt . ' إلى ' . $newAmt
+                );
+            }
+            // خصم مرة واحدة يكفي عادةً
+            break;
+        }
+    }
+
+    if ($removed <= 0) {
+        return array(false, 'ما لقيت دين إيجار للخصم');
+    }
+    return array(true, $removed);
 }
 
 function rental_badge_html($sub, $settings = null)

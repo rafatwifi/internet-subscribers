@@ -540,6 +540,10 @@ function sas_refresh_online_flags($pdo, $config)
     if (!is_array($rows)) {
         return 0;
     }
+    // إذا فشل الاتصال بالساس — لا تمسح الأونلاين القديم
+    if (isset($api->lastOnlineListOk) && !$api->lastOnlineListOk) {
+        return 0;
+    }
     $names = array();
     $trafMap = array();
     $ipMap = array();
@@ -601,10 +605,33 @@ function sas_refresh_online_flags($pdo, $config)
                 }
             }
         }
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            $_SESSION['sas_online_flags_at'] = time();
+        }
     } catch (Exception $e) {
         return 0;
     }
     return count($names);
+}
+
+/**
+ * تحديث أونلاين/IP مع حد أدنى بين الطلبات (للبحث السريع).
+ * $force=true يتجاوز الانتظار.
+ */
+function sas_refresh_online_flags_throttled($pdo, $config, $minInterval = 4, $force = false)
+{
+    $minInterval = (int) $minInterval;
+    if ($minInterval < 0) {
+        $minInterval = 0;
+    }
+    $at = 0;
+    if (session_status() === PHP_SESSION_ACTIVE && !empty($_SESSION['sas_online_flags_at'])) {
+        $at = (int) $_SESSION['sas_online_flags_at'];
+    }
+    if (!$force && $at > 0 && $minInterval > 0 && (time() - $at) < $minInterval) {
+        return -1;
+    }
+    return sas_refresh_online_flags($pdo, $config);
 }
 
 function sas_cache_daily_traffic($row)
@@ -1170,6 +1197,144 @@ function sas_clear_unused_card_cache()
     );
 }
 
+/**
+ * كروت استُخدمت مؤخراً — تمنع إعادة اختيارها لو الساس لسا ما حدّث الجرد.
+ */
+function sas_remember_used_pin($pin)
+{
+    $pin = trim((string) $pin);
+    if ($pin === '') {
+        return;
+    }
+    if (!isset($_SESSION['sas_pins_used_recent']) || !is_array($_SESSION['sas_pins_used_recent'])) {
+        $_SESSION['sas_pins_used_recent'] = array();
+    }
+    $now = time();
+    $_SESSION['sas_pins_used_recent'][strtolower($pin)] = $now;
+    foreach ($_SESSION['sas_pins_used_recent'] as $k => $ts) {
+        if (($now - (int) $ts) > 900) {
+            unset($_SESSION['sas_pins_used_recent'][$k]);
+        }
+    }
+}
+
+function sas_pin_is_recently_used($pin)
+{
+    $pin = strtolower(trim((string) $pin));
+    if ($pin === '' || empty($_SESSION['sas_pins_used_recent']) || !is_array($_SESSION['sas_pins_used_recent'])) {
+        return false;
+    }
+    if (!isset($_SESSION['sas_pins_used_recent'][$pin])) {
+        return false;
+    }
+    $ts = (int) $_SESSION['sas_pins_used_recent'][$pin];
+    if ($ts <= 0 || (time() - $ts) > 900) {
+        unset($_SESSION['sas_pins_used_recent'][$pin]);
+        return false;
+    }
+    return true;
+}
+
+function sas_filter_recently_used_cards($cards)
+{
+    if (!is_array($cards) || !$cards) {
+        return is_array($cards) ? $cards : array();
+    }
+    $out = array();
+    foreach ($cards as $c) {
+        if (!is_array($c)) {
+            continue;
+        }
+        $p = isset($c['pin']) ? trim((string) $c['pin']) : '';
+        if ($p !== '' && sas_pin_is_recently_used($p)) {
+            continue;
+        }
+        $out[] = $c;
+    }
+    return $out;
+}
+
+/**
+ * يشيل كرت من قائمة الشاغر فوراً بعد التفعيل/الرفض حتى ما ينعاد استخدامه من الكاش.
+ */
+function sas_mark_card_pin_used($pin)
+{
+    $pin = trim((string) $pin);
+    if ($pin === '') {
+        return false;
+    }
+    sas_remember_used_pin($pin);
+    $changed = false;
+    if (function_exists('sas_cards_inventory_load_persisted') && function_exists('sas_cards_inventory_save_persisted')) {
+        $inv = sas_cards_inventory_load_persisted(0);
+        if ($inv && !empty($inv['groups']) && is_array($inv['groups'])) {
+            $groups = $inv['groups'];
+            foreach ($groups as $gi => $g) {
+                if (!is_array($g) || empty($g['cards']) || !is_array($g['cards'])) {
+                    continue;
+                }
+                $groupChanged = false;
+                foreach ($g['cards'] as $ci => $c) {
+                    if (!is_array($c)) {
+                        continue;
+                    }
+                    $cPin = isset($c['pin']) ? trim((string) $c['pin']) : '';
+                    if ($cPin === '' || strcasecmp($cPin, $pin) !== 0) {
+                        continue;
+                    }
+                    if (empty($c['used'])) {
+                        $groups[$gi]['cards'][$ci]['used'] = 1;
+                        $groupChanged = true;
+                        $changed = true;
+                    }
+                }
+                if ($groupChanged) {
+                    $unused = 0;
+                    foreach ($groups[$gi]['cards'] as $c2) {
+                        if (is_array($c2) && empty($c2['used'])) {
+                            $p2 = isset($c2['pin']) ? trim((string) $c2['pin']) : '';
+                            if ($p2 !== '' && strlen($p2) >= 6 && !sas_pin_is_recently_used($p2)) {
+                                $unused++;
+                            }
+                        }
+                    }
+                    $groups[$gi]['unused'] = $unused;
+                }
+            }
+            if ($changed) {
+                sas_cards_inventory_save_persisted($groups);
+                if (function_exists('sas_dash_groups_from_inventory') && function_exists('sas_store_dash_card_groups')) {
+                    sas_store_dash_card_groups(sas_dash_groups_from_inventory($groups), 'inventory');
+                }
+            }
+        }
+    }
+    sas_clear_unused_card_cache();
+    // أعد بناء قائمة الشاغر من الجرد المحدّث بدون انتظار API
+    if (function_exists('sas_unused_pins_from_inventory_cache')) {
+        $fromInv = sas_unused_pins_from_inventory_cache();
+        if (is_array($fromInv)) {
+            $_SESSION['sas_unused_ui_v6'] = $fromInv;
+            $_SESSION['sas_unused_ui_v6_at'] = time();
+        }
+    }
+    return $changed;
+}
+
+function sas_unused_cards_snapshot_for_ui()
+{
+    if (function_exists('sas_unused_pins_from_inventory_cache')) {
+        $fromInv = sas_unused_pins_from_inventory_cache();
+        if (is_array($fromInv)) {
+            return $fromInv;
+        }
+    }
+    if (!empty($_SESSION['sas_unused_ui_v6']) && is_array($_SESSION['sas_unused_ui_v6'])) {
+        return sas_filter_recently_used_cards($_SESSION['sas_unused_ui_v6']);
+    }
+    return array();
+}
+
 function sas_cards_server_cache_dir()
 {
     $dir = dirname(__DIR__) . '/storage/cache';
@@ -1379,6 +1544,9 @@ function sas_unused_pins_from_inventory_cache()
             if ($pin === '' || strlen($pin) < 6) {
                 continue;
             }
+            if (function_exists('sas_pin_is_recently_used') && sas_pin_is_recently_used($pin)) {
+                continue;
+            }
             $key = strtolower($pin);
             if (isset($seen[$key])) {
                 continue;
@@ -1404,7 +1572,11 @@ function sas_unused_cards_cached($api, $force = false)
         $age = time() - $at;
         $empty = !$_SESSION['sas_unused_ui_v6'];
         if ((!$empty && $age < $ttl) || ($empty && $age < 20)) {
-            return $_SESSION['sas_unused_ui_v6'];
+            $sess = function_exists('sas_filter_recently_used_cards')
+                ? sas_filter_recently_used_cards($_SESSION['sas_unused_ui_v6'])
+                : $_SESSION['sas_unused_ui_v6'];
+            $_SESSION['sas_unused_ui_v6'] = $sess;
+            return $sess;
         }
     }
 
@@ -1451,6 +1623,9 @@ function sas_unused_cards_cached($api, $force = false)
     }
     if (!is_array($out)) {
         $out = array();
+    }
+    if (function_exists('sas_filter_recently_used_cards')) {
+        $out = sas_filter_recently_used_cards($out);
     }
     $_SESSION['sas_unused_ui_v6'] = $out;
     $_SESSION['sas_unused_ui_v6_at'] = time();
@@ -2629,7 +2804,22 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
         if (!empty($res['_verified'])) {
             // موثّق من الساس مباشرة
         } elseif (!sas_activate_api_ok($res) && !sas_activate_may_force_expire($res)) {
-            return array(false, 'SAS: ' . (function_exists('sas_response_message') ? sas_response_message($res) : 'فشل التفعيل'), array());
+            $failMsg = 'SAS: ' . (function_exists('sas_response_message') ? sas_response_message($res) : 'فشل التفعيل');
+            // كرت مرفوض/مستخدم — لا ترجعه بالقائمة الشاغرة
+            if ($pin !== '' && function_exists('sas_mark_card_pin_used')) {
+                $lm = strtolower($failMsg);
+                if (strpos($lm, 'invalid_profile') !== false
+                    || strpos($lm, 'رفض باقة') !== false
+                    || strpos($lm, 'used') !== false
+                    || strpos($lm, 'مستخدم') !== false) {
+                    sas_mark_card_pin_used($pin);
+                }
+            }
+            $extraFail = array();
+            if (function_exists('sas_unused_cards_snapshot_for_ui')) {
+                $extraFail['cards'] = sas_unused_cards_snapshot_for_ui();
+            }
+            return array(false, $failMsg, $extraFail);
         }
         list($confirmed, $afterRow) = sas_confirm_activation_result(
             $api,
@@ -2642,16 +2832,35 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
             $res
         );
         if (!$confirmed) {
-            return array(false, sas_activate_fail_detail($res, $beforeTs, $afterRow), array());
+            $failDetail = sas_activate_fail_detail($res, $beforeTs, $afterRow);
+            if ($pin !== '' && function_exists('sas_mark_card_pin_used')) {
+                $lm = strtolower($failDetail);
+                if (strpos($lm, 'invalid_profile') !== false || strpos($lm, 'رفض باقة') !== false) {
+                    sas_mark_card_pin_used($pin);
+                }
+            }
+            $extraFail = array();
+            if (function_exists('sas_unused_cards_snapshot_for_ui')) {
+                $extraFail['cards'] = sas_unused_cards_snapshot_for_ui();
+            }
+            return array(false, $failDetail, $extraFail);
         }
         if ($afterRow) {
             sas_cache_upsert_row($pdo, $afterRow);
         } else {
             sas_cache_refresh_one($pdo, $config, $username, $sasUserId);
         }
-        sas_clear_unused_card_cache();
+        if ($pin !== '' && function_exists('sas_mark_card_pin_used')) {
+            sas_mark_card_pin_used($pin);
+        } else {
+            sas_clear_unused_card_cache();
+        }
         $okMsg = sas_finish_local_activation($pdo, $config, $username, $fields, 'تم تفعيل المشترك');
-        return array(true, $okMsg, array());
+        $extraOk = array();
+        if (function_exists('sas_unused_cards_snapshot_for_ui')) {
+            $extraOk['cards'] = sas_unused_cards_snapshot_for_ui();
+        }
+        return array(true, $okMsg, $extraOk);
     }
 
     return array(false, 'عملية غير معروفة', array());
@@ -2752,7 +2961,7 @@ function sas_cache_patch($pdo, $username, $fields)
     $allow = array(
         'sas_user_id', 'firstname', 'lastname', 'display_name', 'phone',
         'profile_id', 'profile_name', 'enabled', 'expire_at',
-        'parent_id', 'parent_name', 'city', 'email', 'company', 'last_online', 'is_online', 'daily_traffic',
+        'parent_id', 'parent_name', 'city', 'email', 'company', 'last_online', 'is_online', 'framed_ip', 'daily_traffic',
     );
     $cols = array();
     $params = array(':u' => $username);

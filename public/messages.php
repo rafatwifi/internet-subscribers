@@ -825,7 +825,6 @@ render_header(t('messages'), 'messages');
     </script>
 
 <?php elseif ($mode === 'log'): ?>
-<?php elseif ($mode === 'log'): ?>
     <form method="get" class="actions actions-tight" style="margin-bottom:10px">
         <input type="hidden" name="mode" value="log">
         <input name="q" value="<?php echo e($logQ); ?>" placeholder="<?php echo e($lang === 'en' ? 'Search message text, name, phone…' : 'بحث بنص الرسالة أو الاسم أو الرقم…'); ?>" style="max-width:340px;flex:1">

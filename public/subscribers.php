@@ -482,9 +482,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if ($action === 'pay_all') {
-        // التحويل لصفحة الديون لاختيار الشهر/المبلغ جزئياً
         $id = (int) post('id', '0');
-        redirect('debts.php?status=unpaid&subscriber_id=' . $id);
+        $payAmount = (float) post('pay_amount', '0');
+        $sendWa = post('send_whatsapp') === '1';
+        if ($id <= 0) {
+            flash('error', $lang === 'en' ? 'Subscriber required' : 'مشترك غير محدد');
+            redirect('subscribers.php');
+        }
+        if ($payAmount <= 0 && function_exists('subscriber_unpaid_total')) {
+            $payAmount = (float) subscriber_unpaid_total($pdo, $id);
+        }
+        if ($payAmount <= 0) {
+            flash('error', $lang === 'en' ? 'No unpaid debts' : 'ماكو ديون غير مسددة');
+            redirect('subscribers.php');
+        }
+        if (!function_exists('apply_subscriber_payment')) {
+            redirect('debts.php?status=unpaid&subscriber_id=' . $id);
+        }
+        list($ok, $msg) = apply_subscriber_payment($pdo, $config, $id, $payAmount, $sendWa, 0);
+        flash($ok ? 'success' : 'error', $msg);
+        redirect('subscribers.php');
     }
 
     if ($action === 'retry_message') {
@@ -741,6 +758,7 @@ function render_subscriber_table_row($row, $n, $config, $lang)
         . ' data-id="' . (int) $row['id'] . '"'
         . ' data-name="' . e($row['name']) . '"'
         . ' data-debt="' . ($debt > 0 ? '1' : '0') . '"'
+        . ' data-debt-amount="' . (int) round($debt) . '"'
         . ' data-active="' . ($hasActive ? '1' : '0') . '"'
         . ' data-msg-fail="' . $msgFail . '"'
         . ' data-log-id="' . $logId . '"'
@@ -1033,6 +1051,20 @@ function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
   table-layout: auto;
   width: 100%;
   border-collapse: collapse;
+}
+#subsTable tbody tr.subs-row-ctx {
+  outline: 2px solid #2563eb;
+  outline-offset: -2px;
+}
+#subsTable tbody tr.subs-row-ctx td,
+#subsTable tbody tr.row-status-active.subs-row-ctx td,
+#subsTable tbody tr.row-status-expired.subs-row-ctx td,
+#subsTable tbody tr.row-status-left.subs-row-ctx td,
+#subsTable tbody tr.row-status-active.subs-row-ctx:nth-child(even) td,
+#subsTable tbody tr.row-status-active.subs-row-ctx:hover td,
+#subsTable tbody tr.row-status-expired.subs-row-ctx:hover td,
+#subsTable tbody tr.row-status-left.subs-row-ctx:hover td {
+  background: #93c5fd !important;
 }
 #subsTable .col-hide {
   display: none !important;
@@ -1424,6 +1456,41 @@ function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
     <?php endif; ?>
 
     <div class="table-wrap">
+        <script>
+        (function () {
+          try {
+            var key = 'subsTableCols_v2';
+            var defaults = { phone: false, pkg: true, month: false, days: true, debt: true, msg: true };
+            var state = {
+              phone: defaults.phone,
+              pkg: defaults.pkg,
+              month: defaults.month,
+              days: defaults.days,
+              debt: defaults.debt,
+              msg: defaults.msg
+            };
+            var raw = localStorage.getItem(key);
+            if (raw) {
+              var parsed = JSON.parse(raw) || {};
+              ['phone', 'pkg', 'month', 'days', 'debt', 'msg'].forEach(function (k) {
+                if (Object.prototype.hasOwnProperty.call(parsed, k)) state[k] = !!parsed[k];
+              });
+            }
+            var map = { phone: '.col-phone', pkg: '.col-pkg', month: '.col-month', days: '.col-days', debt: '.col-debt', msg: '.col-msg' };
+            var css = [];
+            Object.keys(map).forEach(function (k) {
+              if (!state[k]) css.push('#subsTable ' + map[k] + '{display:none!important}');
+            });
+            if (css.length) {
+              var style = document.createElement('style');
+              style.id = 'subsColsStyleEarly';
+              style.textContent = css.join('');
+              document.head.appendChild(style);
+            }
+            window.__subsColsEarly = state;
+          } catch (e) {}
+        })();
+        </script>
         <table id="subsTable" class="table-compact data-table">
             <thead>
             <tr>
@@ -1562,10 +1629,10 @@ window.DEBT_ENTRY = {
     <a class="ops-item" href="subscribers.php?add=1" id="opsAddLink"><?php echo e(t('add_subscriber')); ?></a>
     <div class="ops-sep" id="opsSep" hidden></div>
     <button type="button" class="ops-item" data-ops="open" id="opsItemOpen" hidden><?php echo e($lang === 'en' ? 'Open' : 'فتح'); ?></button>
+    <button type="button" class="ops-item" data-ops="pay" id="opsItemPay" hidden><?php echo e(t('pay_debts')); ?></button>
     <button type="button" class="ops-item" data-ops="activate" id="opsItemActivate" hidden><?php echo e(t('activate')); ?></button>
     <button type="button" class="ops-item" data-ops="give_test" id="opsItemGiveTest" hidden><?php echo e(t('give_test')); ?></button>
     <button type="button" class="ops-item" data-ops="bulk_activate" id="opsItemBulkActivate" hidden><?php echo e(t('bulk_activate')); ?></button>
-    <button type="button" class="ops-item" data-ops="pay" id="opsItemPay" hidden><?php echo e(t('pay_debt')); ?></button>
     <button type="button" class="ops-item" data-ops="remind_debt" id="opsItemRemind" hidden><?php echo e(t('remind')); ?></button>
     <button type="button" class="ops-item" data-ops="remind_days" id="opsItemDays" hidden><?php echo e($lang === 'en' ? 'Send days left' : 'إرسال الأيام المتبقية'); ?></button>
     <button type="button" class="ops-item" data-ops="retry" id="opsItemRetry" hidden><?php echo e(t('retry_send')); ?></button>
@@ -1738,10 +1805,12 @@ window.DEBT_ENTRY = {
         id: tr.getAttribute('data-id'),
         name: tr.getAttribute('data-name') || '',
         debt: tr.getAttribute('data-debt') === '1',
+        debtAmount: parseFloat(tr.getAttribute('data-debt-amount') || '0') || 0,
         active: tr.getAttribute('data-active') === '1',
         msgFail: tr.getAttribute('data-msg-fail') === '1',
         logId: tr.getAttribute('data-log-id') || '0',
-        hasDays: tr.getAttribute('data-has-days') === '1'
+        hasDays: tr.getAttribute('data-has-days') === '1',
+        tr: tr
       });
     });
     return out;
@@ -1778,25 +1847,26 @@ window.DEBT_ENTRY = {
     if (on) {
       el.hidden = false;
       el.removeAttribute('hidden');
-      el.style.display = '';
+      el.style.display = 'block';
     } else {
       el.hidden = true;
       el.setAttribute('hidden', 'hidden');
       el.style.display = 'none';
     }
   }
+  var opsIgnoreCloseUntil = 0;
   function refreshMenuItems() {
     var rows = selectedRows();
     var n = rows.length;
     var one = n === 1 ? rows[0] : null;
-    var anyDebt = rows.some(function (r) { return r.debt; });
-    // مشترك جديد بدون دين/أيام/رسالة فاشلة: فتح + تفعيل + حذف فقط
+    var anyDebt = rows.some(function (r) { return r.debt || (r.debtAmount > 0); });
     showEl(document.getElementById('opsSep'), n > 0);
     showEl(document.getElementById('opsItemOpen'), !!one);
+    // تسديد ديون: دائماً مع أي تحديد — وبالأخص عند وجود دين
+    showEl(document.getElementById('opsItemPay'), n >= 1);
     showEl(document.getElementById('opsItemActivate'), !!one);
     showEl(document.getElementById('opsItemGiveTest'), !!one);
     showEl(document.getElementById('opsItemBulkActivate'), n > 1);
-    showEl(document.getElementById('opsItemPay'), anyDebt);
     showEl(document.getElementById('opsItemRemind'), anyDebt);
     showEl(document.getElementById('opsItemDays'), !!(one && one.hasDays));
     showEl(document.getElementById('opsItemRetry'), !!(one && one.msgFail));
@@ -1850,6 +1920,14 @@ window.DEBT_ENTRY = {
     el.style.top = Math.round(y) + 'px';
     el.style.visibility = 'visible';
   }
+  function clearRowCtx() {
+    if (!tbody) return;
+    tbody.querySelectorAll('tr.subs-row-ctx').forEach(function (r) { r.classList.remove('subs-row-ctx'); });
+  }
+  function markRowCtx(tr) {
+    clearRowCtx();
+    if (tr) tr.classList.add('subs-row-ctx');
+  }
   function closeOpsMenu() {
     if (!opsDrop) return;
     opsDrop.classList.add('hidden');
@@ -1862,7 +1940,15 @@ window.DEBT_ENTRY = {
   }
   function openOpsMenu(clientX, clientY) {
     if (!opsDrop) return;
+    opsIgnoreCloseUntil = Date.now() + 450;
     refreshMenuItems();
+    // تأكيد إضافي: زر التسديد ظاهر
+    var payBtn = document.getElementById('opsItemPay');
+    if (payBtn && selectedRows().length >= 1) {
+      payBtn.hidden = false;
+      payBtn.removeAttribute('hidden');
+      payBtn.style.display = 'block';
+    }
     placeMenuAt(opsDrop, clientX, clientY, opsBtn);
     if (opsBtn) opsBtn.setAttribute('aria-expanded', 'true');
   }
@@ -1885,6 +1971,7 @@ window.DEBT_ENTRY = {
     visibleChecks().forEach(function (c) { c.checked = false; });
     var chk = tr.querySelector('input.sub-check');
     if (chk) chk.checked = true;
+    markRowCtx(tr);
     syncBulk();
   }
   function runOps(action) {
@@ -1913,7 +2000,15 @@ window.DEBT_ENTRY = {
     }
     if (action === 'pay') {
       if (one) {
-        window.location.href = 'debts.php?status=unpaid&subscriber_id=' + encodeURIComponent(one.id);
+        if (typeof window.openSubsPay === 'function') {
+          window.openSubsPay({
+            sub: one.id,
+            amount: one.debtAmount,
+            name: one.name
+          });
+        } else {
+          window.location.href = 'debts.php?status=unpaid&subscriber_id=' + encodeURIComponent(one.id);
+        }
       } else if (rows.length) {
         window.location.href = 'debts.php?status=unpaid';
       }
@@ -1966,14 +2061,19 @@ window.DEBT_ENTRY = {
     tbody.addEventListener('change', function (e) {
       if (e.target && e.target.classList && e.target.classList.contains('sub-check')) syncBulk();
     });
+    // كلك يسار: تظليل السطر
+    tbody.addEventListener('click', function (e) {
+      var tr = e.target && e.target.closest ? e.target.closest('tr[data-id]') : null;
+      if (!tr || !tbody.contains(tr)) return;
+      markRowCtx(tr);
+    });
     tbody.addEventListener('contextmenu', function (e) {
       var tr = e.target && e.target.closest ? e.target.closest('tr[data-id]') : null;
       if (!tr || !tbody.contains(tr)) return;
       e.preventDefault();
       e.stopPropagation();
-      var chk = tr.querySelector('input.sub-check');
-      if (chk && !chk.checked) selectOnlyRow(tr);
-      else syncBulk();
+      markRowCtx(tr);
+      selectOnlyRow(tr);
       openOpsMenu(e.clientX, e.clientY);
     });
     var lpTimer = null;
@@ -1987,6 +2087,7 @@ window.DEBT_ENTRY = {
       lpTimer = setTimeout(function () {
         if (!lpStart) return;
         e.preventDefault && e.preventDefault();
+        markRowCtx(lpStart.tr);
         selectOnlyRow(lpStart.tr);
         openOpsMenu(lpStart.x, lpStart.y);
         lpStart = null;
@@ -2052,6 +2153,7 @@ window.DEBT_ENTRY = {
     if (!wasOpen) placeMenuAt(drop, null, null, btn);
   }
   document.addEventListener('click', function (e) {
+    if (Date.now() < opsIgnoreCloseUntil) return;
     if (opsDrop && !opsDrop.classList.contains('hidden')) {
       if (!(opsAnchor && opsAnchor.contains(e.target)) && !opsDrop.contains(e.target)) {
         closeOpsMenu();
@@ -2107,8 +2209,12 @@ window.DEBT_ENTRY = {
     var defaults = { phone: false, pkg: true, month: false, days: true, debt: true, msg: true };
     var state = defaults;
     try {
-      var raw = localStorage.getItem(key);
-      if (raw) state = Object.assign({}, defaults, JSON.parse(raw));
+      if (window.__subsColsEarly) {
+        state = Object.assign({}, defaults, window.__subsColsEarly);
+      } else {
+        var raw = localStorage.getItem(key);
+        if (raw) state = Object.assign({}, defaults, JSON.parse(raw));
+      }
     } catch (err) {}
     applySubsCols = function () {
       var style = document.getElementById('subsColsStyle');
@@ -2117,14 +2223,21 @@ window.DEBT_ENTRY = {
         style.id = 'subsColsStyle';
         document.head.appendChild(style);
       }
+      var early = document.getElementById('subsColsStyleEarly');
+      if (early && early.parentNode) early.parentNode.removeChild(early);
       var css = [];
       Object.keys(map).forEach(function (k) {
         var on = state[k] !== false;
         if (!on) css.push('#subsTable ' + map[k] + '{display:none!important}');
         var inp = colsDrop.querySelector('input[data-col="' + k + '"]');
         if (inp) inp.checked = on;
+        Array.prototype.slice.call(table.querySelectorAll(map[k])).forEach(function (el) {
+          if (on) el.classList.remove('col-hide');
+          else el.classList.add('col-hide');
+        });
       });
       style.textContent = css.join('');
+      table.setAttribute('data-cols', JSON.stringify(state));
     };
     applySubsCols();
     if (colsBtn) {
@@ -2134,13 +2247,24 @@ window.DEBT_ENTRY = {
         toggleToolMenu(colsBtn, colsDrop);
       });
     }
-    colsDrop.addEventListener('change', function (e) {
-      var inp = e.target;
+    function onColToggle(inp) {
       if (!inp || !inp.getAttribute('data-col')) return;
       var k = inp.getAttribute('data-col');
       state[k] = !!inp.checked;
       try { localStorage.setItem(key, JSON.stringify(state)); } catch (err2) {}
       applySubsCols();
+    }
+    colsDrop.addEventListener('change', function (e) {
+      var t = e.target;
+      if (t && t.getAttribute && t.getAttribute('data-col')) onColToggle(t);
+    });
+    // نقر الليبل يطبّق فوراً بدون انتظار رفرش
+    Array.prototype.slice.call(colsDrop.querySelectorAll('input[data-col]')).forEach(function (inp) {
+      inp.addEventListener('click', function (e) {
+        e.stopPropagation();
+        // بعد تبديل المتصفح للقيمة
+        setTimeout(function () { onColToggle(inp); }, 0);
+      });
     });
     colsDrop.addEventListener('click', function (e) { e.stopPropagation(); });
   })();
@@ -2295,72 +2419,64 @@ window.DEBT_ENTRY = {
       };
       el.onblur = function () { finish(true); };
     }
-    function beginDebtEdit(btn) {
-      if (!btn || btn.classList.contains('editing')) return;
-      var current = btn.getAttribute('data-amount') || '0';
-      var snap = btn.textContent;
+    function saveDebtAmount(btn, n, snap) {
       var id = btn.getAttribute('data-sub') || '';
-      btn.classList.add('editing');
-      btn.contentEditable = 'true';
-      btn.textContent = current;
-      btn.focus();
-      try {
-        var range = document.createRange();
-        range.selectNodeContents(btn);
-        var sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(range);
-      } catch (err) {}
-      var done = false;
-      function finish(ok) {
-        if (done || !btn.classList.contains('editing')) return;
-        done = true;
-        btn.classList.remove('editing');
-        btn.contentEditable = 'false';
-        var raw = String(btn.textContent || '').replace(/[^\d]/g, '');
-        var n = parseInt(raw, 10);
-        if (!ok || raw === '') {
-          btn.textContent = snap;
-          return;
-        }
-        if (isNaN(n) || n < 0) {
-          alert(<?php echo json_encode($lang === 'en' ? 'Enter a valid amount' : 'أدخل مبلغ صحيح'); ?>);
-          btn.textContent = snap;
-          return;
-        }
-        if (String(n) === String(current)) {
-          btn.textContent = snap;
-          return;
-        }
-        var body = new FormData();
-        body.append('csrf', csrf);
-        body.append('action', 'inline_update_debt');
-        body.append('id', id);
-        body.append('amount', String(n));
-        fetch('subscribers.php', { method: 'POST', body: body, credentials: 'same-origin' })
-          .then(function (r) { return r.json(); })
-          .then(function (data) {
-            if (!data || !data.ok) {
-              alert((data && data.message) ? data.message : <?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>);
-              btn.textContent = snap;
-              return;
-            }
-            btn.textContent = data.debt_text || String(n);
-            btn.setAttribute('data-amount', String(Math.round(Number(data.debt) || n)));
-            btn.className = (Number(data.debt) > 0 ? 'debt-amt debt-due' : 'debt-amt debt-zero') + ' debt-edit-btn';
-            var tr = btn.closest('tr');
-            if (tr) tr.setAttribute('data-debt', Number(data.debt) > 0 ? '1' : '0');
-          })
-          .catch(function () {
-            alert(<?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>);
-            btn.textContent = snap;
-          });
+      var body = new FormData();
+      body.append('csrf', csrf);
+      body.append('action', 'inline_update_debt');
+      body.append('id', id);
+      body.append('amount', String(n));
+      fetch('subscribers.php', { method: 'POST', body: body, credentials: 'same-origin' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!data || !data.ok) {
+            alert((data && data.message) ? data.message : <?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>);
+            if (snap != null) btn.textContent = snap;
+            return;
+          }
+          btn.textContent = data.debt_text || String(n);
+          btn.setAttribute('data-amount', String(Math.round(Number(data.debt) || n)));
+          btn.className = (Number(data.debt) > 0 ? 'debt-amt debt-due' : 'debt-amt debt-zero') + ' debt-edit-btn';
+          var tr = btn.closest('tr');
+          if (tr) {
+            tr.setAttribute('data-debt', Number(data.debt) > 0 ? '1' : '0');
+            tr.setAttribute('data-debt-amount', String(Math.round(Number(data.debt) || 0)));
+          }
+        })
+        .catch(function () {
+          alert(<?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>);
+          if (snap != null) btn.textContent = snap;
+        });
+    }
+    function beginDebtEdit(btn) {
+      if (!btn) return;
+      var current = btn.getAttribute('data-amount') || '0';
+      var id = btn.getAttribute('data-sub') || '';
+      var modal = document.getElementById('subsDebtModal');
+      var form = document.getElementById('subsDebtForm');
+      var amt = document.getElementById('subsDebtAmount');
+      var hid = document.getElementById('subsDebtSubId');
+      if (modal && form && amt && hid) {
+        hid.value = id;
+        amt.value = current;
+        form._debtBtn = btn;
+        form._debtSnap = btn.textContent;
+        form._debtCurrent = current;
+        modal.classList.remove('hidden');
+        setTimeout(function () { amt.focus(); amt.select(); }, 40);
+        return;
       }
-      btn.onkeydown = function (ev) {
-        if (ev.key === 'Enter') { ev.preventDefault(); finish(true); }
-        if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
-      };
-      btn.onblur = function () { finish(true); };
+      // احتياط سطح المكتب: تعديل مباشر
+      var snap = btn.textContent;
+      var raw = window.prompt(<?php echo json_encode($lang === 'en' ? 'Debt amount' : 'مبلغ الدين'); ?>, current);
+      if (raw === null) return;
+      var n = parseInt(String(raw).replace(/[^\d]/g, ''), 10);
+      if (isNaN(n) || n < 0) {
+        alert(<?php echo json_encode($lang === 'en' ? 'Enter a valid amount' : 'أدخل مبلغ صحيح'); ?>);
+        return;
+      }
+      if (String(n) === String(current)) return;
+      saveDebtAmount(btn, n, snap);
     }
     document.addEventListener('click', function (e) {
       var debtBtn = e.target && e.target.closest ? e.target.closest('.debt-edit-btn') : null;
@@ -2383,6 +2499,7 @@ window.DEBT_ENTRY = {
         beginEdit(name);
       }
     });
+    window.__subsSaveDebtAmount = saveDebtAmount;
   })();
 
   function fetchLive(q) {
@@ -2464,6 +2581,45 @@ window.DEBT_ENTRY = {
 })();
 </script>
 
+<div class="modal-backdrop hidden" id="payFloat" role="dialog" aria-modal="true">
+    <div class="modal-card pay-float-card">
+        <h3 id="payFloatTitle"><?php echo e(t('pay_debts')); ?></h3>
+        <p class="meta" id="payFloatWho" style="margin:0 0 10px"></p>
+        <div class="pay-float-amt" id="payFloatAmt"></div>
+        <label class="toggle" style="margin:14px 0">
+            <input type="checkbox" id="payAutoToggle" checked>
+            <span class="toggle-ui" aria-hidden="true"></span>
+            <span class="toggle-text"><?php echo e($lang === 'en' ? 'Send WhatsApp' : 'إرسال واتساب'); ?></span>
+        </label>
+        <div class="actions" style="margin-top:0">
+            <button class="btn" type="button" id="payFloatOk"><?php echo e($lang === 'en' ? 'Pay' : 'تسديد'); ?></button>
+            <button class="btn ghost" type="button" id="payFloatCancel"><?php echo e($lang === 'en' ? 'Cancel' : 'إلغاء'); ?></button>
+        </div>
+    </div>
+</div>
+<form method="post" id="payConfirmForm" class="hidden" hidden>
+    <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+    <input type="hidden" name="action" value="pay_all">
+    <input type="hidden" name="id" id="payConfirmSub" value="">
+    <input type="hidden" name="pay_amount" id="payConfirmAmt" value="">
+    <input type="hidden" name="send_whatsapp" id="payConfirmWa" value="1">
+</form>
+
+<div class="modal-backdrop hidden" id="subsDebtModal" role="dialog" aria-modal="true">
+    <div class="modal-card">
+        <h3><?php echo e($lang === 'en' ? 'Edit debt total' : 'تعديل مجموع الديون'); ?></h3>
+        <form id="subsDebtForm">
+            <input type="hidden" id="subsDebtSubId" value="">
+            <label><?php echo e($lang === 'en' ? 'Amount' : 'المبلغ'); ?></label>
+            <input type="number" id="subsDebtAmount" min="0" step="1" required inputmode="numeric" enterkeyhint="done" autofocus>
+            <div class="actions" style="margin-top:14px;justify-content:flex-end">
+                <button type="button" class="btn ghost" id="subsDebtCancel"><?php echo e($lang === 'en' ? 'Cancel' : 'إلغاء'); ?></button>
+                <button type="submit" class="btn"><?php echo e($lang === 'en' ? 'Save' : 'حفظ'); ?></button>
+            </div>
+        </form>
+    </div>
+</div>
+
 <div class="modal-backdrop hidden" id="daysModal">
     <div class="modal-card">
         <h3><?php echo e($lang === 'en' ? 'Days left' : 'الأيام المتبقية'); ?></h3>
@@ -2542,6 +2698,97 @@ window.DEBT_ENTRY = {
   }
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') closeDays();
+  });
+})();
+</script>
+<script>
+(function () {
+  var box = document.getElementById('payFloat');
+  var who = document.getElementById('payFloatWho');
+  var amtEl = document.getElementById('payFloatAmt');
+  var tog = document.getElementById('payAutoToggle');
+  var form = document.getElementById('payConfirmForm');
+  var subEl = document.getElementById('payConfirmSub');
+  var amtIn = document.getElementById('payConfirmAmt');
+  var waEl = document.getElementById('payConfirmWa');
+  var pending = null;
+  var cur = <?php echo json_encode($config['currency']); ?>;
+  function fmt(n) {
+    n = Math.round(Number(n) || 0);
+    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',') + ' ' + cur;
+  }
+  function closePay() {
+    if (box) box.classList.add('hidden');
+    pending = null;
+  }
+  window.openSubsPay = function (opts) {
+    opts = opts || {};
+    var amount = parseFloat(opts.amount || '0') || 0;
+    if (!(amount > 0)) {
+      alert(<?php echo json_encode($lang === 'en' ? 'No amount to pay' : 'ماكو مبلغ للتسديد'); ?>);
+      return;
+    }
+    pending = { sub: opts.sub || '', amount: amount, name: opts.name || '' };
+    if (who) who.textContent = pending.name;
+    if (amtEl) amtEl.textContent = fmt(amount);
+    if (tog) tog.checked = true;
+    if (box) box.classList.remove('hidden');
+  };
+  var okBtn = document.getElementById('payFloatOk');
+  var cancelBtn = document.getElementById('payFloatCancel');
+  if (okBtn) {
+    okBtn.addEventListener('click', function () {
+      if (!pending || !form) return;
+      if (subEl) subEl.value = pending.sub;
+      if (amtIn) amtIn.value = String(Math.round(pending.amount));
+      if (waEl) waEl.value = (tog && tog.checked) ? '1' : '0';
+      form.submit();
+    });
+  }
+  if (cancelBtn) cancelBtn.addEventListener('click', closePay);
+  if (box) {
+    box.addEventListener('click', function (e) {
+      if (e.target === box) closePay();
+    });
+  }
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') closePay();
+  });
+
+  var debtModal = document.getElementById('subsDebtModal');
+  var debtForm = document.getElementById('subsDebtForm');
+  var debtCancel = document.getElementById('subsDebtCancel');
+  function closeDebtModal() {
+    if (debtModal) debtModal.classList.add('hidden');
+  }
+  if (debtCancel) debtCancel.addEventListener('click', closeDebtModal);
+  if (debtModal) {
+    debtModal.addEventListener('click', function (e) {
+      if (e.target === debtModal) closeDebtModal();
+    });
+  }
+  if (debtForm) {
+    debtForm.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var amt = document.getElementById('subsDebtAmount');
+      var btn = debtForm._debtBtn;
+      var snap = debtForm._debtSnap;
+      var current = debtForm._debtCurrent || '0';
+      if (!btn || !amt) { closeDebtModal(); return; }
+      var n = parseInt(String(amt.value || '').replace(/[^\d]/g, ''), 10);
+      if (isNaN(n) || n < 0) {
+        alert(<?php echo json_encode($lang === 'en' ? 'Enter a valid amount' : 'أدخل مبلغ صحيح'); ?>);
+        return;
+      }
+      closeDebtModal();
+      if (String(n) === String(current)) return;
+      if (typeof window.__subsSaveDebtAmount === 'function') {
+        window.__subsSaveDebtAmount(btn, n, snap);
+      }
+    });
+  }
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') closeDebtModal();
   });
 })();
 </script>
