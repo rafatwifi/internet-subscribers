@@ -26,6 +26,14 @@ function get_flash()
     return $flash;
 }
 
+/** حرّر قفل جلسة PHP حتى لا تنتظر صفحات التنقّل طلبات أجاكس طويلة */
+function app_session_close()
+{
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        @session_write_close();
+    }
+}
+
 function money_format_iqd($amount, $currency = 'د.ع')
 {
     return number_format((float) $amount, 0, '.', ',') . ' ' . $currency;

@@ -522,6 +522,11 @@ function sas_cache_username_match_keys($username)
     return array_keys($keys);
 }
 
+function sas_online_flags_throttle_file()
+{
+    return rtrim(sys_get_temp_dir(), '\\/') . DIRECTORY_SEPARATOR . 'isp_sas_online_flags_at.txt';
+}
+
 function sas_refresh_online_flags($pdo, $config)
 {
     ensure_sas_users_cache_table($pdo);
@@ -529,9 +534,15 @@ function sas_refresh_online_flags($pdo, $config)
     if (!$api || !method_exists($api, 'listOnlineUsers')) {
         return 0;
     }
+    // لا تمسك قفل الجلسة أثناء طلب الساس (يمنع صفنة التنقّل بين الصفحات)
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    } elseif (session_status() === PHP_SESSION_ACTIVE) {
+        @session_write_close();
+    }
     try {
         if (method_exists($api, 'setTimeout')) {
-            $api->setTimeout(18);
+            $api->setTimeout(8);
         }
         $rows = $api->listOnlineUsers();
     } catch (Exception $e) {
@@ -605,6 +616,7 @@ function sas_refresh_online_flags($pdo, $config)
                 }
             }
         }
+        @file_put_contents(sas_online_flags_throttle_file(), (string) time());
         if (session_status() === PHP_SESSION_ACTIVE) {
             $_SESSION['sas_online_flags_at'] = time();
         }
@@ -627,6 +639,10 @@ function sas_refresh_online_flags_throttled($pdo, $config, $minInterval = 4, $fo
     $at = 0;
     if (session_status() === PHP_SESSION_ACTIVE && !empty($_SESSION['sas_online_flags_at'])) {
         $at = (int) $_SESSION['sas_online_flags_at'];
+    }
+    $fileAt = @file_get_contents(sas_online_flags_throttle_file());
+    if ($fileAt !== false && (int) $fileAt > $at) {
+        $at = (int) $fileAt;
     }
     if (!$force && $at > 0 && $minInterval > 0 && (time() - $at) < $minInterval) {
         return -1;

@@ -830,6 +830,9 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'refresh_now') {
 
 if (isset($_GET['live']) && $_GET['live'] === '1') {
     header('Content-Type: application/json; charset=utf-8');
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
     $html = '<tr><td colspan="16">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
     $liveCount = 0;
     try {
@@ -948,20 +951,7 @@ if ($showAll) {
 
 $sql = '';
 try {
-    // فتح الصفحة: حدّث حالة الاتصال والـ IP قبل الرسم
-    if ($sasReady && function_exists('sas_refresh_online_flags_throttled')) {
-        try {
-            sas_refresh_online_flags_throttled($pdo, $config, 5, false);
-        } catch (Exception $e) {
-        } catch (Error $e) {
-        }
-    } elseif ($sasReady && function_exists('sas_refresh_online_flags')) {
-        try {
-            sas_refresh_online_flags($pdo, $config);
-        } catch (Exception $e) {
-        } catch (Error $e) {
-        }
-    }
+    // لا ننتظر SAS هنا — الصفحة تفتح من الكاش فوراً، والأونلاين/IP يتحدثون بعد الرسم عبر ajax=live_table
     $sql = sas_cache_list_select_sql() . $fromSql . '
      WHERE ' . $where . '
      ORDER BY ' . $orderSql;
@@ -985,12 +975,17 @@ try {
 
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'live_table') {
     header('Content-Type: application/json; charset=utf-8');
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
     if ($sql === '') {
         echo json_encode(array('ok' => false, 'html' => '', 'last_error' => 'query'));
         exit;
     }
     try {
-        if (function_exists('sas_refresh_online_flags')) {
+        if (function_exists('sas_refresh_online_flags_throttled')) {
+            sas_refresh_online_flags_throttled($pdo, $config, 4, false);
+        } elseif (function_exists('sas_refresh_online_flags')) {
             sas_refresh_online_flags($pdo, $config);
         }
         $stmt = $pdo->prepare($sql);
@@ -2359,7 +2354,6 @@ render_header(t('sas'), 'sas', '');
     <?php endif; ?>
 
     <div class="sas-legend">
-        <span class="meta" id="sasBuildStamp" style="font-weight:800;color:#2563eb">build-911c</span>
         <span><i class="status-sq status-online"></i> <?php echo e($lang === 'en' ? 'Active + connected' : 'فعال ومتصل'); ?></span>
         <span><i class="status-sq status-active"></i> <?php echo e($lang === 'en' ? 'Active' : 'فعال غير متصل'); ?></span>
         <span><i class="status-sq status-expired"></i> <?php echo e($lang === 'en' ? 'Expired' : 'منتهي'); ?></span>

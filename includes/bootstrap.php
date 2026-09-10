@@ -296,64 +296,72 @@ try {
 } catch (Throwable $e) {
 }
 try {
-    if (function_exists('ensure_monthly_archives_table')) {
-        ensure_monthly_archives_table($pdo);
-    }
-} catch (Exception $e) {
-} catch (Throwable $e) {
-}
-try {
-    if (function_exists('ensure_rental_columns')) {
-        ensure_rental_columns($pdo);
-    }
-} catch (Exception $e) {
-} catch (Throwable $e) {
-}
-try {
-    if (function_exists('ensure_subscriber_grace_days_column')) {
-        ensure_subscriber_grace_days_column($pdo);
-    }
-} catch (Exception $e) {
-} catch (Throwable $e) {
-}
-try {
-    if (function_exists('ensure_preferred_plan_column')) {
-        ensure_preferred_plan_column($pdo);
-    }
-} catch (Exception $e) {
-} catch (Throwable $e) {
-}
-try {
-    if (function_exists('ensure_subscriber_agent_column')) {
-        ensure_subscriber_agent_column($pdo);
-    }
-} catch (Exception $e) {
-} catch (Throwable $e) {
-}
-try {
-    if (function_exists('ensure_phone_not_unique')) {
-        ensure_phone_not_unique($pdo);
-    }
-} catch (Exception $e) {
-} catch (Throwable $e) {
-}
-try {
-    if (function_exists('ensure_name_unique')) {
-        ensure_name_unique($pdo);
-    }
-} catch (Exception $e) {
-} catch (Throwable $e) {
-}
-try {
-    if (function_exists('ensure_sas_columns')) {
-        ensure_sas_columns($pdo);
-    }
-} catch (Exception $e) {
-} catch (Throwable $e) {
-}
-try {
-    if (function_exists('ensure_sas_users_cache_table')) {
-        ensure_sas_users_cache_table($pdo);
+    // فحص المخطط مرة كل ساعة لكل جلسة — لا تكرّر SHOW COLUMNS بكل طلب
+    $needSchema = empty($_SESSION['_schema_ok_at']) || (time() - (int) $_SESSION['_schema_ok_at']) > 3600;
+    if ($needSchema) {
+        if (function_exists('ensure_monthly_archives_table')) {
+            ensure_monthly_archives_table($pdo);
+        }
+        if (function_exists('ensure_rental_columns')) {
+            ensure_rental_columns($pdo);
+        }
+        if (function_exists('ensure_subscriber_grace_days_column')) {
+            ensure_subscriber_grace_days_column($pdo);
+        }
+        if (function_exists('ensure_preferred_plan_column')) {
+            ensure_preferred_plan_column($pdo);
+        }
+        if (function_exists('ensure_subscriber_agent_column')) {
+            ensure_subscriber_agent_column($pdo);
+        }
+        if (function_exists('ensure_phone_not_unique')) {
+            ensure_phone_not_unique($pdo);
+        }
+        if (function_exists('ensure_name_unique')) {
+            ensure_name_unique($pdo);
+        }
+        if (function_exists('ensure_sas_columns')) {
+            ensure_sas_columns($pdo);
+        }
+        if (function_exists('ensure_sas_users_cache_table')) {
+            ensure_sas_users_cache_table($pdo);
+        }
+        // ترقية خفيفة: عمود ترتيب الباقات
+        try {
+            $col = $pdo->query("SHOW COLUMNS FROM service_plans LIKE 'sort_order'")->fetch();
+            if (!$col) {
+                $pdo->exec('ALTER TABLE service_plans ADD COLUMN sort_order INT NOT NULL DEFAULT 100 AFTER cost_price');
+                $pdo->exec('UPDATE service_plans SET sort_order = id * 10');
+            }
+        } catch (Exception $e) {
+        }
+        // ترقية: دين أغراض بدون اشتراك
+        try {
+            $col = $pdo->query("SHOW COLUMNS FROM invoices LIKE 'subscription_id'")->fetch();
+            if ($col && strtoupper($col['Null']) === 'NO') {
+                $fkRows = $pdo->query(
+                    "SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE
+                     WHERE TABLE_SCHEMA = DATABASE()
+                       AND TABLE_NAME = 'invoices'
+                       AND COLUMN_NAME = 'subscription_id'
+                       AND REFERENCED_TABLE_NAME IS NOT NULL"
+                )->fetchAll();
+                foreach ($fkRows as $fk) {
+                    $pdo->exec('ALTER TABLE invoices DROP FOREIGN KEY `' . str_replace('`', '``', $fk['CONSTRAINT_NAME']) . '`');
+                }
+                $pdo->exec('ALTER TABLE invoices MODIFY subscription_id INT UNSIGNED NULL');
+                try {
+                    $pdo->exec(
+                        'ALTER TABLE invoices
+                         ADD CONSTRAINT fk_inv_subscription
+                         FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE'
+                    );
+                } catch (Exception $e3) {
+                }
+            }
+        } catch (Exception $e) {
+        }
+        $_SESSION['_schema_ok_at'] = time();
     }
 } catch (Exception $e) {
 } catch (Throwable $e) {
@@ -375,44 +383,4 @@ try {
     }
 } catch (Exception $e) {
 } catch (Throwable $e) {
-}
-
-// ترقية خفيفة: عمود ترتيب الباقات
-try {
-    $col = $pdo->query("SHOW COLUMNS FROM service_plans LIKE 'sort_order'")->fetch();
-    if (!$col) {
-        $pdo->exec('ALTER TABLE service_plans ADD COLUMN sort_order INT NOT NULL DEFAULT 100 AFTER cost_price');
-        $pdo->exec('UPDATE service_plans SET sort_order = id * 10');
-    }
-} catch (Exception $e) {
-    // تجاهل إن الجدول غير موجود بعد
-}
-
-// ترقية: دين أغراض بدون اشتراك (subscription_id اختياري)
-try {
-    $col = $pdo->query("SHOW COLUMNS FROM invoices LIKE 'subscription_id'")->fetch();
-    if ($col && strtoupper($col['Null']) === 'NO') {
-        $fkRows = $pdo->query(
-            "SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE
-             WHERE TABLE_SCHEMA = DATABASE()
-               AND TABLE_NAME = 'invoices'
-               AND COLUMN_NAME = 'subscription_id'
-               AND REFERENCED_TABLE_NAME IS NOT NULL"
-        )->fetchAll();
-        foreach ($fkRows as $fk) {
-            $pdo->exec('ALTER TABLE invoices DROP FOREIGN KEY `' . str_replace('`', '``', $fk['CONSTRAINT_NAME']) . '`');
-        }
-        $pdo->exec('ALTER TABLE invoices MODIFY subscription_id INT UNSIGNED NULL');
-        try {
-            $pdo->exec(
-                'ALTER TABLE invoices
-                 ADD CONSTRAINT fk_inv_subscription
-                 FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE'
-            );
-        } catch (Exception $e3) {
-            // تجاهل إن القيد موجود
-        }
-    }
-} catch (Exception $e) {
-    // تجاهل
 }

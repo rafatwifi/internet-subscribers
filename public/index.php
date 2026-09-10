@@ -52,6 +52,11 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
                 sas_clear_unused_card_cache();
             }
         }
+        $cachedLatMs = isset($_SESSION['sas_latency_ms']) ? $_SESSION['sas_latency_ms'] : null;
+        // حرّر الجلسة قبل طلبات الساس/البنغ حتى لا يتوقف التنقّل
+        if (function_exists('app_session_close')) {
+            app_session_close();
+        }
         if (function_exists('sas_manager_reward_points')) {
             list($ptsOk, $ptsVal) = sas_manager_reward_points($config, $pdo);
             if ($ptsOk && $ptsVal !== null) {
@@ -65,12 +70,18 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
             if (isset($lat['ms']) && $lat['ms'] !== null) {
                 $out['sas_ms'] = (int) $lat['ms'];
                 $out['balance'] = number_format((float) $lat['ms'], 0) . ' ms';
+                if (session_status() !== PHP_SESSION_ACTIVE) {
+                    @session_start();
+                }
                 $_SESSION['sas_latency_ms'] = (int) $lat['ms'];
                 $_SESSION['sas_latency_host'] = isset($lat['host']) ? (string) $lat['host'] : '';
+                if (function_exists('app_session_close')) {
+                    app_session_close();
+                }
             }
-        } elseif (isset($_SESSION['sas_latency_ms'])) {
-            $out['sas_ms'] = (int) $_SESSION['sas_latency_ms'];
-            $out['balance'] = number_format((float) $_SESSION['sas_latency_ms'], 0) . ' ms';
+        } elseif ($cachedLatMs !== null && $cachedLatMs !== '') {
+            $out['sas_ms'] = (int) $cachedLatMs;
+            $out['balance'] = number_format((float) $cachedLatMs, 0) . ' ms';
         }
 
         $needCardsRefresh = $force;
@@ -460,7 +471,6 @@ if ($sasReadyDash) {
       .catch(function () {});
   }
   loadDash(false);
-  setTimeout(function () { loadDash(false); }, 1500);
   setInterval(function () { loadDash(false); }, 120000);
 })();
 </script>

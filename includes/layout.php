@@ -46,8 +46,9 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     <link rel="apple-touch-icon" href="<?php echo e($brandIcon !== '' ? $brandIcon : 'assets/apple-touch-icon.png?v=2'); ?>">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="assets/style.css?v=ui5">
+    <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+    <noscript><link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet"></noscript>
+    <link rel="stylesheet" href="assets/style.css?v=ui6">
     <style>
         <?php if ($bgMode === 'image' && $bgUrl !== ''): ?>
         body.app-bg-image {
@@ -289,6 +290,14 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
                 <div class="alert alert-<?php echo e($flash['type']); ?>"><?php echo e($flash['message']); ?></div>
             <?php endif; ?>
 <?php
+    // بعد رسم الهيدر: حرّر قفل الجلسة لطلبات GET حتى لا يتوقف التنقّل على أجاكس خلفي
+    if (
+        (!isset($_SERVER['REQUEST_METHOD']) || strtoupper((string) $_SERVER['REQUEST_METHOD']) === 'GET')
+        && empty($GLOBALS['app_keep_session'])
+        && function_exists('app_session_close')
+    ) {
+        app_session_close();
+    }
 }
 
 function render_footer()
@@ -305,8 +314,24 @@ function render_footer()
     <span class="fab-menu-bars" aria-hidden="true"><i></i><i></i><i></i></span>
 </button>
 <style>
-body.nav-pending .main { opacity: .72; transition: opacity .12s ease; pointer-events: none; }
-body.nav-pending .side-links a { opacity: .85; }
+.nav-progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  z-index: 100000;
+  pointer-events: none;
+  display: none;
+  background: linear-gradient(90deg, #38bdf8 0%, #2563eb 45%, #38bdf8 100%);
+  background-size: 220% 100%;
+  animation: navProgressSlide 0.9s linear infinite;
+}
+body.nav-pending .nav-progress { display: block; }
+@keyframes navProgressSlide {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
 </style>
 <script>
 (function () {
@@ -318,6 +343,15 @@ body.nav-pending .side-links a { opacity: .85; }
   var sidebar = document.getElementById('sidebar');
   var key = 'sidebar_collapsed';
   var mobile = function () { return window.matchMedia('(max-width: 900px)').matches; };
+
+  // شريط تقدّم خفيف بدل تبهيت الصفحة (كان يسبب مظهر ضبابي عند التنقّل)
+  if (!document.getElementById('navProgress')) {
+    var barProg = document.createElement('div');
+    barProg.id = 'navProgress';
+    barProg.className = 'nav-progress';
+    barProg.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(barProg);
+  }
 
   function setCollapsed(on) {
     if (!app) return;

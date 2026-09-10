@@ -8,6 +8,10 @@
 require_once __DIR__ . '/../includes/bootstrap.php';
 require_login();
 
+if (function_exists('app_session_close')) {
+    app_session_close();
+}
+
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 
