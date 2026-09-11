@@ -429,6 +429,30 @@ $st = $pdo->prepare(
 $st->execute(array(':id' => $id));
 $msgLogs = $st->fetchAll();
 $lastMsg = $msgLogs ? $msgLogs[0] : null;
+$everWaOk = false;
+foreach ($msgLogs as $mlChk) {
+    if (!empty($mlChk['success'])) {
+        $everWaOk = true;
+        break;
+    }
+}
+$lastNoWa = false;
+if ($lastMsg && empty($lastMsg['success'])) {
+    if (function_exists('subscriber_no_whatsapp_for_current')) {
+        $lastNoWa = subscriber_no_whatsapp_for_current(
+            isset($lastMsg['response_json']) ? $lastMsg['response_json'] : '',
+            isset($lastMsg['phone']) ? $lastMsg['phone'] : '',
+            isset($subscriber['phone']) ? $subscriber['phone'] : '',
+            $everWaOk
+        );
+    } elseif (function_exists('subscriber_msg_is_no_whatsapp')) {
+        $lastNoWa = subscriber_msg_is_no_whatsapp(isset($lastMsg['response_json']) ? $lastMsg['response_json'] : '');
+        if ($lastNoWa && function_exists('subscriber_should_hide_no_whatsapp')
+            && subscriber_should_hide_no_whatsapp(isset($subscriber['phone']) ? $subscriber['phone'] : '', $everWaOk)) {
+            $lastNoWa = false;
+        }
+    }
+}
 $activityLogs = fetch_subscriber_activity($pdo, $id, 150);
 $canEditDebts = function_exists('user_can_edit_debts') ? user_can_edit_debts() : false;
 
@@ -644,6 +668,8 @@ endif;
             echo 'g-cyan';
         } elseif (!empty($lastMsg['success'])) {
             echo 'g-green';
+        } elseif (!empty($lastNoWa)) {
+            echo 'g-red';
         } else {
             echo 'g-orange';
         }
@@ -655,13 +681,21 @@ endif;
                 echo e($lang === 'en' ? 'Not sent' : 'ما انرسلت');
             } elseif (!empty($lastMsg['success'])) {
                 echo e($lang === 'en' ? 'Sent' : 'أُرسلت');
+            } elseif (!empty($lastNoWa)) {
+                echo e($lang === 'en' ? 'No WhatsApp' : 'ماكو واتساب');
             } else {
                 echo e($lang === 'en' ? 'Failed' : 'فشلت');
             }
             ?>
         </div>
         <?php if ($lastMsg): ?>
-            <div class="hint"><?php echo e(message_short_summary($lastMsg['message_type'], $lastMsg['body'], !empty($lastMsg['success']))); ?></div>
+            <div class="hint"><?php
+                if (!empty($lastNoWa)) {
+                    echo e($lang === 'en' ? 'This number is not on WhatsApp' : 'لا يتوفر واتساب لدى المشترك');
+                } else {
+                    echo e(message_short_summary($lastMsg['message_type'], $lastMsg['body'], !empty($lastMsg['success'])));
+                }
+            ?></div>
         <?php endif; ?>
     </div>
 </div>
@@ -878,8 +912,13 @@ if ($activeSubCard) {
 <div class="panel" style="border-color:#f5c6cb;background:#fff8f8">
     <div class="actions" style="margin-top:0;align-items:center">
         <div style="flex:1">
+            <?php if (!empty($lastNoWa)): ?>
+            <strong style="color:#c0392b"><?php echo e($lang === 'en' ? 'No WhatsApp on this number' : 'ماكو واتساب عند هذا الرقم'); ?></strong>
+            <div class="msg-short" style="margin-top:4px"><?php echo e($lang === 'en' ? 'Try again after confirming the number, or if the number was changed.' : 'جرّب إعادة الإرسال بعد التأكد من الرقم، أو إذا بدّلت الرقم.'); ?></div>
+            <?php else: ?>
             <strong style="color:#c0392b"><?php echo e($lang === 'en' ? 'Last message failed' : 'آخر رسالة فشلت'); ?></strong>
             <div class="msg-short" style="margin-top:4px"><?php echo e(message_short_summary($lastMsg['message_type'], $lastMsg['body'], false)); ?></div>
+            <?php endif; ?>
         </div>
         <form method="post">
             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
@@ -1244,7 +1283,18 @@ if ($activeSubCard) {
                 <?php
                 $ok = !empty($log['success']);
                 $resolved = !$ok && !empty($msgResolvedMap[(int) $log['id']]);
-                $short = message_short_summary($log['message_type'], $log['body'], $ok);
+                $noWaLog = !$ok && function_exists('subscriber_no_whatsapp_for_current')
+                    ? subscriber_no_whatsapp_for_current(
+                        isset($log['response_json']) ? $log['response_json'] : '',
+                        isset($log['phone']) ? $log['phone'] : '',
+                        isset($subscriber['phone']) ? $subscriber['phone'] : '',
+                        $everWaOk
+                    )
+                    : (!$ok && function_exists('subscriber_msg_is_no_whatsapp')
+                        && subscriber_msg_is_no_whatsapp(isset($log['response_json']) ? $log['response_json'] : ''));
+                $short = $noWaLog
+                    ? ($lang === 'en' ? 'This number is not on WhatsApp' : 'لا يتوفر واتساب لدى المشترك')
+                    : message_short_summary($log['message_type'], $log['body'], $ok);
                 $resolvedTitle = $lang === 'en' ? 'Resolved by a later successful send' : 'انحلت لاحقاً بإرسال ناجح';
                 $itemCls = $ok ? '' : ($resolved ? ' msg-resolved' : ' msg-failed');
                 ?>
@@ -1257,6 +1307,8 @@ if ($activeSubCard) {
                                 <?php echo e($lang === 'en' ? 'Fail → Fixed' : 'فشل → انحلت'); ?>
                             </span>
                             <span class="msg-resolved-arrow" title="<?php echo e($resolvedTitle); ?>">→</span>
+                        <?php elseif ($noWaLog): ?>
+                            <span class="badge expired"><?php echo e($lang === 'en' ? 'No WhatsApp' : 'ماكو واتساب'); ?></span>
                         <?php else: ?>
                             <span class="badge expired"><?php echo e($lang === 'en' ? 'Failed' : 'فشلت'); ?></span>
                         <?php endif; ?>

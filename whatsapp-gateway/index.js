@@ -36,6 +36,23 @@ let qrHoldUntil = 0;
 let pairingQuietUntil = 0;
 let lastWipeAt = 0;
 let useInsecureTls = String(process.env.WA_TLS_INSECURE || '') === '1';
+const knownWaFile = path.join(AUTH_DIR, 'known-wa.json');
+const knownWa = Object.create(null);
+try {
+  if (fs.existsSync(knownWaFile)) {
+    const saved = JSON.parse(fs.readFileSync(knownWaFile, 'utf8'));
+    if (saved && typeof saved === 'object') {
+      Object.keys(saved).forEach(function (k) { knownWa[k] = saved[k]; });
+    }
+  }
+} catch (e) {}
+
+function rememberWa(phone, jid) {
+  knownWa[phone] = { jid: jid, at: Date.now() };
+  try {
+    fs.writeFileSync(knownWaFile, JSON.stringify(knownWa));
+  } catch (e) {}
+}
 
 const FALLBACK_WA_VERSION = [2, 3000, 1043857760];
 const STALE_WA_BUILDS = {
@@ -364,20 +381,71 @@ async function hardLogout() {
   return { success: true, message: 'Logged out. Wait ~12s for new QR...' };
 }
 
+function slimSendResult(result) {
+  const key = result && result.key ? result.key : {};
+  return {
+    id: key.id || null,
+    remoteJid: key.remoteJid || null,
+    fromMe: !!key.fromMe
+  };
+}
+
 async function sendText(phone, message) {
   if (!sock || !ready) throw new Error('WhatsApp not ready. Scan QR first.');
   const normalized = normalizePhone(phone);
-  const jid = normalized + '@s.whatsapp.net';
-  const info = await sock.onWhatsApp(normalized);
-  const exists = Array.isArray(info) && info[0] && info[0].exists;
-  if (!exists) {
-    const err = new Error('Number not on WhatsApp: ' + normalized);
-    err.code = 'no_whatsapp';
+  if (!normalized || normalized.length < 10) {
+    const err = new Error('Invalid phone number');
+    err.code = 'bad_phone';
     throw err;
   }
-  const realJid = (info[0].jid) ? info[0].jid : jid;
+  const pnJid = normalized + '@s.whatsapp.net';
+  let realJid = (knownWa[normalized] && knownWa[normalized].jid) ? knownWa[normalized].jid : pnJid;
+
+  try {
+    const info = await Promise.race([
+      sock.onWhatsApp(normalized),
+      new Promise(function (resolve) {
+        setTimeout(function () { resolve(null); }, 3000);
+      })
+    ]);
+    if (Array.isArray(info) && info[0] && info[0].exists === true && info[0].jid) {
+      realJid = info[0].jid;
+      rememberWa(normalized, realJid);
+    }
+  } catch (e) {}
+
   await delay(SEND_DELAY_MS);
-  return sock.sendMessage(realJid, { text: String(message) });
+  const sendOpts = { timeoutMs: 25000 };
+
+  try {
+    const result = await sock.sendMessage(realJid, { text: String(message) }, sendOpts);
+    rememberWa(normalized, realJid);
+    return result;
+  } catch (e) {
+    const msg = (e && e.message) ? e.message : String(e);
+    if (/not on WhatsApp/i.test(msg) || (e && e.code === 'no_whatsapp')) {
+      const err = new Error('Number not on WhatsApp: ' + normalized);
+      err.code = 'no_whatsapp';
+      throw err;
+    }
+    if (realJid !== pnJid) {
+      const result2 = await sock.sendMessage(pnJid, { text: String(message) }, sendOpts);
+      rememberWa(normalized, pnJid);
+      return result2;
+    }
+    console.error('send fail', normalized, realJid, msg);
+    throw e;
+  }
+}
+
+let sendChain = Promise.resolve();
+function sendTextQueued(phone, message) {
+  const run = sendChain.then(
+    function () { return sendText(phone, message); },
+    function () { return sendText(phone, message); }
+  );
+  sendChain = run.then(function () {}, function () {});
+  return run;
 }
 
 const app = express();
@@ -459,10 +527,11 @@ app.post('/send', checkKey, async (req, res) => {
     if (!body.phone || !body.message) {
       return res.status(400).json({ success: false, error: 'phone and message required' });
     }
-    const result = await sendText(body.phone, body.message);
-    res.json({ success: true, result: result });
+    const result = await sendTextQueued(body.phone, body.message);
+    res.json({ success: true, result: slimSendResult(result) });
   } catch (err) {
     const msg = (err && err.message) ? err.message : String(err);
+    console.error('POST /send', msg);
     const payload = { success: false, error: msg };
     if ((err && err.code === 'no_whatsapp') || /not on WhatsApp/i.test(msg)) {
       payload.code = 'no_whatsapp';

@@ -833,34 +833,23 @@ if (isset($_GET['live']) && $_GET['live'] === '1') {
     if (function_exists('app_session_close')) {
         app_session_close();
     }
-    $html = '<tr><td colspan="16">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
+    $html = '<tr><td colspan="17">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
     $liveCount = 0;
     try {
-        // بحث حي: حدّث أونلاين/IP من الساس قبل العرض
-        if ($sasReady) {
-            if ($q !== '' && strlen($q) >= 2 && function_exists('sas_cache_pull_search')) {
-                try {
-                    sas_cache_pull_search($pdo, $config, $q);
-                } catch (Exception $e) {
-                } catch (Error $e) {
-                }
-            }
-            if (function_exists('sas_refresh_online_flags_throttled')) {
-                sas_refresh_online_flags_throttled($pdo, $config, 2, false);
-            } elseif (function_exists('sas_refresh_online_flags')) {
-                sas_refresh_online_flags($pdo, $config);
-            }
-        }
+        // بحث حي من الكاش فقط — لا ننتظر الساس حتى لا تعلق الأعمدة بعد البحث
         $fromSql = function_exists('sas_cache_list_from_sql')
             ? sas_cache_list_from_sql()
             : ' FROM sas_users_cache c LEFT JOIN subscribers s ON s.id = c.local_subscriber_id';
-        $sqlLive = sas_cache_list_select_sql(true) . $fromSql . '
+        $sqlLive = sas_cache_list_select_sql(false) . $fromSql . '
             WHERE ' . $where . '
             ORDER BY c.display_name ASC
             LIMIT 80';
         $stLive = $pdo->prepare($sqlLive);
         $stLive->execute($params);
         $liveRows = $stLive->fetchAll();
+        if (function_exists('phones_known_register_from_rows')) {
+            phones_known_register_from_rows($liveRows, $pdo);
+        }
         $html = '';
         $nLive = 1;
         foreach ($liveRows as $liveRow) {
@@ -868,12 +857,12 @@ if (isset($_GET['live']) && $_GET['live'] === '1') {
         }
         $liveCount = count($liveRows);
         if ($html === '') {
-            $html = '<tr><td colspan="16">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
+            $html = '<tr><td colspan="17">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
         }
     } catch (Exception $e) {
-        $html = '<tr><td colspan="16">' . e($e->getMessage()) . '</td></tr>';
+        $html = '<tr><td colspan="17">' . e($e->getMessage()) . '</td></tr>';
     } catch (Error $e) {
-        $html = '<tr><td colspan="16">' . e($e->getMessage()) . '</td></tr>';
+        $html = '<tr><td colspan="17">' . e($e->getMessage()) . '</td></tr>';
     }
     echo json_encode(array(
         'html' => $html,
@@ -997,7 +986,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'live_table') {
             $html .= sas_render_table_row($liveRow, $nLive++, $config, $lang);
         }
         if ($html === '') {
-            $html = '<tr><td colspan="16">' . e($lang === 'en' ? 'No SAS users in cache yet' : 'ماكو مشتركين من الساس بعد') . '</td></tr>';
+            $html = '<tr><td colspan="17">' . e($lang === 'en' ? 'No SAS users in cache yet' : 'ماكو مشتركين من الساس بعد') . '</td></tr>';
         }
         echo json_encode(array('ok' => true, 'html' => $html, 'count' => count($rows)));
     } catch (Exception $e) {
@@ -1154,6 +1143,60 @@ render_header(t('sas'), 'sas', '');
   font-weight: 700;
   opacity: 1;
   text-align: left;
+}
+.sas-radius-page #subsTable .col-msg {
+  width: 96px;
+  min-width: 72px;
+  max-width: 160px;
+}
+.sas-radius-page #subsTable .msg-status-row {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+.sas-radius-page #subsTable .dot-msg {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  vertical-align: middle;
+}
+.sas-radius-page #subsTable .dot-msg.ok { background: #34c759; }
+.sas-radius-page #subsTable .dot-msg.fail { background: #ff9f0a; }
+.sas-radius-page #subsTable .dot-msg.off { background: #cbd5e1; }
+.sas-radius-page #subsTable .msg-nowa {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: rgba(220, 38, 38, 0.12);
+  color: #b91c1c;
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+  line-height: 1;
+}
+.sas-radius-page #subsTable .msg-retry-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 0;
+  background: #fff4e5;
+  color: #e67e22;
+  box-shadow: 0 1px 0 rgba(230, 126, 34, 0.2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  transition: transform .12s ease, background .12s ease;
+}
+.sas-radius-page #subsTable .msg-retry-btn:hover {
+  background: #ffe0b8;
+  color: #d35400;
+  transform: rotate(-20deg);
 }
 #subsTable tbody tr.sas-row-ctx {
   outline: 2px solid #2563eb;
@@ -2433,6 +2476,7 @@ render_header(t('sas'), 'sas', '');
                 <th class="col-traf" title="<?php echo e($lang === 'en' ? 'Daily traffic' : 'الاستهلاك اليومي'); ?>"><?php echo e($lang === 'en' ? 'Daily' : 'الاستهلاك'); ?></th>
                 <th class="col-grace" title="<?php echo e($lang === 'en' ? 'Grace days' : 'أيام السماح'); ?>"><?php echo e($lang === 'en' ? 'Grace' : 'السماح'); ?></th>
                 <th class="col-days" title="<?php echo e($lang === 'en' ? 'Remaining days' : 'الأيام المتبقية'); ?>"><?php echo sas_sort_link('days', $lang === 'en' ? 'Days left' : 'المتبقي', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
+                <th class="col-msg" title="<?php echo e($lang === 'en' ? 'Last message' : 'آخر رسالة'); ?>"><?php echo e($lang === 'en' ? 'Msg' : 'الرسالة'); ?></th>
             </tr>
             </thead>
             <tbody id="subsTableBody">
@@ -2442,7 +2486,10 @@ render_header(t('sas'), 'sas', '');
                 $emptyMsg = ($sasReady && $cacheCount <= 0)
                     ? ($lang === 'en' ? 'Loading users from SAS…' : 'جاري جلب المشتركين من الساس…')
                     : ($lang === 'en' ? 'No SAS users in cache yet' : 'ماكو مشتركين من الساس بعد');
-                echo '<tr><td colspan="16">' . e($emptyMsg) . '</td></tr>';
+                echo '<tr><td colspan="17">' . e($emptyMsg) . '</td></tr>';
+            }
+            if (function_exists('phones_known_register_from_rows')) {
+                phones_known_register_from_rows($rows, $pdo);
             }
             foreach ($rows as $row) {
                 echo sas_render_table_row($row, $n++, $config, $lang);
@@ -2485,6 +2532,8 @@ render_header(t('sas'), 'sas', '');
 </div>
 
 <div class="ops-dropdown hidden" id="opsDropdown" role="menu">
+    <a class="ops-item" href="sas_user.php?new=1" id="opsAddLink"><?php echo e($lang === 'en' ? 'Add subscriber' : 'إضافة مشترك جديد'); ?></a>
+    <div class="ops-sep" id="opsSep" hidden></div>
     <div class="ops-item" id="opsItemHint" style="cursor:default;color:#64748b"><?php echo e($lang === 'en' ? 'Select a subscriber first' : 'حدد مشتركاً من الجدول أولاً'); ?></div>
     <button type="button" class="ops-item" data-ops="open" id="opsItemOpen" hidden><?php echo e($lang === 'en' ? 'Edit' : 'تعديل'); ?></button>
     <button type="button" class="ops-item" data-ops="pay" id="opsItemPay" hidden><?php echo e(t('pay_debts')); ?></button>
@@ -2590,6 +2639,12 @@ render_header(t('sas'), 'sas', '');
     <div class="cols-check ops-item" data-col-row="days">
         <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
         <label><input type="checkbox" data-col="days" checked> <?php echo e($lang === 'en' ? 'Remaining Days' : 'الأيام المتبقية'); ?></label>
+        <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
+        <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
+    </div>
+    <div class="cols-check ops-item" data-col-row="msg">
+        <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
+        <label><input type="checkbox" data-col="msg" checked> <?php echo e($lang === 'en' ? 'Message' : 'الرسالة'); ?></label>
         <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
         <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
     </div>
@@ -2902,7 +2957,7 @@ render_header(t('sas'), 'sas', '');
   var liveBusy = false;
   var COLS_KEY = 'sas_table_cols_v1';
   var ORDER_KEY = 'sas_table_col_order_v1';
-  var DEFAULT_COL_ORDER = ['num','status','user','ip','fn','ln','phone','exp','parent','pkg','rent','debt','traf','grace','days'];
+  var DEFAULT_COL_ORDER = ['num','status','user','ip','fn','ln','phone','exp','parent','pkg','rent','debt','traf','grace','days','msg'];
   function loadLocalCols() {
     try {
       var raw = localStorage.getItem(COLS_KEY);
@@ -3155,6 +3210,7 @@ render_header(t('sas'), 'sas', '');
     var rows = selectedRows();
     var n = rows.length;
     var one = n === 1 ? rows[0] : null;
+    showEl(document.getElementById('opsSep'), n > 0);
     showEl(document.getElementById('opsItemHint'), n === 0);
     showEl(document.getElementById('opsItemOpen'), !!one);
     showEl(document.getElementById('opsItemPay'), n >= 1);
@@ -3307,6 +3363,18 @@ render_header(t('sas'), 'sas', '');
     });
     // كلك يسار: تظليل السطر (بدون مسحه من closeMenus)
     tbody.addEventListener('click', function (e) {
+      var retry = e.target && e.target.closest ? e.target.closest('.msg-retry-btn') : null;
+      if (retry && tbody.contains(retry)) {
+        e.preventDefault();
+        e.stopPropagation();
+        var fr = document.getElementById('opsRetryForm');
+        var rid = fr && fr.querySelector('input[name="id"]');
+        var lid = fr && fr.querySelector('input[name="log_id"]');
+        if (rid) rid.value = retry.getAttribute('data-id') || '';
+        if (lid) lid.value = retry.getAttribute('data-log-id') || '';
+        if (fr) fr.submit();
+        return;
+      }
       var tr = e.target && e.target.closest ? e.target.closest('tr[data-id]') : null;
       if (!tr || !tbody.contains(tr)) return;
       markSasRowCtx(tr);
@@ -4265,6 +4333,8 @@ render_header(t('sas'), 'sas', '');
   function applyOrder() {
     var table = document.getElementById('subsTable');
     if (!table || !colOrder || !colOrder.length) return;
+    var def = DEFAULT_COL_ORDER.join(',');
+    if (colOrder.join(',') === def) return;
     var rows = table.querySelectorAll('tr');
     for (var i = 0; i < rows.length; i++) {
       var row = rows[i];
@@ -4485,7 +4555,14 @@ render_header(t('sas'), 'sas', '');
         if (d && d.html) {
           tbody.innerHTML = d.html;
           syncBulk();
-          applyCols();
+          applyCols(true);
+          if (colOrder.join(',') !== DEFAULT_COL_ORDER.join(',')) {
+            if (window.requestAnimationFrame) {
+              window.requestAnimationFrame(function () { applyOrder(); });
+            } else {
+              applyOrder();
+            }
+          }
         }
       }).catch(function () {});
   }

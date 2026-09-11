@@ -2938,7 +2938,6 @@ th.status-cell {
 }
 @media (max-width: 860px) {
   #subsTable .col-num,
-  #subsTable .col-msg,
   #subsTable .col-month {
     display: none;
   }

@@ -48,7 +48,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
     <noscript><link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet"></noscript>
-    <link rel="stylesheet" href="assets/style.css?v=ui6">
+    <link rel="stylesheet" href="assets/style.css?v=ui8">
     <style>
         <?php if ($bgMode === 'image' && $bgUrl !== ''): ?>
         body.app-bg-image {

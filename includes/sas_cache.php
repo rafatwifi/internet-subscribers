@@ -2612,6 +2612,9 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
         if ($patch) {
             sas_cache_patch($pdo, $username, $patch);
         }
+        if (isset($payload['phone'])) {
+            sas_cache_sync_local_phone($pdo, $username, $payload['phone']);
+        }
         if ($renamedOk) {
             try {
                 $pdo->prepare('UPDATE sas_users_cache SET username = :n WHERE username = :o')
@@ -2965,6 +2968,34 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
         return true;
     } catch (Exception $e) {
         return false;
+    }
+}
+
+function sas_cache_sync_local_phone($pdo, $username, $phone)
+{
+    $username = trim((string) $username);
+    if ($username === '') {
+        return;
+    }
+    $store = function_exists('normalize_phone') ? normalize_phone($phone) : trim((string) $phone);
+    if ($store === '') {
+        $store = trim((string) $phone);
+    }
+    try {
+        $lid = 0;
+        $st = $pdo->prepare('SELECT local_subscriber_id FROM sas_users_cache WHERE username = :u LIMIT 1');
+        $st->execute(array(':u' => $username));
+        $lid = (int) $st->fetchColumn();
+        if ($lid <= 0) {
+            $st2 = $pdo->prepare('SELECT id FROM subscribers WHERE sas_username = :u LIMIT 1');
+            $st2->execute(array(':u' => $username));
+            $lid = (int) $st2->fetchColumn();
+        }
+        if ($lid > 0) {
+            $pdo->prepare('UPDATE subscribers SET phone = :p WHERE id = :id')
+                ->execute(array(':p' => $store, ':id' => $lid));
+        }
+    } catch (Exception $e) {
     }
 }
 
@@ -3379,6 +3410,7 @@ function sas_cache_list_select_sql($light = false)
         NULL AS last_msg_type,
         NULL AS last_msg_body,
         NULL AS last_msg_response,
+        NULL AS last_msg_phone,
         NULL AS last_msg_at,
         NULL AS last_msg_id';
         return $sql;
@@ -3390,6 +3422,7 @@ function sas_cache_list_select_sql($light = false)
         (SELECT m.message_type FROM message_logs m WHERE m.subscriber_id = s.id ORDER BY m.id DESC LIMIT 1) AS last_msg_type,
         (SELECT m.body FROM message_logs m WHERE m.subscriber_id = s.id ORDER BY m.id DESC LIMIT 1) AS last_msg_body,
         (SELECT m.response_json FROM message_logs m WHERE m.subscriber_id = s.id ORDER BY m.id DESC LIMIT 1) AS last_msg_response,
+        (SELECT m.phone FROM message_logs m WHERE m.subscriber_id = s.id ORDER BY m.id DESC LIMIT 1) AS last_msg_phone,
         (SELECT m.created_at FROM message_logs m WHERE m.subscriber_id = s.id ORDER BY m.id DESC LIMIT 1) AS last_msg_at,
         (SELECT m.id FROM message_logs m WHERE m.subscriber_id = s.id ORDER BY m.id DESC LIMIT 1) AS last_msg_id';
     return $sql;
@@ -3495,10 +3528,10 @@ function sas_render_table_row($row, $n, $config, $lang)
 
     $hasMsg = isset($row['last_msg_at']) && $row['last_msg_at'] !== null && $row['last_msg_at'] !== '';
     $msgOk = $hasMsg && !empty($row['last_msg_ok']);
-    $msgResp = isset($row['last_msg_response']) ? $row['last_msg_response'] : '';
-    $noWa = $hasMsg && !$msgOk && function_exists('subscriber_msg_is_no_whatsapp')
-        && subscriber_msg_is_no_whatsapp($msgResp);
-    $msgFail = ($hasMsg && !$msgOk && !$noWa) ? '1' : '0';
+    $noWa = function_exists('subscriber_row_is_no_whatsapp')
+        ? subscriber_row_is_no_whatsapp($row)
+        : false;
+    $msgFail = ($hasMsg && !$msgOk) ? '1' : '0';
     $logId = (!empty($row['last_msg_id'])) ? (int) $row['last_msg_id'] : 0;
 
     $html = '<tr class="' . e($rowClass) . '"'
@@ -3606,6 +3639,19 @@ function sas_render_table_row($row, $n, $config, $lang)
         . e($username) . '" data-value="' . e($graceRaw) . '" title="' . e($editTip) . '">'
         . e($graceLabel) . '</span></td>';
     $html .= '<td class="col-days">' . e($daysLeft !== '' ? $daysLeft : '-') . '</td>';
+    $msgShort = $hasMsg
+        ? (function_exists('message_short_summary')
+            ? message_short_summary(isset($row['last_msg_type']) ? $row['last_msg_type'] : '', isset($row['last_msg_body']) ? $row['last_msg_body'] : '', $msgOk)
+            : '')
+        : ($lang === 'en' ? 'No message sent' : 'لم تُرسل رسالة');
+    if ($noWa) {
+        $msgShort = $lang === 'en' ? 'This number is not on WhatsApp' : 'لا يتوفر واتساب لدى المشترك';
+    }
+    $html .= '<td class="msg-status-cell col-msg" title="' . e($msgShort) . '">';
+    $html .= function_exists('msg_table_status_html')
+        ? msg_table_status_html($hasMsg, $msgOk, $noWa, $username, $logId, $lang)
+        : '<span class="dot-msg ' . ($hasMsg ? ($msgOk ? 'ok' : 'fail') : 'off') . '"></span>';
+    $html .= '</td>';
     $html .= '</tr>';
     return $html;
 }

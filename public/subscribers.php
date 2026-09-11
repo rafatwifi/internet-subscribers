@@ -607,6 +607,9 @@ if (isset($_GET['live']) && $_GET['live'] === '1') {
     $stLive = $pdo->prepare($sqlLive);
     $stLive->execute($paramsLive);
     $liveRows = $stLive->fetchAll();
+    if (function_exists('phones_known_register_from_rows')) {
+        phones_known_register_from_rows($liveRows, $pdo);
+    }
     $html = '';
     $nLive = 1;
     foreach ($liveRows as $liveRow) {
@@ -647,12 +650,14 @@ function subscribers_list_select_sql()
     (SELECT m.message_type FROM message_logs m WHERE m.subscriber_id = s.id ORDER BY m.id DESC LIMIT 1) AS last_msg_type,
     (SELECT m.body FROM message_logs m WHERE m.subscriber_id = s.id ORDER BY m.id DESC LIMIT 1) AS last_msg_body,
     (SELECT m.response_json FROM message_logs m WHERE m.subscriber_id = s.id ORDER BY m.id DESC LIMIT 1) AS last_msg_response,
+    (SELECT m.phone FROM message_logs m WHERE m.subscriber_id = s.id ORDER BY m.id DESC LIMIT 1) AS last_msg_phone,
     (SELECT m.created_at FROM message_logs m WHERE m.subscriber_id = s.id ORDER BY m.id DESC LIMIT 1) AS last_msg_at,
     (SELECT m.id FROM message_logs m WHERE m.subscriber_id = s.id ORDER BY m.id DESC LIMIT 1) AS last_msg_id,
     (SELECT GROUP_CONCAT(DISTINCT i.month_label ORDER BY i.month_label SEPARATOR \',\')
         FROM invoices i WHERE i.subscriber_id = s.id AND i.status = "unpaid") AS debt_months';
 }
 
+if (!function_exists('subscriber_msg_is_no_whatsapp')) {
 function subscriber_msg_is_no_whatsapp($response)
 {
     $response = (string) $response;
@@ -664,6 +669,7 @@ function subscriber_msg_is_no_whatsapp($response)
         || stripos($response, 'no_whatsapp') !== false
         || strpos($response, 'لا يتوفر واتساب') !== false
     );
+}
 }
 
 function render_subscriber_month_cell($row, $lang)
@@ -721,8 +727,9 @@ function render_subscriber_table_row($row, $n, $config, $lang)
     $searchText = strtolower($row['name'] . ' ' . format_phone_display($row['phone']) . ' ' . $row['phone']);
     $hasMsg = isset($row['last_msg_at']) && $row['last_msg_at'] !== null && $row['last_msg_at'] !== '';
     $msgOk = $hasMsg && !empty($row['last_msg_ok']);
-    $msgResp = isset($row['last_msg_response']) ? $row['last_msg_response'] : '';
-    $noWa = $hasMsg && !$msgOk && subscriber_msg_is_no_whatsapp($msgResp);
+    $noWa = function_exists('subscriber_row_is_no_whatsapp')
+        ? subscriber_row_is_no_whatsapp($row)
+        : ($hasMsg && !$msgOk && subscriber_msg_is_no_whatsapp(isset($row['last_msg_response']) ? $row['last_msg_response'] : ''));
     $msgShort = $hasMsg
         ? message_short_summary($row['last_msg_type'], $row['last_msg_body'], $msgOk)
         : ($lang === 'en' ? 'No message sent' : 'لم تُرسل رسالة');
@@ -749,7 +756,7 @@ function render_subscriber_table_row($row, $n, $config, $lang)
         ? $row['active_service']
         : (!empty($row['preferred_plan_name']) ? $row['preferred_plan_name'] : '-');
 
-    $msgFail = ($hasMsg && !$msgOk && !$noWa) ? '1' : '0';
+    $msgFail = ($hasMsg && !$msgOk) ? '1' : '0';
     $logId = (!empty($row['last_msg_id'])) ? (int) $row['last_msg_id'] : 0;
     $hasDays = $daysInfo ? '1' : '0';
 
@@ -803,18 +810,11 @@ function render_subscriber_table_row($row, $n, $config, $lang)
     }
     $html .= '</td>';
     $html .= render_subscriber_month_cell($row, $lang);
-    $html .= '<td class="msg-status-cell col-msg" title="' . e($msgShort) . '"><span class="msg-status-row">';
-    if (!$hasMsg) {
-        $html .= '<span class="dot-msg off"></span>';
-    } elseif ($msgOk) {
-        $html .= '<span class="dot-msg ok"></span>';
-    } elseif ($noWa) {
-        $html .= '<span class="dot-msg fail"></span>';
-        $html .= '<span class="msg-x" title="' . e('لا يتوفر واتساب لدى المشترك') . '">✕</span>';
-    } else {
-        $html .= '<span class="dot-msg fail"></span>';
-    }
-    $html .= '</span></td>';
+    $html .= '<td class="msg-status-cell col-msg" title="' . e($msgShort) . '">';
+    $html .= function_exists('msg_table_status_html')
+        ? msg_table_status_html($hasMsg, $msgOk, $noWa, (int) $row['id'], $logId, $lang)
+        : '<span class="dot-msg ' . ($hasMsg ? ($msgOk ? 'ok' : 'fail') : 'off') . '"></span>';
+    $html .= '</td>';
     $html .= '</tr>';
     return $html;
 }
@@ -1164,16 +1164,35 @@ function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
   width: 22px;
   height: 22px;
   border-radius: 999px;
-  border: 1px solid rgba(255, 159, 10, 0.45);
-  background: rgba(255, 159, 10, 0.14);
-  color: #b86a00;
-  font-size: 14px;
-  font-weight: 800;
-  line-height: 1;
+  border: 0;
+  background: #fff4e5;
+  color: #e67e22;
+  box-shadow: 0 1px 0 rgba(230, 126, 34, 0.2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
   padding: 0;
+  transition: transform .12s ease, background .12s ease;
 }
-#subsTable .msg-retry-btn:hover { background: rgba(255, 159, 10, 0.28); }
+#subsTable .msg-retry-btn:hover {
+  background: #ffe0b8;
+  color: #d35400;
+  transform: rotate(-20deg);
+}
+#subsTable .msg-nowa {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: rgba(220, 38, 38, 0.12);
+  color: #b91c1c;
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+  line-height: 1;
+}
 #subsTable .msg-x {
   display: inline-flex;
   align-items: center;
@@ -1515,6 +1534,9 @@ function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
             $n = $offset + 1;
             if (!$rows) {
                 echo '<tr><td colspan="10">' . e($lang === 'en' ? 'No subscribers' : 'ماكو مشتركين') . '</td></tr>';
+            }
+            if (function_exists('phones_known_register_from_rows')) {
+                phones_known_register_from_rows($rows, $pdo);
             }
             foreach ($rows as $row) {
                 echo render_subscriber_table_row($row, $n++, $config, $lang);
@@ -2063,6 +2085,18 @@ window.DEBT_ENTRY = {
     });
     // كلك يسار: تظليل السطر
     tbody.addEventListener('click', function (e) {
+      var retry = e.target && e.target.closest ? e.target.closest('.msg-retry-btn') : null;
+      if (retry && tbody.contains(retry)) {
+        e.preventDefault();
+        e.stopPropagation();
+        var fr = document.getElementById('opsRetryForm');
+        var rid = fr && fr.querySelector('input[name="id"]');
+        var lid = fr && fr.querySelector('input[name="log_id"]');
+        if (rid) rid.value = retry.getAttribute('data-id') || '';
+        if (lid) lid.value = retry.getAttribute('data-log-id') || '';
+        if (fr) fr.submit();
+        return;
+      }
       var tr = e.target && e.target.closest ? e.target.closest('tr[data-id]') : null;
       if (!tr || !tbody.contains(tr)) return;
       markRowCtx(tr);
@@ -2231,10 +2265,6 @@ window.DEBT_ENTRY = {
         if (!on) css.push('#subsTable ' + map[k] + '{display:none!important}');
         var inp = colsDrop.querySelector('input[data-col="' + k + '"]');
         if (inp) inp.checked = on;
-        Array.prototype.slice.call(table.querySelectorAll(map[k])).forEach(function (el) {
-          if (on) el.classList.remove('col-hide');
-          else el.classList.add('col-hide');
-        });
       });
       style.textContent = css.join('');
       table.setAttribute('data-cols', JSON.stringify(state));
