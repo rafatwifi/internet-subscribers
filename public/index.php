@@ -4,6 +4,57 @@ require_once __DIR__ . '/../includes/bootstrap.php';
 require_once __DIR__ . '/../includes/layout.php';
 require_login();
 
+$isEn = (isset($lang) && $lang === 'en');
+// ويدجت محاسبة الكروت: للمحاسب فقط (مو للأدمن/الكل)
+$showCardAccountingDash = function_exists('is_accountant_user') && is_accountant_user()
+    && function_exists('user_can') && user_can('card_accounting');
+$cardDashAgentId = 0;
+if ($showCardAccountingDash) {
+    $cardDashAgentId = accountant_linked_agent_id();
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['card_payment']) && $showCardAccountingDash) {
+    if (!verify_csrf(post('csrf'))) {
+        flash('error', $isEn ? 'Invalid request' : 'طلب غير صالح');
+        redirect('index.php');
+    }
+    $payAgentId = (int) post('agent_user_id', '0');
+    $linked = accountant_linked_agent_id();
+    if ($linked > 0) {
+        $payAgentId = $linked;
+    }
+    $amount = (float) post('amount', '0');
+    $note = trim((string) post('payment_note', ''));
+    $me = current_admin();
+    $meId = $me ? (int) $me['id'] : 0;
+    list($ok, $code) = record_card_payment($pdo, $payAgentId, $amount, $note, $meId);
+    if ($ok) {
+        if (function_exists('whatsapp_send') && $payAgentId > 0) {
+            try {
+                $agentRow = get_admin_user($pdo, $payAgentId);
+                $phone = '';
+                if ($agentRow && !empty($agentRow['phone'])) {
+                    $phone = trim((string) $agentRow['phone']);
+                }
+                if ($phone !== '') {
+                    $msg = $isEn
+                        ? ('Payment recorded: ' . money_format_iqd($amount, $config['currency']))
+                        : ('تم تسجيل دفعة: ' . money_format_iqd($amount, $config['currency']));
+                    if ($note !== '') {
+                        $msg .= ' — ' . $note;
+                    }
+                    whatsapp_send($config, $phone, $msg, 'card_payment');
+                }
+            } catch (Exception $e) {
+            }
+        }
+        flash('success', $isEn ? 'Payment recorded' : 'تم تسجيل الدفعة');
+    } else {
+        flash('error', card_transfer_error_message($code, isset($lang) ? $lang : 'ar'));
+    }
+    redirect('index.php#card-accounting');
+}
+
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
     header('Content-Type: application/json; charset=utf-8');
     $en = (isset($lang) && $lang === 'en');
@@ -135,23 +186,32 @@ if (empty($_SESSION['archive_months_at']) || (time() - (int) $_SESSION['archive_
     $_SESSION['archive_months_at'] = time();
 }
 
-$totalSubscribers = (int) $pdo->query('SELECT COUNT(*) FROM subscribers')->fetchColumn();
-$totalDebt = (float) $pdo->query("SELECT COALESCE(SUM(amount),0) FROM invoices WHERE status = 'unpaid'")->fetchColumn();
+$agentScope = function_exists('subscriber_agent_scope_sql') ? subscriber_agent_scope_sql('s') : '';
+$totalSubscribers = (int) $pdo->query('SELECT COUNT(*) FROM subscribers s WHERE 1=1' . $agentScope)->fetchColumn();
+$totalDebt = (float) $pdo->query(
+    "SELECT COALESCE(SUM(i.amount),0) FROM invoices i
+     JOIN subscribers s ON s.id = i.subscriber_id
+     WHERE i.status = 'unpaid'" . $agentScope
+)->fetchColumn();
 $receivedMonth = (float) $pdo->query(
-    "SELECT COALESCE(SUM(amount),0) FROM invoices
-     WHERE status = 'paid' AND DATE_FORMAT(paid_at, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')"
+    "SELECT COALESCE(SUM(i.amount),0) FROM invoices i
+     JOIN subscribers s ON s.id = i.subscriber_id
+     WHERE i.status = 'paid' AND DATE_FORMAT(i.paid_at, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')" . $agentScope
 )->fetchColumn();
 $profitMonth = (float) $pdo->query(
-    "SELECT COALESCE(SUM(profit),0) FROM invoices
-     WHERE status = 'paid' AND DATE_FORMAT(paid_at, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')"
+    "SELECT COALESCE(SUM(i.profit),0) FROM invoices i
+     JOIN subscribers s ON s.id = i.subscriber_id
+     WHERE i.status = 'paid' AND DATE_FORMAT(i.paid_at, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')" . $agentScope
 )->fetchColumn();
 $salesMonth = (float) $pdo->query(
-    "SELECT COALESCE(SUM(monthly_price),0) FROM subscriptions
-     WHERE DATE_FORMAT(created_at, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')"
+    "SELECT COALESCE(SUM(sub.monthly_price),0) FROM subscriptions sub
+     JOIN subscribers s ON s.id = sub.subscriber_id
+     WHERE DATE_FORMAT(sub.created_at, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')" . $agentScope
 )->fetchColumn();
 $activatedMonth = (int) $pdo->query(
-    "SELECT COUNT(*) FROM subscriptions
-     WHERE DATE_FORMAT(created_at, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')"
+    "SELECT COUNT(*) FROM subscriptions sub
+     JOIN subscribers s ON s.id = sub.subscriber_id
+     WHERE DATE_FORMAT(sub.created_at, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')" . $agentScope
 )->fetchColumn();
 // رأس المال = الربح + الديون
 $capitalMonth = $profitMonth + $totalDebt;
@@ -162,7 +222,7 @@ $rentalJoin = ' FROM subscribers s
         = CONVERT(s.sas_username USING utf8mb4) COLLATE utf8mb4_unicode_ci
      WHERE (s.rental_enabled = 1 OR s.rental_enabled = "1")
        AND s.rental_device_id IS NOT NULL
-       AND TRIM(s.rental_device_id) <> ""';
+       AND TRIM(s.rental_device_id) <> ""' . $agentScope;
 $rentalActiveSql = '(EXISTS (
          SELECT 1 FROM subscriptions sub
          WHERE sub.subscriber_id = s.id AND sub.status = "active" AND sub.end_date >= CURDATE()
@@ -181,18 +241,19 @@ $activeOnlineCount = (int) $pdo->query(
      WHERE EXISTS (
        SELECT 1 FROM subscriptions sub
        WHERE sub.subscriber_id = s.id AND sub.status = "active" AND sub.end_date >= CURDATE()
-     )'
+     )' . $agentScope
 )->fetchColumn();
 $expiredSubsCount = (int) $pdo->query(
     'SELECT COUNT(*) FROM subscribers s
      WHERE NOT EXISTS (
          SELECT 1 FROM subscriptions sub
          WHERE sub.subscriber_id = s.id AND sub.status = "active" AND sub.end_date >= CURDATE()
-       )'
+       )' . $agentScope
 )->fetchColumn();
 $expireTodayCount = (int) $pdo->query(
     'SELECT COUNT(DISTINCT sub.subscriber_id) FROM subscriptions sub
-     WHERE sub.status = "active" AND sub.end_date = CURDATE()'
+     JOIN subscribers s ON s.id = sub.subscriber_id
+     WHERE sub.status = "active" AND sub.end_date = CURDATE()' . $agentScope
 )->fetchColumn();
 
 $sasPointsOk = false;
@@ -200,9 +261,10 @@ $sasPointsVal = null;
 $sasPointsDisp = '—';
 $expireSoonCount = (int) $pdo->query(
     'SELECT COUNT(DISTINCT sub.subscriber_id) FROM subscriptions sub
+     JOIN subscribers s ON s.id = sub.subscriber_id
      WHERE sub.status = "active"
        AND sub.end_date > CURDATE()
-       AND sub.end_date <= DATE_ADD(CURDATE(), INTERVAL 3 DAY)'
+       AND sub.end_date <= DATE_ADD(CURDATE(), INTERVAL 3 DAY)' . $agentScope
 )->fetchColumn();
 
 $chartMonths = array();
@@ -212,8 +274,9 @@ for ($m = 1; $m <= 12; $m++) {
     $ym = sprintf('%04d-%02d', $chartYear, $m);
     $chartMonths[] = month_short_label($ym, true);
     $stmt = $pdo->prepare(
-        "SELECT COALESCE(SUM(amount),0) FROM invoices
-         WHERE status = 'paid' AND DATE_FORMAT(paid_at, '%Y-%m') = :ym"
+        "SELECT COALESCE(SUM(i.amount),0) FROM invoices i
+         JOIN subscribers s ON s.id = i.subscriber_id
+         WHERE i.status = 'paid' AND DATE_FORMAT(i.paid_at, '%Y-%m') = :ym" . $agentScope
     );
     $stmt->execute(array(':ym' => $ym));
     $chartValues[] = (float) $stmt->fetchColumn();
@@ -278,6 +341,16 @@ if (!function_exists('dash_sas_box')) {
         echo '<div class="sas-box-val"' . ($boxId !== '' ? (' id="' . e($boxId) . 'Val"') : '') . '>' . e($value) . '</div>';
         echo '<span class="sas-box-ico" aria-hidden="true">' . $ico . '</span>';
         echo '</a>';
+    }
+}
+
+$cardDash = null;
+$cardDashPayments = array();
+if ($showCardAccountingDash && function_exists('card_accounting_dashboard')) {
+    ensure_card_accounting_tables($pdo);
+    if ($cardDashAgentId > 0) {
+        $cardDash = card_accounting_dashboard($pdo, $cardDashAgentId);
+        $cardDashPayments = list_recent_card_payments($pdo, $cardDashAgentId, 8);
     }
 }
 
@@ -347,45 +420,13 @@ body:has(.sas-dash) .container {
   color: var(--ink) !important;
   transform: translate(-2px, -3px);
   box-shadow: 9px 10px 0 rgba(15, 23, 42, 0.14);
-  filter: brightness(1.04);
 }
-.sas-box-title {
-  position: relative;
-  z-index: 1;
-  font-family: inherit;
-  font-size: 15px;
-  font-weight: 800;
-  line-height: 1.35;
-  color: rgba(255,255,255,0.94);
-  letter-spacing: 0.01em;
-}
-.sas-box-sub {
-  position: relative;
-  z-index: 1;
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  color: rgba(255,255,255,0.78);
-  margin-top: 3px;
-  line-height: 1.35;
-}
-#dashCardsSub { font-size: 13px; line-height: 1.3; max-height: 2.7em; overflow: hidden; }
-.sas-box-val {
-  position: relative;
-  z-index: 1;
-  font-family: inherit;
-  font-size: 32px;
-  font-weight: 800;
-  margin-top: 16px;
-  line-height: 1;
-  color: #ffffff;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.02em;
-  text-shadow: 0 1px 0 rgba(0,0,0,0.12);
-}
-.sas-box-ico { display: none !important; }
-.sas-box.tone-blue { --c1: #3b82f6; --c2: #1d4ed8; }
-.sas-box.tone-green { --c1: #22c55e; --c2: #15803d; }
+.sas-box-title { font-size: 13px; font-weight: 800; opacity: .95; z-index: 1; }
+.sas-box-sub { font-size: 11px; font-weight: 600; opacity: .8; margin-top: 2px; z-index: 1; }
+.sas-box-val { font-size: 28px; font-weight: 800; margin-top: 10px; z-index: 1; letter-spacing: -0.02em; }
+.sas-box-ico { position: absolute; inset-inline-end: 14px; inset-block-start: 12px; font-size: 22px; opacity: .35; }
+.sas-box.tone-blue { --c1: #38bdf8; --c2: #0369a1; }
+.sas-box.tone-green { --c1: #4ade80; --c2: #15803d; }
 .sas-box.tone-aqua { --c1: #22d3ee; --c2: #0e7490; }
 .sas-box.tone-red { --c1: #fb7185; --c2: #be123c; }
 .sas-box.tone-yellow { --c1: #fbbf24; --c2: #b45309; }
@@ -395,7 +436,81 @@ body:has(.sas-dash) .container {
 .sas-box.tone-navy { --c1: #64748b; --c2: #1e293b; }
 .sas-box.tone-maroon { --c1: #f43f5e; --c2: #9f1239; }
 .sas-dash h2.sas-sec { font-size: 15px; margin: 6px 0 10px; color: #444; font-family: inherit; }
+.acct-pay-row {
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: end;
+  margin: 0 0 16px; padding: 0;
+}
+.acct-pay-row label { display: block; font-size: 12px; font-weight: 700; margin-bottom: 4px; color: #475569; }
+.acct-pay-row input {
+  padding: 10px 12px; border: 1px solid #d8dee8; border-radius: 10px;
+  font: inherit; min-width: 140px; background: #fff;
+}
 </style>
+<?php if ($showCardAccountingDash): ?>
+<div class="sas-dash">
+    <h2 class="sas-sec"><?php echo e($isEn ? 'Card accounting' : 'محاسبة الكروت'); ?></h2>
+    <?php if ($cardDash): ?>
+    <div class="sas-boxes">
+        <?php
+        $stk = $cardDash['stock'];
+        $xfer = $cardDash['transfers'];
+        $catHint = '';
+        if (!empty($stk['rows'])) {
+            $bits = array();
+            foreach ($stk['rows'] as $sr) {
+                $bits[] = $sr['profile_name'] . ': ' . (int) $sr['qty'];
+            }
+            $catHint = implode(' · ', array_slice($bits, 0, 3));
+        }
+        dash_sas_box('cards.php', 'tone-navy', $isEn ? 'Remaining stock' : 'المخزون الشاغر', $catHint !== '' ? $catHint : ($isEn ? 'Cards left' : 'كروت متبقية'), (string) (int) $stk['total_qty'], '🃏');
+        dash_sas_box('cards.php#card-transfer', 'tone-purple', $isEn ? 'Transfers' : 'التحويلات', $isEn ? 'Received cards' : 'كروت مستلمة', (string) (int) $xfer['qty'], '📦');
+        dash_sas_box('cards.php', 'tone-green', $isEn ? 'Profit' : 'الربح', $isEn ? 'Wholesale vs agent' : 'جملة مقابل وكيل', money_format_iqd($cardDash['profit_total'], $config['currency']), '📈');
+        dash_sas_box('index.php#acct-pay', 'tone-teal', $isEn ? 'Received' : 'المقبوض', $isEn ? 'Payments' : 'دفعات', money_format_iqd($cardDash['payments_total'], $config['currency']), '💵');
+        dash_sas_box('index.php#acct-pay', 'tone-red', $isEn ? 'Remaining' : 'المتبقي', $isEn ? 'To collect' : 'باقي التحصيل', money_format_iqd($cardDash['remaining'], $config['currency']), '📄');
+        ?>
+    </div>
+    <form method="post" class="acct-pay-row" id="acct-pay">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="card_payment" value="1">
+        <input type="hidden" name="agent_user_id" value="<?php echo (int) $cardDashAgentId; ?>">
+        <div>
+            <label><?php echo e($isEn ? 'Payment amount' : 'مبلغ الدفعة'); ?></label>
+            <input name="amount" type="number" min="0.01" step="0.01" required placeholder="0">
+        </div>
+        <div style="flex:1;min-width:200px">
+            <label><?php echo e($isEn ? 'Note (optional)' : 'ملاحظة (اختياري)'); ?></label>
+            <input name="payment_note" maxlength="255" style="width:100%" placeholder="<?php echo e($isEn ? 'Payment note…' : 'ملاحظة…'); ?>">
+        </div>
+        <button class="btn" type="submit"><?php echo e($isEn ? 'Record payment' : 'تسجيل دفعة'); ?></button>
+    </form>
+    <?php if ($cardDashPayments): ?>
+        <div class="table-wrap" style="margin:0 0 18px">
+            <table class="table-compact" style="font-size:13px">
+                <thead>
+                <tr>
+                    <th><?php echo e($isEn ? 'Date' : 'التاريخ'); ?></th>
+                    <th><?php echo e($isEn ? 'Amount' : 'المبلغ'); ?></th>
+                    <th><?php echo e($isEn ? 'Note' : 'ملاحظة'); ?></th>
+                </tr>
+                </thead>
+                <tbody>
+                <?php foreach ($cardDashPayments as $cp): ?>
+                    <tr>
+                        <td><?php echo e(isset($cp['created_at']) ? $cp['created_at'] : ''); ?></td>
+                        <td><?php echo e(money_format_iqd($cp['amount'], $config['currency'])); ?></td>
+                        <td><?php echo e(isset($cp['note']) ? $cp['note'] : ''); ?></td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+    <?php endif; ?>
+    <?php else: ?>
+        <p class="meta" style="margin:0 0 18px"><?php echo e($isEn ? 'Link an agent to this accountant in Settings → Users.' : 'اربط وكيلاً بحساب المحاسب من الإعدادات → المستخدمين.'); ?></p>
+    <?php endif; ?>
+</div>
+<?php endif; ?>
+<?php if (!is_accountant_user()): ?>
 <div class="sas-dash">
 <div class="sas-boxes">
 <?php
@@ -443,7 +558,8 @@ if ($sasReadyDash) {
 ?>
 </div>
 </div>
-<?php if ($sasReadyDash): ?>
+<?php endif; ?>
+<?php if ($sasReadyDash && !is_accountant_user()): ?>
 <script>
 (function () {
   function applyDash(d) {
@@ -476,6 +592,7 @@ if ($sasReadyDash) {
 </script>
 <?php endif; ?>
 
+<?php if (!is_accountant_user()): ?>
 <div class="panel chart-panel glass-panel panel-compact">
     <div class="chart-head chart-head-row">
         <div>
@@ -503,4 +620,5 @@ if ($sasReadyDash) {
         <?php endfor; ?>
     </div>
 </div>
+<?php endif; ?>
 <?php render_footer(); ?>

@@ -1,5 +1,19 @@
 <?php
 
+/**
+ * معرّف جلسة واتساب على البوابة المشتركة: default للأدمن، agent_{id} للوكيل.
+ */
+function whatsapp_session_id()
+{
+    if (function_exists('current_admin')) {
+        $admin = current_admin();
+        if ($admin && function_exists('is_agent_user') && is_agent_user($admin) && !empty($admin['id'])) {
+            return 'agent_' . (int) $admin['id'];
+        }
+    }
+    return 'default';
+}
+
 function whatsapp_send($config, $phone, $message, $type = 'text')
 {
     $wa = isset($config['whatsapp']) ? $config['whatsapp'] : array();
@@ -30,9 +44,11 @@ function whatsapp_send_local($wa, $phone, $message, $type)
     $key = isset($wa['local_key']) ? (string) $wa['local_key'] : 'local-secret-change-me';
     $url = $base . '/send';
 
+    $sessionId = function_exists('whatsapp_session_id') ? whatsapp_session_id() : 'default';
     $payload = array(
         'phone' => $phone,
         'message' => $message,
+        'session' => $sessionId,
     );
 
     $ch = curl_init($url);
@@ -42,6 +58,7 @@ function whatsapp_send_local($wa, $phone, $message, $type)
         CURLOPT_HTTPHEADER => array(
             'Content-Type: application/json',
             'X-Api-Key: ' . $key,
+            'X-Wa-Session: ' . $sessionId,
         ),
         CURLOPT_POSTFIELDS => json_encode($payload),
         CURLOPT_CONNECTTIMEOUT => 8,
@@ -663,9 +680,10 @@ function wa_case_labels($lang = 'ar')
 {
     $en = ($lang === 'en');
     return array(
-        'activation_cash' => $en ? 'Cash activation' : 'التفعيل النقدي',
-        'activation_credit' => $en ? 'Credit activation' : 'التفعيل الآجل',
-        'activation_debts' => $en ? 'Prior debts on activation' : 'ملحق الديون مع التفعيل',
+        'activation_cash' => $en ? '1) Cash activation' : '1) تفعيل نقدي',
+        'activation_credit' => $en ? '2) Credit activation' : '2) تفعيل آجل',
+        'activation_credit_debts' => $en ? '3) Credit + old debts' : '3) تفعيل آجل + ديون قديمة',
+        'activation_debts' => $en ? '4) Old-debts appendix' : '4) ملحق ديون قديمة',
         'debt_created' => $en ? 'Debt added' : 'إضافة دين',
         'payment_ok' => $en ? 'Payment received' : 'استلام التسديد',
         'debt_remind' => $en ? 'Debt reminder (manual / bulk)' : 'تذكير دين (يدوي / جماعي)',
@@ -686,27 +704,40 @@ function wa_system_cases($lang = 'ar')
     $labels = wa_case_labels($lang);
     return array(
         array(
-            'group' => $en ? 'Activation' : 'التفعيل',
+            'group' => $en ? 'Activation (pick a template for each case)' : 'التفعيل (خصّص قالباً لكل حالة)',
             'cases' => array(
                 array(
                     'key' => 'activation_cash',
                     'label' => $labels['activation_cash'],
                     'vars' => '{name} {package} {from} {to} {amount}',
-                    'hint' => $en ? 'Sent when activating and payment is cash.' : 'عند تفعيل الاشتراك نقداً.',
+                    'hint' => $en ? 'When activating with cash payment.' : 'عند التفعيل نقداً.',
                     'required' => true,
                 ),
                 array(
                     'key' => 'activation_credit',
                     'label' => $labels['activation_credit'],
                     'vars' => '{name} {package} {from} {to} {amount}',
-                    'hint' => $en ? 'Sent when activating on credit (new debt).' : 'عند التفعيل الآجل مع إنشاء دين.',
+                    'hint' => $en
+                        ? 'When activating on credit without attaching old debts.'
+                        : 'عند التفعيل بالآجل بدون إرفاق ديون قديمة.',
+                    'required' => true,
+                ),
+                array(
+                    'key' => 'activation_credit_debts',
+                    'label' => $labels['activation_credit_debts'],
+                    'vars' => '{name} {package} {from} {to} {amount} {debt} {month} {notes}',
+                    'hint' => $en
+                        ? 'When activating on credit and attaching old debts — one message.'
+                        : 'عند التفعيل بالآجل مع إرفاق ديون قديمة — رسالة واحدة.',
                     'required' => true,
                 ),
                 array(
                     'key' => 'activation_debts',
                     'label' => $labels['activation_debts'],
                     'vars' => '{name} {debt} {amount} {month} {notes}',
-                    'hint' => $en ? 'Appendix when “include old debts” is enabled.' : 'ملحق يُضاف عند تفعيل «تضمين الديون القديمة».',
+                    'hint' => $en
+                        ? 'Short appendix with cash activation when old debts are attached.'
+                        : 'ملحق يُضاف مع التفعيل النقدي عند إرفاق ديون قديمة.',
                     'required' => true,
                 ),
             ),
@@ -758,16 +789,17 @@ function wa_system_cases($lang = 'ar')
                     'key' => 'expiry_soon',
                     'label' => $labels['expiry_soon'],
                     'vars' => '{name} {days} {package} {to}',
-                    'hint' => $en ? 'Automatic expiry reminder cron.' : 'تذكير قرب الانتهاء التلقائي.',
+                    'hint' => $en ? 'Automatic expiry reminder (Schedule settings).' : 'تذكير قرب الانتهاء التلقائي (إعدادات الجدول الدوري).',
                     'required' => true,
                 ),
                 array(
                     'key' => 'unpaid_overdue',
                     'label' => $labels['unpaid_overdue'],
                     'vars' => '{name} {days_passed} {debt} {package}',
-                    'hint' => $en ? 'Late after activation (Messages → Late payers).' : 'المتأخرون بعد التفعيل (تبويب متأخرون).',
+                    'hint' => $en
+                        ? 'Warning N days after activation (Schedule settings / Messages bulk).'
+                        : 'تنبيه بعد أيام من التفعيل (إعدادات الجدول / إرسال جماعي).',
                     'required' => true,
-                    'extra' => 'unpaid_days',
                 ),
                 array(
                     'key' => 'schedule_cut',
@@ -836,6 +868,7 @@ function wa_case_template_key($config, $case)
         'activation_cash' => 'activation',
         'activation_credit' => 'activation_credit',
         'activation_debts' => 'activation_debts',
+        'activation_credit_debts' => 'activation_credit_debts',
         'activation' => 'activation',
         'debt_created' => 'debt_created',
         'payment_ok' => 'payment_ok',

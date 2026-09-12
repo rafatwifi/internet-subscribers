@@ -291,13 +291,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if ($action === 'sas_inline' || $action === 'sas_enable' || $action === 'sas_disconnect' || $action === 'sas_activate_card'
         || $action === 'sas_activate_credit' || $action === 'sas_activate_reward' || $action === 'sas_change_profile' || $action === 'give_test') {
+        $usernameGate = trim((string) post('id', ''));
+        if ($usernameGate !== '' && function_exists('user_can_access_sas_username')
+            && !user_can_access_sas_username($pdo, $usernameGate)) {
+            sas_json_out(false, $lang === 'en' ? 'No access to this SAS user' : 'ما عندك صلاحية لهذا المشترك');
+        }
         if ($action === 'give_test') {
+            if (function_exists('app_maintenance_blocks') && app_maintenance_blocks('give_test', $config)) {
+                sas_json_out(false, app_maintenance_message('give_test', $lang));
+            }
             $username = trim((string) post('id', ''));
             if (!function_exists('sas_extend_one_day')) {
                 sas_json_out(false, 'ملف SAS غير مكتمل');
             }
             list($ok, $msg) = sas_extend_one_day($pdo, $config, $username);
             sas_json_out($ok, $msg);
+        }
+        if (in_array($action, array('sas_activate_card', 'sas_activate_credit', 'sas_activate_reward'), true)
+            && function_exists('app_maintenance_blocks') && app_maintenance_blocks('activate', $config)) {
+            sas_json_out(false, app_maintenance_message('activate', $lang));
         }
         $username = trim((string) post('id', ''));
         $fields = array(
@@ -558,6 +570,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if ($action === 'bulk_activate') {
+        if (function_exists('app_maintenance_blocks') && app_maintenance_blocks('activate', $config)) {
+            flash('error', app_maintenance_message('activate', $lang));
+            sas_page_redirect();
+        }
         $ids = isset($_POST['ids']) && is_array($_POST['ids']) ? $_POST['ids'] : array();
         $payMode = post('pay_mode') === 'credit' ? 'credit' : 'cash';
         $sendWa = post('send_whatsapp') === '1';
@@ -567,6 +583,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         foreach ($ids as $raw) {
             $username = trim((string) $raw);
             if ($username === '') {
+                continue;
+            }
+            if (function_exists('user_can_access_sas_username') && !user_can_access_sas_username($pdo, $username)) {
+                $failN++;
+                $failNames[] = $username . ' (صلاحية)';
                 continue;
             }
             list($localId, $err) = sas_resolve_local_from_username($pdo, $config, $username);
@@ -748,6 +769,9 @@ $params = array();
 $where = function_exists('sas_cache_search_sql') ? sas_cache_search_sql($q, $params) : '1=1';
 if (function_exists('sas_cache_filter_sql')) {
     $where .= sas_cache_filter_sql($subFilter);
+}
+if (function_exists('sas_agent_scope_sql')) {
+    $where .= sas_agent_scope_sql('c');
 }
 if ($parentFilter !== '') {
     $where .= ' AND c.parent_name = :parent_name';
@@ -1044,10 +1068,11 @@ if ($savedRefreshSec < 0) {
 }
 $parentNames = array();
 try {
+    $parentScope = function_exists('sas_agent_scope_sql') ? sas_agent_scope_sql('c') : '';
     $parentNames = $pdo->query(
-        'SELECT DISTINCT parent_name FROM sas_users_cache
-         WHERE parent_name IS NOT NULL AND parent_name <> ""
-         ORDER BY parent_name ASC LIMIT 100'
+        'SELECT DISTINCT c.parent_name FROM sas_users_cache c
+         WHERE c.parent_name IS NOT NULL AND c.parent_name <> ""' . $parentScope . '
+         ORDER BY c.parent_name ASC LIMIT 100'
     )->fetchAll(PDO::FETCH_COLUMN);
     if (!is_array($parentNames)) {
         $parentNames = array();
@@ -1077,6 +1102,8 @@ function sas_filter_href($sub, $parent, $q, $perPageRaw)
 }
 
 render_header(t('sas'), 'sas', '');
+$maintBlockActivate = function_exists('app_maintenance_blocks') && app_maintenance_blocks('activate', $config);
+$maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenance_blocks('give_test', $config);
 ?>
 <style>
 .sas-radius-page { font-family: inherit; overflow-anchor: none; }
@@ -2944,6 +2971,8 @@ render_header(t('sas'), 'sas', '');
   var canEditDebts = <?php echo json_encode(function_exists('user_can_edit_debts') && user_can_edit_debts()); ?>;
   syncBulk();
   var confirmTest = <?php echo json_encode(t('confirm_give_test')); ?>;
+  var maintBlockActivate = <?php echo !empty($maintBlockActivate) ? 'true' : 'false'; ?>;
+  var maintBlockGiveTest = <?php echo !empty($maintBlockGiveTest) ? 'true' : 'false'; ?>;
   var stale = <?php echo json_encode($syncMode === 'stale'); ?>;
   var refreshSec = <?php echo (int) $savedRefreshSec; ?>;
   try {
@@ -3214,13 +3243,13 @@ render_header(t('sas'), 'sas', '');
     showEl(document.getElementById('opsItemHint'), n === 0);
     showEl(document.getElementById('opsItemOpen'), !!one);
     showEl(document.getElementById('opsItemPay'), n >= 1);
-    showEl(document.getElementById('opsItemActivate'), !!one);
+    showEl(document.getElementById('opsItemActivate'), !!one && !maintBlockActivate);
     showEl(document.getElementById('opsItemProfile'), !!one);
     showEl(document.getElementById('opsItemEnable'), !!(one && !one.enabled));
     showEl(document.getElementById('opsItemDisable'), !!(one && one.enabled));
     showEl(document.getElementById('opsItemDisconnect'), !!(one && one.online));
-    showEl(document.getElementById('opsItemGiveTest'), !!one);
-    showEl(document.getElementById('opsItemBulkActivate'), n > 1);
+    showEl(document.getElementById('opsItemGiveTest'), !!one && !maintBlockGiveTest);
+    showEl(document.getElementById('opsItemBulkActivate'), n > 1 && !maintBlockActivate);
     showEl(document.getElementById('opsItemBulkDisconnect'), n > 1 && rows.some(function (r) { return r.online; }));
     showEl(document.getElementById('opsItemAddDebt'), !!(one && canEditDebts));
     showEl(document.getElementById('opsItemRemind'), !!one);

@@ -72,6 +72,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if ($action === 'give_test') {
+        if (function_exists('app_maintenance_blocks') && app_maintenance_blocks('give_test', $config)) {
+            flash('error', app_maintenance_message('give_test', $lang));
+            redirect('subscriber.php?id=' . $id);
+        }
         list($ok, $msg) = activate_subscriber_test($pdo, $config, $id);
         flash($ok ? 'success' : 'error', $msg);
         redirect('subscriber.php?id=' . $id);

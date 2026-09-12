@@ -38,6 +38,137 @@ function schedule_cut_message($row, $config)
 }
 
 /**
+ * قائمة المدينين للجدول الدوري (عرض الصفحة).
+ * يرجع array('rows' => [...], 'error' => '')
+ */
+function schedule_debtors_list($pdo, $config, $limit = 500)
+{
+    $out = array('rows' => array(), 'error' => '');
+    $limit = max(1, min(1000, (int) $limit));
+    $sysGrace = function_exists('subscriber_default_grace_days')
+        ? subscriber_default_grace_days($config)
+        : (isset($config['grace_days']) ? (int) $config['grace_days'] : 3);
+
+    if (function_exists('ensure_subscriber_grace_days_column')) {
+        try {
+            ensure_subscriber_grace_days_column($pdo);
+        } catch (Exception $e) {
+        }
+    }
+
+    $rows = array();
+    $sql = "SELECT s.id AS subscriber_id, s.name, s.phone, s.grace_days, s.sas_username,
+                   MAX(c.username) AS cache_username,
+                   MAX(c.enabled) AS sas_enabled,
+                   MAX(c.is_online) AS is_online,
+                   MIN(CASE
+                         WHEN i.due_date IS NULL OR i.due_date < '1971-01-01' THEN CURDATE()
+                         ELSE i.due_date
+                       END) AS oldest_due,
+                   SUM(i.amount) AS debt_total
+            FROM subscribers s
+            INNER JOIN invoices i ON i.subscriber_id = s.id AND i.status = 'unpaid'
+            LEFT JOIN sas_users_cache c ON (
+                c.local_subscriber_id = s.id
+                OR (
+                  s.sas_username IS NOT NULL AND TRIM(s.sas_username) <> ''
+                  AND LOWER(TRIM(c.username)) = LOWER(TRIM(s.sas_username))
+                )
+            )
+            GROUP BY s.id, s.name, s.phone, s.grace_days, s.sas_username
+            HAVING SUM(i.amount) > 0
+            ORDER BY oldest_due ASC
+            LIMIT " . (int) $limit;
+    try {
+        $rows = $pdo->query($sql)->fetchAll();
+    } catch (Exception $e) {
+        $out['error'] = $e->getMessage();
+        try {
+            $sql2 = "SELECT s.id AS subscriber_id, s.name, s.phone, s.grace_days, s.sas_username,
+                            '' AS cache_username, 1 AS sas_enabled, 0 AS is_online,
+                            MIN(i.due_date) AS oldest_due, SUM(i.amount) AS debt_total
+                     FROM subscribers s
+                     INNER JOIN invoices i ON i.subscriber_id = s.id AND i.status = 'unpaid'
+                     GROUP BY s.id, s.name, s.phone, s.grace_days, s.sas_username
+                     HAVING SUM(i.amount) > 0
+                     ORDER BY oldest_due ASC
+                     LIMIT " . (int) $limit;
+            $rows = $pdo->query($sql2)->fetchAll();
+            $out['error'] = '';
+        } catch (Exception $e2) {
+            $out['error'] = $e2->getMessage();
+            return $out;
+        }
+    }
+
+    $list = array();
+    $stats = array('total' => 0, 'will_cut' => 0, 'grace' => 0, 'disabled' => 0, 'debt_sum' => 0.0);
+    foreach ($rows as $row) {
+        $grace = function_exists('subscriber_grace_days')
+            ? subscriber_grace_days($row, $config)
+            : $sysGrace;
+        $oldest = !empty($row['oldest_due']) ? (string) $row['oldest_due'] : date('Y-m-d');
+        if ($oldest === '' || $oldest < '1971-01-01') {
+            $oldest = date('Y-m-d');
+        }
+        $dueTs = strtotime($oldest);
+        if ($dueTs <= 0) {
+            $dueTs = strtotime(date('Y-m-d'));
+        }
+        $daysPassed = (int) floor((strtotime(date('Y-m-d')) - strtotime(date('Y-m-d', $dueTs))) / 86400);
+        if ($daysPassed < 0) {
+            $daysPassed = 0;
+        }
+        $enabled = isset($row['sas_enabled']) ? (int) $row['sas_enabled'] : 1;
+        $willCut = ($enabled !== 0 && $daysPassed > $grace);
+        $daysLeft = $grace - $daysPassed;
+        $username = trim((string) (!empty($row['cache_username']) ? $row['cache_username'] : $row['sas_username']));
+        $debt = isset($row['debt_total']) ? (float) $row['debt_total'] : 0;
+        $status = 'grace';
+        if ($enabled === 0) {
+            $status = 'disabled';
+        } elseif ($willCut) {
+            $status = 'will_cut';
+        }
+        $pct = 0;
+        if ($grace > 0) {
+            $pct = (int) min(100, round(($daysPassed / max(1, $grace)) * 100));
+        } elseif ($daysPassed > 0) {
+            $pct = 100;
+        }
+        $item = array(
+            'id' => (int) $row['subscriber_id'],
+            'name' => $row['name'],
+            'username' => $username,
+            'phone' => isset($row['phone']) ? $row['phone'] : '',
+            'debt' => $debt,
+            'grace' => $grace,
+            'days_passed' => $daysPassed,
+            'days_left' => $daysLeft,
+            'will_cut' => $willCut,
+            'enabled' => $enabled,
+            'online' => !empty($row['is_online']),
+            'status' => $status,
+            'oldest_due' => $oldest,
+            'grace_pct' => $pct,
+        );
+        $list[] = $item;
+        $stats['total']++;
+        $stats['debt_sum'] += $debt;
+        if ($status === 'will_cut') {
+            $stats['will_cut']++;
+        } elseif ($status === 'disabled') {
+            $stats['disabled']++;
+        } else {
+            $stats['grace']++;
+        }
+    }
+    $out['rows'] = $list;
+    $out['stats'] = $stats;
+    return $out;
+}
+
+/**
  * يرجع ملخص: checked, cut, wa_sent, wa_failed, skipped
  */
 function run_schedule_debt_cuts($pdo, $config, $limit = 80)

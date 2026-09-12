@@ -37,7 +37,7 @@ function admin_password_verify($plain, $hash)
 /** الأدوار المتاحة */
 function admin_roles()
 {
-    return array('admin', 'manager', 'staff', 'agent');
+    return array('admin', 'manager', 'staff', 'agent', 'accountant');
 }
 
 function admin_role_label($role, $lang = null)
@@ -50,6 +50,7 @@ function admin_role_label($role, $lang = null)
         'manager' => array('ar' => 'مشرف', 'en' => 'Manager'),
         'staff' => array('ar' => 'موظف', 'en' => 'Staff'),
         'agent' => array('ar' => 'وكيل', 'en' => 'Agent'),
+        'accountant' => array('ar' => 'محاسب', 'en' => 'Accountant'),
     );
     if (!isset($map[$role])) {
         return $role;
@@ -77,6 +78,11 @@ function admin_role_hint($role, $lang = null)
             ? 'Only own subscribers + messages (no settings)'
             : 'مشتركيه فقط + رسائل (بدون إعدادات النظام)';
     }
+    if ($role === 'accountant') {
+        return $lang === 'en'
+            ? 'Card transfers, agent stock & payments for linked agent'
+            : 'تحويل كروت، مخزون الوكيل، ودفعات الوكيل المرتبط';
+    }
     return $lang === 'en'
         ? 'Subscribers, activate, debts, messages, rentals'
         : 'مشتركين، تفعيل، ديون، رسائل، إيجار';
@@ -89,14 +95,19 @@ function role_permissions($role)
     if ($role === 'admin') {
         return array(
             'dashboard', 'subscribers', 'activate', 'debts', 'edit_debts', 'messages', 'rentals',
-            'subscriptions', 'reports', 'logs', 'plans',
+            'subscriptions', 'reports', 'logs', 'plans', 'cards', 'card_accounting',
             'settings', 'users', 'agents', 'backup', 'clear_data',
         );
     }
     if ($role === 'manager') {
         return array(
             'dashboard', 'subscribers', 'activate', 'debts', 'messages', 'rentals',
-            'subscriptions', 'reports', 'logs', 'agents',
+            'subscriptions', 'reports', 'logs', 'agents', 'cards', 'card_accounting',
+        );
+    }
+    if ($role === 'accountant') {
+        return array(
+            'dashboard', 'cards', 'card_accounting', 'reports',
         );
     }
     if ($role === 'agent') {
@@ -118,6 +129,28 @@ function is_agent_user($u = null)
         return false;
     }
     return normalize_admin_role(isset($u['role']) ? $u['role'] : '') === 'agent';
+}
+
+function is_accountant_user($u = null)
+{
+    if ($u === null) {
+        $u = current_admin();
+    }
+    if (!$u) {
+        return false;
+    }
+    return normalize_admin_role(isset($u['role']) ? $u['role'] : '') === 'accountant';
+}
+
+function accountant_linked_agent_id($u = null)
+{
+    if ($u === null) {
+        $u = current_admin();
+    }
+    if (!$u) {
+        return 0;
+    }
+    return isset($u['linked_agent_id']) ? (int) $u['linked_agent_id'] : 0;
 }
 
 function is_admin_user($u = null)
@@ -187,7 +220,7 @@ function list_agent_users($pdo, $activeOnly = true)
 {
     try {
         ensure_admin_users_table($pdo);
-        $sql = "SELECT id, username, display_name, role, is_active, created_at, updated_at, sas_manager_id
+        $sql = "SELECT id, username, display_name, role, is_active, created_at, updated_at, sas_manager_id, wa_local_url, wa_local_key
                 FROM admin_users WHERE role = 'agent'";
         if ($activeOnly) {
             $sql .= ' AND is_active = 1';
@@ -320,6 +353,28 @@ function ensure_admin_users_table($pdo, $config = null)
             }
         } catch (Exception $e) {
         }
+        try {
+            $col = $pdo->query("SHOW COLUMNS FROM admin_users LIKE 'sas_manager_id'")->fetch();
+            if (!$col) {
+                $pdo->exec('ALTER TABLE admin_users ADD COLUMN sas_manager_id INT UNSIGNED NULL DEFAULT NULL');
+            }
+        } catch (Exception $e) {
+        }
+        try {
+            $col = $pdo->query("SHOW COLUMNS FROM admin_users LIKE 'wa_local_url'")->fetch();
+            if (!$col) {
+                $pdo->exec('ALTER TABLE admin_users ADD COLUMN wa_local_url VARCHAR(255) NULL DEFAULT NULL');
+                $pdo->exec('ALTER TABLE admin_users ADD COLUMN wa_local_key VARCHAR(120) NULL DEFAULT NULL');
+            }
+        } catch (Exception $e) {
+        }
+        try {
+            $col = $pdo->query("SHOW COLUMNS FROM admin_users LIKE 'linked_agent_id'")->fetch();
+            if (!$col) {
+                $pdo->exec('ALTER TABLE admin_users ADD COLUMN linked_agent_id INT UNSIGNED NULL DEFAULT NULL');
+            }
+        } catch (Exception $e) {
+        }
 
         $count = (int) $pdo->query('SELECT COUNT(*) FROM admin_users')->fetchColumn();
         if ($count === 0) {
@@ -369,7 +424,82 @@ function current_admin()
         'username' => isset($_SESSION['admin_username']) ? (string) $_SESSION['admin_username'] : 'admin',
         'display_name' => isset($_SESSION['admin_display_name']) ? (string) $_SESSION['admin_display_name'] : 'Admin',
         'role' => isset($_SESSION['admin_role']) ? normalize_admin_role($_SESSION['admin_role']) : 'admin',
+        'sas_manager_id' => isset($_SESSION['admin_sas_manager_id']) ? (int) $_SESSION['admin_sas_manager_id'] : 0,
+        'wa_local_url' => isset($_SESSION['admin_wa_local_url']) ? (string) $_SESSION['admin_wa_local_url'] : '',
+        'wa_local_key' => isset($_SESSION['admin_wa_local_key']) ? (string) $_SESSION['admin_wa_local_key'] : '',
+        'linked_agent_id' => isset($_SESSION['admin_linked_agent_id']) ? (int) $_SESSION['admin_linked_agent_id'] : 0,
     );
+}
+
+function is_impersonating()
+{
+    return !empty($_SESSION['admin_real_user_id']);
+}
+
+function impersonation_real_admin_id()
+{
+    return isset($_SESSION['admin_real_user_id']) ? (int) $_SESSION['admin_real_user_id'] : 0;
+}
+
+/**
+ * فلترة كاش الساس حسب وكيل SAS المرتبط بالمستخدم الحالي.
+ * الأدمن/المشرف يشوف الكل. الوكيل يشوف يوزرات parent_id = sas_manager_id.
+ */
+function sas_agent_scope_sql($alias = 'c')
+{
+    if (!is_agent_user()) {
+        return '';
+    }
+    $u = current_admin();
+    $mid = $u && !empty($u['sas_manager_id']) ? (int) $u['sas_manager_id'] : 0;
+    if ($mid <= 0) {
+        return ' AND 1=0';
+    }
+    $a = preg_replace('/[^a-zA-Z0-9_]/', '', (string) $alias);
+    if ($a === '') {
+        $a = 'c';
+    }
+    return ' AND ' . $a . '.parent_id = ' . $mid;
+}
+
+function current_admin_sas_manager_id()
+{
+    $u = current_admin();
+    return $u && !empty($u['sas_manager_id']) ? (int) $u['sas_manager_id'] : 0;
+}
+
+function user_can_access_sas_username($pdo, $username)
+{
+    $username = trim((string) $username);
+    if ($username === '') {
+        return false;
+    }
+    if (!is_agent_user()) {
+        return true;
+    }
+    $mid = current_admin_sas_manager_id();
+    if ($mid <= 0) {
+        return false;
+    }
+    try {
+        $st = $pdo->prepare(
+            'SELECT parent_id FROM sas_users_cache WHERE username = :u LIMIT 1'
+        );
+        $st->execute(array(':u' => $username));
+        $pid = $st->fetchColumn();
+        return $pid !== false && (int) $pid === $mid;
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+function require_sas_user_access($pdo, $username)
+{
+    if (!user_can_access_sas_username($pdo, $username)) {
+        $lang = isset($GLOBALS['lang']) ? $GLOBALS['lang'] : 'ar';
+        flash('error', $lang === 'en' ? 'No access to this SAS user' : 'ما عندك صلاحية لهذا المشترك');
+        redirect('sas.php');
+    }
 }
 
 function current_admin_label()
@@ -439,7 +569,72 @@ function set_admin_session_from_row($row)
     $_SESSION['admin_username'] = $row['username'];
     $_SESSION['admin_display_name'] = $row['display_name'];
     $_SESSION['admin_role'] = normalize_admin_role(isset($row['role']) ? $row['role'] : 'staff');
+    $_SESSION['admin_sas_manager_id'] = isset($row['sas_manager_id']) ? (int) $row['sas_manager_id'] : 0;
+    $_SESSION['admin_wa_local_url'] = isset($row['wa_local_url']) ? (string) $row['wa_local_url'] : '';
+    $_SESSION['admin_wa_local_key'] = isset($row['wa_local_key']) ? (string) $row['wa_local_key'] : '';
+    $_SESSION['admin_linked_agent_id'] = isset($row['linked_agent_id']) ? (int) $row['linked_agent_id'] : 0;
     unset($_SESSION['ui_prefs']);
+}
+
+/**
+ * دخول بصفة وكيل (للأدمن فقط) مع حفظ الجلسة الأصلية.
+ */
+function impersonate_start($pdo, $targetUserId)
+{
+    if (!is_admin_user() || is_impersonating()) {
+        return array(false, 'غير مسموح');
+    }
+    $targetUserId = (int) $targetUserId;
+    if ($targetUserId <= 0) {
+        return array(false, 'وكيل غير محدد');
+    }
+    $me = current_admin();
+    if (!$me || (int) $me['id'] === $targetUserId) {
+        return array(false, 'لا يمكن');
+    }
+    try {
+        ensure_admin_users_table($pdo);
+        $st = $pdo->prepare(
+            'SELECT * FROM admin_users WHERE id = :id AND is_active = 1 LIMIT 1'
+        );
+        $st->execute(array(':id' => $targetUserId));
+        $row = $st->fetch();
+        if (!$row) {
+            return array(false, 'الوكيل غير موجود');
+        }
+        $_SESSION['admin_real_user_id'] = (int) $me['id'];
+        $_SESSION['admin_real_username'] = $me['username'];
+        $_SESSION['admin_real_display_name'] = $me['display_name'];
+        set_admin_session_from_row($row);
+        return array(true, 'تم الدخول بصفة ' . $row['display_name']);
+    } catch (Exception $e) {
+        return array(false, $e->getMessage());
+    }
+}
+
+function impersonate_stop($pdo)
+{
+    if (!is_impersonating()) {
+        return array(false, 'ماكو جلسة بديلة');
+    }
+    $rid = impersonation_real_admin_id();
+    try {
+        $st = $pdo->prepare('SELECT * FROM admin_users WHERE id = :id LIMIT 1');
+        $st->execute(array(':id' => $rid));
+        $row = $st->fetch();
+        unset(
+            $_SESSION['admin_real_user_id'],
+            $_SESSION['admin_real_username'],
+            $_SESSION['admin_real_display_name']
+        );
+        if ($row) {
+            set_admin_session_from_row($row);
+            return array(true, 'رجعت لحسابك');
+        }
+        return array(false, 'تعذر استرجاع الحساب الأصلي');
+    } catch (Exception $e) {
+        return array(false, $e->getMessage());
+    }
 }
 
 function attempt_login($pdo, $config, $username, $password)
@@ -543,12 +738,19 @@ function list_admin_users($pdo)
     try {
         ensure_admin_users_table($pdo);
         return $pdo->query(
-            'SELECT id, username, display_name, role, is_active, created_at, updated_at
+            'SELECT id, username, display_name, role, is_active, linked_agent_id, created_at, updated_at
              FROM admin_users
              ORDER BY id ASC'
         )->fetchAll();
     } catch (Exception $e) {
-        return array();
+        try {
+            return $pdo->query(
+                'SELECT id, username, display_name, role, is_active, created_at, updated_at
+                 FROM admin_users ORDER BY id ASC'
+            )->fetchAll();
+        } catch (Exception $e2) {
+            return array();
+        }
     }
 }
 
@@ -560,7 +762,7 @@ function get_admin_user($pdo, $id)
     return $row ? $row : null;
 }
 
-function create_admin_user($pdo, $username, $displayName, $password, $role)
+function create_admin_user($pdo, $username, $displayName, $password, $role, $linkedAgentId = null)
 {
     $username = trim((string) $username);
     $displayName = trim((string) $displayName);
@@ -576,15 +778,32 @@ function create_admin_user($pdo, $username, $displayName, $password, $role)
     if ($exists->fetchColumn()) {
         return 'taken';
     }
-    $pdo->prepare(
-        'INSERT INTO admin_users (username, display_name, password_hash, role, is_active)
-         VALUES (:u, :d, :h, :r, 1)'
-    )->execute(array(
-        ':u' => $username,
-        ':d' => $displayName,
-        ':h' => admin_password_hash($password),
-        ':r' => $role,
-    ));
+    $linkedVal = null;
+    if ($role === 'accountant' && $linkedAgentId !== null && (int) $linkedAgentId > 0) {
+        $linkedVal = (int) $linkedAgentId;
+    }
+    try {
+        $pdo->prepare(
+            'INSERT INTO admin_users (username, display_name, password_hash, role, is_active, linked_agent_id)
+             VALUES (:u, :d, :h, :r, 1, :la)'
+        )->execute(array(
+            ':u' => $username,
+            ':d' => $displayName,
+            ':h' => admin_password_hash($password),
+            ':r' => $role,
+            ':la' => $linkedVal,
+        ));
+    } catch (Exception $e) {
+        $pdo->prepare(
+            'INSERT INTO admin_users (username, display_name, password_hash, role, is_active)
+             VALUES (:u, :d, :h, :r, 1)'
+        )->execute(array(
+            ':u' => $username,
+            ':d' => $displayName,
+            ':h' => admin_password_hash($password),
+            ':r' => $role,
+        ));
+    }
     return 'ok';
 }
 
@@ -607,19 +826,46 @@ function delete_admin_user($pdo, $id, $currentId)
     return 'ok';
 }
 
-function update_admin_user_meta($pdo, $id, $displayName, $role = null)
+function update_admin_user_meta($pdo, $id, $displayName, $role = null, $linkedAgentId = null)
 {
     $displayName = trim((string) $displayName);
     if ($displayName === '') {
         return false;
     }
+    $uid = (int) $id;
+    $linkedVal = null;
+    if ($linkedAgentId !== null) {
+        $linkedVal = ((int) $linkedAgentId > 0) ? (int) $linkedAgentId : null;
+    }
     if ($role !== null) {
         $role = normalize_admin_role($role);
-        $pdo->prepare('UPDATE admin_users SET display_name = :d, role = :r, updated_at = NOW() WHERE id = :id')
-            ->execute(array(':d' => $displayName, ':r' => $role, ':id' => (int) $id));
+        if ($role !== 'accountant') {
+            $linkedVal = null;
+        }
+        if ($linkedAgentId !== null || $role !== 'accountant') {
+            try {
+                $pdo->prepare(
+                    'UPDATE admin_users SET display_name = :d, role = :r, linked_agent_id = :la, updated_at = NOW() WHERE id = :id'
+                )->execute(array(':d' => $displayName, ':r' => $role, ':la' => $linkedVal, ':id' => $uid));
+            } catch (Exception $e) {
+                $pdo->prepare('UPDATE admin_users SET display_name = :d, role = :r, updated_at = NOW() WHERE id = :id')
+                    ->execute(array(':d' => $displayName, ':r' => $role, ':id' => $uid));
+            }
+        } else {
+            $pdo->prepare('UPDATE admin_users SET display_name = :d, role = :r, updated_at = NOW() WHERE id = :id')
+                ->execute(array(':d' => $displayName, ':r' => $role, ':id' => $uid));
+        }
+    } elseif ($linkedAgentId !== null) {
+        try {
+            $pdo->prepare('UPDATE admin_users SET display_name = :d, linked_agent_id = :la, updated_at = NOW() WHERE id = :id')
+                ->execute(array(':d' => $displayName, ':la' => $linkedVal, ':id' => $uid));
+        } catch (Exception $e) {
+            $pdo->prepare('UPDATE admin_users SET display_name = :d, updated_at = NOW() WHERE id = :id')
+                ->execute(array(':d' => $displayName, ':id' => $uid));
+        }
     } else {
         $pdo->prepare('UPDATE admin_users SET display_name = :d, updated_at = NOW() WHERE id = :id')
-            ->execute(array(':d' => $displayName, ':id' => (int) $id));
+            ->execute(array(':d' => $displayName, ':id' => $uid));
     }
     return true;
 }

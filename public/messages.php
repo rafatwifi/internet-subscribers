@@ -4,9 +4,18 @@ require_once __DIR__ . '/../includes/bootstrap.php';
 require_once __DIR__ . '/../includes/layout.php';
 require_login();
 
-$mode = isset($_GET['mode']) ? (string) $_GET['mode'] : 'overdue';
-if (!in_array($mode, array('debt', 'days', 'overdue', 'log', 'templates'), true)) {
-    $mode = 'overdue';
+$mode = isset($_GET['mode']) ? (string) $_GET['mode'] : 'send';
+$filter = isset($_GET['filter']) ? (string) $_GET['filter'] : 'overdue';
+// توافق مع الروابط القديمة: ?mode=debt|days|overdue
+if (in_array($mode, array('debt', 'days', 'overdue'), true)) {
+    $filter = $mode;
+    $mode = 'send';
+}
+if (!in_array($mode, array('send', 'log', 'templates'), true)) {
+    $mode = 'send';
+}
+if (!in_array($filter, array('debt', 'days', 'overdue'), true)) {
+    $filter = 'overdue';
 }
 
 $logQ = isset($_GET['q']) ? trim((string) $_GET['q']) : '';
@@ -45,14 +54,15 @@ if (isset($config['templates']['unpaid_overdue']) && trim((string) $config['temp
 
 $previewMsg = isset($_GET['msg']) ? (string) $_GET['msg'] : '';
 if ($previewMsg === '') {
-    if ($mode === 'debt') {
+    if ($filter === 'debt') {
         $previewMsg = $defaultDebtTpl;
-    } elseif ($mode === 'days') {
+    } elseif ($filter === 'days') {
         $previewMsg = $defaultDaysTpl;
     } else {
         $previewMsg = $defaultOverdueTpl;
     }
 }
+$agentScopeSql = function_exists('subscriber_agent_scope_sql') ? subscriber_agent_scope_sql('s') : '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf(post('csrf'))) {
@@ -63,17 +73,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = post('action');
 
     if ($action === 'save_templates') {
-        $afterDaysSave = (int) post('unpaid_remind_after_days', '7');
-        if ($afterDaysSave < 1) {
-            $afterDaysSave = 1;
-        }
-        if ($afterDaysSave > 365) {
-            $afterDaysSave = 365;
-        }
-
         $caseKeys = array(
-            'activation_cash', 'activation_credit', 'activation_debts', 'debt_created', 'payment_ok',
-            'debt_remind', 'reminder_auto', 'days_left', 'unpaid_overdue', 'expiry_soon', 'schedule_cut'
+            'activation_cash', 'activation_credit', 'activation_debts', 'activation_credit_debts',
+            'debt_created', 'payment_ok', 'debt_remind', 'reminder_auto', 'days_left',
+            'expiry_soon', 'schedule_cut'
         );
 
         $keysIn = isset($_POST['tpl_key']) && is_array($_POST['tpl_key']) ? $_POST['tpl_key'] : array();
@@ -146,7 +149,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $allowedKeys = array_keys($catalog);
         $payload = array(
             'wa_templates' => $catalog,
-            'unpaid_remind_after_days' => $afterDaysSave,
         );
 
         // Mirror legacy tpl_* for schedule/settings pages that still edit those fields.
@@ -174,11 +176,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('messages.php?mode=templates');
     }
 
-    $modePost = post('mode', 'overdue');
-    if (!in_array($modePost, array('debt', 'days', 'overdue'), true)) {
-        $modePost = 'overdue';
+    $modePost = post('mode', 'send');
+    $filterPost = post('filter', post('mode', 'overdue'));
+    if (in_array($modePost, array('debt', 'days', 'overdue'), true)) {
+        $filterPost = $modePost;
+        $modePost = 'send';
     }
-    $mode = $modePost;
+    if (!in_array($filterPost, array('debt', 'days', 'overdue'), true)) {
+        $filterPost = 'overdue';
+    }
+    $mode = 'send';
+    $filter = $filterPost;
     $msgTpl = (string) post('msg', '');
     $ids = isset($_POST['ids']) && is_array($_POST['ids']) ? $_POST['ids'] : array();
 
@@ -198,12 +206,67 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect($redir);
     }
 
+    if ($action === 'disable_users') {
+        $okN = 0;
+        $failN = 0;
+        $skipped = 0;
+        foreach ($ids as $idRaw) {
+            $id = (int) $idRaw;
+            if ($id <= 0) {
+                continue;
+            }
+            if (function_exists('user_can_access_subscriber') && !user_can_access_subscriber($pdo, $id)) {
+                $skipped++;
+                continue;
+            }
+            $st = $pdo->prepare('SELECT id, name, sas_username FROM subscribers WHERE id = :id LIMIT 1');
+            $st->execute(array(':id' => $id));
+            $sub = $st->fetch();
+            if (!$sub) {
+                $skipped++;
+                continue;
+            }
+            $username = trim((string) (isset($sub['sas_username']) ? $sub['sas_username'] : ''));
+            if ($username === '') {
+                $st2 = $pdo->prepare('SELECT username FROM sas_users_cache WHERE local_subscriber_id = :id LIMIT 1');
+                $st2->execute(array(':id' => $id));
+                $username = trim((string) $st2->fetchColumn());
+            }
+            if ($username === '' || !function_exists('sas_write_user')) {
+                $failN++;
+                continue;
+            }
+            if (function_exists('user_can_access_sas_username') && !user_can_access_sas_username($pdo, $username)) {
+                $skipped++;
+                continue;
+            }
+            list($okDis, $msgDis) = sas_write_user($pdo, $config, 'sas_enable', $username, array('enabled' => '0'));
+            if ($okDis) {
+                $okN++;
+            } else {
+                $failN++;
+            }
+            usleep(120000);
+        }
+        $msg = ($lang === 'en' ? 'Disabled: ' : 'تم الإيقاف: ') . $okN
+            . ($lang === 'en' ? ' / Failed: ' : ' / فشل: ') . $failN;
+        if ($skipped > 0) {
+            $msg .= ($lang === 'en' ? ' / Skipped: ' : ' / تخطي: ') . $skipped;
+        }
+        flash($failN > 0 && $okN === 0 ? 'error' : 'success', $msg);
+        $redir = 'messages.php?mode=send&filter=' . rawurlencode($filter);
+        if ($filter === 'days') {
+            $redir .= '&days=' . (int) post('days', '7');
+        }
+        redirect($redir);
+    }
+
     if ($action === 'send') {
         $ok = 0;
         $fail = 0;
         $skipped = 0;
 
-        if ($mode === 'debt') {
+        if ($filter === 'debt') {
             foreach ($ids as $idRaw) {
                 $id = (int) $idRaw;
                 if ($id <= 0) {
@@ -249,7 +312,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 usleep(350000);
             }
-        } elseif ($mode === 'overdue') {
+        } elseif ($filter === 'overdue') {
+            if (empty($config['unpaid_remind_enabled'])) {
+                flash('error', $lang === 'en'
+                    ? 'Enable “warn after N days” in Schedule settings first.'
+                    : 'فعّل «تنبيه بعد * يوم من التفعيل» من إعدادات الجدول الدوري أولاً.');
+                redirect('messages.php');
+            }
             $afterDays = unpaid_remind_after_days($config);
             foreach ($ids as $idRaw) {
                 $id = (int) $idRaw;
@@ -317,7 +386,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                          WHERE i.subscriber_id = s.id AND i.status = "unpaid") AS debt_total
                      FROM subscriptions sub
                      JOIN subscribers s ON s.id = sub.subscriber_id
-                     WHERE sub.id = :id AND sub.status = "active"'
+                     WHERE sub.subscriber_id = :id AND sub.status = "active"
+                     ORDER BY sub.end_date ASC, sub.id DESC
+                     LIMIT 1'
                 );
                 $st->execute(array(':id' => $id));
                 $row = $st->fetch();
@@ -370,8 +441,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $msg .= ($lang === 'en' ? ' / Skipped: ' : ' / تخطي: ') . $skipped;
         }
         flash($fail > 0 && $ok === 0 ? 'error' : 'success', $msg);
-        $redir = 'messages.php?mode=' . $mode;
-        if ($mode === 'days') {
+        $redir = 'messages.php?mode=send&filter=' . rawurlencode($filter);
+        if ($filter === 'days') {
             $redir .= '&days=' . (int) post('days', '7');
         }
         redirect($redir);
@@ -434,7 +505,7 @@ if ($mode === 'log') {
     $logResolvedMap = message_logs_resolved_map($pdo, $logRows);
 } elseif ($mode === 'templates') {
     $sTpl = settings_load();
-} elseif ($mode === 'debt') {
+} elseif ($mode === 'send' && $filter === 'debt') {
     $filtered = $pdo->query(
         "SELECT s.id, s.name, s.phone,
             d.debt_total, d.debt_count
@@ -447,10 +518,10 @@ if ($mode === 'log') {
             WHERE status = 'unpaid'
             GROUP BY subscriber_id
          ) d ON d.subscriber_id = s.id
-         WHERE d.debt_total > 0
+         WHERE d.debt_total > 0" . $agentScopeSql . "
          ORDER BY d.debt_total DESC, s.name ASC"
     )->fetchAll();
-} elseif ($mode === 'overdue') {
+} elseif ($mode === 'send' && $filter === 'overdue') {
     $candidates = $pdo->query(
         "SELECT s.id, s.name, s.phone,
             d.debt_total, d.debt_count,
@@ -469,7 +540,7 @@ if ($mode === 'log') {
             WHERE status = 'unpaid'
             GROUP BY subscriber_id
          ) d ON d.subscriber_id = s.id
-         WHERE d.debt_total > 0
+         WHERE d.debt_total > 0" . $agentScopeSql . "
          ORDER BY s.name ASC"
     )->fetchAll();
     foreach ($candidates as $row) {
@@ -485,12 +556,12 @@ if ($mode === 'log') {
     usort($filtered, function ($a, $b) {
         return (int) $b['_days_passed'] - (int) $a['_days_passed'];
     });
-} elseif ($mode === 'days') {
+} elseif ($mode === 'send' && $filter === 'days') {
     $candidates = $pdo->query(
         "SELECT sub.*, s.name, s.phone
          FROM subscriptions sub
          JOIN subscribers s ON s.id = sub.subscriber_id
-         WHERE sub.status = 'active'
+         WHERE sub.status = 'active'" . $agentScopeSql . "
          ORDER BY sub.end_date ASC"
     )->fetchAll();
     foreach ($candidates as $row) {
@@ -504,15 +575,43 @@ if ($mode === 'log') {
 }
 
 render_header(t('messages'), 'messages');
+$isEnMsg = ($lang === 'en');
+$msgModes = array(
+    'send' => array('label' => $isEnMsg ? 'Send' : 'الإرسال', 'hint' => $isEnMsg ? 'Filter & WhatsApp' : 'فلترة وواتساب'),
+    'log' => array('label' => $isEnMsg ? 'Sent log' : 'سجل الرسائل', 'hint' => $isEnMsg ? 'History' : 'الأرشيف'),
+    'templates' => array('label' => t('templates'), 'hint' => $isEnMsg ? 'Edit & assign' : 'تعديل وتخصيص'),
+);
+$sendFilters = array(
+    'overdue' => array('label' => $isEnMsg ? 'Late payers' : 'المتأخرين بالتسديد', 'hint' => $isEnMsg ? 'Unpaid after activation' : 'دين بعد التفعيل'),
+    'debt' => array('label' => t('msg_mode_debt'), 'hint' => $isEnMsg ? 'Everyone with debt' : 'عليهم دين'),
+    'days' => array('label' => t('msg_mode_days'), 'hint' => $isEnMsg ? 'Expiring soon' : 'قرب الانتهاء'),
+);
 ?>
-<div class="panel panel-compact">
-    <h2><?php echo e(t('messages')); ?></h2>
-    <div class="actions actions-tight" style="margin-top:0;margin-bottom:8px">
-        <a class="btn sm <?php echo $mode === 'templates' ? '' : 'ghost'; ?>" href="messages.php?mode=templates"><?php echo e(t('templates')); ?></a>
-        <a class="btn sm <?php echo $mode === 'overdue' ? '' : 'ghost'; ?>" href="messages.php?mode=overdue"><?php echo e($lang === 'en' ? 'Late payers' : 'المتأخرين بالتسديد'); ?></a>
-        <a class="btn sm <?php echo $mode === 'debt' ? '' : 'ghost'; ?>" href="messages.php?mode=debt"><?php echo e(t('msg_mode_debt')); ?></a>
-        <a class="btn sm <?php echo $mode === 'days' ? '' : 'ghost'; ?>" href="messages.php?mode=days&days=<?php echo (int) $daysMax; ?>"><?php echo e(t('msg_mode_days')); ?></a>
-        <a class="btn sm <?php echo $mode === 'log' ? '' : 'ghost'; ?>" href="messages.php?mode=log"><?php echo e($lang === 'en' ? 'Sent log' : 'سجل الرسائل'); ?></a>
+<div class="msg-page">
+    <div class="msg-hero">
+        <div class="msg-hero-text">
+            <h2><?php echo e(t('messages')); ?></h2>
+            <p><?php echo e($isEnMsg
+                ? 'Bulk WhatsApp, delivery log, then templates — filter who to contact.'
+                : 'إرسال جماعي وسجل التوصيل، والقوالب بالآخر — فلتر مين تريد تراسله.'); ?></p>
+        </div>
+        <nav class="msg-tabs" aria-label="<?php echo e($isEnMsg ? 'Message sections' : 'أقسام الرسائل'); ?>">
+            <?php foreach ($msgModes as $mk => $meta): ?>
+                <?php
+                $href = 'messages.php?mode=' . rawurlencode($mk);
+                if ($mk === 'send') {
+                    $href .= '&filter=' . rawurlencode($filter);
+                    if ($filter === 'days') {
+                        $href .= '&days=' . (int) $daysMax;
+                    }
+                }
+                ?>
+                <a class="msg-tab<?php echo $mode === $mk ? ' is-on' : ''; ?>" href="<?php echo e($href); ?>">
+                    <strong><?php echo e($meta['label']); ?></strong>
+                    <span><?php echo e($meta['hint']); ?></span>
+                </a>
+            <?php endforeach; ?>
+        </nav>
     </div>
 
 <?php if ($mode === 'templates'): ?>
@@ -520,7 +619,6 @@ render_header(t('messages'), 'messages');
     if (!isset($sTpl) || !is_array($sTpl)) {
         $sTpl = settings_load();
     }
-    $isEnMsg = ($lang === 'en');
     $catalog = isset($config['wa_templates']) && is_array($config['wa_templates'])
         ? $config['wa_templates']
         : (function_exists('wa_build_templates_catalog') ? wa_build_templates_catalog($sTpl, $lang) : array());
@@ -594,60 +692,76 @@ render_header(t('messages'), 'messages');
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="action" value="save_templates">
 
-        <div class="panel" style="margin:0 0 14px;padding:12px 14px">
-            <h3 style="margin:0 0 8px;font-size:15px"><?php echo e($isEnMsg ? 'Assign templates to actions' : 'تخصيص القوالب للحركات'); ?></h3>
-            <p class="meta" style="margin:0 0 10px"><?php echo e($isEnMsg
-                ? 'Cash and credit activations are separate. Prior-debts appendix is used only when “include old debts” is on.'
-                : 'التفعيل النقدي والآجل منفصلان. ملحق الديون يُستخدم فقط عند تفعيل «تضمين الديون القديمة».'); ?></p>
-            <div class="form-grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px" id="tplCaseMap">
-                <?php foreach ($caseLabels as $caseKey => $caseLab): ?>
-                    <?php
-                    $stored = isset($sTpl['wa_case_' . $caseKey]) ? trim((string) $sTpl['wa_case_' . $caseKey]) : null;
-                    if ($stored === '__none__') {
-                        $sel = '__none__';
-                    } elseif ($stored !== null && $stored !== '' && isset($catalog[$stored])) {
-                        $sel = $stored;
-                    } else {
-                        $sel = isset($caseMap[$caseKey]) ? $caseMap[$caseKey] : '';
-                        if ($sel === '' || !isset($catalog[$sel])) {
-                            $sel = '__none__';
-                        }
-                    }
-                    $hasIssue = false;
-                    foreach ($warnMsgs as $w) {
-                        if ($w['case'] === $caseKey) {
-                            $hasIssue = true;
-                            break;
-                        }
-                    }
-                    ?>
-                    <label class="tpl-case-lab<?php echo $hasIssue ? ' is-warn' : ''; ?>" id="case-<?php echo e($caseKey); ?>" style="display:block;font-size:12px;font-weight:700;color:#475569">
-                        <?php echo e($caseLab); ?>
-                        <select name="wa_case_<?php echo e($caseKey); ?>" class="js-case-select" style="width:100%;margin-top:4px;height:36px">
-                            <option value="__none__"<?php echo $sel === '__none__' ? ' selected' : ''; ?>><?php echo e($isEnMsg ? '— Choose template —' : '— اختر قالباً —'); ?></option>
-                            <?php foreach ($catalog as $tk => $trow): ?>
-                                <option value="<?php echo e($tk); ?>"<?php echo $sel === $tk ? ' selected' : ''; ?>><?php echo e(isset($trow['label']) ? $trow['label'] : $tk); ?></option>
+        <section class="tpl-assign panel">
+            <div class="tpl-section-head">
+                <div>
+                    <h3><?php echo e($isEnMsg ? 'Assign templates to actions' : 'تخصيص القوالب للحركات'); ?></h3>
+                    <p class="meta"><?php echo e($isEnMsg
+                        ? 'Assign a template for each activation case (cash, credit, credit + old debts, debts appendix).'
+                        : 'خصّص قالباً لكل حالة تفعيل (نقدي، آجل، آجل + ديون قديمة، ملحق الديون).'); ?></p>
+                </div>
+            </div>
+            <div id="tplCaseMap">
+                <?php foreach ($sysGroups as $g): ?>
+                    <div class="tpl-case-group">
+                        <h4><?php echo e($g['group']); ?></h4>
+                        <div class="tpl-case-grid">
+                            <?php foreach ($g['cases'] as $c): ?>
+                                <?php
+                                $caseKey = $c['key'];
+                                $caseLab = $c['label'];
+                                $stored = isset($sTpl['wa_case_' . $caseKey]) ? trim((string) $sTpl['wa_case_' . $caseKey]) : null;
+                                if ($stored === '__none__') {
+                                    $sel = '__none__';
+                                } elseif ($stored !== null && $stored !== '' && isset($catalog[$stored])) {
+                                    $sel = $stored;
+                                } else {
+                                    $sel = isset($caseMap[$caseKey]) ? $caseMap[$caseKey] : '';
+                                    if ($sel === '' || !isset($catalog[$sel])) {
+                                        $sel = '__none__';
+                                    }
+                                }
+                                $hasIssue = false;
+                                foreach ($warnMsgs as $w) {
+                                    if ($w['case'] === $caseKey) {
+                                        $hasIssue = true;
+                                        break;
+                                    }
+                                }
+                                ?>
+                                <label class="tpl-case-lab<?php echo $hasIssue ? ' is-warn' : ''; ?>" id="case-<?php echo e($caseKey); ?>">
+                                    <span class="tpl-case-title"><?php echo e($caseLab); ?></span>
+                                    <?php if (!empty($c['hint'])): ?>
+                                        <span class="tpl-case-hint"><?php echo e($c['hint']); ?></span>
+                                    <?php endif; ?>
+                                    <?php if (!empty($c['vars'])): ?>
+                                        <span class="tpl-case-vars"><?php echo e($c['vars']); ?></span>
+                                    <?php endif; ?>
+                                    <select name="wa_case_<?php echo e($caseKey); ?>" class="js-case-select">
+                                        <option value="__none__"<?php echo $sel === '__none__' ? ' selected' : ''; ?>><?php echo e($isEnMsg ? '— Choose template —' : '— اختر قالباً —'); ?></option>
+                                        <?php foreach ($catalog as $tk => $trow): ?>
+                                            <option value="<?php echo e($tk); ?>"<?php echo $sel === $tk ? ' selected' : ''; ?>><?php echo e(isset($trow['label']) ? $trow['label'] : $tk); ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </label>
                             <?php endforeach; ?>
-                        </select>
-                        <?php if ($caseKey === 'unpaid_overdue'): ?>
-                            <span class="tpl-inline" style="margin-top:6px;display:inline-flex">
-                                <span><?php echo e($isEnMsg ? 'Warn after (days)' : 'تنبيه بعد (يوم)'); ?></span>
-                                <input type="number" name="unpaid_remind_after_days" min="1" max="365"
-                                    value="<?php echo (int) (isset($sTpl['unpaid_remind_after_days']) ? $sTpl['unpaid_remind_after_days'] : 7); ?>">
-                            </span>
-                        <?php endif; ?>
-                    </label>
+                        </div>
+                    </div>
                 <?php endforeach; ?>
             </div>
-        </div>
+        </section>
 
-        <div class="actions actions-tight" style="margin-bottom:8px">
-            <strong style="font-size:14px;margin-inline-end:auto"><?php echo e($isEnMsg ? 'Templates' : 'القوالب'); ?></strong>
+        <div class="tpl-lib-toolbar">
+            <div>
+                <strong><?php echo e($isEnMsg ? 'Templates' : 'القوالب'); ?></strong>
+                <span class="meta" id="tplCountHint"><?php echo count($catalog); ?></span>
+            </div>
+            <input type="search" id="tplSearch" class="tpl-search" placeholder="<?php echo e($isEnMsg ? 'Filter templates…' : 'تصفية القوالب…'); ?>" autocomplete="off">
             <button type="button" class="btn secondary sm" id="tplAddBtn"><?php echo e($isEnMsg ? '+ Add template' : '+ إضافة قالب'); ?></button>
         </div>
 
-        <div class="tpl-new panel" id="tplNewBox" style="margin:0 0 10px;padding:12px 14px" hidden>
-            <div class="form-grid" style="grid-template-columns:1.2fr .8fr;gap:8px">
+        <div class="tpl-new panel" id="tplNewBox" hidden>
+            <div class="form-grid tpl-new-grid">
                 <div>
                     <label><?php echo e($isEnMsg ? 'Name' : 'الاسم'); ?></label>
                     <input type="text" name="tpl_new_label" id="tplNewLabel" placeholder="<?php echo e($isEnMsg ? 'e.g. Ramadan offer' : 'مثال: عرض رمضان'); ?>">
@@ -657,7 +771,7 @@ render_header(t('messages'), 'messages');
                     <input type="text" name="tpl_new_key" id="tplNewKey" dir="ltr" placeholder="my_template">
                 </div>
             </div>
-            <label style="margin-top:8px;display:block"><?php echo e($isEnMsg ? 'Message text' : 'نص الرسالة'); ?></label>
+            <label class="tpl-new-body-lab"><?php echo e($isEnMsg ? 'Message text' : 'نص الرسالة'); ?></label>
             <textarea name="tpl_new_body" id="tplNewBody" rows="3" placeholder="<?php echo e($commonVars); ?>"></textarea>
             <div class="actions actions-tight" style="margin-top:8px">
                 <button type="button" class="btn sm" id="tplNewConfirm"><?php echo e($isEnMsg ? 'Add to list' : 'أضف للقائمة'); ?></button>
@@ -674,36 +788,44 @@ render_header(t('messages'), 'messages');
                         $inUseLabels[] = isset($caseLabels[$uck]) ? $caseLabels[$uck] : $uck;
                     }
                 }
+                $bodyVal = isset($trow['body']) ? (string) $trow['body'] : '';
+                $labVal = isset($trow['label']) ? (string) $trow['label'] : $tk;
+                $searchCard = strtolower($tk . ' ' . $labVal . ' ' . $bodyVal);
                 ?>
-                <article class="tpl-card" data-tpl-card>
+                <article class="tpl-card" data-tpl-card data-search="<?php echo e($searchCard); ?>">
                     <header class="tpl-card-head">
                         <input type="hidden" name="tpl_key[]" value="<?php echo e($tk); ?>">
-                        <input type="text" name="tpl_label[]" class="tpl-label-input" value="<?php echo e(isset($trow['label']) ? $trow['label'] : $tk); ?>" placeholder="<?php echo e($isEnMsg ? 'Template name' : 'اسم القالب'); ?>">
+                        <input type="text" name="tpl_label[]" class="tpl-label-input" value="<?php echo e($labVal); ?>" placeholder="<?php echo e($isEnMsg ? 'Template name' : 'اسم القالب'); ?>">
                         <span class="tpl-vars" title="<?php echo e($tk); ?>"><?php echo e($tk); ?></span>
                         <button type="button" class="btn ghost sm js-tpl-del"><?php echo e($isEnMsg ? 'Delete' : 'حذف'); ?></button>
                     </header>
                     <?php if ($inUseLabels): ?>
-                        <p class="meta" style="margin:0;font-size:11px"><?php echo e($isEnMsg ? 'Used by: ' : 'مستخدم في: '); ?><?php echo e(implode(' · ', $inUseLabels)); ?></p>
+                        <p class="tpl-used"><?php echo e($isEnMsg ? 'Used by: ' : 'مستخدم في: '); ?><?php echo e(implode(' · ', $inUseLabels)); ?></p>
                     <?php endif; ?>
-                    <textarea name="tpl_body[]" rows="4" placeholder="<?php echo e($commonVars); ?>"><?php echo e(isset($trow['body']) ? $trow['body'] : ''); ?></textarea>
+                    <textarea name="tpl_body[]" rows="4" class="js-tpl-body" placeholder="<?php echo e($commonVars); ?>"><?php echo e($bodyVal); ?></textarea>
+                    <div class="tpl-card-foot">
+                        <span class="tpl-len"><?php echo function_exists('mb_strlen') ? mb_strlen($bodyVal, 'UTF-8') : strlen($bodyVal); ?> <?php echo e($isEnMsg ? 'chars' : 'حرف'); ?></span>
+                    </div>
                 </article>
             <?php endforeach; ?>
         </div>
 
-        <div class="tpl-save">
+        <div class="tpl-save is-sticky">
             <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
+            <span class="meta"><?php echo e($isEnMsg ? 'Saves templates and action mapping together.' : 'يحفظ القوالب وتخصيص الحركات معاً.'); ?></span>
         </div>
     </form>
 
     <template id="tplCardTpl">
-        <article class="tpl-card" data-tpl-card>
+        <article class="tpl-card" data-tpl-card data-search="">
             <header class="tpl-card-head">
                 <input type="hidden" name="tpl_key[]" value="">
                 <input type="text" name="tpl_label[]" class="tpl-label-input" value="" placeholder="<?php echo e($isEnMsg ? 'Template name' : 'اسم القالب'); ?>">
                 <span class="tpl-vars"></span>
                 <button type="button" class="btn ghost sm js-tpl-del"><?php echo e($isEnMsg ? 'Delete' : 'حذف'); ?></button>
             </header>
-            <textarea name="tpl_body[]" rows="4" placeholder="<?php echo e($commonVars); ?>"></textarea>
+            <textarea name="tpl_body[]" rows="4" class="js-tpl-body" placeholder="<?php echo e($commonVars); ?>"></textarea>
+            <div class="tpl-card-foot"><span class="tpl-len">0 <?php echo e($isEnMsg ? 'chars' : 'حرف'); ?></span></div>
         </article>
     </template>
     <script>
@@ -715,6 +837,9 @@ render_header(t('messages'), 'messages');
       var newBox = document.getElementById('tplNewBox');
       var newConfirm = document.getElementById('tplNewConfirm');
       var newCancel = document.getElementById('tplNewCancel');
+      var search = document.getElementById('tplSearch');
+      var countHint = document.getElementById('tplCountHint');
+      var charsWord = <?php echo json_encode($isEnMsg ? 'chars' : 'حرف'); ?>;
       var confirmDel = <?php echo json_encode($isEnMsg
           ? 'Delete this template? Reassign actions that used it.'
           : 'تحذف هذا القالب؟ عيّن قالباً آخر للحركات اللي كانت تستخدمه.'); ?>;
@@ -737,6 +862,16 @@ render_header(t('messages'), 'messages');
         if (!keys[k]) return k;
         while (keys[k + '_' + n]) n++;
         return k + '_' + n;
+      }
+      function updateLen(card) {
+        var ta = card.querySelector('.js-tpl-body');
+        var el = card.querySelector('.tpl-len');
+        if (!ta || !el) return;
+        el.textContent = String(ta.value.length) + ' ' + charsWord;
+      }
+      function refreshCount() {
+        if (!lib || !countHint) return;
+        countHint.textContent = String(lib.querySelectorAll('[data-tpl-card]:not(.is-hidden)').length);
       }
       function rebuildCaseOptions() {
         var cards = lib ? lib.querySelectorAll('[data-tpl-card]') : [];
@@ -771,10 +906,16 @@ render_header(t('messages'), 'messages');
             if (!window.confirm(confirmDel)) return;
             card.parentNode.removeChild(card);
             rebuildCaseOptions();
+            refreshCount();
           });
         }
         var lab = card.querySelector('input[name="tpl_label[]"]');
         if (lab) lab.addEventListener('input', rebuildCaseOptions);
+        var ta = card.querySelector('.js-tpl-body');
+        if (ta) {
+          ta.addEventListener('input', function () { updateLen(card); });
+          updateLen(card);
+        }
       }
       function addTemplateFromNew() {
         var labelEl = document.getElementById('tplNewLabel');
@@ -796,9 +937,11 @@ render_header(t('messages'), 'messages');
         var badge = card.querySelector('.tpl-vars');
         if (badge) badge.textContent = key;
         card.querySelector('textarea[name="tpl_body[]"]').value = body;
+        card.setAttribute('data-search', (key + ' ' + label + ' ' + body).toLowerCase());
         lib.insertBefore(card, lib.firstChild);
         bindCard(card);
         rebuildCaseOptions();
+        refreshCount();
         if (labelEl) labelEl.value = '';
         if (keyEl) keyEl.value = '';
         if (bodyEl) bodyEl.value = '';
@@ -821,43 +964,55 @@ render_header(t('messages'), 'messages');
           if (newBox) newBox.setAttribute('hidden', 'hidden');
         });
       }
+      if (search && lib) {
+        search.addEventListener('input', function () {
+          var q = String(search.value || '').toLowerCase().trim();
+          var cards = lib.querySelectorAll('[data-tpl-card]');
+          for (var i = 0; i < cards.length; i++) {
+            var hay = cards[i].getAttribute('data-search') || '';
+            cards[i].classList.toggle('is-hidden', !!(q && hay.indexOf(q) === -1));
+          }
+          refreshCount();
+        });
+      }
+      refreshCount();
     })();
     </script>
 
 <?php elseif ($mode === 'log'): ?>
-    <form method="get" class="actions actions-tight" style="margin-bottom:10px">
+    <form method="get" class="msg-toolbar">
         <input type="hidden" name="mode" value="log">
-        <input name="q" value="<?php echo e($logQ); ?>" placeholder="<?php echo e($lang === 'en' ? 'Search message text, name, phone…' : 'بحث بنص الرسالة أو الاسم أو الرقم…'); ?>" style="max-width:340px;flex:1">
-        <select name="type" style="max-width:200px">
-            <option value=""><?php echo e($lang === 'en' ? 'All types' : 'كل الأنواع'); ?></option>
-            <option value="auto"<?php echo $logType === 'auto' ? ' selected' : ''; ?>><?php echo e($lang === 'en' ? 'Automatic only' : 'التلقائي فقط'); ?></option>
-            <option value="activation"<?php echo $logType === 'activation' ? ' selected' : ''; ?>><?php echo e($lang === 'en' ? 'Activation' : 'تفعيل'); ?></option>
-            <option value="reminder_debt"<?php echo $logType === 'reminder_debt' ? ' selected' : ''; ?>><?php echo e($lang === 'en' ? 'Debt reminder' : 'تذكير دين'); ?></option>
-            <option value="unpaid_overdue"<?php echo $logType === 'unpaid_overdue' ? ' selected' : ''; ?>><?php echo e($lang === 'en' ? 'Unpaid / delay' : 'تأخير الدين'); ?></option>
-            <option value="expiry_auto"<?php echo $logType === 'expiry_auto' ? ' selected' : ''; ?>><?php echo e($lang === 'en' ? 'Expiry auto' : 'قرب الانتهاء'); ?></option>
+        <input name="q" value="<?php echo e($logQ); ?>" placeholder="<?php echo e($isEnMsg ? 'Search message text, name, phone…' : 'بحث بنص الرسالة أو الاسم أو الرقم…'); ?>">
+        <select name="type">
+            <option value=""><?php echo e($isEnMsg ? 'All types' : 'كل الأنواع'); ?></option>
+            <option value="auto"<?php echo $logType === 'auto' ? ' selected' : ''; ?>><?php echo e($isEnMsg ? 'Automatic only' : 'التلقائي فقط'); ?></option>
+            <option value="activation"<?php echo $logType === 'activation' ? ' selected' : ''; ?>><?php echo e($isEnMsg ? 'Activation' : 'تفعيل'); ?></option>
+            <option value="reminder_debt"<?php echo $logType === 'reminder_debt' ? ' selected' : ''; ?>><?php echo e($isEnMsg ? 'Debt reminder' : 'تذكير دين'); ?></option>
+            <option value="unpaid_overdue"<?php echo $logType === 'unpaid_overdue' ? ' selected' : ''; ?>><?php echo e($isEnMsg ? 'Unpaid / delay' : 'تأخير الدين'); ?></option>
+            <option value="expiry_auto"<?php echo $logType === 'expiry_auto' ? ' selected' : ''; ?>><?php echo e($isEnMsg ? 'Expiry auto' : 'قرب الانتهاء'); ?></option>
         </select>
-        <button class="btn secondary sm" type="submit"><?php echo e($lang === 'en' ? 'Search' : 'بحث'); ?></button>
-        <?php if ($logQ !== ''): ?>
+        <button class="btn secondary sm" type="submit"><?php echo e($isEnMsg ? 'Search' : 'بحث'); ?></button>
+        <?php if ($logQ !== '' || $logType !== ''): ?>
             <a class="btn ghost sm" href="messages.php?mode=log"><?php echo e(t('show_all')); ?></a>
         <?php endif; ?>
-        <span class="meta" style="margin:0"><?php echo (int) $logTotal; ?> <?php echo e($lang === 'en' ? 'messages' : 'رسالة'); ?></span>
+        <span class="meta msg-count"><?php echo (int) $logTotal; ?> <?php echo e($isEnMsg ? 'messages' : 'رسالة'); ?></span>
     </form>
-    <div class="table-wrap">
+    <div class="table-wrap msg-table-wrap">
         <table class="table-compact log-table" id="msgLogTable">
             <thead>
             <tr>
-                <th><?php echo e($lang === 'en' ? 'When' : 'الوقت'); ?></th>
+                <th><?php echo e($isEnMsg ? 'When' : 'الوقت'); ?></th>
                 <th><?php echo e(t('name')); ?></th>
                 <th><?php echo e(t('phone')); ?></th>
-                <th><?php echo e($lang === 'en' ? 'Type' : 'النوع'); ?></th>
-                <th><?php echo e($lang === 'en' ? 'Status' : 'الحالة'); ?></th>
-                <th><?php echo e($lang === 'en' ? 'Message' : 'نص الرسالة'); ?></th>
+                <th><?php echo e($isEnMsg ? 'Type' : 'النوع'); ?></th>
+                <th><?php echo e($isEnMsg ? 'Status' : 'الحالة'); ?></th>
+                <th><?php echo e($isEnMsg ? 'Message' : 'نص الرسالة'); ?></th>
                 <th></th>
             </tr>
             </thead>
             <tbody>
             <?php if (!$logRows): ?>
-                <tr><td colspan="7"><?php echo e($lang === 'en' ? 'No messages yet' : 'ماكو رسائل بالسجل بعد'); ?></td></tr>
+                <tr><td colspan="7" class="msg-empty"><?php echo e($isEnMsg ? 'No messages yet' : 'ماكو رسائل بالسجل بعد'); ?></td></tr>
             <?php endif; ?>
             <?php foreach ($logRows as $row): ?>
                 <?php
@@ -874,7 +1029,7 @@ render_header(t('messages'), 'messages');
                 }
                 $bodyShort = str_replace(array("\r\n", "\n", "\r"), ' ', $bodyShort);
                 $rowCls = $ok ? '' : ($resolved ? 'row-msg-resolved' : 'row-msg-fail');
-                $resolvedTitle = $lang === 'en' ? 'Resolved by a later successful send' : 'انحلت لاحقاً بإرسال ناجح';
+                $resolvedTitle = $isEnMsg ? 'Resolved by a later successful send' : 'انحلت لاحقاً بإرسال ناجح';
                 ?>
                 <tr class="<?php echo e($rowCls); ?>">
                     <td class="nowrap"><?php echo e($row['created_at']); ?></td>
@@ -891,23 +1046,23 @@ render_header(t('messages'), 'messages');
                     <td><small><?php echo e(message_type_title($row['message_type'])); ?></small></td>
                     <td class="msg-status-log">
                         <?php if ($ok): ?>
-                            <span class="dot-msg ok" title="<?php echo e($lang === 'en' ? 'Sent' : 'تم'); ?>"></span>
-                            <?php echo e($lang === 'en' ? 'OK' : 'تم'); ?>
+                            <span class="dot-msg ok" title="<?php echo e($isEnMsg ? 'Sent' : 'تم'); ?>"></span>
+                            <?php echo e($isEnMsg ? 'OK' : 'تم'); ?>
                         <?php elseif ($resolved): ?>
                             <span class="dot-msg resolved" title="<?php echo e($resolvedTitle); ?>"></span>
-                            <span class="msg-fail-muted"><?php echo e($lang === 'en' ? 'Fail' : 'فشل'); ?></span>
+                            <span class="msg-fail-muted"><?php echo e($isEnMsg ? 'Fail' : 'فشل'); ?></span>
                             <span class="msg-resolved-arrow" title="<?php echo e($resolvedTitle); ?>" aria-label="<?php echo e($resolvedTitle); ?>">→</span>
-                            <span class="msg-resolved-ok"><?php echo e($lang === 'en' ? 'Fixed' : 'انحلت'); ?></span>
+                            <span class="msg-resolved-ok"><?php echo e($isEnMsg ? 'Fixed' : 'انحلت'); ?></span>
                         <?php else: ?>
                             <span class="dot-msg fail"></span>
-                            <?php echo e($lang === 'en' ? 'Fail' : 'فشل'); ?>
+                            <?php echo e($isEnMsg ? 'Fail' : 'فشل'); ?>
                         <?php endif; ?>
                     </td>
                     <td class="log-details msg-log-body" title="<?php echo e($bodyFull); ?>">
                         <?php echo e($bodyShort); ?>
                         <?php if ($bodyShort !== str_replace(array("\r\n", "\n", "\r"), ' ', $bodyFull)): ?>
                             <details class="msg-log-more">
-                                <summary><?php echo e($lang === 'en' ? 'Full' : 'كامل'); ?></summary>
+                                <summary><?php echo e($isEnMsg ? 'Full' : 'كامل'); ?></summary>
                                 <pre class="msg-log-pre"><?php echo e($bodyFull); ?></pre>
                             </details>
                         <?php endif; ?>
@@ -920,7 +1075,7 @@ render_header(t('messages'), 'messages');
                                 <input type="hidden" name="log_id" value="<?php echo (int) $row['id']; ?>">
                                 <input type="hidden" name="q" value="<?php echo e($logQ); ?>">
                                 <input type="hidden" name="page" value="<?php echo (int) $logPage; ?>">
-                                <button class="link-act" type="submit" title="<?php echo e($lang === 'en' ? 'Retry' : 'إعادة إرسال'); ?>">↻</button>
+                                <button class="link-act" type="submit" title="<?php echo e($isEnMsg ? 'Retry' : 'إعادة إرسال'); ?>">↻</button>
                             </form>
                         <?php elseif ($resolved): ?>
                             <span class="msg-resolved-arrow acts-resolved" title="<?php echo e($resolvedTitle); ?>">→</span>
@@ -934,87 +1089,112 @@ render_header(t('messages'), 'messages');
     <?php if ($logPages > 1): ?>
         <div class="actions actions-tight" style="margin-top:10px">
             <?php if ($logPage > 1): ?>
-                <a class="btn ghost sm" href="messages.php?mode=log&page=<?php echo (int) ($logPage - 1); ?><?php echo $logQ !== '' ? '&q=' . rawurlencode($logQ) : ''; ?>">‹</a>
+                <a class="btn ghost sm" href="messages.php?mode=log&page=<?php echo (int) ($logPage - 1); ?><?php echo $logQ !== '' ? '&q=' . rawurlencode($logQ) : ''; ?><?php echo $logType !== '' ? '&type=' . rawurlencode($logType) : ''; ?>">‹</a>
             <?php endif; ?>
             <span class="meta" style="margin:0"><?php echo (int) $logPage; ?> / <?php echo (int) $logPages; ?></span>
             <?php if ($logPage < $logPages): ?>
-                <a class="btn ghost sm" href="messages.php?mode=log&page=<?php echo (int) ($logPage + 1); ?><?php echo $logQ !== '' ? '&q=' . rawurlencode($logQ) : ''; ?>">›</a>
+                <a class="btn ghost sm" href="messages.php?mode=log&page=<?php echo (int) ($logPage + 1); ?><?php echo $logQ !== '' ? '&q=' . rawurlencode($logQ) : ''; ?><?php echo $logType !== '' ? '&type=' . rawurlencode($logType) : ''; ?>">›</a>
             <?php endif; ?>
         </div>
     <?php endif; ?>
 
 <?php else: ?>
 
-    <?php if ($mode === 'days'): ?>
-        <form method="get" class="form-grid form-grid-tight" style="margin-bottom:10px">
-            <input type="hidden" name="mode" value="days">
-            <div>
-                <label><?php echo e(t('filter_days')); ?></label>
+    <div class="msg-bulk-intro">
+        <nav class="msg-filter-chips" aria-label="<?php echo e($isEnMsg ? 'Send filters' : 'فلاتر الإرسال'); ?>">
+            <?php foreach ($sendFilters as $fk => $fmeta): ?>
+                <?php
+                $fhref = 'messages.php?mode=send&filter=' . rawurlencode($fk);
+                if ($fk === 'days') {
+                    $fhref .= '&days=' . (int) $daysMax;
+                }
+                ?>
+                <a class="msg-chip<?php echo $filter === $fk ? ' is-on' : ''; ?>" href="<?php echo e($fhref); ?>">
+                    <strong><?php echo e($fmeta['label']); ?></strong>
+                    <span><?php echo e($fmeta['hint']); ?></span>
+                </a>
+            <?php endforeach; ?>
+        </nav>
+    <?php if ($filter === 'days'): ?>
+        <form method="get" class="msg-toolbar">
+            <input type="hidden" name="mode" value="send">
+            <input type="hidden" name="filter" value="days">
+            <label class="msg-inline-lab">
+                <span><?php echo e(t('filter_days')); ?></span>
                 <input type="number" min="0" name="days" value="<?php echo (int) $daysMax; ?>">
-            </div>
-            <div style="display:flex;align-items:flex-end">
-                <button class="btn sm" type="submit"><?php echo e(t('show')); ?></button>
-            </div>
+            </label>
+            <button class="btn sm" type="submit"><?php echo e(t('show')); ?></button>
+            <span class="meta msg-count"><?php echo count($filtered); ?> <?php echo e($isEnMsg ? 'people' : 'مشترك'); ?></span>
         </form>
-    <?php elseif ($mode === 'overdue'): ?>
-        <p class="meta" style="margin-top:0">
-            <?php echo e($lang === 'en'
+    <?php elseif ($filter === 'overdue'): ?>
+        <p class="meta">
+            <?php echo e($isEnMsg
                 ? ('Active + unpaid for ' . $afterDays . '+ days. Edit days/text in Templates.')
                 : ('مفعّل وعليه دين ومضى ' . $afterDays . '+ يوم. الأيام والنص من القوالب.')); ?>
+            · <strong><?php echo count($filtered); ?></strong>
         </p>
     <?php else: ?>
-        <p class="meta" style="margin-top:0">
-            <?php echo e($lang === 'en'
+        <p class="meta">
+            <?php echo e($isEnMsg
                 ? 'Everyone with unpaid debt. Uncheck to exclude.'
                 : 'كل من عليه دين. شيل الجك بوكس للاستثناء.'); ?>
+            · <strong><?php echo count($filtered); ?></strong>
         </p>
     <?php endif; ?>
+    </div>
 
-    <form method="post" id="bulkMsgForm">
+    <form method="post" id="bulkMsgForm" class="msg-bulk-form">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
-        <input type="hidden" name="action" value="send">
-        <input type="hidden" name="mode" value="<?php echo e($mode); ?>">
-        <?php if ($mode === 'days'): ?>
+        <input type="hidden" name="action" value="send" id="bulkMsgAction">
+        <input type="hidden" name="mode" value="send">
+        <input type="hidden" name="filter" value="<?php echo e($filter); ?>">
+        <?php if ($filter === 'days'): ?>
             <input type="hidden" name="days" value="<?php echo (int) $daysMax; ?>">
         <?php endif; ?>
-        <div>
+        <div class="msg-compose panel">
             <label>
-                <?php echo e($lang === 'en' ? 'Message' : 'نص الرسالة'); ?>
-                <?php if ($mode === 'debt'): ?>
-                    ({name} {debt} {amount} {month})
-                <?php elseif ($mode === 'overdue'): ?>
-                    ({name} {days_passed} {debt} {package})
+                <?php echo e($isEnMsg ? 'Message' : 'نص الرسالة'); ?>
+                <?php if ($filter === 'debt'): ?>
+                    <span class="tpl-case-vars">({name} {debt} {amount} {month})</span>
+                <?php elseif ($filter === 'overdue'): ?>
+                    <span class="tpl-case-vars">({name} {days_passed} {debt} {package})</span>
                 <?php else: ?>
-                    ({name} {days} {package} {from} {to} {debt})
+                    <span class="tpl-case-vars">({name} {days} {package} {from} {to} {debt})</span>
                 <?php endif; ?>
             </label>
-            <textarea name="msg" rows="3" class="msg-textarea-compact"><?php echo e($previewMsg); ?></textarea>
-        </div>
-        <div class="actions actions-tight">
-            <button class="btn ghost sm" type="button" id="selAllMsg"><?php echo e(t('select_all')); ?></button>
-            <button class="btn ghost sm" type="button" id="selNoneMsg"><?php echo e(t('select_none')); ?></button>
-            <button class="btn secondary sm" type="submit" id="sendBulkBtn"
-                onclick="return confirm(<?php echo json_encode($lang === 'en'
-                    ? 'Send WhatsApp to selected people only?'
-                    : 'إرسال واتساب للمحددين فقط؟'); ?>);">
-                <?php echo e(t('send_selected')); ?> (<span id="selCount"><?php echo count($filtered); ?></span>)
-            </button>
+            <textarea name="msg" rows="4" class="msg-textarea-compact" id="bulkMsgText"><?php echo e($previewMsg); ?></textarea>
+            <div class="msg-compose-bar">
+                <button class="btn ghost sm" type="button" id="selAllMsg"><?php echo e(t('select_all')); ?></button>
+                <button class="btn ghost sm" type="button" id="selNoneMsg"><?php echo e(t('select_none')); ?></button>
+                <button class="btn secondary sm" type="submit" id="sendBulkBtn"
+                    onclick="document.getElementById('bulkMsgAction').value='send'; return confirm(<?php echo json_encode($isEnMsg
+                        ? 'Send WhatsApp to selected people only?'
+                        : 'إرسال واتساب للمحددين فقط؟'); ?>);">
+                    <?php echo e(t('send_selected')); ?> (<span id="selCount"><?php echo count($filtered); ?></span>)
+                </button>
+                <button class="btn danger sm" type="submit" id="disableBulkBtn"
+                    onclick="document.getElementById('bulkMsgAction').value='disable_users'; return confirm(<?php echo json_encode($isEnMsg
+                        ? 'Disable selected users on SAS?'
+                        : 'إيقاف اليوزرات المحددين على الساس؟'); ?>);">
+                    <?php echo e($isEnMsg ? 'Disable selected' : 'إيقاف المحددين'); ?>
+                </button>
+            </div>
         </div>
 
-        <div class="table-wrap" style="margin-top:8px">
+        <div class="table-wrap msg-table-wrap">
             <table class="table-compact" id="msgBulkTable">
                 <thead>
                 <tr>
                     <th class="chk-col"><input type="checkbox" id="checkAllMsg" class="chk-sm" checked></th>
                     <th><?php echo e(t('name')); ?></th>
                     <th><?php echo e(t('phone')); ?></th>
-                    <?php if ($mode === 'debt'): ?>
+                    <?php if ($filter === 'debt'): ?>
                         <th><?php echo e(t('debts_total')); ?></th>
-                        <th><?php echo e($lang === 'en' ? 'Items' : 'عدد الديون'); ?></th>
-                    <?php elseif ($mode === 'overdue'): ?>
+                        <th><?php echo e($isEnMsg ? 'Items' : 'عدد الديون'); ?></th>
+                    <?php elseif ($filter === 'overdue'): ?>
                         <th><?php echo e(t('package')); ?></th>
-                        <th><?php echo e($lang === 'en' ? 'Activated' : 'تاريخ التفعيل'); ?></th>
-                        <th><?php echo e($lang === 'en' ? 'Days since' : 'مضى (يوم)'); ?></th>
+                        <th><?php echo e($isEnMsg ? 'Activated' : 'تاريخ التفعيل'); ?></th>
+                        <th><?php echo e($isEnMsg ? 'Days since' : 'مضى (يوم)'); ?></th>
                         <th><?php echo e(t('debts_total')); ?></th>
                     <?php else: ?>
                         <th><?php echo e(t('package')); ?></th>
@@ -1025,20 +1205,25 @@ render_header(t('messages'), 'messages');
                 </thead>
                 <tbody>
                 <?php if (!$filtered): ?>
-                    <tr><td colspan="6"><?php echo e($lang === 'en' ? 'No results' : 'لا توجد نتائج'); ?></td></tr>
+                    <tr><td colspan="6" class="msg-empty"><?php echo e($isEnMsg ? 'No results' : 'لا توجد نتائج'); ?></td></tr>
                 <?php endif; ?>
                 <?php foreach ($filtered as $row): ?>
+                    <?php
+                    $chkId = ($filter === 'days' && isset($row['subscriber_id']))
+                        ? (int) $row['subscriber_id']
+                        : (int) $row['id'];
+                    ?>
                     <tr>
                         <td class="chk-col">
                             <input type="checkbox" class="msg-check chk-sm" name="ids[]"
-                                value="<?php echo (int) $row['id']; ?>" checked>
+                                value="<?php echo $chkId; ?>" checked>
                         </td>
                         <td><?php echo e($row['name']); ?></td>
                         <td><?php echo e(format_phone_display($row['phone'])); ?></td>
-                        <?php if ($mode === 'debt'): ?>
+                        <?php if ($filter === 'debt'): ?>
                             <td><strong><?php echo e(money_format_iqd($row['debt_total'], $config['currency'])); ?></strong></td>
                             <td><?php echo (int) $row['debt_count']; ?></td>
-                        <?php elseif ($mode === 'overdue'): ?>
+                        <?php elseif ($filter === 'overdue'): ?>
                             <td><?php echo e(!empty($row['active_service']) ? $row['active_service'] : '-'); ?></td>
                             <td><?php echo e($row['active_start']); ?></td>
                             <td><strong><?php echo (int) $row['_days_passed']; ?></strong></td>

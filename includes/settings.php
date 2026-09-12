@@ -22,11 +22,14 @@ function settings_defaults()
         'tpl_payment_ok' => "مرحباً {name}\nتم استلام مبلغ {amount}\nعن: {month}\nالمتبقي عليك: {remaining}",
         'tpl_debt_created' => "مرحباً {name}\nتم تسجيل دين بمبلغ {amount}\nعن: {month}\n{notes}",
         'tpl_activation' => "مرحباً {name}\nتم تفعيل خدمة الإنترنت ({package})\nمن {from} إلى {to}\nالمبلغ: {amount}",
-        'tpl_activation_credit' => "مرحباً {name}\nتم تفعيل خدمة الإنترنت ({package}) بالآجل\nمن {from} إلى {to}\nالمبلغ المستحق: {amount}",
-        'tpl_activation_debts' => "تنويه: عليك ديون سابقة بمبلغ {debt}\nالتفاصيل: {month}",
+        'tpl_activation_credit' => "مرحباً {name}\nتم تفعيل خدمة الإنترنت ({package}) بالآجل\nمن {from} إلى {to}\nالمبلغ المستحق: {amount}\nيمكنك التسديد عبر الماستر كارد",
+        'tpl_activation_debts' => "تنويه: عليك ديون سابقة بمبلغ {debt}\nالتفاصيل:\n{notes}",
+        'tpl_activation_credit_debts' => "مرحباً {name}\nتم تفعيل خدمة الإنترنت ({package}) بالآجل\nمن {from} إلى {to}\nالمبلغ المستحق لهذا التفعيل: {amount}\nوعليك ديون سابقة بمبلغ {debt}\nالتفاصيل:\n{notes}\nيمكنك تسديد الكل عبر الماستر كارد",
         'tpl_days_left' => "السلام عليكم {name}\nتبقى لديك {days} يوم على الاشتراك",
         'tpl_unpaid_overdue' => "السلام عليكم {name}\nمضى على تفعيل خطك {days_passed} أيام\nيرجى تسديد الديون البالغة {debt}\nوبعكسه سيتم إيقاف الخدمة",
         'unpaid_remind_after_days' => 7,
+        'unpaid_remind_enabled' => false,
+        'wa_case_unpaid_overdue' => 'unpaid_overdue',
         'expiry_auto_remind_enabled' => false,
         'expiry_auto_remind_days' => 1,
         'tpl_expiry_soon' => "السلام عليكم {name}\nتبقى لديك {days} يوم على اشتراك ({package})\nينتهي بتاريخ {to}\nيرجى التجديد لتجنب انقطاع الخدمة",
@@ -34,11 +37,11 @@ function settings_defaults()
         'wa_case_activation_cash' => 'activation',
         'wa_case_activation_credit' => 'activation_credit',
         'wa_case_activation_debts' => 'activation_debts',
+        'wa_case_activation_credit_debts' => 'activation_credit_debts',
         'wa_case_debt_created' => 'debt_created',
         'wa_case_payment_ok' => 'payment_ok',
         'wa_case_debt_remind' => 'debt_remind',
         'wa_case_days_left' => 'days_left',
-        'wa_case_unpaid_overdue' => 'unpaid_overdue',
         'wa_case_expiry_soon' => 'expiry_soon',
         'wa_case_reminder_auto' => 'debt_remind',
         'wa_case_schedule_cut' => 'schedule_cut',
@@ -69,6 +72,11 @@ function settings_defaults()
         'bg_mode' => 'color',
         'brand_icon' => '',
         'login_session_days' => 3,
+        'maint_block_activate' => false,
+        'maint_block_give_test' => false,
+        'app_update_note' => '',
+        'app_update_file' => '',
+        'app_update_at' => '',
     );
 }
 
@@ -413,6 +421,7 @@ function wa_legacy_tpl_field_map()
         'activation' => 'tpl_activation',
         'activation_credit' => 'tpl_activation_credit',
         'activation_debts' => 'tpl_activation_debts',
+        'activation_credit_debts' => 'tpl_activation_credit_debts',
         'debt_created' => 'tpl_debt_created',
         'payment_ok' => 'tpl_payment_ok',
         'debt_remind' => 'tpl_debt_remind',
@@ -430,6 +439,7 @@ function wa_default_template_labels($lang = 'ar')
         'activation' => $en ? 'Cash activation' : 'تفعيل نقدي',
         'activation_credit' => $en ? 'Credit activation' : 'تفعيل آجل',
         'activation_debts' => $en ? 'Prior-debts appendix' : 'ملحق ديون سابقة',
+        'activation_credit_debts' => $en ? 'Credit + old debts (one message)' : 'تفعيل آجل + ديون قديمة',
         'debt_created' => $en ? 'Debt added' : 'إضافة دين',
         'payment_ok' => $en ? 'Payment confirmed' : 'تأكيد التسديد',
         'debt_remind' => $en ? 'Debt reminder' : 'تذكير بالدين',
@@ -537,6 +547,18 @@ function apply_settings_to_config($config, $settings)
         && isset($config['templates']['debt_remind'])) {
         $config['templates']['activation_debts'] = $config['templates']['debt_remind'];
     }
+    // لا تدمج قالب الآجل + ملحق الديون تلقائياً (رسالة واحدة منفصلة)
+    if (!isset($config['templates']['activation_credit_debts'])
+        || trim((string) $config['templates']['activation_credit_debts']) === '') {
+        $config['templates']['activation_credit_debts'] =
+            "مرحباً {name}\nتم تفعيل خدمة الإنترنت ({package}) بالآجل\nمن {from} إلى {to}\nالمبلغ المستحق لهذا التفعيل: {amount}\nوعليك ديون سابقة بمبلغ {debt}\nالتفاصيل:\n{notes}\nيمكنك تسديد الكل عبر الماستر كارد";
+        if (empty($config['template_labels']['activation_credit_debts'])) {
+            $labs = wa_default_template_labels($langTpl);
+            $config['template_labels']['activation_credit_debts'] = isset($labs['activation_credit_debts'])
+                ? $labs['activation_credit_debts']
+                : 'تفعيل آجل + ديون قديمة';
+        }
+    }
     $tplKeys = array_keys($config['templates']);
     $legacyAct = isset($settings['wa_case_activation']) ? trim((string) $settings['wa_case_activation']) : 'activation';
     if ($legacyAct === '' || !in_array($legacyAct, $tplKeys, true)) {
@@ -546,12 +568,13 @@ function apply_settings_to_config($config, $settings)
         'activation_cash' => $legacyAct,
         'activation_credit' => 'activation_credit',
         'activation_debts' => 'activation_debts',
+        'activation_credit_debts' => 'activation_credit_debts',
         'debt_created' => 'debt_created',
         'payment_ok' => 'payment_ok',
         'debt_remind' => 'debt_remind',
         'days_left' => 'days_left',
-        'unpaid_overdue' => 'unpaid_overdue',
         'expiry_soon' => 'expiry_soon',
+        'unpaid_overdue' => 'unpaid_overdue',
         'reminder_auto' => 'debt_remind',
         'schedule_cut' => 'schedule_cut',
     );
@@ -584,6 +607,7 @@ function apply_settings_to_config($config, $settings)
     $config['unpaid_remind_after_days'] = isset($settings['unpaid_remind_after_days'])
         ? max(1, (int) $settings['unpaid_remind_after_days'])
         : 7;
+    $config['unpaid_remind_enabled'] = !empty($settings['unpaid_remind_enabled']);
     $config['expiry_auto_remind_enabled'] = !empty($settings['expiry_auto_remind_enabled']);
     $config['expiry_auto_remind_days'] = isset($settings['expiry_auto_remind_days'])
         ? max(0, (int) $settings['expiry_auto_remind_days'])
@@ -629,6 +653,192 @@ function apply_settings_to_config($config, $settings)
     $config['login_session_days'] = isset($settings['login_session_days'])
         ? max(1, min(30, (int) $settings['login_session_days']))
         : 3;
+    $config['maint_block_activate'] = !empty($settings['maint_block_activate']);
+    $config['maint_block_give_test'] = !empty($settings['maint_block_give_test']);
 
     return $config;
+}
+
+/**
+ * صيانة النظام: منع التفعيل أو إعطاء يوم تجريبي.
+ * $action: activate | give_test
+ */
+function app_maintenance_blocks($action, $config = null)
+{
+    if ($config === null) {
+        $config = isset($GLOBALS['config']) ? $GLOBALS['config'] : array();
+    }
+    if ($action === 'activate' && !empty($config['maint_block_activate'])) {
+        return true;
+    }
+    if ($action === 'give_test' && !empty($config['maint_block_give_test'])) {
+        return true;
+    }
+    return false;
+}
+
+function app_maintenance_message($action, $lang = 'ar')
+{
+    $en = ($lang === 'en');
+    if ($action === 'activate') {
+        return $en
+            ? 'Activation is paused for system maintenance.'
+            : 'التفعيل متوقف حالياً لصيانة النظام.';
+    }
+    return $en
+        ? 'Give-1-day is paused for system maintenance.'
+        : 'إعطاء يوم واحد متوقف حالياً لصيانة النظام.';
+}
+
+function app_updates_dir()
+{
+    return dirname(__DIR__) . '/storage/updates';
+}
+
+function app_update_pending($settings = null)
+{
+    if ($settings === null) {
+        $settings = function_exists('settings_load') ? settings_load() : array();
+    }
+    $file = isset($settings['app_update_file']) ? trim((string) $settings['app_update_file']) : '';
+    if ($file === '') {
+        return null;
+    }
+    $path = app_updates_dir() . '/' . basename($file);
+    if (!is_file($path)) {
+        return null;
+    }
+    return array(
+        'file' => basename($file),
+        'path' => $path,
+        'note' => isset($settings['app_update_note']) ? (string) $settings['app_update_note'] : '',
+        'at' => isset($settings['app_update_at']) ? (string) $settings['app_update_at'] : '',
+    );
+}
+
+/**
+ * تطبيق حزمة تحديث ZIP (مسارات مسموحة فقط — لا يمسّ config/config.php).
+ * @return array [ok, message]
+ */
+function app_update_apply($zipPath)
+{
+    $zipPath = (string) $zipPath;
+    if ($zipPath === '' || !is_file($zipPath)) {
+        return array(false, 'ملف التحديث غير موجود');
+    }
+    if (!class_exists('ZipArchive')) {
+        return array(false, 'ZipArchive غير متاح على السيرفر');
+    }
+    $root = dirname(__DIR__);
+    $allowedPrefixes = array('includes/', 'public/', 'cron/', 'whatsapp-gateway/');
+    $blocked = array(
+        'config/config.php',
+        'public/uploads/',
+        'storage/settings.json',
+    );
+    $zip = new ZipArchive();
+    if ($zip->open($zipPath) !== true) {
+        return array(false, 'تعذر فتح ملف ZIP');
+    }
+    $copied = 0;
+    $skipped = 0;
+    for ($i = 0; $i < $zip->numFiles; $i++) {
+        $name = str_replace('\\', '/', (string) $zip->getNameIndex($i));
+        $name = ltrim($name, '/');
+        if ($name === '' || substr($name, -1) === '/') {
+            continue;
+        }
+        if (strpos($name, '..') !== false) {
+            $skipped++;
+            continue;
+        }
+        $okPrefix = false;
+        foreach ($allowedPrefixes as $p) {
+            if (strpos($name, $p) === 0) {
+                $okPrefix = true;
+                break;
+            }
+        }
+        if (!$okPrefix) {
+            $skipped++;
+            continue;
+        }
+        $blockedHit = false;
+        foreach ($blocked as $b) {
+            if ($name === $b || strpos($name, $b) === 0) {
+                $blockedHit = true;
+                break;
+            }
+        }
+        if ($blockedHit) {
+            $skipped++;
+            continue;
+        }
+        $dest = $root . '/' . $name;
+        $dir = dirname($dest);
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0755, true);
+        }
+        $stream = $zip->getStream($name);
+        if (!$stream) {
+            $skipped++;
+            continue;
+        }
+        $data = stream_get_contents($stream);
+        fclose($stream);
+        if ($data === false) {
+            $skipped++;
+            continue;
+        }
+        if (@file_put_contents($dest, $data) === false) {
+            $skipped++;
+            continue;
+        }
+        $copied++;
+    }
+    $zip->close();
+    if ($copied <= 0) {
+        return array(false, 'ما انسخ أي ملف (تحقق من بنية الـ ZIP)');
+    }
+    return array(true, 'تم تطبيق التحديث: ' . $copied . ' ملف' . ($skipped ? (' — تخطي ' . $skipped) : ''));
+}
+
+/**
+ * حفظ رفع تحديث رسمي.
+ * @return array [ok, message, filename]
+ */
+function app_update_store_upload($fileInfo, $note = '')
+{
+    if (!is_array($fileInfo) || empty($fileInfo['tmp_name']) || !is_uploaded_file($fileInfo['tmp_name'])) {
+        return array(false, 'ماكو ملف مرفوع', '');
+    }
+    $name = isset($fileInfo['name']) ? (string) $fileInfo['name'] : '';
+    $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+    if ($ext !== 'zip') {
+        return array(false, 'ارفع ملف ZIP فقط', '');
+    }
+    if (!empty($fileInfo['size']) && (int) $fileInfo['size'] > 40 * 1024 * 1024) {
+        return array(false, 'الملف أكبر من 40MB', '');
+    }
+    $dir = app_updates_dir();
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0755, true);
+    }
+    if (!is_dir($dir) || !is_writable($dir)) {
+        return array(false, 'مجلد storage/updates غير قابل للكتابة', '');
+    }
+    $safe = 'update_' . date('Ymd_His') . '.zip';
+    $dest = $dir . '/' . $safe;
+    if (!@move_uploaded_file($fileInfo['tmp_name'], $dest)) {
+        return array(false, 'فشل حفظ الملف', '');
+    }
+    $payload = array(
+        'app_update_file' => $safe,
+        'app_update_note' => trim((string) $note),
+        'app_update_at' => date('Y-m-d H:i:s'),
+    );
+    if (!settings_save($payload)) {
+        return array(false, 'حُفظ الملف لكن فشل تحديث الإعدادات', $safe);
+    }
+    return array(true, 'تم رفع التحديث — النظام يطلب التطبيق الآن', $safe);
 }

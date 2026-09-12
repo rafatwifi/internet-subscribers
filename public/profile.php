@@ -130,4 +130,18 @@ render_header($lang === 'en' ? 'My profile' : 'بروفايلي', 'profile');
         </div>
     </form>
 </div>
+
+<?php if (function_exists('is_agent_user') && is_agent_user()): ?>
+<div class="panel panel-compact">
+    <h2><?php echo e($lang === 'en' ? 'My WhatsApp number' : 'رقم واتسابي'); ?></h2>
+    <p class="meta" style="margin-top:-4px">
+        <?php echo e($lang === 'en'
+            ? 'Link your own WhatsApp on the shared gateway — scan QR once from Settings.'
+            : 'اربط رقم واتسابك على البوابة المشتركة — امسح QR مرة واحدة من الإعدادات.'); ?>
+    </p>
+    <div class="actions">
+        <a class="btn" href="settings.php?tab=whatsapp"><?php echo e($lang === 'en' ? 'Open WhatsApp QR' : 'فتح QR واتساب'); ?></a>
+    </div>
+</div>
+<?php endif; ?>
 <?php render_footer(); ?>

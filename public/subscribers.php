@@ -141,6 +141,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if ($action === 'bulk_activate') {
+        if (function_exists('app_maintenance_blocks') && app_maintenance_blocks('activate', $config)) {
+            flash('error', app_maintenance_message('activate', $lang));
+            redirect('subscribers.php');
+        }
         $ids = isset($_POST['ids']) && is_array($_POST['ids']) ? $_POST['ids'] : array();
         $payMode = post('pay_mode') === 'credit' ? 'credit' : 'cash';
         $sendWa = post('send_whatsapp') === '1';
@@ -233,6 +237,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'give_test') {
         $id = (int) post('id', '0');
         require_subscriber_access($pdo, $id);
+        if (function_exists('app_maintenance_blocks') && app_maintenance_blocks('give_test', $config)) {
+            flash('error', app_maintenance_message('give_test', $lang));
+            redirect('subscribers.php?focus=' . $id . '&per_page=all');
+        }
         list($ok, $msg) = activate_subscriber_test($pdo, $config, $id);
         flash($ok ? 'success' : 'error', $msg);
         redirect('subscribers.php?focus=' . $id . '&per_page=all');

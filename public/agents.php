@@ -68,6 +68,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('agents.php');
     }
 
+    if ($action === 'save_accountant') {
+        $uid = (int) post('user_id', '0');
+        $display = trim((string) post('display_name', ''));
+        $active = post('is_active') === '1' ? 1 : 0;
+        $linked = (int) post('linked_agent_id', '0');
+        $row = get_admin_user($pdo, $uid);
+        if (!$row || normalize_admin_role($row['role']) !== 'accountant') {
+            flash('error', $isEn ? 'Accountant not found' : 'المحاسب غير موجود');
+            redirect('agents.php');
+        }
+        update_admin_user_meta($pdo, $uid, $display !== '' ? $display : $row['display_name'], 'accountant', $linked);
+        $pdo->prepare('UPDATE admin_users SET is_active = :a, updated_at = NOW() WHERE id = :id AND role = "accountant"')
+            ->execute(array(':a' => $active, ':id' => $uid));
+        $newPass = (string) post('password', '');
+        if (strlen($newPass) >= 4) {
+            change_user_password($pdo, $uid, $newPass);
+        }
+        flash('success', $isEn ? 'Accountant updated' : 'تم تعديل المحاسب');
+        redirect('agents.php');
+    }
+
+    if ($action === 'create_accountant') {
+        $username = trim((string) post('username', ''));
+        $display = trim((string) post('display_name', ''));
+        $password = (string) post('password', '');
+        $linked = (int) post('linked_agent_id', '0');
+        $res = create_admin_user($pdo, $username, $display, $password, 'accountant', $linked);
+        if ($res === 'ok') {
+            flash('success', $isEn ? 'Accountant created' : 'تم إضافة المحاسب');
+        } elseif ($res === 'taken') {
+            flash('error', $isEn ? 'Username taken' : 'اسم المستخدم مستخدم');
+        } elseif ($res === 'username') {
+            flash('error', $isEn ? 'Invalid username' : 'اسم مستخدم غير صالح');
+        } else {
+            flash('error', $isEn ? 'Check the fields (password min 4)' : 'تحقق من الحقول (كلمة المرور 4 أحرف على الأقل)');
+        }
+        redirect('agents.php');
+    }
+
     if ($action === 'delete') {
         $uid = (int) post('user_id', '0');
         $row = get_admin_user($pdo, $uid);
@@ -192,6 +231,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $agents = list_agent_users($pdo, false);
+$accountants = list_accountant_users($pdo, false);
 $counts = array();
 try {
     $st = $pdo->query(
@@ -338,6 +378,103 @@ render_header($isEn ? 'Agents' : 'الوكلاء', 'agents');
                                 <input type="hidden" name="action" value="delete">
                                 <input type="hidden" name="user_id" value="<?php echo $aid; ?>">
                                 <button class="btn ghost sm danger" type="submit"><?php echo e($isEn ? 'Delete' : 'حذف'); ?></button>
+                            </form>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+            <?php endif; ?>
+            </tbody>
+        </table>
+    </div>
+
+    <h2 style="margin-top:28px"><?php echo e($isEn ? 'Add accountant' : 'إضافة محاسب'); ?></h2>
+    <p class="meta"><?php echo e($isEn
+        ? 'Accountants manage card transfers and payments for one linked agent.'
+        : 'المحاسب يدير تحويل الكروت ودفعات وكيل واحد مرتبط.'); ?></p>
+    <form method="post" class="form-grid" style="margin-bottom:22px">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="action" value="create_accountant">
+        <div>
+            <label><?php echo e($isEn ? 'Username' : 'اسم الدخول'); ?></label>
+            <input name="username" required pattern="[A-Za-z0-9._\-]{2,40}" placeholder="acct1">
+        </div>
+        <div>
+            <label><?php echo e($isEn ? 'Display name' : 'الاسم الظاهر'); ?></label>
+            <input name="display_name" required>
+        </div>
+        <div>
+            <label><?php echo e($isEn ? 'Password' : 'كلمة المرور'); ?></label>
+            <input name="password" type="password" required minlength="4">
+        </div>
+        <div>
+            <label><?php echo e($isEn ? 'Linked agent' : 'الوكيل المرتبط'); ?></label>
+            <select name="linked_agent_id">
+                <option value="0"><?php echo e($isEn ? '— select —' : '— اختر —'); ?></option>
+                <?php foreach ($agents as $ag): ?>
+                    <option value="<?php echo (int) $ag['id']; ?>"><?php echo e($ag['display_name']); ?></option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+        <div class="actions" style="align-items:end">
+            <button class="btn" type="submit"><?php echo e($isEn ? 'Add accountant' : 'إضافة محاسب'); ?></button>
+        </div>
+    </form>
+
+    <h2><?php echo e($isEn ? 'Accountants' : 'المحاسبين'); ?></h2>
+    <div class="table-wrap">
+        <table class="data-table table-compact">
+            <thead>
+            <tr>
+                <th>#</th>
+                <th><?php echo e($isEn ? 'Name' : 'الاسم'); ?></th>
+                <th><?php echo e($isEn ? 'Username' : 'الدخول'); ?></th>
+                <th><?php echo e($isEn ? 'Linked agent' : 'الوكيل المرتبط'); ?></th>
+                <th><?php echo e($isEn ? 'Status' : 'الحالة'); ?></th>
+                <th><?php echo e($isEn ? 'Actions' : 'إجراءات'); ?></th>
+            </tr>
+            </thead>
+            <tbody>
+            <?php if (!$accountants): ?>
+                <tr><td colspan="6"><?php echo e($isEn ? 'No accountants yet' : 'ماكو محاسبين بعد'); ?></td></tr>
+            <?php else: ?>
+                <?php foreach ($accountants as $ac): ?>
+                    <?php $acid = (int) $ac['id']; ?>
+                    <tr>
+                        <td><?php echo $acid; ?></td>
+                        <td>
+                            <form method="post" class="inline-agent-form">
+                                <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                                <input type="hidden" name="action" value="save_accountant">
+                                <input type="hidden" name="user_id" value="<?php echo $acid; ?>">
+                                <input name="display_name" value="<?php echo e($ac['display_name']); ?>" required>
+                        </td>
+                        <td><?php echo e($ac['username']); ?></td>
+                        <td>
+                            <select name="linked_agent_id" style="min-width:140px">
+                                <option value="0"><?php echo e($isEn ? '— none —' : '— بدون —'); ?></option>
+                                <?php
+                                $curLinked = isset($ac['linked_agent_id']) ? (int) $ac['linked_agent_id'] : 0;
+                                foreach ($agents as $ag):
+                                    $gid = (int) $ag['id'];
+                                    ?>
+                                    <option value="<?php echo $gid; ?>"<?php echo $curLinked === $gid ? ' selected' : ''; ?>>
+                                        <?php echo e($ag['display_name']); ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </td>
+                        <td>
+                            <label class="toggle" style="margin:0">
+                                <input type="checkbox" name="is_active" value="1" <?php echo (int) $ac['is_active'] === 1 ? 'checked' : ''; ?>>
+                                <span class="toggle-ui" aria-hidden="true"></span>
+                                <span class="toggle-text"><?php echo e((int) $ac['is_active'] === 1 ? ($isEn ? 'Active' : 'فعال') : ($isEn ? 'Off' : 'موقوف')); ?></span>
+                            </label>
+                            <div style="margin-top:6px">
+                                <input name="password" type="password" minlength="4" placeholder="<?php echo e($isEn ? 'New password (optional)' : 'كلمة مرور جديدة (اختياري)'); ?>">
+                            </div>
+                        </td>
+                        <td class="actions">
+                                <button class="btn sm" type="submit"><?php echo e($isEn ? 'Save' : 'حفظ'); ?></button>
                             </form>
                         </td>
                     </tr>

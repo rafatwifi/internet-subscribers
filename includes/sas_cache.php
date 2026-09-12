@@ -908,10 +908,22 @@ function sas_cache_ensure_local($pdo, $config, $cacheRow)
     }
     $planId = sas_cache_plan_id_for_profile($pdo, isset($cacheRow['profile_id']) ? $cacheRow['profile_id'] : 0);
     $agentId = 0;
-    if (function_exists('is_agent_user') && is_agent_user() && function_exists('current_admin')) {
+    $parentId = isset($cacheRow['parent_id']) ? (int) $cacheRow['parent_id'] : 0;
+    if ($parentId > 0) {
+        try {
+            $stAg = $pdo->prepare(
+                'SELECT id FROM admin_users WHERE role = "agent" AND sas_manager_id = :m AND is_active = 1 LIMIT 1'
+            );
+            $stAg->execute(array(':m' => $parentId));
+            $agentId = (int) $stAg->fetchColumn();
+        } catch (Exception $e) {
+            $agentId = 0;
+        }
+    }
+    if ($agentId <= 0 && function_exists('is_agent_user') && is_agent_user() && function_exists('current_admin')) {
         $me = current_admin();
         $agentId = $me ? (int) $me['id'] : 0;
-    } elseif (function_exists('default_admin_user_id')) {
+    } elseif ($agentId <= 0 && function_exists('default_admin_user_id')) {
         $agentId = default_admin_user_id($pdo);
     }
 
@@ -1857,25 +1869,26 @@ function sas_dash_user_counts($pdo)
         'today' => 0,
         'disabled' => 0,
     );
+    $scope = function_exists('sas_agent_scope_sql') ? sas_agent_scope_sql('c') : '';
     try {
-        $out['total'] = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache')->fetchColumn();
-        $out['disabled'] = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache WHERE enabled = 0')->fetchColumn();
-        $out['online'] = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache WHERE is_online = 1')->fetchColumn();
+        $out['total'] = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache c WHERE 1=1' . $scope)->fetchColumn();
+        $out['disabled'] = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache c WHERE c.enabled = 0' . $scope)->fetchColumn();
+        $out['online'] = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache c WHERE c.is_online = 1' . $scope)->fetchColumn();
         $out['active'] = (int) $pdo->query(
-            'SELECT COUNT(*) FROM sas_users_cache
-             WHERE enabled = 1 AND expire_at IS NOT NULL AND expire_at >= NOW()'
+            'SELECT COUNT(*) FROM sas_users_cache c
+             WHERE c.enabled = 1 AND c.expire_at IS NOT NULL AND c.expire_at >= NOW()' . $scope
         )->fetchColumn();
         $out['expired'] = (int) $pdo->query(
-            'SELECT COUNT(*) FROM sas_users_cache
-             WHERE enabled = 1 AND (expire_at IS NULL OR expire_at < NOW())'
+            'SELECT COUNT(*) FROM sas_users_cache c
+             WHERE c.enabled = 1 AND (c.expire_at IS NULL OR c.expire_at < NOW())' . $scope
         )->fetchColumn();
         $out['soon'] = (int) $pdo->query(
-            'SELECT COUNT(*) FROM sas_users_cache
-             WHERE enabled = 1 AND expire_at > NOW() AND expire_at <= DATE_ADD(NOW(), INTERVAL 3 DAY)'
+            'SELECT COUNT(*) FROM sas_users_cache c
+             WHERE c.enabled = 1 AND c.expire_at > NOW() AND c.expire_at <= DATE_ADD(NOW(), INTERVAL 3 DAY)' . $scope
         )->fetchColumn();
         $out['today'] = (int) $pdo->query(
-            'SELECT COUNT(*) FROM sas_users_cache
-             WHERE enabled = 1 AND DATE(expire_at) = CURDATE()'
+            'SELECT COUNT(*) FROM sas_users_cache c
+             WHERE c.enabled = 1 AND DATE(c.expire_at) = CURDATE()' . $scope
         )->fetchColumn();
     } catch (Exception $e) {
     }
@@ -1908,9 +1921,10 @@ function sas_read_username_from_api($api, $sasUserId)
     return sas_cache_username($found);
 }
 
-function sas_notify_activation_whatsapp($pdo, $config, $username, $sendOldDebts)
+function sas_notify_activation_whatsapp($pdo, $config, $username, $sendOldDebts, $payMode = 'cash')
 {
     $username = trim((string) $username);
+    $payMode = ($payMode === 'credit') ? 'credit' : 'cash';
     if ($username === '' || !function_exists('whatsapp_send') || !function_exists('activation_message')) {
         return '';
     }
@@ -1962,6 +1976,9 @@ function sas_notify_activation_whatsapp($pdo, $config, $username, $sendOldDebts)
         'phone' => isset($local['phone']) ? $local['phone'] : '',
     );
     $extra = '';
+    $oldDebtSum = 0.0;
+    $notesLine = '';
+    $oldLines = array();
     if ($sendOldDebts) {
         $oldSt = $pdo->prepare(
             'SELECT month_label, amount, notes FROM invoices
@@ -1972,25 +1989,74 @@ function sas_notify_activation_whatsapp($pdo, $config, $username, $sendOldDebts)
         $oldLines = $oldSt->fetchAll();
         if ($oldLines) {
             $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
-            $sum = 0.0;
-            $extra .= "\n\nالديون السابقة:";
+            $parts = array();
             foreach ($oldLines as $od) {
                 $lab = function_exists('month_short_label') ? month_short_label($od['month_label']) : $od['month_label'];
                 $amt = function_exists('money_format_iqd')
                     ? money_format_iqd($od['amount'], $currency)
                     : $od['amount'];
-                $extra .= "\n• " . $lab . ': ' . $amt;
-                if (!empty($od['notes'])) {
-                    $extra .= ' (' . $od['notes'] . ')';
-                }
-                $sum += (float) $od['amount'];
+                $parts[] = '• ' . $lab . ': ' . $amt;
+                $oldDebtSum += (float) $od['amount'];
             }
-            $extra .= "\nإجمالي السابق: " . (function_exists('money_format_iqd')
-                ? money_format_iqd($sum, $currency)
-                : $sum);
+            $notesLine = implode("\n", $parts);
         }
     }
-    $msg = activation_message($msgRow, $config, $extra);
+    $useCreditDebts = ($payMode === 'credit' && $sendOldDebts && $oldLines);
+    $actCase = $useCreditDebts
+        ? 'activation_credit_debts'
+        : (($payMode === 'credit') ? 'activation_credit' : 'activation_cash');
+    // آجل + ديون قديمة = قالب واحد فقط (بدون دمج قالبين)
+    $tplKey = function_exists('wa_case_template_key')
+        ? wa_case_template_key($config, $actCase)
+        : ($useCreditDebts ? 'activation_credit_debts'
+            : (($payMode === 'credit') ? 'activation_credit' : 'activation'));
+    if ($useCreditDebts && function_exists('wa_render_named_template')) {
+        $msg = wa_render_named_template($tplKey, $msgRow, $config, array(
+            'amount' => $price,
+            'debt' => $oldDebtSum,
+            'package' => $msgRow['service_name'],
+            'notes' => $notesLine,
+            'month' => !empty($oldLines[0]['month_label']) ? $oldLines[0]['month_label'] : date('Y-m'),
+        ));
+        if ($msg === '') {
+            $msg = activation_message($msgRow, $config, '');
+            if ($notesLine !== '') {
+                $msg .= "\n\nديون سابقة:\n" . $notesLine;
+            }
+        }
+    } else {
+        // نقدي + ديون قديمة فقط: رسالة التفعيل + ملحق الديون
+        if ($payMode !== 'credit' && $sendOldDebts && $notesLine !== '') {
+            $debtKey = function_exists('wa_case_template_key')
+                ? wa_case_template_key($config, 'activation_debts')
+                : 'activation_debts';
+            if (function_exists('wa_render_named_template')) {
+                $extra = wa_render_named_template($debtKey, $msgRow, $config, array(
+                    'debt' => $oldDebtSum,
+                    'amount' => $oldDebtSum,
+                    'notes' => $notesLine,
+                ));
+            }
+            if ($extra === '') {
+                $extra = "\n\nالديون السابقة:\n" . $notesLine;
+            } else {
+                $extra = "\n\n" . $extra;
+            }
+        }
+        if ($payMode === 'credit' && function_exists('wa_render_named_template')) {
+            $msg = wa_render_named_template($tplKey, $msgRow, $config, array(
+                'amount' => $price,
+                'package' => $msgRow['service_name'],
+            ));
+            if ($msg === '') {
+                $msg = activation_message($msgRow, $config, $extra);
+            } elseif ($extra !== '') {
+                $msg .= $extra;
+            }
+        } else {
+            $msg = activation_message($msgRow, $config, $extra);
+        }
+    }
     $result = whatsapp_send($config, $local['phone'], $msg, 'activation');
     if (function_exists('log_message')) {
         log_message($pdo, $localId, $result);
@@ -2369,7 +2435,7 @@ function sas_finish_local_activation($pdo, $config, $username, $fields, $okMsg)
     }
     if ($localId <= 0 || !function_exists('activate_one_subscriber')) {
         if ($sendWa && function_exists('sas_notify_activation_whatsapp')) {
-            sas_notify_activation_whatsapp($pdo, $config, $username, $sendOld);
+            sas_notify_activation_whatsapp($pdo, $config, $username, $sendOld, $payMode);
         }
         return 'تم تفعيل المشترك';
     }
@@ -2385,11 +2451,6 @@ function sas_finish_local_activation($pdo, $config, $username, $fields, $okMsg)
         } catch (Exception $e) {
         }
     }
-    $waTpl = '';
-    if (function_exists('wa_case_template_key')) {
-        $actCase = ($payMode === 'credit') ? 'activation_credit' : 'activation_cash';
-        $waTpl = wa_case_template_key($config, $actCase);
-    }
     list($lok, $lmsg) = activate_one_subscriber($pdo, $config, $localId, array(
         'plan_id' => $planId,
         'pay_mode' => $payMode,
@@ -2399,7 +2460,6 @@ function sas_finish_local_activation($pdo, $config, $username, $fields, $okMsg)
         'skip_grace' => true,
         'simple_msg' => true,
         'carry_days' => true,
-        'wa_template' => $waTpl !== '' ? $waTpl : (($payMode === 'credit') ? 'activation_credit' : 'activation'),
     ));
     if (!$lok && $lmsg !== '') {
         return 'تم تفعيل المشترك — محلي: ' . $lmsg;

@@ -3,10 +3,72 @@
 require_once __DIR__ . '/../includes/bootstrap.php';
 require_once __DIR__ . '/../includes/layout.php';
 require_login();
-require_perm('subscribers');
+if (!user_can('cards') && !user_can('card_accounting')) {
+    require_perm('cards');
+}
+ensure_card_accounting_tables($pdo);
 
 $isEn = ($lang === 'en');
+$me = current_admin();
+$meId = $me ? (int) $me['id'] : 0;
+$canTransfer = user_can('cards') || user_can('card_accounting');
 $sasReady = function_exists('sas_is_ready') && sas_is_ready($config);
+$agents = list_agent_users($pdo, true);
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
+    if (!verify_csrf(post('csrf'))) {
+        flash('error', $isEn ? 'Invalid request' : 'طلب غير صالح');
+        redirect('cards.php');
+    }
+    $action = post('action');
+    if ($action === 'transfer') {
+        $fromAgentId = (int) post('from_agent_id', '0');
+        $toAgentId = (int) post('to_agent_id', '0');
+        $profileId = (int) post('profile_id', '0');
+        $profileName = trim((string) post('profile_name', ''));
+        $qty = (int) post('qty', '0');
+        $wholesale = (float) post('wholesale_price', '0');
+        $agentPrice = (float) post('agent_price', '0');
+        $note = trim((string) post('note', ''));
+
+        if (is_accountant_user()) {
+            $linked = accountant_linked_agent_id();
+            if ($linked > 0) {
+                if ($toAgentId <= 0) {
+                    $toAgentId = $linked;
+                }
+            }
+        }
+
+        list($ok, $code) = transfer_cards(
+            $pdo,
+            $fromAgentId,
+            $toAgentId,
+            $profileId,
+            $profileName,
+            $qty,
+            $wholesale,
+            $agentPrice,
+            $note,
+            $meId
+        );
+        if ($ok) {
+            flash('success', $isEn ? 'Transfer recorded' : 'تم تسجيل التحويل');
+        } else {
+            flash('error', card_transfer_error_message($code, $lang));
+        }
+        redirect('cards.php#card-transfer');
+    }
+}
+
+$scopeAgentId = null;
+if (is_accountant_user()) {
+    $linked = accountant_linked_agent_id();
+    if ($linked > 0) {
+        $scopeAgentId = $linked;
+    }
+}
+$recentTransfers = list_recent_card_transfers($pdo, 25, $scopeAgentId);
 
 function cards_page_fetch_inventory($config, $force = false)
 {
@@ -198,9 +260,132 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 .cards-page .used-fold-body { display: none; margin-top: 10px; }
 .cards-page .used-fold.is-open .used-fold-body { display: block; }
 .cards-page .used-fold.is-open .used-fold-chevron { transform: rotate(90deg); display: inline-block; }
+.cards-page .xfer-panel {
+  border: 1px solid #d8dee8; border-radius: 14px; background: #fff;
+  padding: 16px; margin: 0 0 18px;
+}
+.cards-page .xfer-panel h2 { margin: 0 0 12px; font-size: 16px; }
+.cards-page .xfer-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px;
+}
+.cards-page .xfer-grid label { display: block; font-size: 12px; font-weight: 700; margin-bottom: 4px; color: #475569; }
+.cards-page .xfer-grid input, .cards-page .xfer-grid select {
+  width: 100%; padding: 8px 10px; border: 1px solid #d8dee8; border-radius: 8px; font: inherit;
+}
+.cards-page .xfer-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
+.cards-page .xfer-table th, .cards-page .xfer-table td {
+  border-bottom: 1px solid #e8edf4; padding: 8px 6px; text-align: inherit;
+}
+.cards-page .xfer-table th { font-size: 12px; color: #64748b; }
 </style>
 
 <div class="cards-page">
+    <?php if ($canTransfer): ?>
+    <div class="xfer-panel" id="card-transfer">
+        <h2><?php echo e($isEn ? 'Card transfer' : 'تحويل كروت'); ?></h2>
+        <form method="post">
+            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+            <input type="hidden" name="action" value="transfer">
+            <div class="xfer-grid">
+                <div>
+                    <label><?php echo e($isEn ? 'From agent' : 'من وكيل'); ?></label>
+                    <select name="from_agent_id">
+                        <option value="0"><?php echo e($isEn ? '— warehouse / none —' : '— مخزن / بدون —'); ?></option>
+                        <?php foreach ($agents as $ag): ?>
+                            <option value="<?php echo (int) $ag['id']; ?>"><?php echo e($ag['display_name']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div>
+                    <label><?php echo e($isEn ? 'To agent' : 'إلى وكيل'); ?><?php echo is_accountant_user() && $scopeAgentId ? ' *' : ''; ?></label>
+                    <select name="to_agent_id"<?php echo is_accountant_user() && $scopeAgentId ? ' required' : ''; ?>>
+                        <?php if (!is_accountant_user() || !$scopeAgentId): ?>
+                            <option value="0"><?php echo e($isEn ? '— select —' : '— اختر —'); ?></option>
+                        <?php endif; ?>
+                        <?php foreach ($agents as $ag):
+                            $aid = (int) $ag['id'];
+                            if (is_accountant_user() && $scopeAgentId && $aid !== $scopeAgentId) {
+                                continue;
+                            }
+                            ?>
+                            <option value="<?php echo $aid; ?>"<?php echo ($scopeAgentId === $aid) ? ' selected' : ''; ?>>
+                                <?php echo e($ag['display_name']); ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div>
+                    <label><?php echo e($isEn ? 'Package / category' : 'الفئة / الباقة'); ?></label>
+                    <input name="profile_name" list="cardProfileList" required placeholder="<?php echo e($isEn ? 'Package name' : 'اسم الفئة'); ?>">
+                    <datalist id="cardProfileList">
+                        <?php foreach ($groups as $g0):
+                            $gn = isset($g0['name']) ? (string) $g0['name'] : '';
+                            if ($gn === '') { continue; }
+                            $gpid = isset($g0['profile_id']) ? (int) $g0['profile_id'] : 0;
+                            ?>
+                            <option value="<?php echo e($gn); ?>" data-pid="<?php echo $gpid; ?>"></option>
+                        <?php endforeach; ?>
+                    </datalist>
+                    <input type="hidden" name="profile_id" id="xferProfileId" value="0">
+                </div>
+                <div>
+                    <label><?php echo e($isEn ? 'Quantity' : 'الكمية'); ?></label>
+                    <input name="qty" type="number" min="1" step="1" required value="1">
+                </div>
+                <div>
+                    <label><?php echo e($isEn ? 'Wholesale price' : 'سعر الجملة'); ?></label>
+                    <input name="wholesale_price" type="number" min="0" step="0.01" value="0">
+                </div>
+                <div>
+                    <label><?php echo e($isEn ? 'Agent price' : 'سعر الوكيل'); ?></label>
+                    <input name="agent_price" type="number" min="0" step="0.01" value="0">
+                </div>
+                <div style="grid-column: 1 / -1">
+                    <label><?php echo e($isEn ? 'Note (optional)' : 'ملاحظة (اختياري)'); ?></label>
+                    <input name="note" maxlength="255" placeholder="<?php echo e($isEn ? 'Transfer note…' : 'ملاحظة التحويل…'); ?>">
+                </div>
+            </div>
+            <div class="actions" style="margin-top:12px">
+                <button class="btn" type="submit"><?php echo e($isEn ? 'Record transfer' : 'تسجيل التحويل'); ?></button>
+            </div>
+        </form>
+
+        <?php if ($recentTransfers): ?>
+        <h3 style="margin:18px 0 8px;font-size:14px"><?php echo e($isEn ? 'Recent transfers' : 'آخر التحويلات'); ?></h3>
+        <div class="table-wrap">
+            <table class="xfer-table">
+                <thead>
+                <tr>
+                    <th><?php echo e($isEn ? 'Date' : 'التاريخ'); ?></th>
+                    <th><?php echo e($isEn ? 'From' : 'من'); ?></th>
+                    <th><?php echo e($isEn ? 'To' : 'إلى'); ?></th>
+                    <th><?php echo e($isEn ? 'Package' : 'الفئة'); ?></th>
+                    <th><?php echo e($isEn ? 'Qty' : 'كم'); ?></th>
+                    <th><?php echo e($isEn ? 'Profit' : 'ربح'); ?></th>
+                    <th><?php echo e($isEn ? 'Note' : 'ملاحظة'); ?></th>
+                </tr>
+                </thead>
+                <tbody>
+                <?php foreach ($recentTransfers as $tr):
+                    $fromLbl = $tr['from_name'] ? $tr['from_name'] : ($isEn ? 'Warehouse' : 'مخزن');
+                    $profit = card_transfer_profit($tr['wholesale_price'], $tr['agent_price'], $tr['qty']);
+                    ?>
+                    <tr>
+                        <td><?php echo e(isset($tr['created_at']) ? $tr['created_at'] : ''); ?></td>
+                        <td><?php echo e($fromLbl); ?></td>
+                        <td><?php echo e(isset($tr['to_name']) ? $tr['to_name'] : ''); ?></td>
+                        <td><?php echo e(isset($tr['profile_name']) ? $tr['profile_name'] : ''); ?></td>
+                        <td><?php echo (int) $tr['qty']; ?></td>
+                        <td><?php echo e(money_format_iqd($profit, $config['currency'])); ?></td>
+                        <td><?php echo e(isset($tr['note']) ? $tr['note'] : ''); ?></td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php endif; ?>
+    </div>
+    <?php endif; ?>
     <p class="cards-sync<?php echo $fromCache ? '' : ' is-busy'; ?>" id="cardsSync">
         <?php
         if ($err) {
@@ -478,6 +663,23 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
   bindUi();
   // مزامنة خلفية بعد الرسم الفوري من الكاش
   setTimeout(function () { sync(false); }, 200);
+
+  var profileInput = document.querySelector('input[name="profile_name"]');
+  var profileIdInput = document.getElementById('xferProfileId');
+  var profileList = document.getElementById('cardProfileList');
+  if (profileInput && profileIdInput && profileList) {
+    profileInput.addEventListener('change', function () {
+      var val = profileInput.value || '';
+      profileIdInput.value = '0';
+      var opts = profileList.querySelectorAll('option');
+      for (var i = 0; i < opts.length; i++) {
+        if (opts[i].value === val) {
+          profileIdInput.value = opts[i].getAttribute('data-pid') || '0';
+          break;
+        }
+      }
+    });
+  }
 })();
 </script>
 <?php render_footer(); ?>

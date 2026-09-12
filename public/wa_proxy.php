@@ -26,6 +26,8 @@ if (!in_array($action, $allowed, true)) {
 $wa = isset($config['whatsapp']) ? $config['whatsapp'] : array();
 $base = isset($wa['local_url']) ? rtrim((string) $wa['local_url'], '/') : '';
 $key = isset($wa['local_key']) ? (string) $wa['local_key'] : '';
+$sessionId = function_exists('whatsapp_session_id') ? whatsapp_session_id() : 'default';
+$sessionQs = '&session=' . rawurlencode($sessionId);
 
 if ($base === '' || strpos($base, 'http') !== 0) {
     http_response_code(502);
@@ -59,7 +61,7 @@ function wa_proxy_request($url, $method, $key, $timeout)
 }
 
 if ($action === 'logout') {
-    $urlPost = $base . '/logout?key=' . rawurlencode($key);
+    $urlPost = $base . '/logout?key=' . rawurlencode($key) . $sessionQs;
     $urlGet = $urlPost;
     list($raw, $err, $code) = wa_proxy_request($urlPost, 'POST', $key, 12);
     if ($raw === false || $code >= 400 || $code === 0) {
@@ -81,7 +83,7 @@ if ($action === 'logout') {
 }
 
 $path = '/' . $action;
-$url = $base . $path . '?key=' . rawurlencode($key);
+$url = $base . $path . '?key=' . rawurlencode($key) . $sessionQs;
 list($raw, $err, $code) = wa_proxy_request($url, 'GET', $key, 8);
 
 if ($raw === false) {

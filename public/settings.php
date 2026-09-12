@@ -43,9 +43,11 @@ $tab = isset($_GET['tab']) ? (string) $_GET['tab'] : 'general';
 if ($tab === 'templates') {
     redirect('messages.php?mode=templates');
 }
-if (!in_array($tab, array('general', 'whatsapp', 'rental', 'users', 'plans', 'sas', 'schedule', 'sensitive'), true)) {
+if (!in_array($tab, array('general', 'whatsapp', 'rental', 'users', 'plans', 'sas', 'schedule', 'sensitive', 'update'), true)) {
     $tab = 'general';
 }
+
+$isAgentWaOnly = ($tab === 'whatsapp' && function_exists('is_agent_user') && is_agent_user());
 
 if ($tab === 'users') {
     require_perm('users');
@@ -55,6 +57,10 @@ if ($tab === 'users') {
     redirect('schedule.php');
 } elseif ($tab === 'sensitive') {
     require_perm('clear_data');
+} elseif ($tab === 'update') {
+    require_perm('settings');
+} elseif ($isAgentWaOnly) {
+    // الوكيل: QR فقط — بدون صلاحية settings كاملة
 } else {
     require_perm('settings');
 }
@@ -133,6 +139,58 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         list($ok, $msg) = system_power_action($power);
         flash($ok ? 'success' : 'error', $msg);
         redirect('settings.php?tab=sensitive');
+    } elseif ($section === 'maintenance') {
+        require_perm('users');
+        $data = array(
+            'maint_block_activate' => post('maint_block_activate') === '1',
+            'maint_block_give_test' => post('maint_block_give_test') === '1',
+        );
+        $tab = 'users';
+    } elseif ($section === 'app_update_upload') {
+        require_perm('settings');
+        $skipSettingsSave = true;
+        $tab = 'update';
+        list($ok, $msg) = app_update_store_upload(
+            isset($_FILES['update_zip']) ? $_FILES['update_zip'] : array(),
+            post('app_update_note', '')
+        );
+        flash($ok ? 'success' : 'error', $msg);
+        redirect('settings.php?tab=update');
+    } elseif ($section === 'app_update_apply') {
+        require_perm('settings');
+        $skipSettingsSave = true;
+        $tab = 'update';
+        $pending = app_update_pending(settings_load());
+        if (!$pending) {
+            flash('error', $lang === 'en' ? 'No pending update' : 'ماكو تحديث معلّق');
+            redirect('settings.php?tab=update');
+        }
+        list($ok, $msg) = app_update_apply($pending['path']);
+        if ($ok) {
+            settings_save(array(
+                'app_update_file' => '',
+                'app_update_note' => '',
+                'app_update_at' => '',
+            ));
+            @unlink($pending['path']);
+        }
+        flash($ok ? 'success' : 'error', $msg);
+        redirect('settings.php?tab=update');
+    } elseif ($section === 'app_update_clear') {
+        require_perm('settings');
+        $skipSettingsSave = true;
+        $tab = 'update';
+        $pending = app_update_pending(settings_load());
+        if ($pending && is_file($pending['path'])) {
+            @unlink($pending['path']);
+        }
+        settings_save(array(
+            'app_update_file' => '',
+            'app_update_note' => '',
+            'app_update_at' => '',
+        ));
+        flash('success', $lang === 'en' ? 'Pending update cleared' : 'تم إلغاء التحديث المعلّق');
+        redirect('settings.php?tab=update');
     } elseif ($section === 'clear_data' || $section === 'clear_logs' || $section === 'clear_offline') {
         require_perm('clear_data');
         $pass = (string) post('admin_password', '');
@@ -161,12 +219,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if ($section === 'add_user') {
         require_perm('users');
+        $addRole = normalize_admin_role(post('role', 'staff'));
+        $linkedAgent = ($addRole === 'accountant') ? (int) post('linked_agent_id', '0') : null;
         $res = create_admin_user(
             $pdo,
             post('username', ''),
             post('display_name', ''),
             post('password', ''),
-            post('role', 'staff')
+            $addRole,
+            $linkedAgent
         );
         if ($res === 'ok') {
             activity_log($pdo, null, 'system', null, 'user_add', 'إضافة مستخدم: ' . post('username'), post('role'));
@@ -201,10 +262,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             flash('error', $lang === 'en' ? 'Keep at least one admin' : 'لازم يبقى مدير واحد على الأقل');
             redirect('settings.php?tab=users');
         }
-        update_admin_user_meta($pdo, $uid, $display, $role);
+        $linkedAgent = null;
+        if ($role === 'accountant') {
+            $linkedAgent = (int) post('linked_agent_id', '0');
+        }
+        update_admin_user_meta($pdo, $uid, $display, $role, $linkedAgent);
         if ($me && (int) $me['id'] === $uid) {
             $_SESSION['admin_display_name'] = $display;
             $_SESSION['admin_role'] = $role;
+            if ($role === 'accountant') {
+                $_SESSION['admin_linked_agent_id'] = $linkedAgent > 0 ? $linkedAgent : 0;
+            } else {
+                $_SESSION['admin_linked_agent_id'] = 0;
+            }
         }
         $newPass = (string) post('new_password', '');
         if ($newPass !== '') {
@@ -369,13 +439,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         );
         $tab = 'whatsapp';
     } elseif ($section === 'templates') {
-        $afterDays = (int) post('unpaid_remind_after_days', '7');
-        if ($afterDays < 1) {
-            $afterDays = 1;
-        }
-        if ($afterDays > 365) {
-            $afterDays = 365;
-        }
         $data = array(
             'tpl_debt_remind' => (string) post('tpl_debt_remind', ''),
             'tpl_payment_ok' => (string) post('tpl_payment_ok', ''),
@@ -383,18 +446,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'tpl_activation' => (string) post('tpl_activation', ''),
             'tpl_activation_credit' => (string) post('tpl_activation_credit', ''),
             'tpl_activation_debts' => (string) post('tpl_activation_debts', ''),
+            'tpl_activation_credit_debts' => (string) post('tpl_activation_credit_debts', ''),
             'tpl_days_left' => (string) post('tpl_days_left', ''),
             'tpl_unpaid_overdue' => (string) post('tpl_unpaid_overdue', ''),
             'tpl_expiry_soon' => (string) post('tpl_expiry_soon', ''),
-            'unpaid_remind_after_days' => $afterDays,
         );
         $tplAllowed = array(
-            'activation', 'activation_credit', 'activation_debts',
+            'activation', 'activation_credit', 'activation_debts', 'activation_credit_debts',
             'debt_created', 'payment_ok', 'debt_remind', 'days_left', 'unpaid_overdue', 'expiry_soon'
         );
         $caseKeys = array(
-            'activation_cash', 'activation_credit', 'activation_debts', 'debt_created', 'payment_ok',
-            'debt_remind', 'reminder_auto', 'days_left', 'unpaid_overdue', 'expiry_soon'
+            'activation_cash', 'activation_credit', 'activation_debts', 'activation_credit_debts',
+            'debt_created', 'payment_ok', 'debt_remind', 'reminder_auto', 'days_left', 'expiry_soon'
         );
         foreach ($caseKeys as $ck) {
             $v = trim((string) post('wa_case_' . $ck, ''));
@@ -552,6 +615,7 @@ if (!$hostHint) {
     $hostHint = '172.16.16.13';
 }
 $adminUsers = list_admin_users($pdo);
+$settingsAgents = list_agent_users($pdo, false);
 $me = current_admin();
 
 render_header(t('settings'), $activeNav);
@@ -567,6 +631,30 @@ render_settings_tabs($tab);
         <div><strong><?php echo e(admin_role_label('staff', $lang)); ?></strong> — <?php echo e(admin_role_hint('staff', $lang)); ?></div>
         <div><strong><?php echo e(admin_role_label('agent', $lang)); ?></strong> — <?php echo e(admin_role_hint('agent', $lang)); ?></div>
     </div>
+</div>
+
+<div class="panel panel-compact">
+    <h2><?php echo e($lang === 'en' ? 'System maintenance' : 'صيانة النظام'); ?></h2>
+    <p class="meta" style="margin-top:-4px">
+        <?php echo e($lang === 'en'
+            ? 'Temporarily block Activate and Give-1-day for all agents while you maintain the system.'
+            : 'أوقف مؤقتاً زر التفعيل وإعطاء يوم واحد لكل الوكلاء أثناء صيانة النظام.'); ?>
+    </p>
+    <form method="post">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="section" value="maintenance">
+        <label class="toggle" style="display:flex;align-items:center;gap:10px;margin:10px 0">
+            <input type="checkbox" name="maint_block_activate" value="1" <?php echo !empty($s['maint_block_activate']) ? 'checked' : ''; ?>>
+            <span><?php echo e($lang === 'en' ? 'Block Activate' : 'إيقاف زر التفعيل'); ?></span>
+        </label>
+        <label class="toggle" style="display:flex;align-items:center;gap:10px;margin:10px 0">
+            <input type="checkbox" name="maint_block_give_test" value="1" <?php echo !empty($s['maint_block_give_test']) ? 'checked' : ''; ?>>
+            <span><?php echo e($lang === 'en' ? 'Block Give 1 day' : 'إيقاف إعطاء يوم واحد'); ?></span>
+        </label>
+        <div class="actions">
+            <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
+        </div>
+    </form>
 </div>
 
 <div class="panel panel-compact">
@@ -589,11 +677,19 @@ render_settings_tabs($tab);
             </div>
             <div>
                 <label><?php echo e($lang === 'en' ? 'Role' : 'الصلاحية'); ?></label>
-                <select name="role">
-                    <option value="staff"><?php echo e(admin_role_label('staff', $lang)); ?></option>
-                    <option value="agent"><?php echo e(admin_role_label('agent', $lang)); ?></option>
-                    <option value="manager"><?php echo e(admin_role_label('manager', $lang)); ?></option>
-                    <option value="admin"><?php echo e(admin_role_label('admin', $lang)); ?></option>
+                <select name="role" id="addUserRole">
+                    <?php foreach (admin_roles() as $rOpt): ?>
+                        <option value="<?php echo e($rOpt); ?>"><?php echo e(admin_role_label($rOpt, $lang)); ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div id="addLinkedAgentWrap" style="display:none">
+                <label><?php echo e($lang === 'en' ? 'Linked agent' : 'الوكيل المرتبط'); ?></label>
+                <select name="linked_agent_id">
+                    <option value="0"><?php echo e($lang === 'en' ? '— select agent —' : '— اختر وكيل —'); ?></option>
+                    <?php foreach ($settingsAgents as $sag): ?>
+                        <option value="<?php echo (int) $sag['id']; ?>"><?php echo e($sag['display_name']); ?></option>
+                    <?php endforeach; ?>
                 </select>
             </div>
         </div>
@@ -601,6 +697,16 @@ render_settings_tabs($tab);
             <button class="btn" type="submit"><?php echo e($lang === 'en' ? 'Add' : 'إضافة'); ?></button>
         </div>
     </form>
+    <script>
+    (function () {
+      var roleSel = document.getElementById('addUserRole');
+      var wrap = document.getElementById('addLinkedAgentWrap');
+      if (!roleSel || !wrap) return;
+      function sync() { wrap.style.display = roleSel.value === 'accountant' ? '' : 'none'; }
+      roleSel.addEventListener('change', sync);
+      sync();
+    })();
+    </script>
 </div>
 
 <div class="panel panel-compact">
@@ -627,6 +733,7 @@ render_settings_tabs($tab);
             <?php endif; ?>
             <?php foreach ($adminUsers as $u):
                 $urole = normalize_admin_role(isset($u['role']) ? $u['role'] : 'staff');
+                $ulinked = isset($u['linked_agent_id']) ? (int) $u['linked_agent_id'] : 0;
                 ?>
                 <tr>
                     <td>
@@ -643,9 +750,17 @@ render_settings_tabs($tab);
                             <input type="hidden" name="user_id" value="<?php echo (int) $u['id']; ?>">
                             <div class="inline-form-row">
                                 <input name="display_name" value="<?php echo e($u['display_name']); ?>" required style="max-width:140px" placeholder="<?php echo e($lang === 'en' ? 'Name' : 'الاسم'); ?>">
-                                <select name="role" style="max-width:120px">
+                                <select name="role" class="user-role-select" style="max-width:120px">
                                     <?php foreach (admin_roles() as $rOpt): ?>
                                         <option value="<?php echo e($rOpt); ?>" <?php echo $urole === $rOpt ? 'selected' : ''; ?>><?php echo e(admin_role_label($rOpt, $lang)); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                                <select name="linked_agent_id" class="user-linked-agent" style="max-width:130px;<?php echo $urole === 'accountant' ? '' : 'display:none'; ?>">
+                                    <option value="0"><?php echo e($lang === 'en' ? 'Agent…' : 'وكيل…'); ?></option>
+                                    <?php foreach ($settingsAgents as $sag):
+                                        $sid = (int) $sag['id'];
+                                        ?>
+                                        <option value="<?php echo $sid; ?>"<?php echo $ulinked === $sid ? ' selected' : ''; ?>><?php echo e($sag['display_name']); ?></option>
                                     <?php endforeach; ?>
                                 </select>
                                 <input type="password" name="new_password" placeholder="<?php echo e($lang === 'en' ? 'New pass (optional)' : 'رمز جديد (اختياري)'); ?>" style="max-width:140px" minlength="4">
@@ -670,6 +785,17 @@ render_settings_tabs($tab);
             </tbody>
         </table>
     </div>
+    <script>
+    (function () {
+      document.querySelectorAll('.user-edit-form').forEach(function (form) {
+        var roleSel = form.querySelector('.user-role-select');
+        var linkedSel = form.querySelector('.user-linked-agent');
+        if (!roleSel || !linkedSel) return;
+        function sync() { linkedSel.style.display = roleSel.value === 'accountant' ? '' : 'none'; }
+        roleSel.addEventListener('change', sync);
+      });
+    })();
+    </script>
 </div>
 <?php endif; ?>
 
@@ -1145,6 +1271,7 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
 </style>
 
 <div class="wa-layout">
+  <?php if (!$isAgentWaOnly): ?>
   <div class="wa-card">
     <h2><?php echo e(t('settings_whatsapp')); ?></h2>
     <p class="wa-lead"><?php echo e($lang === 'en'
@@ -1188,12 +1315,17 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
       <?php endif; ?>
     </div>
   </div>
+  <?php endif; ?>
 
   <div class="wa-card">
     <h2><?php echo e($lang === 'en' ? 'Link WhatsApp' : 'ربط واتساب'); ?></h2>
-    <p class="wa-lead"><?php echo e($lang === 'en'
-        ? 'When disconnected, a QR appears here. Scan once — or disconnect to relink.'
-        : 'عند تسجيل الخروج يظهر QR هنا. امسحه مرة واحدة — أو افصل لإعادة الربط.'); ?></p>
+    <p class="wa-lead"><?php echo e($isAgentWaOnly
+        ? ($lang === 'en'
+            ? 'Your messages use your own WhatsApp session on the shared gateway. Scan QR once here.'
+            : 'رسائلك تُرسل من جلسة واتساب خاصة بك على البوابة المشتركة. امسح QR هنا مرة واحدة.')
+        : ($lang === 'en'
+            ? 'When disconnected, a QR appears here. Scan once — or disconnect to relink.'
+            : 'عند تسجيل الخروج يظهر QR هنا. امسحه مرة واحدة — أو افصل لإعادة الربط.')); ?></p>
     <div id="wa-status" class="wa-status-pill warn"><span class="wa-status-dot"></span><span id="wa-status-text">...</span></div>
     <div id="wa-qr" class="wa-qr-stage">
         <img id="wa-qr-img" alt="QR" style="display:none">
@@ -1678,6 +1810,60 @@ $sysGrace = (int) (isset($s['grace_days']) ? $s['grace_days'] : 3);
             <?php if (!empty($s['schedule_cut_enabled']) && function_exists('run_schedule_debt_cuts')): ?>
                 <button class="btn ghost" type="submit" name="schedule_run_now" value="1"><?php echo e($isEn ? 'Run once now' : 'تشغيل مرة الآن'); ?></button>
             <?php endif; ?>
+        </div>
+    </form>
+</div>
+<?php endif; ?>
+
+<?php if ($tab === 'update'): ?>
+<?php
+$isEn = ($lang === 'en');
+$pendingUpd = function_exists('app_update_pending') ? app_update_pending($s) : null;
+?>
+<div class="panel panel-compact">
+    <h2><?php echo e($isEn ? 'Official system update' : 'تحديث النظام الرسمي'); ?></h2>
+    <p class="meta" style="margin-top:-4px">
+        <?php echo e($isEn
+            ? 'Upload a ZIP of changed files (includes/, public/, cron/, whatsapp-gateway/). Live secrets in config/config.php are never overwritten.'
+            : 'ارفع ZIP يضم الملفات المتغيرة (includes/ و public/ و cron/ و whatsapp-gateway/). ملف config/config.php ما ينستبدل أبداً.'); ?>
+    </p>
+    <?php if ($pendingUpd): ?>
+        <div class="alert alert-info" style="margin:12px 0">
+            <strong><?php echo e($isEn ? 'Update ready to apply' : 'تحديث جاهز للتطبيق'); ?></strong>
+            <div class="meta"><?php echo e($pendingUpd['file']); ?>
+                <?php if (!empty($pendingUpd['at'])): ?> · <?php echo e($pendingUpd['at']); ?><?php endif; ?>
+            </div>
+            <?php if (trim((string) $pendingUpd['note']) !== ''): ?>
+                <div><?php echo e($pendingUpd['note']); ?></div>
+            <?php endif; ?>
+        </div>
+        <form method="post" style="display:inline" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Apply this update now?' : 'تطبيق التحديث الآن؟'); ?>);">
+            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+            <input type="hidden" name="section" value="app_update_apply">
+            <button class="btn" type="submit"><?php echo e($isEn ? 'Apply update' : 'تطبيق التحديث'); ?></button>
+        </form>
+        <form method="post" style="display:inline;margin-inline-start:8px" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Discard pending update?' : 'إلغاء التحديث المعلّق؟'); ?>);">
+            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+            <input type="hidden" name="section" value="app_update_clear">
+            <button class="btn ghost" type="submit"><?php echo e($isEn ? 'Discard' : 'إلغاء'); ?></button>
+        </form>
+    <?php else: ?>
+        <p class="meta"><?php echo e($isEn ? 'No pending update.' : 'ماكو تحديث معلّق حالياً.'); ?></p>
+    <?php endif; ?>
+</div>
+<div class="panel panel-compact">
+    <h2><?php echo e($isEn ? 'Upload new package' : 'رفع حزمة جديدة'); ?></h2>
+    <form method="post" enctype="multipart/form-data">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="section" value="app_update_upload">
+        <label><?php echo e($isEn ? 'ZIP file' : 'ملف ZIP'); ?>
+            <input type="file" name="update_zip" accept=".zip,application/zip" required>
+        </label>
+        <label style="margin-top:10px;display:block"><?php echo e($isEn ? 'Note (optional)' : 'ملاحظة (اختياري)'); ?>
+            <input name="app_update_note" maxlength="200" placeholder="<?php echo e($isEn ? 'e.g. messages + agents fix' : 'مثال: إصلاح الرسائل والوكلاء'); ?>">
+        </label>
+        <div class="actions" style="margin-top:12px">
+            <button class="btn" type="submit"><?php echo e($isEn ? 'Upload & announce' : 'رفع وإعلان التحديث'); ?></button>
         </div>
     </form>
 </div>

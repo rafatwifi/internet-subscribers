@@ -221,6 +221,10 @@ require_once __DIR__ . '/helpers.php';
 require_once __DIR__ . '/system_status.php';
 require_once __DIR__ . '/auth.php';
 require_once __DIR__ . '/whatsapp.php';
+$cardAccountingFile = __DIR__ . '/card_accounting.php';
+if (is_file($cardAccountingFile)) {
+    require_once $cardAccountingFile;
+}
 
 $pdo = db_connect($config);
 if (function_exists('app_remember_try_restore')) {
@@ -314,6 +318,9 @@ try {
         if (function_exists('ensure_subscriber_agent_column')) {
             ensure_subscriber_agent_column($pdo);
         }
+        if (function_exists('ensure_card_accounting_tables')) {
+            ensure_card_accounting_tables($pdo);
+        }
         if (function_exists('ensure_phone_not_unique')) {
             ensure_phone_not_unique($pdo);
         }
@@ -370,13 +377,19 @@ try {
 // مزامنة الدور/الاسم من قاعدة البيانات للجلسة الحالية
 try {
     if (!empty($_SESSION['admin_logged_in']) && !empty($_SESSION['admin_user_id'])) {
-        $stRole = $pdo->prepare('SELECT role, display_name, username, is_active FROM admin_users WHERE id = :id LIMIT 1');
+        $stRole = $pdo->prepare(
+            'SELECT role, display_name, username, is_active, sas_manager_id, wa_local_url, wa_local_key
+             FROM admin_users WHERE id = :id LIMIT 1'
+        );
         $stRole->execute(array(':id' => (int) $_SESSION['admin_user_id']));
         $liveUser = $stRole->fetch();
         if ($liveUser && (int) $liveUser['is_active'] === 1) {
             $_SESSION['admin_role'] = normalize_admin_role(isset($liveUser['role']) ? $liveUser['role'] : 'staff');
             $_SESSION['admin_display_name'] = $liveUser['display_name'];
             $_SESSION['admin_username'] = $liveUser['username'];
+            $_SESSION['admin_sas_manager_id'] = isset($liveUser['sas_manager_id']) ? (int) $liveUser['sas_manager_id'] : 0;
+            $_SESSION['admin_wa_local_url'] = isset($liveUser['wa_local_url']) ? (string) $liveUser['wa_local_url'] : '';
+            $_SESSION['admin_wa_local_key'] = isset($liveUser['wa_local_key']) ? (string) $liveUser['wa_local_key'] : '';
         } elseif ($liveUser && (int) $liveUser['is_active'] !== 1) {
             $_SESSION = array();
         }

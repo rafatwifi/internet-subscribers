@@ -48,7 +48,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
     <noscript><link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet"></noscript>
-    <link rel="stylesheet" href="assets/style.css?v=ui8">
+    <link rel="stylesheet" href="assets/style.css?v=ui11">
     <style>
         <?php if ($bgMode === 'image' && $bgUrl !== ''): ?>
         body.app-bg-image {
@@ -66,6 +66,11 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
         body.app-bg-image .sas-table-card,
         body.app-bg-image .glass-panel,
         body.app-bg-image .sched-table-wrap,
+        body.app-bg-image .sched-toolbar,
+        body.app-bg-image .sched-stat,
+        body.app-bg-image .msg-table-wrap,
+        body.app-bg-image .msg-toolbar,
+        body.app-bg-image .msg-compose,
         body.app-bg-image .debts-table-wrap,
         body.app-bg-image .debts-toolbar,
         body.app-bg-image .debts-add,
@@ -207,7 +212,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <?php if ($can('subscribers')): ?>
             <a class="<?php echo $active === 'sas' ? 'active' : ''; ?>" href="sas.php"><?php echo e(t('sas')); ?></a>
             <?php endif; ?>
-            <?php if ($can('subscribers')): ?>
+            <?php if ($can('cards')): ?>
             <a class="<?php echo $active === 'cards' ? 'active' : ''; ?>" href="cards.php"><?php echo e($isEn ? 'Cards' : 'الكارتات'); ?></a>
             <?php endif; ?>
             <?php if ($can('plans')): ?>
@@ -265,22 +270,73 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
                 <?php endif; ?>
             </div>
             <div class="main-top-end">
-                <div class="top-user-cluster">
-                    <a class="top-profile-btn" href="profile.php" title="<?php echo e($isEn ? 'My profile' : 'بروفايلي'); ?>">
-                        <span class="top-profile-avatar" aria-hidden="true">
-                            <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 12a4.5 4.5 0 1 0-4.5-4.5A4.5 4.5 0 0 0 12 12zm0 2.25c-3.6 0-6.75 1.8-6.75 4V20h13.5v-1.75c0-2.2-3.15-4-6.75-4z"/></svg>
-                        </span>
-                        <?php if ($userLabel !== ''): ?>
-                            <span class="top-profile-name"><?php echo e($userLabel); ?></span>
-                        <?php endif; ?>
+                <?php
+                $pendingUpd = function_exists('app_update_pending') ? app_update_pending(isset($settings) ? $settings : null) : null;
+                $isImpersonating = function_exists('is_impersonating') && is_impersonating();
+                $canLoginAs = function_exists('is_admin_user') && is_admin_user() && !$isImpersonating;
+                ?>
+                <?php if ($pendingUpd && !$isImpersonating && function_exists('user_can') && user_can('settings')): ?>
+                    <a class="top-update-pill" href="settings.php?tab=update" title="<?php echo e($isEn ? 'System update available' : 'تحديث نظام متاح'); ?>">
+                        <?php echo e($isEn ? 'Update' : 'تحديث'); ?>
                     </a>
+                <?php endif; ?>
+                <div class="top-user-cluster">
+                    <div class="top-admin-menu" id="topAdminMenu">
+                        <button type="button" class="top-profile-btn" id="topAdminBtn" aria-haspopup="true" aria-expanded="false">
+                            <span class="top-profile-avatar" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 12a4.5 4.5 0 1 0-4.5-4.5A4.5 4.5 0 0 0 12 12zm0 2.25c-3.6 0-6.75 1.8-6.75 4V20h13.5v-1.75c0-2.2-3.15-4-6.75-4z"/></svg>
+                            </span>
+                            <?php if ($userLabel !== ''): ?>
+                                <span class="top-profile-name"><?php echo e($userLabel); ?></span>
+                            <?php endif; ?>
+                            <?php if ($isImpersonating): ?>
+                                <span class="top-as-agent"><?php echo e($isEn ? 'as agent' : 'وكيل'); ?></span>
+                            <?php endif; ?>
+                        </button>
+                        <div class="top-admin-dropdown" id="topAdminDropdown" hidden>
+                            <a href="profile.php"><?php echo e($isEn ? 'My profile' : 'البروفايل الشخصي'); ?></a>
+                            <?php if ($canLoginAs): ?>
+                                <button type="button" id="topLoginAsBtn"><?php echo e($isEn ? 'Login as agent…' : 'الدخول بصفة وكيل…'); ?></button>
+                            <?php endif; ?>
+                            <?php if ($isImpersonating): ?>
+                                <form method="post" action="impersonate.php" class="top-admin-exit-form">
+                                    <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                                    <input type="hidden" name="action" value="stop">
+                                    <button type="submit"><?php echo e($isEn ? 'Back to my account' : 'رجوع لحسابي'); ?></button>
+                                </form>
+                            <?php endif; ?>
+                            <a href="logout.php"><?php echo e(t('logout')); ?></a>
+                        </div>
+                    </div>
                     <a class="top-lang-btn" href="<?php echo e($langHref); ?>" title="<?php echo e(t('language')); ?>">
-                        <span class="top-lang-glyph" aria-hidden="true"><?php echo $isEn ? 'ع' : 'A'; ?></span>
+                        <span class="top-lang-glyph" aria-hidden="true"><?php echo $isEn ? 'E' : 'ع'; ?></span>
                     </a>
                 </div>
             </div>
         </div>
-        <div id="waConnBar" class="wa-conn-bar wa-conn-checking wa-conn-hidden" role="status" aria-live="polite" hidden>
+        <?php if ($canLoginAs): ?>
+        <div class="login-as-modal" id="loginAsModal" hidden>
+            <div class="login-as-card" role="dialog" aria-modal="true" aria-labelledby="loginAsTitle">
+                <h3 id="loginAsTitle"><?php echo e($isEn ? 'Login as agent' : 'الدخول بصفة وكيل'); ?></h3>
+                <p class="meta"><?php echo e($isEn ? 'Type the agent name, then choose from matches.' : 'اكتب اسم الوكيل، ثم اختَر من النتائج المطابقة.'); ?></p>
+                <input type="search" id="loginAsQ" autocomplete="off" placeholder="<?php echo e($isEn ? 'Agent name…' : 'اسم الوكيل…'); ?>">
+                <div id="loginAsResults" class="login-as-results"></div>
+                <div class="actions">
+                    <button type="button" class="btn ghost sm" id="loginAsClose"><?php echo e($isEn ? 'Close' : 'إغلاق'); ?></button>
+                </div>
+                <form method="post" action="impersonate.php" id="loginAsForm" hidden>
+                    <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                    <input type="hidden" name="action" value="start">
+                    <input type="hidden" name="user_id" id="loginAsUserId" value="">
+                </form>
+            </div>
+        </div>
+        <?php endif; ?>
+        <?php
+        // شريط واتساب: للأدمن فقط (مو للوكيل / الدخول بصفة وكيل)
+        $showWaBar = !$isImpersonating && function_exists('is_agent_user') && !is_agent_user();
+        ?>
+        <div id="waConnBar" class="wa-conn-bar wa-conn-checking wa-conn-hidden" role="status" aria-live="polite" <?php echo $showWaBar ? '' : 'hidden'; ?> data-disabled="<?php echo $showWaBar ? '0' : '1'; ?>">
             <span class="wa-conn-dot" aria-hidden="true"></span>
             <span class="wa-conn-text"><?php echo e($isEn ? 'Checking WhatsApp…' : 'جاري فحص واتساب…'); ?></span>
             <a class="wa-conn-link" href="settings.php?tab=whatsapp"><?php echo e($isEn ? 'Settings' : 'الإعدادات'); ?></a>
@@ -439,7 +495,7 @@ body.nav-pending .nav-progress { display: block; }
 
 (function () {
   var bar = document.getElementById('waConnBar');
-  if (!bar) return;
+  if (!bar || bar.getAttribute('data-disabled') === '1') return;
   var text = bar.querySelector('.wa-conn-text');
   var isEn = document.documentElement.lang === 'en';
   var msgs = {
@@ -516,6 +572,95 @@ setTimeout(function () {
     }
   } catch (e) {}
 }, 4000);
+
+(function () {
+  var wrap = document.getElementById('topAdminMenu');
+  var btn = document.getElementById('topAdminBtn');
+  var drop = document.getElementById('topAdminDropdown');
+  if (btn && drop) {
+    btn.addEventListener('click', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      var open = drop.hidden;
+      drop.hidden = !open;
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+    document.addEventListener('click', function () {
+      drop.hidden = true;
+      btn.setAttribute('aria-expanded', 'false');
+    });
+    drop.addEventListener('click', function (e) { e.stopPropagation(); });
+  }
+
+  var modal = document.getElementById('loginAsModal');
+  var openBtn = document.getElementById('topLoginAsBtn');
+  var closeBtn = document.getElementById('loginAsClose');
+  var qInput = document.getElementById('loginAsQ');
+  var results = document.getElementById('loginAsResults');
+  var form = document.getElementById('loginAsForm');
+  var uid = document.getElementById('loginAsUserId');
+  var timer = null;
+
+  function showModal(on) {
+    if (!modal) return;
+    modal.hidden = !on;
+    if (on && qInput) {
+      qInput.value = '';
+      if (results) results.innerHTML = '';
+      setTimeout(function () { qInput.focus(); }, 50);
+    }
+  }
+  if (openBtn) openBtn.addEventListener('click', function () {
+    if (drop) drop.hidden = true;
+    showModal(true);
+  });
+  if (closeBtn) closeBtn.addEventListener('click', function () { showModal(false); });
+  if (modal) modal.addEventListener('click', function (e) {
+    if (e.target === modal) showModal(false);
+  });
+
+  function renderAgents(list) {
+    if (!results) return;
+    results.innerHTML = '';
+    if (!list || !list.length) {
+      results.innerHTML = '<div class="meta">—</div>';
+      return;
+    }
+    list.forEach(function (a) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'login-as-item';
+      b.textContent = a.label || a.display_name || a.username;
+      b.addEventListener('click', function () {
+        if (!form || !uid) return;
+        uid.value = String(a.id);
+        form.submit();
+      });
+      results.appendChild(b);
+    });
+  }
+
+  if (qInput) {
+    qInput.addEventListener('input', function () {
+      clearTimeout(timer);
+      var q = (qInput.value || '').trim();
+      timer = setTimeout(function () {
+        if (q.length < 1) {
+          renderAgents([]);
+          return;
+        }
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', 'impersonate.php?action=search&ajax=1&q=' + encodeURIComponent(q), true);
+        xhr.onload = function () {
+          var data = null;
+          try { data = JSON.parse(xhr.responseText); } catch (e) {}
+          renderAgents(data && data.agents ? data.agents : []);
+        };
+        xhr.send();
+      }, 220);
+    });
+  }
+})();
 </script>
 </body>
 </html>
