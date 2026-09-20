@@ -860,10 +860,30 @@ if (isset($_GET['live']) && $_GET['live'] === '1') {
     $html = '<tr><td colspan="17">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
     $liveCount = 0;
     try {
-        // بحث حي من الكاش فقط — لا ننتظر الساس حتى لا تعلق الأعمدة بعد البحث
         $fromSql = function_exists('sas_cache_list_from_sql')
             ? sas_cache_list_from_sql()
             : ' FROM sas_users_cache c LEFT JOIN subscribers s ON s.id = c.local_subscriber_id';
+        // إن ماكو نتائج بالكاش — اسحب من الساس ثم أعد البحث (حتى ما يضطر المستخدم يضغط Enter مرّات)
+        if ($sasReady && $q !== '' && strlen($q) >= 2 && function_exists('sas_cache_pull_search')) {
+            $localHits = 0;
+            try {
+                $cntSt = $pdo->prepare('SELECT COUNT(DISTINCT c.username)' . $fromSql . ' WHERE ' . $where);
+                $cntSt->execute($params);
+                $localHits = (int) $cntSt->fetchColumn();
+            } catch (Exception $e) {
+                $localHits = 0;
+            }
+            if ($localHits <= 0) {
+                if (function_exists('set_time_limit')) {
+                    @set_time_limit(25);
+                }
+                try {
+                    sas_cache_pull_search($pdo, $config, $q);
+                } catch (Exception $e) {
+                } catch (Error $e) {
+                }
+            }
+        }
         $sqlLive = sas_cache_list_select_sql(false) . $fromSql . '
             WHERE ' . $where . '
             ORDER BY c.display_name ASC
@@ -892,6 +912,7 @@ if (isset($_GET['live']) && $_GET['live'] === '1') {
         'html' => $html,
         'count' => $liveCount,
         'capped' => $liveCount >= 80,
+        'q' => $q,
     ));
     exit;
 }
@@ -2959,7 +2980,15 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   var tbody = document.getElementById('subsTableBody');
   var pager = document.getElementById('subsPager');
   var liveTimer = null;
+  var liveSearchSeq = 0;
+  var liveSearchAbort = null;
+  var liveSearchBusy = false;
   var originalHtml = tbody ? tbody.innerHTML : '';
+  var foundLabel = document.getElementById('sasFoundLabel');
+  var foundLabelBase = foundLabel ? foundLabel.textContent : '';
+  var foundLabelTpl = <?php echo json_encode($lang === 'en' ? 'Found {n} record(s)' : 'عُثر على {n} قيد'); ?>;
+  var searchingLabel = <?php echo json_encode($lang === 'en' ? 'Searching…' : 'جاري البحث…'); ?>;
+  var noMatchLabel = <?php echo json_encode($lang === 'en' ? 'No matches' : 'ماكو نتيجة'); ?>;
   var actBill = { old_sum: 0, old_lines: [], charge: 0, currency: <?php echo json_encode(isset($config['currency']) ? $config['currency'] : 'د.ع'); ?> };
   var checkAll = document.getElementById('subCheckAll');
   var opsBtn = document.getElementById('openOpsBtn');
@@ -4522,14 +4551,18 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     if (window.scrollTo) window.scrollTo(0, y);
   }
   function refreshTableLive() {
-    if (liveBusy || tableIsBusy() || document.hidden) return Promise.resolve(null);
+    if (liveBusy || liveSearchBusy || tableIsBusy() || document.hidden) return Promise.resolve(null);
     if (Date.now() < colsSkipUntil) return Promise.resolve(null);
-    if (filter && filter.value.trim() !== String((liveQs && liveQs.q) || '')) return Promise.resolve(null);
+    var typed = filter ? filter.value.trim() : '';
+    var locked = String((liveQs && liveQs.q) || '');
+    // أثناء الكتابة بالبحث الحي لا تستبدل الجدول بتحديث الأونلاين
+    if (typed !== locked) return Promise.resolve(null);
     liveBusy = true;
     return fetch(liveTableUrl(), { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(function (d) {
         liveBusy = false;
+        if (filter && filter.value.trim() !== String((liveQs && liveQs.q) || '')) return null;
         if (d && d.ok && d.html && !tableIsBusy()) replaceTableHtml(d.html);
         return d;
       })
@@ -4569,36 +4602,104 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   // أول تحديث فوري للأونلاين/IP عند فتح الصفحة
   setTimeout(function () { refreshTableLive(); }, 200);
 
-  function liveSearch() {
+  function setFoundCount(n, searching) {
+    if (!foundLabel) return;
+    if (searching) {
+      foundLabel.textContent = searchingLabel;
+      return;
+    }
+    if (n === null || n === undefined) {
+      foundLabel.textContent = foundLabelBase;
+      return;
+    }
+    foundLabel.textContent = String(foundLabelTpl).replace('{n}', String(n));
+  }
+
+  function applyLiveRows(html, count) {
+    if (!tbody || html == null || html === '') return;
+    tbody.innerHTML = html;
+    syncBulk();
+    applyCols(true);
+    if (colOrder.join(',') !== DEFAULT_COL_ORDER.join(',')) {
+      if (window.requestAnimationFrame) {
+        window.requestAnimationFrame(function () { applyOrder(); });
+      } else {
+        applyOrder();
+      }
+    }
+    setFoundCount(typeof count === 'number' ? count : null, false);
+  }
+
+  function liveSearch(force) {
     if (!filter || !tbody) return;
     var q = filter.value.trim();
+    if (liveSearchAbort && liveSearchAbort.abort) {
+      try { liveSearchAbort.abort(); } catch (e) {}
+    }
     if (q === '') {
-      tbody.innerHTML = originalHtml;
+      liveSearchBusy = false;
       if (pager) pager.style.display = '';
+      setFoundCount(null, false);
+      // أعد الجدول من السيرفر (مو من لقطة قديمة)
+      if (liveQs) liveQs.q = '';
+      refreshTableLive();
       return;
     }
     if (pager) pager.style.display = 'none';
-    fetch('sas.php?live=1&q=' + encodeURIComponent(q) + '&sub=<?php echo rawurlencode($subFilter); ?>&parent=<?php echo rawurlencode($parentFilter); ?>')
+    liveSearchBusy = true;
+    setFoundCount(0, true);
+    var seq = ++liveSearchSeq;
+    var ctrl = null;
+    if (typeof AbortController !== 'undefined') {
+      ctrl = new AbortController();
+      liveSearchAbort = ctrl;
+    }
+    var url = 'sas.php?live=1&q=' + encodeURIComponent(q)
+      + '&sub=' + encodeURIComponent(<?php echo json_encode($subFilter); ?>)
+      + '&parent=' + encodeURIComponent(<?php echo json_encode($parentFilter); ?>);
+    fetch(url, {
+      credentials: 'same-origin',
+      signal: ctrl ? ctrl.signal : undefined,
+      cache: 'no-store'
+    })
       .then(function (r) { return r.json(); })
       .then(function (d) {
-        if (d && d.html) {
-          tbody.innerHTML = d.html;
-          syncBulk();
-          applyCols(true);
-          if (colOrder.join(',') !== DEFAULT_COL_ORDER.join(',')) {
-            if (window.requestAnimationFrame) {
-              window.requestAnimationFrame(function () { applyOrder(); });
-            } else {
-              applyOrder();
-            }
-          }
+        if (seq !== liveSearchSeq) return;
+        if (filter && filter.value.trim() !== q) return;
+        liveSearchBusy = false;
+        if (d && typeof d.html === 'string') {
+          applyLiveRows(d.html, typeof d.count === 'number' ? d.count : null);
+        } else if (force) {
+          applyLiveRows('<tr><td colspan="17">' + noMatchLabel + '</td></tr>', 0);
         }
-      }).catch(function () {});
+      })
+      .catch(function (err) {
+        if (err && err.name === 'AbortError') return;
+        if (seq !== liveSearchSeq) return;
+        liveSearchBusy = false;
+        setFoundCount(null, false);
+      });
   }
+
+  function scheduleLiveSearch() {
+    clearTimeout(liveTimer);
+    liveTimer = setTimeout(function () { liveSearch(false); }, 220);
+  }
+
   if (filter) {
-    filter.addEventListener('input', function () {
+    filter.addEventListener('input', scheduleLiveSearch);
+    filter.addEventListener('keyup', function (e) {
+      if (e.key === 'Enter') return;
+      scheduleLiveSearch();
+    });
+    filter.addEventListener('search', function () { liveSearch(true); });
+    filter.addEventListener('compositionend', scheduleLiveSearch);
+  }
+  if (searchForm) {
+    searchForm.addEventListener('submit', function (e) {
+      e.preventDefault();
       clearTimeout(liveTimer);
-      liveTimer = setTimeout(liveSearch, 280);
+      liveSearch(true);
     });
   }
 

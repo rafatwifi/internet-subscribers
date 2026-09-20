@@ -934,8 +934,8 @@ if ($activeSubCard) {
 </div>
 <?php endif; ?>
 
-<div class="panel glass-panel sub-section">
-    <h2>كل التفعيلات</h2>
+<div class="panel glass-panel sub-section" id="activations">
+    <h2><?php echo e($lang === 'en' ? 'All activations' : 'كل التفعيلات'); ?></h2>
     <div class="table-wrap">
         <table>
             <thead>

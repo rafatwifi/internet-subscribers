@@ -124,6 +124,110 @@ function cards_page_fetch_inventory($config, $force = false)
     return array($groups, false);
 }
 
+/**
+ * اربط used_by بصفحة المشترك المحلي (#activations) أو sas_user كاحتياط.
+ */
+function cards_enrich_used_by_links($pdo, $groups)
+{
+    if (!is_array($groups) || !$groups) {
+        return $groups;
+    }
+    $names = array();
+    foreach ($groups as $g) {
+        if (empty($g['cards']) || !is_array($g['cards'])) {
+            continue;
+        }
+        foreach ($g['cards'] as $c) {
+            if (empty($c['used']) || empty($c['used_by'])) {
+                continue;
+            }
+            $u = trim((string) $c['used_by']);
+            if ($u !== '') {
+                $names[strtolower($u)] = $u;
+            }
+        }
+    }
+    if (!$names) {
+        return $groups;
+    }
+    $map = array(); // lower => local_id
+    $list = array_values($names);
+    // sas_users_cache.local_subscriber_id
+    try {
+        $ph = array();
+        $bind = array();
+        $i = 0;
+        foreach ($list as $u) {
+            $k = ':u' . $i;
+            $ph[] = $k;
+            $bind[$k] = $u;
+            $i++;
+        }
+        $sql = 'SELECT username, local_subscriber_id FROM sas_users_cache WHERE username IN (' . implode(',', $ph) . ')';
+        $st = $pdo->prepare($sql);
+        $st->execute($bind);
+        while ($row = $st->fetch()) {
+            $lid = !empty($row['local_subscriber_id']) ? (int) $row['local_subscriber_id'] : 0;
+            if ($lid > 0) {
+                $map[strtolower((string) $row['username'])] = $lid;
+            }
+        }
+    } catch (Exception $e) {
+    }
+    // subscribers.sas_username
+    $missing = array();
+    foreach ($list as $u) {
+        if (!isset($map[strtolower($u)])) {
+            $missing[] = $u;
+        }
+    }
+    if ($missing) {
+        try {
+            $ph = array();
+            $bind = array();
+            $i = 0;
+            foreach ($missing as $u) {
+                $k = ':s' . $i;
+                $ph[] = $k;
+                $bind[$k] = $u;
+                $i++;
+            }
+            $sql = 'SELECT id, sas_username FROM subscribers WHERE sas_username IN (' . implode(',', $ph) . ')';
+            $st = $pdo->prepare($sql);
+            $st->execute($bind);
+            while ($row = $st->fetch()) {
+                $map[strtolower((string) $row['sas_username'])] = (int) $row['id'];
+            }
+        } catch (Exception $e) {
+        }
+    }
+    foreach ($groups as &$g) {
+        if (empty($g['cards']) || !is_array($g['cards'])) {
+            continue;
+        }
+        foreach ($g['cards'] as &$c) {
+            if (empty($c['used']) || empty($c['used_by'])) {
+                continue;
+            }
+            $u = trim((string) $c['used_by']);
+            $key = strtolower($u);
+            if (isset($map[$key]) && $map[$key] > 0) {
+                $c['local_id'] = (int) $map[$key];
+                $c['user_href'] = 'subscriber.php?id=' . (int) $map[$key] . '#activations';
+            } elseif (function_exists('sas_user_url')) {
+                $c['local_id'] = 0;
+                $c['user_href'] = sas_user_url($u);
+            } else {
+                $c['local_id'] = 0;
+                $c['user_href'] = 'sas.php?q=' . rawurlencode($u);
+            }
+        }
+        unset($c);
+    }
+    unset($g);
+    return $groups;
+}
+
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'inventory') {
     header('Content-Type: application/json; charset=utf-8');
     $force = (isset($_GET['refresh']) && $_GET['refresh'] === '1');
@@ -139,7 +243,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'inventory') {
     }
     try {
         list($groups, $fromCache) = cards_page_fetch_inventory($config, $force);
-        $out['groups'] = $groups;
+        $out['groups'] = cards_enrich_used_by_links($pdo, $groups);
         $out['from_cache'] = $fromCache;
     } catch (Exception $e) {
         $out['ok'] = false;
@@ -181,6 +285,8 @@ if ($sasReady) {
 } else {
     $err = $isEn ? 'Enable SAS in settings first' : 'فعّل ربط SAS من الإعدادات أولاً';
 }
+
+$groups = cards_enrich_used_by_links($pdo, $groups);
 
 $sumTotal = 0;
 $sumUsed = 0;
@@ -232,15 +338,57 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 .cards-page .pill.bad { background: #fee2e2; color: #991b1b; }
 .cards-page .cat-body { display: none; padding: 12px 14px 14px; border-top: 1px solid #e8edf4; }
 .cards-page .cat-block.is-open .cat-body { display: block; }
-.cards-page .chip-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+.cards-page .chip-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 10px; }
+.cards-page .chip-grid-used { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
 .cards-page .chip {
-  border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px; background: #fff;
+  border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px 12px; background: #fff;
+  min-width: 0; overflow: hidden; box-sizing: border-box;
+  user-select: text; -webkit-user-select: text;
 }
-.cards-page .chip.used { background: #fff7f7; border-color: #fecaca; }
-.cards-page .pin { font-weight: 800; font-family: ui-monospace, monospace; letter-spacing: .02em; }
-.cards-page .st { display: inline-block; margin-top: 6px; font-size: 11px; font-weight: 800; color: #166534; }
-.cards-page .chip.used .st { color: #991b1b; }
-.cards-page .by-inline { font-size: 11px; color: #64748b; font-weight: 700; margin-inline-start: 6px; }
+.cards-page .chip.free {
+  display: flex; flex-direction: column; gap: 6px;
+  background: #f8fffb; border-color: #bbf7d0;
+}
+.cards-page .by-line a, .cards-page a.by-link {
+  color: #1d4ed8; text-decoration: none; font-weight: 800;
+  word-break: break-all; overflow-wrap: anywhere;
+}
+.cards-page .by-line a:hover, .cards-page a.by-link:hover {
+  text-decoration: underline; color: #1e40af;
+}
+.cards-page .chip-top {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
+  min-width: 0;
+}
+.cards-page .chip-main { min-width: 0; flex: 1; }
+.cards-page .pin-row {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
+  min-width: 0; width: 100%;
+}
+.cards-page .pin {
+  font-weight: 800; font-family: ui-monospace, Consolas, monospace; letter-spacing: .02em;
+  font-size: 13px; color: #0f172a;
+  word-break: break-all; overflow-wrap: anywhere; max-width: 100%;
+  user-select: text; -webkit-user-select: text;
+}
+.cards-page .by-line {
+  display: block; font-size: 12px; color: #475569; font-weight: 700;
+  word-break: break-all; overflow-wrap: anywhere; max-width: 100%;
+  line-height: 1.35;
+  user-select: text; -webkit-user-select: text;
+}
+.cards-page .st {
+  display: block; margin-top: 2px; font-size: 11px; font-weight: 800; color: #166534;
+  word-break: break-word;
+}
+.cards-page .chip.used .st { color: #b91c1c; margin-top: 0; }
+.cards-page .chip-copy {
+  flex: 0 0 auto; border: 1px solid #e2e8f0; background: #fff; color: #334155;
+  border-radius: 8px; padding: 4px 8px; font: inherit; font-size: 11px; font-weight: 800;
+  cursor: pointer; line-height: 1.2; white-space: nowrap;
+}
+.cards-page .chip-copy:hover { background: #f1f5f9; }
+.cards-page .chip-copy.is-ok { background: #dcfce7; border-color: #86efac; color: #166534; }
 .cards-page .empty-cat { color: #64748b; font-weight: 700; padding: 8px 0; }
 .cards-page .cards-search {
   width: 100%; max-width: 420px; margin: 0 0 10px; padding: 10px 12px;
@@ -455,10 +603,16 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
                         <?php if ($freeCards): ?>
                             <div class="chip-grid" data-free-grid>
                                 <?php foreach ($freeCards as $c):
-                                    $hay = strtolower(trim((isset($c['pin']) ? $c['pin'] : '') . ' ' . (isset($c['used_by']) ? $c['used_by'] : '')));
+                                    $pin = isset($c['pin']) ? (string) $c['pin'] : '';
+                                    $hay = strtolower(trim($pin));
                                     ?>
-                                    <div class="chip" data-used="0" data-search="<?php echo e($hay); ?>">
-                                        <div class="pin-row"><span class="pin"><?php echo e(isset($c['pin']) ? $c['pin'] : ''); ?></span></div>
+                                    <div class="chip free" data-used="0" data-search="<?php echo e($hay); ?>" data-copy="<?php echo e($pin); ?>">
+                                        <div class="chip-top">
+                                            <div class="chip-main">
+                                                <div class="pin-row"><span class="pin"><?php echo e($pin); ?></span></div>
+                                            </div>
+                                            <button type="button" class="chip-copy" data-copy-btn title="<?php echo e($isEn ? 'Copy' : 'نسخ'); ?>"><?php echo e($isEn ? 'Copy' : 'نسخ'); ?></button>
+                                        </div>
                                         <span class="st free"><?php echo e($isEn ? 'Available' : 'شاغر'); ?></span>
                                     </div>
                                 <?php endforeach; ?>
@@ -473,16 +627,28 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
                                     <span class="used-fold-chevron">›</span>
                                 </button>
                                 <div class="used-fold-body">
-                                    <div class="chip-grid">
+                                    <div class="chip-grid chip-grid-used">
                                         <?php foreach ($usedCards as $c):
+                                            $pin = isset($c['pin']) ? (string) $c['pin'] : '';
                                             $usedBy = !empty($c['used_by']) ? (string) $c['used_by'] : '';
                                             $usedAt = !empty($c['used_at']) ? (string) $c['used_at'] : '';
-                                            $hay = strtolower(trim((isset($c['pin']) ? $c['pin'] : '') . ' ' . $usedBy . ' ' . $usedAt));
+                                            $hay = strtolower(trim($pin . ' ' . $usedBy . ' ' . $usedAt));
+                                            $copyText = trim($pin . ($usedBy !== '' ? (' ' . $usedBy) : ''));
+                                            $userHref = !empty($c['user_href']) ? (string) $c['user_href'] : '';
                                             ?>
-                                            <div class="chip used" data-used="1" data-search="<?php echo e($hay); ?>">
-                                                <div class="pin-row">
-                                                    <span class="pin"><?php echo e(isset($c['pin']) ? $c['pin'] : ''); ?></span>
-                                                    <span class="by-inline"><?php echo e($usedBy !== '' ? $usedBy : '?'); ?></span>
+                                            <div class="chip used" data-used="1" data-search="<?php echo e($hay); ?>" data-copy="<?php echo e($copyText); ?>">
+                                                <div class="chip-top">
+                                                    <div class="chip-main">
+                                                        <div class="pin-row">
+                                                            <span class="pin"><?php echo e($pin); ?></span>
+                                                            <?php if ($usedBy !== '' && $userHref !== ''): ?>
+                                                                <span class="by-line"><a class="by-link" href="<?php echo e($userHref); ?>" title="<?php echo e($isEn ? 'Open subscriber activations' : 'فتح تفعيلات المشترك'); ?>"><?php echo e($usedBy); ?></a></span>
+                                                            <?php else: ?>
+                                                                <span class="by-line"><?php echo e($usedBy !== '' ? $usedBy : '—'); ?></span>
+                                                            <?php endif; ?>
+                                                        </div>
+                                                    </div>
+                                                    <button type="button" class="chip-copy" data-copy-btn title="<?php echo e($isEn ? 'Copy' : 'نسخ'); ?>"><?php echo e($isEn ? 'Copy' : 'نسخ'); ?></button>
                                                 </div>
                                                 <?php if ($usedAt !== ''): ?>
                                                     <div class="st"><?php echo e($usedAt); ?></div>
@@ -558,16 +724,32 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
         if (free.length) {
           html += '<div class="chip-grid">';
           free.forEach(function (c) {
-            html += '<div class="chip" data-used="0" data-search="' + esc(String(c.pin || '').toLowerCase()) + '"><div class="pin-row"><span class="pin">' + esc(c.pin || '') + '</span></div><span class="st">' + (isEn ? 'Available' : 'شاغر') + '</span></div>';
+            var pin = c.pin || '';
+            html += '<div class="chip free" data-used="0" data-search="' + esc(String(pin).toLowerCase()) + '" data-copy="' + esc(pin) + '">';
+            html += '<div class="chip-top"><div class="chip-main"><div class="pin-row"><span class="pin">' + esc(pin) + '</span></div></div>';
+            html += '<button type="button" class="chip-copy" data-copy-btn>' + (isEn ? 'Copy' : 'نسخ') + '</button></div>';
+            html += '<span class="st free">' + (isEn ? 'Available' : 'شاغر') + '</span></div>';
           });
           html += '</div>';
         } else {
           html += '<div class="empty-cat">' + (isEn ? 'No free cards' : 'ماكو كروت شاغرة') + '</div>';
         }
         if (used.length) {
-          html += '<div class="used-fold" data-used-fold><button type="button" class="used-fold-btn" data-toggle-used><span>' + (isEn ? 'Used cards' : 'الكروت المستخدمة') + ' (' + used.length + ')</span><span class="used-fold-chevron">›</span></button><div class="used-fold-body"><div class="chip-grid">';
+          html += '<div class="used-fold" data-used-fold><button type="button" class="used-fold-btn" data-toggle-used><span>' + (isEn ? 'Used cards' : 'الكروت المستخدمة') + ' (' + used.length + ')</span><span class="used-fold-chevron">›</span></button><div class="used-fold-body"><div class="chip-grid chip-grid-used">';
           used.forEach(function (c) {
-            html += '<div class="chip used" data-used="1" data-search="' + esc(((c.pin || '') + ' ' + (c.used_by || '')).toLowerCase()) + '"><div class="pin-row"><span class="pin">' + esc(c.pin || '') + '</span><span class="by-inline">' + esc(c.used_by || '?') + '</span></div>';
+            var pin = c.pin || '';
+            var by = c.used_by || '';
+            var href = c.user_href || '';
+            var copyTxt = String(pin) + (by ? (' ' + by) : '');
+            html += '<div class="chip used" data-used="1" data-search="' + esc((pin + ' ' + by + ' ' + (c.used_at || '')).toLowerCase()) + '" data-copy="' + esc(copyTxt) + '">';
+            html += '<div class="chip-top"><div class="chip-main"><div class="pin-row"><span class="pin">' + esc(pin) + '</span>';
+            if (by && href) {
+              html += '<span class="by-line"><a class="by-link" href="' + esc(href) + '">' + esc(by) + '</a></span>';
+            } else {
+              html += '<span class="by-line">' + esc(by || '—') + '</span>';
+            }
+            html += '</div></div>';
+            html += '<button type="button" class="chip-copy" data-copy-btn>' + (isEn ? 'Copy' : 'نسخ') + '</button></div>';
             if (c.used_at) html += '<div class="st">' + esc(c.used_at) + '</div>';
             html += '</div>';
           });
@@ -594,6 +776,64 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
       btn.addEventListener('click', function () {
         var fold = btn.closest('[data-used-fold]');
         if (fold) fold.classList.toggle('is-open');
+      });
+    });
+    function copyText(txt, btn) {
+      txt = String(txt || '');
+      if (!txt) return;
+      var done = function () {
+        if (!btn) return;
+        var old = btn.textContent;
+        btn.textContent = isEn ? 'Copied' : 'تم';
+        btn.classList.add('is-ok');
+        setTimeout(function () {
+          btn.textContent = old;
+          btn.classList.remove('is-ok');
+        }, 1200);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(txt).then(done).catch(function () {
+          try {
+            var ta = document.createElement('textarea');
+            ta.value = txt;
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+            done();
+          } catch (e) {}
+        });
+      } else {
+        try {
+          var ta2 = document.createElement('textarea');
+          ta2.value = txt;
+          document.body.appendChild(ta2);
+          ta2.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta2);
+          done();
+        } catch (e2) {}
+      }
+    }
+    list.querySelectorAll('[data-copy-btn]').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        var chip = btn.closest('.chip');
+        copyText(chip ? chip.getAttribute('data-copy') : '', btn);
+      });
+    });
+    list.querySelectorAll('.chip .pin').forEach(function (el) {
+      el.addEventListener('click', function (e) {
+        if (e.target && e.target.closest && e.target.closest('a')) return;
+        e.stopPropagation();
+        try {
+          var range = document.createRange();
+          range.selectNodeContents(el);
+          var sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+        } catch (err) {}
       });
     });
     var filter = document.getElementById('cardsFilter');
