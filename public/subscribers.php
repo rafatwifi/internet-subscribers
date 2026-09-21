@@ -276,10 +276,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     echo json_encode(array('ok' => false, 'error' => 'empty'));
                     exit;
                 }
+                $oldPhone = '';
+                try {
+                    $ost = $pdo->prepare('SELECT phone FROM subscribers WHERE id = :id LIMIT 1');
+                    $ost->execute(array(':id' => $sid));
+                    $oldPhone = (string) $ost->fetchColumn();
+                } catch (Exception $e) {
+                }
                 $pdo->prepare('UPDATE subscribers SET phone = :p WHERE id = :id')
                     ->execute(array(':p' => $phone, ':id' => $sid));
-                if (function_exists('activity_log')) {
-                    activity_log($pdo, $sid, 'subscriber', $sid, 'update', 'تعديل الهاتف من الجدول', $phone);
+                if (function_exists('log_subscriber_phone_change')) {
+                    log_subscriber_phone_change($pdo, $sid, $oldPhone, $phone, 'جدول المشتركين');
                 }
                 echo json_encode(array('ok' => true, 'value' => format_phone_display($phone), 'raw' => $phone));
                 exit;

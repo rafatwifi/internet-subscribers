@@ -19,6 +19,17 @@ function whatsapp_send($config, $phone, $message, $type = 'text')
     $wa = isset($config['whatsapp']) ? $config['whatsapp'] : array();
     $phone = normalize_phone($phone);
 
+    if ($phone === '' || (function_exists('phone_is_placeholder') && phone_is_placeholder($phone))) {
+        return array(
+            'success' => false,
+            'skipped' => true,
+            'response' => 'رقم هاتف غير صالح أو فارغ',
+            'phone' => $phone,
+            'body' => $message,
+            'type' => $type,
+        );
+    }
+
     if (empty($wa['enabled'])) {
         return array(
             'success' => false,
@@ -401,31 +412,52 @@ if (!function_exists('subscriber_whatsapp_phone')) {
 function subscriber_whatsapp_phone($pdo, $subscriberId, $fallback = '')
 {
     $subscriberId = (int) $subscriberId;
+    $candidates = array();
     if ($subscriberId > 0 && $pdo) {
         try {
             $st = $pdo->prepare(
                 'SELECT phone FROM sas_users_cache
                  WHERE local_subscriber_id = :id AND phone IS NOT NULL AND phone <> \'\'
-                 ORDER BY id DESC LIMIT 1'
+                 LIMIT 5'
             );
             $st->execute(array(':id' => $subscriberId));
-            $cachePhone = $st->fetchColumn();
-            if ($cachePhone !== false && trim((string) $cachePhone) !== '') {
-                return (string) $cachePhone;
+            while ($cachePhone = $st->fetchColumn()) {
+                $candidates[] = (string) $cachePhone;
             }
         } catch (Exception $e) {
         }
         try {
-            $st2 = $pdo->prepare('SELECT phone FROM subscribers WHERE id = :id LIMIT 1');
-            $st2->execute(array(':id' => $subscriberId));
-            $local = $st2->fetchColumn();
-            if ($local !== false && trim((string) $local) !== '') {
-                return (string) $local;
+            $stU = $pdo->prepare('SELECT sas_username, phone FROM subscribers WHERE id = :id LIMIT 1');
+            $stU->execute(array(':id' => $subscriberId));
+            $loc = $stU->fetch();
+            if ($loc) {
+                $candidates[] = isset($loc['phone']) ? (string) $loc['phone'] : '';
+                $u = isset($loc['sas_username']) ? trim((string) $loc['sas_username']) : '';
+                if ($u !== '') {
+                    $stC = $pdo->prepare(
+                        'SELECT phone FROM sas_users_cache WHERE username = :u AND phone IS NOT NULL AND phone <> \'\' LIMIT 1'
+                    );
+                    $stC->execute(array(':u' => $u));
+                    $cp = $stC->fetchColumn();
+                    if ($cp !== false) {
+                        array_unshift($candidates, (string) $cp);
+                    }
+                }
             }
         } catch (Exception $e2) {
         }
     }
-    return (string) $fallback;
+    $candidates[] = $fallback;
+    if (function_exists('phone_first_valid')) {
+        return phone_first_valid($candidates);
+    }
+    foreach ($candidates as $p) {
+        $p = trim((string) $p);
+        if ($p !== '' && $p !== '964000000000') {
+            return $p;
+        }
+    }
+    return '';
 }
 }
 
@@ -559,6 +591,143 @@ function log_message($pdo, $subscriberId, $result)
             ? $result['response']
             : json_encode($result),
     ));
+}
+
+/** تعليم أن تذكير قرب الانتهاء أُرسل لهذا التاريخ */
+function mark_expiry_notice_sent($pdo, $subscriberId, $endDate)
+{
+    $subscriberId = (int) $subscriberId;
+    $endDate = date('Y-m-d', strtotime((string) $endDate));
+    if ($subscriberId <= 0 || !$endDate || strtotime($endDate) === false) {
+        return;
+    }
+    if (function_exists('ensure_sas_expiry_remind_column')) {
+        ensure_sas_expiry_remind_column($pdo);
+    }
+    try {
+        $pdo->prepare(
+            'UPDATE sas_users_cache SET expiry_remind_for_expire = :e
+             WHERE local_subscriber_id = :id'
+        )->execute(array(':e' => $endDate, ':id' => $subscriberId));
+    } catch (Exception $e) {
+    }
+    try {
+        $st = $pdo->prepare('SELECT sas_username FROM subscribers WHERE id = :id LIMIT 1');
+        $st->execute(array(':id' => $subscriberId));
+        $u = trim((string) $st->fetchColumn());
+        if ($u !== '') {
+            $pdo->prepare(
+                'UPDATE sas_users_cache SET expiry_remind_for_expire = :e WHERE username = :u'
+            )->execute(array(':e' => $endDate, ':u' => $u));
+        }
+    } catch (Exception $e) {
+    }
+}
+
+/**
+ * خريطة: subscriber_id => true إذا سبق إرسال إشعار قرب انتهاء لنفس تاريخ النهاية.
+ * $rows عناصر فيها subscriber_id و end_date
+ */
+function subscribers_expiry_notice_map($pdo, $rows)
+{
+    $map = array();
+    if (!$rows || !is_array($rows)) {
+        return $map;
+    }
+    $byEnd = array();
+    foreach ($rows as $row) {
+        $sid = isset($row['subscriber_id']) ? (int) $row['subscriber_id'] : (isset($row['id']) ? (int) $row['id'] : 0);
+        $end = isset($row['end_date']) ? date('Y-m-d', strtotime((string) $row['end_date'])) : '';
+        if ($sid <= 0 || $end === '' || strtotime($end) === false) {
+            continue;
+        }
+        if (!isset($byEnd[$end])) {
+            $byEnd[$end] = array();
+        }
+        $byEnd[$end][$sid] = true;
+    }
+    if (!$byEnd) {
+        return $map;
+    }
+    if (function_exists('ensure_sas_expiry_remind_column')) {
+        try {
+            ensure_sas_expiry_remind_column($pdo);
+        } catch (Exception $e) {
+        }
+    }
+    foreach ($byEnd as $end => $idsMap) {
+        $ids = array_map('intval', array_keys($idsMap));
+        if (!$ids) {
+            continue;
+        }
+        $in = implode(',', $ids);
+        try {
+            $q = $pdo->query(
+                "SELECT local_subscriber_id AS sid FROM sas_users_cache
+                 WHERE local_subscriber_id IN ($in) AND expiry_remind_for_expire = " . $pdo->quote($end)
+            );
+            if ($q) {
+                while ($r = $q->fetch()) {
+                    $map[(int) $r['sid']] = true;
+                }
+            }
+        } catch (Exception $e) {
+        }
+        try {
+            $q2 = $pdo->query(
+                "SELECT s.id AS sid FROM subscribers s
+                 INNER JOIN sas_users_cache c ON c.username = s.sas_username
+                 WHERE s.id IN ($in) AND c.expiry_remind_for_expire = " . $pdo->quote($end)
+            );
+            if ($q2) {
+                while ($r = $q2->fetch()) {
+                    $map[(int) $r['sid']] = true;
+                }
+            }
+        } catch (Exception $e) {
+        }
+        // سجل رسائل ناجحة قرب الانتهاء تتضمن تاريخ النهاية
+        try {
+            $like = '%' . $end . '%';
+            $st = $pdo->prepare(
+                "SELECT DISTINCT subscriber_id FROM message_logs
+                 WHERE success = 1
+                   AND subscriber_id IN ($in)
+                   AND message_type IN ('expiry_auto','bulk_filter','days_left','remind_days')
+                   AND body LIKE :like"
+            );
+            $st->execute(array(':like' => $like));
+            while ($sid = $st->fetchColumn()) {
+                $map[(int) $sid] = true;
+            }
+        } catch (Exception $e) {
+        }
+    }
+    return $map;
+}
+
+function delete_failed_message_log($pdo, $logId)
+{
+    $logId = (int) $logId;
+    if ($logId <= 0) {
+        return array(false, 'معرّف غير صالح');
+    }
+    try {
+        $st = $pdo->prepare('SELECT id, success FROM message_logs WHERE id = :id LIMIT 1');
+        $st->execute(array(':id' => $logId));
+        $row = $st->fetch();
+        if (!$row) {
+            return array(false, 'الرسالة غير موجودة');
+        }
+        if (!empty($row['success'])) {
+            return array(false, 'ما يصير حذف رسالة ناجحة');
+        }
+        $pdo->prepare('DELETE FROM message_logs WHERE id = :id AND success = 0')
+            ->execute(array(':id' => $logId));
+        return array(true, 'تم الحذف');
+    } catch (Exception $e) {
+        return array(false, 'فشل الحذف');
+    }
 }
 
 /**
@@ -1213,8 +1382,34 @@ function ensure_subscription_expiry_remind_column($pdo)
     }
 }
 
+function ensure_sas_expiry_remind_column($pdo)
+{
+    static $done = false;
+    if ($done) {
+        return;
+    }
+    $done = true;
+    if (function_exists('ensure_sas_users_cache_table')) {
+        try {
+            ensure_sas_users_cache_table($pdo);
+        } catch (Exception $e) {
+            // ignore
+        }
+    }
+    try {
+        $chk = $pdo->query("SHOW COLUMNS FROM sas_users_cache LIKE 'expiry_remind_for_expire'");
+        if ($chk && $chk->fetch()) {
+            return;
+        }
+        $pdo->exec('ALTER TABLE sas_users_cache ADD COLUMN expiry_remind_for_expire DATE NULL DEFAULT NULL');
+    } catch (Exception $e) {
+        // ignore
+    }
+}
+
 /**
  * إرسال تذكير لمن ينتهي اشتراكهم خلال N أيام
+ * (اشتراكات محلية + تواريخ انتهاء كاش الساس)
  */
 function run_expiry_soon_reminders($pdo, $config, $limit = 40)
 {
@@ -1233,40 +1428,126 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
         $daysN = 60;
     }
     ensure_subscription_expiry_remind_column($pdo);
-    $pdo->exec(
-        "UPDATE subscriptions SET status = 'expired'
-         WHERE status = 'active' AND end_date < CURDATE()"
-    );
+    ensure_sas_expiry_remind_column($pdo);
+    try {
+        $pdo->exec(
+            "UPDATE subscriptions SET status = 'expired'
+             WHERE status = 'active' AND end_date < CURDATE()"
+        );
+    } catch (Exception $e) {
+        // ignore
+    }
 
     $limit = max(1, (int) $limit);
-    $sql = 'SELECT sub.id AS sub_id, sub.subscriber_id, sub.service_name, sub.start_date, sub.end_date,
-                   s.name, s.phone
-            FROM subscriptions sub
-            JOIN subscribers s ON s.id = sub.subscriber_id
-            WHERE sub.status = \'active\'
-              AND sub.end_date >= CURDATE()
-              AND sub.end_date <= DATE_ADD(CURDATE(), INTERVAL ' . (int) $daysN . ' DAY)
-              AND (sub.expiry_remind_for_end IS NULL OR sub.expiry_remind_for_end <> sub.end_date)
-            ORDER BY sub.end_date ASC
-            LIMIT ' . $limit;
-    $rows = $pdo->query($sql)->fetchAll();
-    $out['checked'] = count($rows);
+    $doneUsers = array();
 
-    foreach ($rows as $row) {
-        $info = subscription_days_info($row['start_date'], $row['end_date']);
+    // 1) تواريخ الانتهاء من كاش المشتركين
+    $sasRows = array();
+    if (function_exists('sas_list_expiring_rows')) {
+        $sasRows = sas_list_expiring_rows($pdo, $daysN, $limit * 3);
+    }
+    // صفّي من تذكّروا مسبقاً لنفس تاريخ الانتهاء
+    $sasFiltered = array();
+    foreach ($sasRows as $crow) {
+        $u = isset($crow['username']) ? trim((string) $crow['username']) : '';
+        if ($u === '') {
+            continue;
+        }
+        try {
+            $stR = $pdo->prepare(
+                'SELECT expiry_remind_for_expire FROM sas_users_cache WHERE username = :u LIMIT 1'
+            );
+            $stR->execute(array(':u' => $u));
+            $prev = $stR->fetchColumn();
+            $endDate = date('Y-m-d', strtotime((string) $crow['expire_at']));
+            if ($prev !== false && $prev !== null && (string) $prev === $endDate) {
+                continue;
+            }
+        } catch (Exception $e) {
+            // ignore
+        }
+        $crow['subscriber_id'] = isset($crow['sub_id']) ? (int) $crow['sub_id'] : 0;
+        $sasFiltered[] = $crow;
+        if (count($sasFiltered) >= $limit) {
+            break;
+        }
+    }
+    $sasRows = $sasFiltered;
+
+    foreach ($sasRows as $crow) {
+        if ($out['sent'] + $out['failed'] + $out['skipped'] >= $limit) {
+            break;
+        }
+        $username = isset($crow['username']) ? trim((string) $crow['username']) : '';
+        if ($username === '' || isset($doneUsers[$username])) {
+            continue;
+        }
+        $out['checked']++;
+        $sid = isset($crow['subscriber_id']) ? (int) $crow['subscriber_id'] : 0;
+        if ($sid <= 0 && !empty($crow['local_subscriber_id'])) {
+            $sid = (int) $crow['local_subscriber_id'];
+        }
+        if ($sid <= 0 && function_exists('sas_cache_ensure_local')) {
+            list($sid, $errLink) = sas_cache_ensure_local($pdo, $config, $crow);
+            $sid = (int) $sid;
+        }
+        if ($sid <= 0) {
+            $out['skipped']++;
+            continue;
+        }
+        $name = '';
+        if (!empty($crow['sub_name'])) {
+            $name = (string) $crow['sub_name'];
+        } elseif (!empty($crow['display_name'])) {
+            $name = (string) $crow['display_name'];
+        } else {
+            $name = $username;
+        }
+        $phone = '';
+        if (function_exists('phone_first_valid')) {
+            $phone = phone_first_valid(array(
+                isset($crow['sas_phone']) ? $crow['sas_phone'] : '',
+                isset($crow['sub_phone']) ? $crow['sub_phone'] : '',
+            ));
+        }
+        if ($phone === '' && function_exists('subscriber_whatsapp_phone')) {
+            $phone = subscriber_whatsapp_phone($pdo, $sid, '');
+        }
+        if ($phone === '') {
+            try {
+                $stPh = $pdo->prepare('SELECT phone FROM subscribers WHERE id = :id LIMIT 1');
+                $stPh->execute(array(':id' => $sid));
+                $phone = (string) $stPh->fetchColumn();
+            } catch (Exception $e) {
+                $phone = '';
+            }
+        }
+        if ($phone === '' || (function_exists('phone_is_placeholder') && phone_is_placeholder($phone))) {
+            $out['skipped']++;
+            continue;
+        }
+        $endDate = date('Y-m-d', strtotime((string) $crow['expire_at']));
+        $startDate = date('Y-m-d', strtotime($endDate . ' -30 days'));
+        $info = subscription_days_info($startDate, $endDate);
+        $pkg = isset($crow['profile_name']) ? (string) $crow['profile_name'] : '';
         $body = expiry_soon_message(array(
-            'name' => $row['name'],
-            'days' => (int) $info['left'],
-            'package' => $row['service_name'],
-            'from' => $row['start_date'],
-            'to' => $row['end_date'],
+            'name' => $name,
+            'days' => isset($crow['_days']) ? (int) $crow['_days'] : (int) $info['left'],
+            'package' => $pkg,
+            'from' => $startDate,
+            'to' => $endDate,
         ), $config);
-        $result = whatsapp_send($config, $row['phone'], $body, 'expiry_auto');
-        log_message($pdo, (int) $row['subscriber_id'], $result);
+        $result = whatsapp_send($config, $phone, $body, 'expiry_auto');
+        log_message($pdo, $sid, $result);
+        $doneUsers[$username] = true;
         if (!empty($result['success'])) {
-            $pdo->prepare(
-                'UPDATE subscriptions SET expiry_remind_for_end = :e WHERE id = :id'
-            )->execute(array(':e' => $row['end_date'], ':id' => (int) $row['sub_id']));
+            try {
+                $pdo->prepare(
+                    'UPDATE sas_users_cache SET expiry_remind_for_expire = :e WHERE username = :u'
+                )->execute(array(':e' => $endDate, ':u' => $username));
+            } catch (Exception $e) {
+                // ignore
+            }
             $out['sent']++;
             usleep(250000);
         } elseif (!empty($result['skipped'])) {
@@ -1276,12 +1557,71 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
             usleep(150000);
         }
     }
+
+    // 2) اشتراكات محلية بدون ربط ساس (أو بدون صف كاش)
+    $remain = $limit - (int) $out['sent'] - (int) $out['failed'] - (int) $out['skipped'];
+    if ($remain < 1) {
+        $remain = 0;
+    }
+    if ($remain > 0) {
+        $sql = 'SELECT sub.id AS sub_id, sub.subscriber_id, sub.service_name, sub.start_date, sub.end_date,
+                       s.name, s.phone, s.sas_username
+                FROM subscriptions sub
+                JOIN subscribers s ON s.id = sub.subscriber_id
+                WHERE sub.status = \'active\'
+                  AND sub.end_date >= CURDATE()
+                  AND sub.end_date <= DATE_ADD(CURDATE(), INTERVAL ' . (int) $daysN . ' DAY)
+                  AND (sub.expiry_remind_for_end IS NULL OR sub.expiry_remind_for_end <> sub.end_date)
+                ORDER BY sub.end_date ASC
+                LIMIT ' . (int) $remain;
+        try {
+            $rows = $pdo->query($sql)->fetchAll();
+        } catch (Exception $e) {
+            $rows = array();
+        }
+        foreach ($rows as $row) {
+            $u = isset($row['sas_username']) ? trim((string) $row['sas_username']) : '';
+            if ($u !== '' && isset($doneUsers[$u])) {
+                continue;
+            }
+            $out['checked']++;
+            $info = subscription_days_info($row['start_date'], $row['end_date']);
+            $body = expiry_soon_message(array(
+                'name' => $row['name'],
+                'days' => (int) $info['left'],
+                'package' => $row['service_name'],
+                'from' => $row['start_date'],
+                'to' => $row['end_date'],
+            ), $config);
+            $result = whatsapp_send($config, $row['phone'], $body, 'expiry_auto');
+            log_message($pdo, (int) $row['subscriber_id'], $result);
+            if ($u !== '') {
+                $doneUsers[$u] = true;
+            }
+            if (!empty($result['success'])) {
+                $pdo->prepare(
+                    'UPDATE subscriptions SET expiry_remind_for_end = :e WHERE id = :id'
+                )->execute(array(':e' => $row['end_date'], ':id' => (int) $row['sub_id']));
+                $out['sent']++;
+                usleep(250000);
+            } elseif (!empty($result['skipped'])) {
+                $out['skipped']++;
+            } else {
+                $out['failed']++;
+                usleep(150000);
+            }
+        }
+    }
     return $out;
 }
 
-/** تشغيل خفيف من الواجهة (مرة كل ~10 دقائق) */
+/** تشغيل خفيف من الواجهة (تذكير انتهاء + قطع) بدون كرون */
 function maybe_run_expiry_auto_reminders($pdo, $config)
 {
+    if (function_exists('maybe_run_auto_schedule_jobs')) {
+        maybe_run_auto_schedule_jobs($pdo, $config);
+        return;
+    }
     if (empty($config['expiry_auto_remind_enabled'])) {
         return;
     }
@@ -1289,10 +1629,49 @@ function maybe_run_expiry_auto_reminders($pdo, $config)
     $now = time();
     if (is_file($lock)) {
         $prev = (int) trim((string) @file_get_contents($lock));
-        if ($prev > 0 && ($now - $prev) < 600) {
+        if ($prev > 0 && ($now - $prev) < 180) {
             return;
         }
     }
     @file_put_contents($lock, (string) $now);
-    @run_expiry_soon_reminders($pdo, $config, 15);
+    @run_expiry_soon_reminders($pdo, $config, 25);
+}
+
+/**
+ * تشغيل تلقائي للتذكير والقطع + تحديث بيانات الانتهاء أثناء استخدام اللوحة.
+ */
+function maybe_run_auto_schedule_jobs($pdo, $config)
+{
+    $lock = __DIR__ . '/../config/auto_schedule.lock';
+    $now = time();
+    if (is_file($lock)) {
+        $prev = (int) trim((string) @file_get_contents($lock));
+        if ($prev > 0 && ($now - $prev) < 120) {
+            return;
+        }
+    }
+    @file_put_contents($lock, (string) $now);
+
+    if (function_exists('sas_maybe_background_sync')) {
+        try {
+            @sas_maybe_background_sync($pdo, $config, false);
+        } catch (Exception $e) {
+            // ignore
+        }
+    }
+
+    if (!empty($config['expiry_auto_remind_enabled']) && function_exists('run_expiry_soon_reminders')) {
+        try {
+            @run_expiry_soon_reminders($pdo, $config, 25);
+        } catch (Exception $e) {
+            // ignore
+        }
+    }
+    if (!empty($config['schedule_cut_enabled']) && function_exists('run_schedule_debt_cuts')) {
+        try {
+            @run_schedule_debt_cuts($pdo, $config, 40);
+        } catch (Exception $e) {
+            // ignore
+        }
+    }
 }

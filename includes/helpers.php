@@ -55,8 +55,44 @@ function normalize_phone($phone)
     return $phone;
 }
 
+/** رقم وهمي/فارغ (مثل 964000000000 اللي يظهر 00000000) */
+function phone_is_placeholder($phone)
+{
+    $d = preg_replace('/\D+/', '', (string) $phone);
+    if ($d === null || $d === '') {
+        return true;
+    }
+    if ($d === '964000000000' || $d === '0000000000' || $d === '00000000000') {
+        return true;
+    }
+    // كل الأرقام أصفار
+    if (preg_match('/^0+$/', $d)) {
+        return true;
+    }
+    return false;
+}
+
+/** أول رقم صالح من قائمة مرشحين */
+function phone_first_valid($candidates)
+{
+    if (!is_array($candidates)) {
+        $candidates = array($candidates);
+    }
+    foreach ($candidates as $p) {
+        $p = trim((string) $p);
+        if ($p === '' || phone_is_placeholder($p)) {
+            continue;
+        }
+        return $p;
+    }
+    return '';
+}
+
 function format_phone_display($phone)
 {
+    if (function_exists('phone_is_placeholder') && phone_is_placeholder($phone)) {
+        return '—';
+    }
     $p = preg_replace('/\D+/', '', (string) $phone);
     if ($p === null) {
         $p = '';

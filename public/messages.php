@@ -206,6 +206,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect($redir);
     }
 
+    if ($action === 'delete_log') {
+        $logId = (int) post('log_id', '0');
+        list($ok, $msg) = function_exists('delete_failed_message_log')
+            ? delete_failed_message_log($pdo, $logId)
+            : array(false, 'غير متاح');
+        flash($ok ? 'success' : 'error', $msg);
+        $redir = 'messages.php?mode=log';
+        $rq = trim((string) post('q', ''));
+        if ($rq !== '') {
+            $redir .= '&q=' . rawurlencode($rq);
+        }
+        $rt = trim((string) post('type', ''));
+        if ($rt !== '') {
+            $redir .= '&type=' . rawurlencode($rt);
+        }
+        $rp = (int) post('page', '1');
+        if ($rp > 1) {
+            $redir .= '&page=' . $rp;
+        }
+        redirect($redir);
+    }
+
     if ($action === 'disable_users') {
         $okN = 0;
         $failN = 0;
@@ -375,28 +397,113 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         } else {
             $daysMax = (int) post('days', '7');
+            $skipReasons = array();
             foreach ($ids as $idRaw) {
                 $id = (int) $idRaw;
                 if ($id <= 0) {
                     continue;
                 }
-                $st = $pdo->prepare(
-                    'SELECT sub.*, s.name, s.phone,
-                        (SELECT COALESCE(SUM(amount),0) FROM invoices i
-                         WHERE i.subscriber_id = s.id AND i.status = "unpaid") AS debt_total
-                     FROM subscriptions sub
-                     JOIN subscribers s ON s.id = sub.subscriber_id
-                     WHERE sub.subscriber_id = :id AND sub.status = "active"
-                     ORDER BY sub.end_date ASC, sub.id DESC
-                     LIMIT 1'
-                );
-                $st->execute(array(':id' => $id));
-                $row = $st->fetch();
-                if (!$row) {
+                if (function_exists('user_can_access_subscriber') && !user_can_access_subscriber($pdo, $id)) {
                     $skipped++;
+                    $skipReasons[] = '#' . $id . ': بدون صلاحية';
                     continue;
                 }
-                $info = subscription_days_info($row['start_date'], $row['end_date']);
+                $st = $pdo->prepare(
+                    'SELECT s.id AS subscriber_id, s.name, s.phone, s.sas_username,
+                        (SELECT COALESCE(SUM(amount),0) FROM invoices i
+                         WHERE i.subscriber_id = s.id AND i.status = "unpaid") AS debt_total
+                     FROM subscribers s WHERE s.id = :id LIMIT 1'
+                );
+                $st->execute(array(':id' => $id));
+                $sub = $st->fetch();
+                if (!$sub) {
+                    $skipped++;
+                    $skipReasons[] = '#' . $id . ': مشترك غير موجود';
+                    continue;
+                }
+                $endDate = '';
+                $startDate = '';
+                $serviceName = '';
+                try {
+                    $stExp = $pdo->prepare(
+                        'SELECT expire_at, profile_name, phone FROM sas_users_cache
+                         WHERE (local_subscriber_id = :id)
+                            OR (username = :u AND :u <> \'\')
+                         ORDER BY expire_at IS NULL, expire_at ASC
+                         LIMIT 1'
+                    );
+                    $uname = isset($sub['sas_username']) ? trim((string) $sub['sas_username']) : '';
+                    $stExp->execute(array(':id' => $id, ':u' => $uname));
+                    $exp = $stExp->fetch();
+                    if ($exp && !empty($exp['expire_at'])) {
+                        $endDate = date('Y-m-d', strtotime((string) $exp['expire_at']));
+                        $startDate = date('Y-m-d', strtotime($endDate . ' -30 days'));
+                        $serviceName = isset($exp['profile_name']) ? (string) $exp['profile_name'] : '';
+                        if (!empty($exp['phone'])) {
+                            $sub['_cache_phone'] = $exp['phone'];
+                        }
+                    }
+                } catch (Exception $e) {
+                    // ignore
+                }
+                if ($endDate === '') {
+                    $stSub = $pdo->prepare(
+                        'SELECT service_name, start_date, end_date, monthly_price FROM subscriptions
+                         WHERE subscriber_id = :id AND status = "active"
+                         ORDER BY end_date ASC, id DESC LIMIT 1'
+                    );
+                    $stSub->execute(array(':id' => $id));
+                    $locSub = $stSub->fetch();
+                    if ($locSub) {
+                        $endDate = $locSub['end_date'];
+                        $startDate = $locSub['start_date'];
+                        $serviceName = $locSub['service_name'];
+                        $sub['monthly_price'] = $locSub['monthly_price'];
+                    }
+                }
+                if ($endDate === '') {
+                    $skipped++;
+                    $skipReasons[] = $sub['name'] . ': ماكو تاريخ انتهاء';
+                    continue;
+                }
+                $phone = function_exists('subscriber_whatsapp_phone')
+                    ? subscriber_whatsapp_phone(
+                        $pdo,
+                        $id,
+                        phone_first_valid(array(
+                            isset($sub['_cache_phone']) ? $sub['_cache_phone'] : '',
+                            $sub['phone'],
+                        ))
+                    )
+                    : (string) $sub['phone'];
+                if ($phone === '' || (function_exists('phone_is_placeholder') && phone_is_placeholder($phone))) {
+                    $skipped++;
+                    $skipReasons[] = $sub['name'] . ': ماكو رقم هاتف صالح';
+                    continue;
+                }
+                // لا تعيد إرسال قرب الانتهاء لنفس تاريخ النهاية
+                if (function_exists('subscribers_expiry_notice_map')) {
+                    $already = subscribers_expiry_notice_map($pdo, array(array(
+                        'subscriber_id' => $id,
+                        'end_date' => $endDate,
+                    )));
+                    if (!empty($already[$id])) {
+                        $skipped++;
+                        $skipReasons[] = $sub['name'] . ': تم إرسال إشعار مسبقاً';
+                        continue;
+                    }
+                }
+                $info = subscription_days_info($startDate !== '' ? $startDate : date('Y-m-d', strtotime($endDate . ' -30 days')), $endDate);
+                $row = array(
+                    'subscriber_id' => $id,
+                    'name' => $sub['name'],
+                    'phone' => $phone,
+                    'service_name' => $serviceName,
+                    'start_date' => $startDate,
+                    'end_date' => $endDate,
+                    'monthly_price' => isset($sub['monthly_price']) ? $sub['monthly_price'] : 0,
+                    'debt_total' => $sub['debt_total'],
+                );
                 if (trim($msgTpl) !== '') {
                     $body = tpl_fill($msgTpl, array(
                         'name' => $row['name'],
@@ -408,7 +515,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'debt' => ((float) $row['debt_total'] > 0)
                             ? money_format_iqd($row['debt_total'], $config['currency'])
                             : '',
-                        'month' => month_short_label(date('Y-m', strtotime($row['start_date']))),
+                        'month' => month_short_label(date('Y-m', strtotime($row['start_date'] ? $row['start_date'] : 'now'))),
                     ));
                     if ((float) $row['debt_total'] > 0) {
                         $debtFmt = money_format_iqd($row['debt_total'], $config['currency']);
@@ -424,14 +531,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'debt_total' => (float) $row['debt_total'],
                     ), $config);
                 }
-                $result = whatsapp_send($config, $row['phone'], $body, 'bulk_filter');
-                log_message($pdo, (int) $row['subscriber_id'], $result);
+                $result = whatsapp_send($config, $phone, $body, 'bulk_filter');
+                log_message($pdo, $id, $result);
                 if (!empty($result['success'])) {
                     $ok++;
+                    if (function_exists('mark_expiry_notice_sent')) {
+                        mark_expiry_notice_sent($pdo, $id, $endDate);
+                    }
+                } elseif (!empty($result['skipped'])) {
+                    $skipped++;
+                    $why = isset($result['response']) ? (string) $result['response'] : 'تخطّي';
+                    $skipReasons[] = $row['name'] . ': ' . $why;
                 } else {
                     $fail++;
                 }
                 usleep(350000);
+            }
+            if ($skipped > 0 && $skipReasons) {
+                $extra = implode(' | ', array_slice($skipReasons, 0, 5));
+                if (count($skipReasons) > 5) {
+                    $extra .= ' …';
+                }
+                // يُلحق لاحقاً برسالة الفلاش عبر متغير عام بسيط
+                $GLOBALS['_msg_skip_detail'] = $extra;
             }
         }
 
@@ -439,6 +561,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             . ($lang === 'en' ? ' / Failed: ' : ' / فشل: ') . $fail;
         if ($skipped > 0) {
             $msg .= ($lang === 'en' ? ' / Skipped: ' : ' / تخطي: ') . $skipped;
+            if (!empty($GLOBALS['_msg_skip_detail'])) {
+                $msg .= ' — ' . $GLOBALS['_msg_skip_detail'];
+                unset($GLOBALS['_msg_skip_detail']);
+            }
         }
         flash($fail > 0 && $ok === 0 ? 'error' : 'success', $msg);
         $redir = 'messages.php?mode=send&filter=' . rawurlencode($filter);
@@ -459,6 +585,7 @@ $logRows = array();
 $logResolvedMap = array();
 $logTotal = 0;
 $logPages = 1;
+$daysEmptyHint = '';
 
 if ($mode === 'log') {
     $where = '1=1';
@@ -557,19 +684,153 @@ if ($mode === 'log') {
         return (int) $b['_days_passed'] - (int) $a['_days_passed'];
     });
 } elseif ($mode === 'send' && $filter === 'days') {
-    $candidates = $pdo->query(
-        "SELECT sub.*, s.name, s.phone
-         FROM subscriptions sub
-         JOIN subscribers s ON s.id = sub.subscriber_id
-         WHERE sub.status = 'active'" . $agentScopeSql . "
-         ORDER BY sub.end_date ASC"
-    )->fetchAll();
+    $seenSubIds = array();
+    // تحديث صامت لبيانات الانتهاء قبل العرض
+    if (function_exists('sas_maybe_background_sync')) {
+        try {
+            @sas_maybe_background_sync($pdo, $config, true);
+        } catch (Exception $e) {
+            // ignore
+        }
+    }
+    $sasCandidates = function_exists('sas_list_expiring_rows')
+        ? sas_list_expiring_rows($pdo, $daysMax, 3000)
+        : array();
+
+    $cacheWithExpire = 0;
+    try {
+        $cacheWithExpire = (int) $pdo->query(
+            "SELECT COUNT(*) FROM sas_users_cache WHERE expire_at IS NOT NULL AND expire_at > '2000-01-01'"
+        )->fetchColumn();
+    } catch (Exception $e) {
+        $cacheWithExpire = count($sasCandidates);
+    }
+
+    $agentIdFilter = 0;
+    if (function_exists('is_agent_user') && is_agent_user()
+        && !(function_exists('current_admin_sas_manager_id') && current_admin_sas_manager_id() > 0)
+        && function_exists('current_admin')
+    ) {
+        $me = current_admin();
+        $agentIdFilter = $me ? (int) $me['id'] : 0;
+    }
+
+    foreach ($sasCandidates as $crow) {
+        $sid = isset($crow['sub_id']) ? (int) $crow['sub_id'] : 0;
+        if ($sid <= 0 && !empty($crow['local_subscriber_id'])) {
+            $sid = (int) $crow['local_subscriber_id'];
+        }
+        if ($sid <= 0 && function_exists('sas_cache_ensure_local')) {
+            list($sid, $errLink) = sas_cache_ensure_local($pdo, $config, $crow);
+            $sid = (int) $sid;
+            if ($sid > 0) {
+                try {
+                    $stN = $pdo->prepare('SELECT name, phone, agent_user_id FROM subscribers WHERE id = :id LIMIT 1');
+                    $stN->execute(array(':id' => $sid));
+                    $loc = $stN->fetch();
+                    if ($loc) {
+                        $crow['sub_name'] = $loc['name'];
+                        $crow['sub_phone'] = $loc['phone'];
+                        $crow['agent_user_id'] = $loc['agent_user_id'];
+                    }
+                } catch (Exception $e) {
+                    // ignore
+                }
+            }
+        }
+        if ($sid <= 0) {
+            continue;
+        }
+        if ($agentIdFilter > 0) {
+            $aid = isset($crow['agent_user_id']) ? (int) $crow['agent_user_id'] : 0;
+            if ($aid !== $agentIdFilter) {
+                continue;
+            }
+        }
+        if (isset($seenSubIds[$sid])) {
+            continue;
+        }
+        $left = isset($crow['_days']) ? (int) $crow['_days'] : 0;
+        $endDate = date('Y-m-d', strtotime((string) $crow['expire_at']));
+        $startDate = date('Y-m-d', strtotime($endDate . ' -30 days'));
+        $info = subscription_days_info($startDate, $endDate);
+        $name = !empty($crow['sub_name']) ? (string) $crow['sub_name']
+            : (!empty($crow['display_name']) ? (string) $crow['display_name'] : (string) $crow['username']);
+        $phone = '';
+        if (function_exists('phone_first_valid')) {
+            $phone = phone_first_valid(array(
+                isset($crow['sas_phone']) ? $crow['sas_phone'] : '',
+                isset($crow['sub_phone']) ? $crow['sub_phone'] : '',
+            ));
+        }
+        if ($phone === '' && function_exists('subscriber_whatsapp_phone')) {
+            $phone = subscriber_whatsapp_phone($pdo, $sid, isset($crow['sub_phone']) ? $crow['sub_phone'] : '');
+        }
+        if ($phone === '') {
+            $phone = !empty($crow['sas_phone']) ? (string) $crow['sas_phone']
+                : (isset($crow['sub_phone']) ? (string) $crow['sub_phone'] : '');
+        }
+        $filtered[] = array(
+            'id' => $sid,
+            'subscriber_id' => $sid,
+            'name' => $name,
+            'phone' => $phone,
+            'service_name' => isset($crow['profile_name']) ? (string) $crow['profile_name'] : '',
+            'start_date' => $startDate,
+            'end_date' => $endDate,
+            '_days' => $left,
+            '_pct' => (int) $info['pct'],
+        );
+        $seenSubIds[$sid] = true;
+    }
+    // احتياطي: اشتراكات محلية
+    try {
+        $candidates = $pdo->query(
+            "SELECT sub.*, s.name, s.phone
+             FROM subscriptions sub
+             JOIN subscribers s ON s.id = sub.subscriber_id
+             WHERE sub.status = 'active'
+               AND sub.end_date >= CURDATE()"
+            . $agentScopeSql . "
+             ORDER BY sub.end_date ASC
+             LIMIT 800"
+        )->fetchAll();
+    } catch (Exception $e) {
+        $candidates = array();
+    }
     foreach ($candidates as $row) {
+        $sid = (int) $row['subscriber_id'];
+        if (isset($seenSubIds[$sid])) {
+            continue;
+        }
         $info = subscription_days_info($row['start_date'], $row['end_date']);
-        if ((int) $info['left'] <= $daysMax) {
+        if ((int) $info['left'] >= 0 && (int) $info['left'] <= $daysMax) {
             $row['_days'] = (int) $info['left'];
             $row['_pct'] = (int) $info['pct'];
             $filtered[] = $row;
+            $seenSubIds[$sid] = true;
+        }
+    }
+    usort($filtered, function ($a, $b) {
+        return (int) $a['_days'] - (int) $b['_days'];
+    });
+    if ($filtered && function_exists('subscribers_expiry_notice_map')) {
+        $noticeMap = subscribers_expiry_notice_map($pdo, $filtered);
+        foreach ($filtered as $i => $row) {
+            $sid = isset($row['subscriber_id']) ? (int) $row['subscriber_id'] : (int) $row['id'];
+            $filtered[$i]['_notified'] = !empty($noticeMap[$sid]);
+        }
+    }
+    if (!$filtered) {
+        $hintEn = ($lang === 'en');
+        if ($cacheWithExpire <= 0) {
+            $daysEmptyHint = $hintEn
+                ? 'Expiry dates are still updating in the background — wait a few seconds and press Show again.'
+                : 'تواريخ الانتهاء عم تتحدث بالخلفية — انتظر ثواني واضغط عرض مرة ثانية.';
+        } else {
+            $daysEmptyHint = $hintEn
+                ? ('No one within ' . $daysMax . ' day(s) right now. Try a larger number.')
+                : ('حالياً ماكو أحد ضمن ' . $daysMax . ' يوم. جرّب رقم أكبر.');
         }
     }
 }
@@ -578,8 +839,8 @@ render_header(t('messages'), 'messages');
 $isEnMsg = ($lang === 'en');
 $msgModes = array(
     'send' => array('label' => $isEnMsg ? 'Send' : 'الإرسال', 'hint' => $isEnMsg ? 'Filter & WhatsApp' : 'فلترة وواتساب'),
-    'log' => array('label' => $isEnMsg ? 'Sent log' : 'سجل الرسائل', 'hint' => $isEnMsg ? 'History' : 'الأرشيف'),
     'templates' => array('label' => t('templates'), 'hint' => $isEnMsg ? 'Edit & assign' : 'تعديل وتخصيص'),
+    'log' => array('label' => $isEnMsg ? 'Sent log' : 'سجل الرسائل', 'hint' => $isEnMsg ? 'History' : 'الأرشيف'),
 );
 $sendFilters = array(
     'overdue' => array('label' => $isEnMsg ? 'Late payers' : 'المتأخرين بالتسديد', 'hint' => $isEnMsg ? 'Unpaid after activation' : 'دين بعد التفعيل'),
@@ -588,12 +849,23 @@ $sendFilters = array(
 );
 ?>
 <div class="msg-page">
+    <style>
+      .msg-sent-badge {
+        display: inline-flex; align-items: center; gap: 5px;
+        margin-inline-start: 8px; font-size: 12px; font-weight: 600; color: #15803d;
+        background: #dcfce7; border-radius: 999px; padding: 2px 8px; white-space: nowrap;
+      }
+      .msg-sent-badge .dot-msg {
+        width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: #22c55e;
+      }
+      tr.msg-row-notified td { background: rgba(34, 197, 94, 0.04); }
+    </style>
     <div class="msg-hero">
         <div class="msg-hero-text">
             <h2><?php echo e(t('messages')); ?></h2>
             <p><?php echo e($isEnMsg
-                ? 'Bulk WhatsApp, delivery log, then templates — filter who to contact.'
-                : 'إرسال جماعي وسجل التوصيل، والقوالب بالآخر — فلتر مين تريد تراسله.'); ?></p>
+                ? 'Bulk WhatsApp and templates — delivery log at the end.'
+                : 'إرسال جماعي والقوالب — سجل الرسائل بالآخر.'); ?></p>
         </div>
         <nav class="msg-tabs" aria-label="<?php echo e($isEnMsg ? 'Message sections' : 'أقسام الرسائل'); ?>">
             <?php foreach ($msgModes as $mk => $meta): ?>
@@ -1031,7 +1303,9 @@ $sendFilters = array(
                 $rowCls = $ok ? '' : ($resolved ? 'row-msg-resolved' : 'row-msg-fail');
                 $resolvedTitle = $isEnMsg ? 'Resolved by a later successful send' : 'انحلت لاحقاً بإرسال ناجح';
                 ?>
-                <tr class="<?php echo e($rowCls); ?>">
+                <tr class="<?php echo e($rowCls); ?>"
+                    data-log-id="<?php echo (int) $row['id']; ?>"
+                    data-log-fail="<?php echo (!$ok && !$resolved) ? '1' : '0'; ?>">
                     <td class="nowrap"><?php echo e($row['created_at']); ?></td>
                     <td>
                         <?php if (!empty($row['subscriber_id'])): ?>
@@ -1097,6 +1371,82 @@ $sendFilters = array(
             <?php endif; ?>
         </div>
     <?php endif; ?>
+    <form method="post" id="msgLogDeleteForm" style="display:none">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="action" value="delete_log">
+        <input type="hidden" name="log_id" id="msgLogDeleteId" value="">
+        <input type="hidden" name="q" value="<?php echo e($logQ); ?>">
+        <input type="hidden" name="type" value="<?php echo e($logType); ?>">
+        <input type="hidden" name="page" value="<?php echo (int) $logPage; ?>">
+    </form>
+    <div id="msgLogCtx" class="msg-log-ctx" hidden>
+        <button type="button" id="msgLogCtxDel"><?php echo e($isEnMsg ? 'Delete failed message' : 'حذف رسالة الفشل'); ?></button>
+    </div>
+    <style>
+      .msg-sent-badge {
+        display: inline-flex; align-items: center; gap: 5px;
+        margin-inline-start: 8px; font-size: 12px; font-weight: 600; color: #15803d;
+        background: #dcfce7; border-radius: 999px; padding: 2px 8px;
+      }
+      .msg-sent-badge .dot-msg {
+        width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: #22c55e;
+      }
+      tr.msg-row-notified td { background: rgba(34, 197, 94, 0.04); }
+      .msg-log-ctx {
+        position: fixed; z-index: 9999; min-width: 160px;
+        background: #fff; border: 1px solid #e2e8f0; border-radius: 10px;
+        box-shadow: 0 10px 30px rgba(15, 23, 42, 0.15); padding: 6px;
+      }
+      .msg-log-ctx button {
+        display: block; width: 100%; text-align: start; border: 0; background: transparent;
+        padding: 8px 10px; border-radius: 8px; cursor: pointer; color: #b91c1c; font-weight: 600;
+      }
+      .msg-log-ctx button:hover { background: #fef2f2; }
+      #msgLogTable tr.row-msg-fail { cursor: context-menu; }
+    </style>
+    <script>
+    (function () {
+      var menu = document.getElementById('msgLogCtx');
+      var delBtn = document.getElementById('msgLogCtxDel');
+      var form = document.getElementById('msgLogDeleteForm');
+      var idInput = document.getElementById('msgLogDeleteId');
+      var activeId = 0;
+      function hide() {
+        if (menu) menu.hidden = true;
+        activeId = 0;
+      }
+      document.addEventListener('click', hide);
+      document.addEventListener('scroll', hide, true);
+      var table = document.getElementById('msgLogTable');
+      if (table) {
+        table.addEventListener('contextmenu', function (e) {
+          var tr = e.target && e.target.closest ? e.target.closest('tr[data-log-fail="1"]') : null;
+          if (!tr) return;
+          e.preventDefault();
+          activeId = parseInt(tr.getAttribute('data-log-id') || '0', 10) || 0;
+          if (!menu || activeId <= 0) return;
+          menu.hidden = false;
+          var x = e.clientX;
+          var y = e.clientY;
+          menu.style.left = Math.min(window.innerWidth - 180, Math.max(8, x)) + 'px';
+          menu.style.top = Math.min(window.innerHeight - 60, Math.max(8, y)) + 'px';
+        });
+      }
+      if (delBtn) {
+        delBtn.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (activeId <= 0 || !form || !idInput) return;
+          if (!confirm(<?php echo json_encode($isEnMsg ? 'Delete this failed message from the log?' : 'تحذف رسالة الفشل من السجل؟'); ?>)) {
+            hide();
+            return;
+          }
+          idInput.value = String(activeId);
+          form.submit();
+        });
+      }
+    })();
+    </script>
 
 <?php else: ?>
 
@@ -1205,20 +1555,30 @@ $sendFilters = array(
                 </thead>
                 <tbody>
                 <?php if (!$filtered): ?>
-                    <tr><td colspan="6" class="msg-empty"><?php echo e($isEnMsg ? 'No results' : 'لا توجد نتائج'); ?></td></tr>
+                    <tr><td colspan="6" class="msg-empty"><?php echo e($daysEmptyHint !== '' ? $daysEmptyHint : ($isEnMsg ? 'No results' : 'لا توجد نتائج')); ?></td></tr>
                 <?php endif; ?>
                 <?php foreach ($filtered as $row): ?>
                     <?php
                     $chkId = ($filter === 'days' && isset($row['subscriber_id']))
                         ? (int) $row['subscriber_id']
                         : (int) $row['id'];
+                    $alreadyNotified = ($filter === 'days' && !empty($row['_notified']));
                     ?>
-                    <tr>
+                    <tr class="<?php echo $alreadyNotified ? 'msg-row-notified' : ''; ?>">
                         <td class="chk-col">
                             <input type="checkbox" class="msg-check chk-sm" name="ids[]"
-                                value="<?php echo $chkId; ?>" checked>
+                                value="<?php echo $chkId; ?>"
+                                <?php echo $alreadyNotified ? '' : 'checked'; ?>>
                         </td>
-                        <td><?php echo e($row['name']); ?></td>
+                        <td>
+                            <?php echo e($row['name']); ?>
+                            <?php if ($alreadyNotified): ?>
+                                <span class="msg-sent-badge" title="<?php echo e($isEnMsg ? 'Expiry notice already sent' : 'تم إرسال إشعار قرب الانتهاء'); ?>">
+                                    <span class="dot-msg ok"></span>
+                                    <?php echo e($isEnMsg ? 'Notified' : 'تم الإشعار'); ?>
+                                </span>
+                            <?php endif; ?>
+                        </td>
                         <td><?php echo e(format_phone_display($row['phone'])); ?></td>
                         <?php if ($filter === 'debt'): ?>
                             <td><strong><?php echo e(money_format_iqd($row['debt_total'], $config['currency'])); ?></strong></td>

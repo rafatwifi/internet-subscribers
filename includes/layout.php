@@ -560,18 +560,23 @@ body.nav-pending .nav-progress { display: block; }
   setInterval(check, 60000);
 })();
 
-// تذكير انتهاء الاشتراك بالخلفية — لا يوقف رسم الصفحة
-setTimeout(function () {
-  try {
-    if (navigator.sendBeacon) navigator.sendBeacon('tick.php');
-    else {
+// تشغيل تلقائي (تذكير انتهاء + قطع) بالخلفية أثناء استخدام اللوحة
+(function () {
+  function fireTick() {
+    try {
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon('tick.php');
+        return;
+      }
       var x = new XMLHttpRequest();
       x.open('GET', 'tick.php', true);
-      x.timeout = 8000;
+      x.timeout = 20000;
       x.send();
-    }
-  } catch (e) {}
-}, 4000);
+    } catch (e) {}
+  }
+  setTimeout(fireTick, 2500);
+  setInterval(fireTick, 120000);
+})();
 
 (function () {
   var wrap = document.getElementById('topAdminMenu');

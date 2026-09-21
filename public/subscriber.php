@@ -35,6 +35,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         try {
+            $prevSt = $pdo->prepare('SELECT name, phone, address, notes, sas_username FROM subscribers WHERE id = :id LIMIT 1');
+            $prevSt->execute(array(':id' => $id));
+            $prev = $prevSt->fetch();
+            $oldPhone = $prev && isset($prev['phone']) ? (string) $prev['phone'] : '';
+
             $stmt = $pdo->prepare(
                 'UPDATE subscribers
                  SET name = :name, phone = :phone, address = :address, notes = :notes
@@ -48,7 +53,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 ':notes' => ($notes !== '' && $notes !== null) ? $notes : null,
             ));
             flash('success', 'تم تعديل المشترك');
-            activity_log($pdo, $id, 'subscriber', $id, 'update', 'تعديل بيانات المشترك', $name . ' / ' . $phone);
+            if (function_exists('log_subscriber_phone_change')) {
+                log_subscriber_phone_change($pdo, $id, $oldPhone, $phone, 'صفحة المشترك');
+            }
+            $diff = array();
+            if ($prev) {
+                $line = activity_diff_line('الاسم', isset($prev['name']) ? $prev['name'] : '', $name);
+                if ($line !== '') {
+                    $diff[] = $line;
+                }
+                $line = activity_diff_line(
+                    'العنوان',
+                    isset($prev['address']) ? $prev['address'] : '',
+                    ($address !== '' && $address !== null) ? $address : ''
+                );
+                if ($line !== '') {
+                    $diff[] = $line;
+                }
+                $line = activity_diff_line(
+                    'ملاحظات',
+                    isset($prev['notes']) ? $prev['notes'] : '',
+                    ($notes !== '' && $notes !== null) ? $notes : ''
+                );
+                if ($line !== '') {
+                    $diff[] = $line;
+                }
+            }
+            if ($diff) {
+                activity_log($pdo, $id, 'subscriber', $id, 'update', 'تعديل بيانات المشترك', implode("\n", $diff));
+            }
+            if ($prev && !empty($prev['sas_username']) && function_exists('sas_cache_patch')) {
+                $dispPhone = function_exists('format_phone_display') ? format_phone_display($phone) : $phone;
+                sas_cache_patch($pdo, $prev['sas_username'], array('phone' => $dispPhone));
+            }
         } catch (PDOException $e) {
             $msg = 'تعذر التعديل. تحقق من البيانات وحاول مرة أخرى.';
             if (stripos($e->getMessage(), 'uq_name') !== false || (int) $e->getCode() === 23000) {
@@ -1350,13 +1387,20 @@ if ($activeSubCard) {
             <?php foreach ($activityLogs as $act): ?>
                 <?php
                 $searchBlob = strtolower(
-                    $act['summary'] . ' ' . (isset($act['details']) ? $act['details'] : '') . ' ' . $act['action'] . ' ' . $act['created_at']
+                    $act['summary'] . ' '
+                    . (isset($act['details']) ? $act['details'] : '') . ' '
+                    . $act['action'] . ' '
+                    . (isset($act['actor_name']) ? $act['actor_name'] : '') . ' '
+                    . $act['created_at']
                 );
                 ?>
                 <div class="activity-item" data-search="<?php echo e($searchBlob); ?>">
                     <div class="activity-head">
                         <span class="badge unpaid"><?php echo e($act['action']); ?></span>
                         <strong><?php echo e($act['summary']); ?></strong>
+                        <?php if (!empty($act['actor_name'])): ?>
+                            <span class="meta"><?php echo e($lang === 'en' ? 'by' : 'بواسطة'); ?> <?php echo e($act['actor_name']); ?></span>
+                        <?php endif; ?>
                         <span class="meta"><?php echo e($act['created_at']); ?></span>
                     </div>
                     <?php if (!empty($act['details'])): ?>

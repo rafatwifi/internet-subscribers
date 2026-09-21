@@ -162,6 +162,56 @@ function activity_diff_line($label, $oldVal, $newVal)
     return $label . ': ' . $oldVal . ' ← ' . $newVal;
 }
 
+/**
+ * تسجيل تغيير رقم الهاتف (القديم + الجديد + من نفّذ) في اللوك.
+ */
+function log_subscriber_phone_change($pdo, $subscriberId, $oldPhone, $newPhone, $source = '')
+{
+    $subscriberId = (int) $subscriberId;
+    if ($subscriberId <= 0 || !function_exists('activity_log')) {
+        return false;
+    }
+    $oldRaw = trim((string) $oldPhone);
+    $newRaw = trim((string) $newPhone);
+    $oldNorm = function_exists('normalize_phone') ? normalize_phone($oldRaw) : preg_replace('/\D+/', '', $oldRaw);
+    $newNorm = function_exists('normalize_phone') ? normalize_phone($newRaw) : preg_replace('/\D+/', '', $newRaw);
+    if ($oldNorm === null) {
+        $oldNorm = '';
+    }
+    if ($newNorm === null) {
+        $newNorm = '';
+    }
+    if ($oldNorm === $newNorm) {
+        return false;
+    }
+    $oldDisp = $oldRaw !== ''
+        ? (function_exists('format_phone_display') ? format_phone_display($oldRaw) : $oldRaw)
+        : '—';
+    $newDisp = $newRaw !== ''
+        ? (function_exists('format_phone_display') ? format_phone_display($newRaw) : $newRaw)
+        : '—';
+    if ($oldDisp === '') {
+        $oldDisp = '—';
+    }
+    if ($newDisp === '') {
+        $newDisp = '—';
+    }
+    $details = 'من: ' . $oldDisp . "\nإلى: " . $newDisp;
+    if ($source !== '') {
+        $details .= "\nالمصدر: " . $source;
+    }
+    activity_log(
+        $pdo,
+        $subscriberId,
+        'subscriber',
+        $subscriberId,
+        'phone_change',
+        'تغيير رقم الهاتف',
+        $details
+    );
+    return true;
+}
+
 function fetch_subscriber_activity($pdo, $subscriberId, $limit = 100)
 {
     ensure_activity_logs_table($pdo);

@@ -31,6 +31,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         redirect('schedule.php');
     }
+    if ($section === 'expiry_run') {
+        if (empty($s['expiry_auto_remind_enabled'])) {
+            flash('error', $isEn ? 'Enable expiry reminder first' : 'فعّل تذكير انتهاء الاشتراك أولاً');
+        } elseif (!function_exists('run_expiry_soon_reminders')) {
+            flash('error', $isEn ? 'Expiry function missing' : 'دالة التذكير غير موجودة');
+        } else {
+            $run = run_expiry_soon_reminders($pdo, $config, 80);
+            flash('success', ($isEn ? 'Expiry reminders: checked ' : 'تذكير الانتهاء: فحص ')
+                . (int) $run['checked']
+                . ($isEn ? ' — sent ' : ' — أُرسل ')
+                . (int) $run['sent']
+                . ($isEn ? ' — failed ' : ' — فشل ')
+                . (int) $run['failed']
+                . ($isEn ? ' — skipped ' : ' — تخطي ')
+                . (int) $run['skipped']);
+        }
+        redirect('schedule.php');
+    }
     if ($section === 'schedule') {
         $expDays = (int) post('expiry_auto_remind_days', '1');
         if ($expDays < 0) {
@@ -87,8 +105,8 @@ $stats = isset($preview['stats']) && is_array($preview['stats']) ? $preview['sta
     'debt_sum' => 0,
 );
 
-$cronCli = 'php ' . str_replace('\\', '/', dirname(__DIR__) . '/cron/schedule_cut.php');
 $enabled = !empty($s['schedule_cut_enabled']);
+$expiryAutoOn = !empty($s['expiry_auto_remind_enabled']);
 $sendWa = !isset($s['schedule_cut_send_wa']) || !empty($s['schedule_cut_send_wa']);
 $unpaidEnabled = !empty($s['unpaid_remind_enabled']);
 $unpaidAfterDays = function_exists('unpaid_remind_after_days')
@@ -263,6 +281,11 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
         ? 'Track unpaid debtors against grace days — who stays online, who will be cut, and WhatsApp notices.'
         : 'متابعة المدينين غير المسددين مقابل أيام السماح — من ضمن السماح، من راح ينقطع، وإشعار واتساب.'); ?></p>
     <div class="sched-hero-pills">
+      <span class="sched-pill <?php echo $expiryAutoOn ? 'on' : 'off'; ?>">
+        <?php echo $expiryAutoOn
+            ? e($isEn ? 'Expiry reminder ON' : 'تذكير الانتهاء يعمل')
+            : e($isEn ? 'Expiry reminder OFF' : 'تذكير الانتهاء متوقف'); ?>
+      </span>
       <span class="sched-pill <?php echo $enabled ? 'on' : 'off'; ?>">
         <?php echo $enabled
             ? e($isEn ? 'Auto-cut ON' : 'القطع التلقائي يعمل')
@@ -271,10 +294,12 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
       <span class="sched-pill">
         <?php echo e($isEn ? 'System grace' : 'سماح النظام'); ?>: <?php echo (int) $sysGrace; ?>
       </span>
+      <?php if ($enabled): ?>
       <span class="sched-pill">
-        <?php echo e($isEn ? 'WA notice' : 'إشعار واتساب'); ?>:
+        <?php echo e($isEn ? 'WA on cut' : 'واتساب عند القطع'); ?>:
         <?php echo $sendWa ? e($isEn ? 'On' : 'يعمل') : e($isEn ? 'Off' : 'مطفأ'); ?>
       </span>
+      <?php endif; ?>
     </div>
   </div>
 
@@ -494,23 +519,27 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
       </div>
     </form>
 
-    <div style="padding:12px;border:1px dashed #cbd5e1;border-radius:10px;background:#f8fafc">
-      <strong style="display:block;margin-bottom:6px"><?php echo e($isEn ? 'What is Cron?' : 'شنو الكرون؟'); ?></strong>
-      <p class="meta" style="margin:0 0 8px"><?php echo e($isEn
-          ? 'Cron is an automatic job on the server (e.g. every hour). It runs auto-cut even when nobody opens the admin panel. Ask your host to add this command:'
-          : 'الكرون مهمة تلقائية على السيرفر (مثلاً كل ساعة). يشغّل القطع التلقائي حتى لو ما أحد فتح لوحة التحكم. اطلب من الاستضافة إضافة هذا الأمر:'); ?></p>
-      <code class="ltr" id="schedCronCmd" style="display:block;word-break:break-all;font-size:12px;padding:8px;background:#fff;border-radius:8px;border:1px solid #e2e8f0;margin-bottom:8px"><?php echo e($cronCli); ?></code>
-      <button type="button" class="btn ghost sm" id="schedCopyCron"><?php echo e($isEn ? 'Copy command' : 'نسخ الأمر'); ?></button>
-      <p class="meta" style="margin:8px 0 0"><?php echo e($isEn
-          ? 'Put this command in your hosting Cron Jobs (hourly recommended). If you have no cron access, use Run once now below when needed.'
-          : 'ضع هذا الأمر في Cron Jobs بالاستضافة (يفضّل كل ساعة). إذا ما عندك صلاحية كرون، استخدم «تشغيل مرة الآن» عند الحاجة.'); ?></p>
+    <div style="padding:12px;border:1px solid #dbeafe;border-radius:10px;background:#eff6ff">
+      <strong style="display:block;margin-bottom:6px"><?php echo e($isEn ? 'Automatic' : 'تشغيل تلقائي'); ?></strong>
+      <p class="meta" style="margin:0 0 10px"><?php echo e($isEn
+          ? 'Turn on the options above and save. The system sends WhatsApp and runs auto-cut by itself while you use the panel — no cron or cPanel needed.'
+          : 'فعّل الخيارات فوق واحفظ. النظام يرسل واتساب ويعمل القطع لحاله أثناء استخدامك للوحة — بدون كرون وبدون cPanel.'); ?></p>
+      <div style="display:flex;flex-wrap:wrap;gap:8px">
       <?php if ($enabled && function_exists('run_schedule_debt_cuts')): ?>
-        <form method="post" style="margin-top:10px" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Run auto-cut once now?' : 'تشغّل القطع التلقائي مرة الآن؟'); ?>);">
+        <form method="post" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Run auto-cut once now?' : 'تشغّل القطع مرة الآن؟'); ?>);">
           <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
           <input type="hidden" name="section" value="schedule_run">
-          <button class="btn ghost" type="submit"><?php echo e($isEn ? 'Run once now' : 'تشغيل مرة الآن'); ?></button>
+          <button class="btn ghost sm" type="submit"><?php echo e($isEn ? 'Test cut now' : 'تجربة القطع الآن'); ?></button>
         </form>
       <?php endif; ?>
+      <?php if ($expiryAutoOn && function_exists('run_expiry_soon_reminders')): ?>
+        <form method="post" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Send expiry reminders once now?' : 'ترسل تذكير الانتهاء مرة الآن؟'); ?>);">
+          <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+          <input type="hidden" name="section" value="expiry_run">
+          <button class="btn ghost sm" type="submit"><?php echo e($isEn ? 'Test expiry now' : 'تجربة تذكير الانتهاء الآن'); ?></button>
+        </form>
+      <?php endif; ?>
+      </div>
     </div>
   </div>
 </div>
@@ -545,8 +574,7 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
   var filter = 'all';
   var labels = {
     selected: <?php echo json_encode($isEn ? 'selected' : 'محدد'); ?>,
-    visible: <?php echo json_encode($isEn ? 'showing' : 'ظاهر'); ?>,
-    copied: <?php echo json_encode($isEn ? 'Copied' : 'تم النسخ'); ?>
+    visible: <?php echo json_encode($isEn ? 'showing' : 'ظاهر'); ?>
   };
 
   function open() {
@@ -674,20 +702,6 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
     if (!drop || (e.target.closest && e.target.closest('#schedOpsDrop'))) return;
     hideOps();
   });
-
-  var copyBtn = document.getElementById('schedCopyCron');
-  var cronEl = document.getElementById('schedCronCmd');
-  if (copyBtn && cronEl) {
-    copyBtn.addEventListener('click', function () {
-      var txt = cronEl.textContent || '';
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(txt).then(function () {
-          copyBtn.textContent = labels.copied;
-          setTimeout(function () { copyBtn.textContent = <?php echo json_encode($isEn ? 'Copy' : 'نسخ'); ?>; }, 1200);
-        }).catch(function () {});
-      }
-    });
-  }
 
   applyFilter();
 })();

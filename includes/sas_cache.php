@@ -335,6 +335,137 @@ function sas_cache_enabled($row)
     return 1;
 }
 
+function sas_maybe_background_sync($pdo, $config, $forceIfNoExpire = false)
+{
+    if (!function_exists('sas_sync_users_from_api') || empty($config['sas']['enabled'])) {
+        return array(false, 'off');
+    }
+    if (function_exists('ensure_sas_users_cache_table')) {
+        try {
+            ensure_sas_users_cache_table($pdo);
+        } catch (Exception $e) {
+            return array(false, 'table');
+        }
+    }
+    $need = false;
+    $meta = function_exists('sas_sync_meta') ? sas_sync_meta($pdo) : array();
+    if (!empty($meta['sync_offset']) || !empty($meta['syncing_at'])) {
+        $need = true;
+    }
+    $last = !empty($meta['last_ok_at']) ? strtotime((string) $meta['last_ok_at']) : 0;
+    if (!$last || (time() - $last) > 240) {
+        $need = true;
+    }
+    if ($forceIfNoExpire) {
+        try {
+            $n = (int) $pdo->query(
+                "SELECT COUNT(*) FROM sas_users_cache WHERE expire_at IS NOT NULL AND expire_at > '2000-01-01'"
+            )->fetchColumn();
+            if ($n <= 0) {
+                $need = true;
+            }
+        } catch (Exception $e) {
+            $need = true;
+        }
+    }
+    if (!$need) {
+        return array(true, 'fresh');
+    }
+    $lock = __DIR__ . '/../config/sas_bg_sync.lock';
+    $now = time();
+    if (is_file($lock)) {
+        $prev = (int) trim((string) @file_get_contents($lock));
+        if ($prev > 0 && ($now - $prev) < 45) {
+            return array(true, 'busy');
+        }
+    }
+    @file_put_contents($lock, (string) $now);
+    try {
+        list($ok, $count, $mode, $meta2) = sas_sync_users_from_api($pdo, $config, false, false);
+        return array($ok, $mode);
+    } catch (Exception $e) {
+        return array(false, 'error');
+    }
+}
+
+/**
+ * صفوف قرب الانتهاء من كاش المشتركين (آمن للكولاجن).
+ */
+function sas_list_expiring_rows($pdo, $daysMax, $limit = 2000)
+{
+    $daysMax = max(0, (int) $daysMax);
+    $limit = max(1, (int) $limit);
+    $out = array();
+    if (function_exists('ensure_sas_users_cache_table')) {
+        try {
+            ensure_sas_users_cache_table($pdo);
+        } catch (Exception $e) {
+            return $out;
+        }
+    }
+    $scope = '';
+    if (function_exists('is_agent_user') && is_agent_user()
+        && function_exists('current_admin_sas_manager_id')
+        && current_admin_sas_manager_id() > 0
+        && function_exists('sas_agent_scope_sql')
+    ) {
+        $scope = sas_agent_scope_sql('c');
+    }
+    $userEq = function_exists('sas_sql_username_eq')
+        ? sas_sql_username_eq('s.sas_username', 'c.username')
+        : 's.sas_username = c.username';
+    $sql = "SELECT c.username, c.display_name, c.phone AS sas_phone, c.profile_name, c.expire_at,
+                   c.local_subscriber_id, c.sas_user_id, c.parent_id, c.enabled,
+                   s.id AS sub_id, s.name AS sub_name, s.phone AS sub_phone, s.agent_user_id
+            FROM sas_users_cache c
+            LEFT JOIN subscribers s ON (
+                (c.local_subscriber_id IS NOT NULL AND s.id = c.local_subscriber_id)
+                OR (c.local_subscriber_id IS NULL AND s.sas_username IS NOT NULL AND s.sas_username <> '' AND {$userEq})
+            )
+            WHERE c.expire_at IS NOT NULL
+              AND DATE(c.expire_at) >= CURDATE()
+              AND DATE(c.expire_at) <= DATE_ADD(CURDATE(), INTERVAL " . (int) $daysMax . " DAY)
+              {$scope}
+            ORDER BY c.expire_at ASC
+            LIMIT " . (int) $limit;
+    try {
+        $rows = $pdo->query($sql)->fetchAll();
+    } catch (Exception $e) {
+        // استعلام مبسّط بدون JOIN إذا فشل الكولاجن
+        try {
+            $sql2 = "SELECT c.username, c.display_name, c.phone AS sas_phone, c.profile_name, c.expire_at,
+                            c.local_subscriber_id, c.sas_user_id, c.parent_id, c.enabled,
+                            c.local_subscriber_id AS sub_id, NULL AS sub_name, NULL AS sub_phone, NULL AS agent_user_id
+                     FROM sas_users_cache c
+                     WHERE c.expire_at IS NOT NULL
+                       AND DATE(c.expire_at) >= CURDATE()
+                       AND DATE(c.expire_at) <= DATE_ADD(CURDATE(), INTERVAL " . (int) $daysMax . " DAY)
+                       {$scope}
+                     ORDER BY c.expire_at ASC
+                     LIMIT " . (int) $limit;
+            $rows = $pdo->query($sql2)->fetchAll();
+        } catch (Exception $e2) {
+            return $out;
+        }
+    }
+    foreach ($rows as $crow) {
+        if (isset($crow['enabled']) && (int) $crow['enabled'] !== 1) {
+            continue;
+        }
+        $leftRaw = sas_remaining_days($crow['expire_at']);
+        if ($leftRaw === '') {
+            continue;
+        }
+        $left = (int) $leftRaw;
+        if ($left < 0 || $left > $daysMax) {
+            continue;
+        }
+        $crow['_days'] = $left;
+        $out[] = $crow;
+    }
+    return $out;
+}
+
 function sas_cache_expire_at($row)
 {
     if (!is_array($row)) {
@@ -897,14 +1028,27 @@ function sas_cache_ensure_local($pdo, $config, $cacheRow)
         $id = sas_cache_link_local_fields($pdo, $local, $username, $sasUserId);
         $pdo->prepare('UPDATE sas_users_cache SET local_subscriber_id = :lid WHERE username = :u')
             ->execute(array(':lid' => $id, ':u' => $username));
+        // إذا المحلي وهمي والكاش فيه رقم حقيقي — حدّث المحلي
+        $localPhone = isset($local['phone']) ? (string) $local['phone'] : '';
+        if ($phone !== '' && function_exists('phone_is_placeholder') && phone_is_placeholder($localPhone)
+            && function_exists('sas_cache_sync_local_phone')
+        ) {
+            sas_cache_sync_local_phone($pdo, $username, $phone);
+        } elseif ($phone !== '' && $localPhone === '' && function_exists('sas_cache_sync_local_phone')) {
+            sas_cache_sync_local_phone($pdo, $username, $phone);
+        }
         return array($id, '');
     }
 
     $display = isset($cacheRow['display_name']) ? $cacheRow['display_name'] : $username;
     $name = sas_cache_unique_name($pdo, $display, $username);
-    $phoneStore = $phone !== '' ? normalize_phone($phone) : normalize_phone($username);
-    if ($phoneStore === '') {
-        $phoneStore = '964000000000';
+    $phoneStore = $phone !== '' ? normalize_phone($phone) : '';
+    if ($phoneStore === '' || (function_exists('phone_is_placeholder') && phone_is_placeholder($phoneStore))) {
+        // لا نخزّن رقم وهمي — نخلي فاضي ونكمّل من الكاش لاحقاً
+        $phoneStore = $phone !== '' ? trim($phone) : '';
+        if ($phoneStore === '') {
+            $phoneStore = '0';
+        }
     }
     $planId = sas_cache_plan_id_for_profile($pdo, isset($cacheRow['profile_id']) ? $cacheRow['profile_id'] : 0);
     $agentId = 0;
@@ -3052,8 +3196,24 @@ function sas_cache_sync_local_phone($pdo, $username, $phone)
             $lid = (int) $st2->fetchColumn();
         }
         if ($lid > 0) {
+            $oldPhone = '';
+            try {
+                $ost = $pdo->prepare('SELECT phone FROM subscribers WHERE id = :id LIMIT 1');
+                $ost->execute(array(':id' => $lid));
+                $oldPhone = (string) $ost->fetchColumn();
+            } catch (Exception $e) {
+            }
             $pdo->prepare('UPDATE subscribers SET phone = :p WHERE id = :id')
                 ->execute(array(':p' => $store, ':id' => $lid));
+            if (function_exists('log_subscriber_phone_change')) {
+                log_subscriber_phone_change(
+                    $pdo,
+                    $lid,
+                    $oldPhone,
+                    $store,
+                    'جدول الساس (' . $username . ')'
+                );
+            }
         }
     } catch (Exception $e) {
     }
