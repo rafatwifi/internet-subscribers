@@ -53,18 +53,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 continue;
             }
             try {
+                $tidImp = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+                $agentImp = null;
+                if (function_exists('is_agent_user') && is_agent_user()) {
+                    $meImp = current_admin();
+                    $agentImp = $meImp ? (int) $meImp['id'] : null;
+                }
                 $stmt = $pdo->prepare(
-                    'INSERT INTO subscribers (name, phone, address, notes) VALUES (:name, :phone, :address, :notes)'
+                    'INSERT INTO subscribers (name, phone, address, notes, tenant_id, agent_user_id)
+                     VALUES (:name, :phone, :address, :notes, :tid, :aid)'
                 );
                 $stmt->execute(array(
                     ':name' => $name,
                     ':phone' => $phone,
                     ':address' => ($address !== '') ? $address : null,
                     ':notes' => ($notes !== '') ? $notes : null,
+                    ':tid' => $tidImp,
+                    ':aid' => $agentImp,
                 ));
                 $added++;
             } catch (PDOException $e) {
-                $skipped++;
+                try {
+                    $stmt = $pdo->prepare(
+                        'INSERT INTO subscribers (name, phone, address, notes) VALUES (:name, :phone, :address, :notes)'
+                    );
+                    $stmt->execute(array(
+                        ':name' => $name,
+                        ':phone' => $phone,
+                        ':address' => ($address !== '') ? $address : null,
+                        ':notes' => ($notes !== '') ? $notes : null,
+                    ));
+                    $added++;
+                } catch (PDOException $e2) {
+                    $skipped++;
+                }
             }
         }
         fclose($handle);

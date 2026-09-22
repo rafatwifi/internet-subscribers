@@ -61,6 +61,11 @@ foreach ($rows as $row) {
 
 $expiry = run_expiry_soon_reminders($pdo, $config, 200);
 
+$cardDebt = array('checked' => 0, 'sent' => 0, 'failed' => 0);
+if (function_exists('run_card_debt_reminders')) {
+    $cardDebt = run_card_debt_reminders($pdo, $config, 40);
+}
+
 $summary = array(
     'debt' => array(
         'checked' => count($rows),
@@ -70,6 +75,7 @@ $summary = array(
         'grace_days' => $graceDays,
     ),
     'expiry_soon' => $expiry,
+    'card_debt' => $cardDebt,
     'expiry_auto_enabled' => !empty($config['expiry_auto_remind_enabled']),
     'expiry_auto_days' => isset($config['expiry_auto_remind_days']) ? (int) $config['expiry_auto_remind_days'] : 1,
     'time' => date('Y-m-d H:i:s'),

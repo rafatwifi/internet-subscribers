@@ -11,9 +11,14 @@ ensure_card_accounting_tables($pdo);
 $isEn = ($lang === 'en');
 $me = current_admin();
 $meId = $me ? (int) $me['id'] : 0;
-$canTransfer = user_can('cards') || user_can('card_accounting');
+$canTransfer = (user_can('cards') || user_can('card_accounting')) && !(function_exists('is_agent_user') && is_agent_user());
 $sasReady = function_exists('sas_is_ready') && sas_is_ready($config);
 $agents = list_agent_users($pdo, true);
+$tidCards = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+$agents = array_values(array_filter($agents, function ($a) use ($tidCards) {
+    $at = isset($a['tenant_id']) ? (int) $a['tenant_id'] : 1;
+    return $at === $tidCards;
+}));
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
     if (!verify_csrf(post('csrf'))) {
@@ -40,6 +45,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
             }
         }
 
+        // أسعار من كتالوج الوكيل إن تُركت 0
+        if (($wholesale <= 0 || $agentPrice <= 0) && function_exists('agent_card_price_get') && $toAgentId > 0) {
+            $pr = agent_card_price_get($pdo, $toAgentId, $profileId, $profileName);
+            if ($pr) {
+                if ($wholesale <= 0) {
+                    $wholesale = (float) $pr['wholesale_price'];
+                }
+                if ($agentPrice <= 0) {
+                    $agentPrice = (float) $pr['agent_price'];
+                }
+            }
+        }
+
         list($ok, $code) = transfer_cards(
             $pdo,
             $fromAgentId,
@@ -62,13 +80,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
 }
 
 $scopeAgentId = null;
-if (is_accountant_user()) {
+if (function_exists('is_agent_user') && is_agent_user()) {
+    $scopeAgentId = $meId;
+} elseif (is_accountant_user()) {
     $linked = accountant_linked_agent_id();
     if ($linked > 0) {
         $scopeAgentId = $linked;
     }
 }
 $recentTransfers = list_recent_card_transfers($pdo, 25, $scopeAgentId);
+$agentStockPanel = null;
+if ($scopeAgentId > 0 && function_exists('card_agent_dashboard')) {
+    $agentStockPanel = card_agent_dashboard($pdo, $scopeAgentId);
+} elseif ($scopeAgentId > 0 && function_exists('card_agent_stock_summary')) {
+    $agentStockPanel = array('stock' => card_agent_stock_summary($pdo, $scopeAgentId));
+}
 
 function cards_page_fetch_inventory($config, $force = false)
 {
@@ -163,7 +189,8 @@ function cards_enrich_used_by_links($pdo, $groups)
             $bind[$k] = $u;
             $i++;
         }
-        $sql = 'SELECT username, local_subscriber_id FROM sas_users_cache WHERE username IN (' . implode(',', $ph) . ')';
+        $sql = 'SELECT username, local_subscriber_id FROM sas_users_cache
+                WHERE username IN (' . implode(',', $ph) . ') AND tenant_id = ' . (int) (function_exists('current_tenant_id') ? current_tenant_id() : 1);
         $st = $pdo->prepare($sql);
         $st->execute($bind);
         while ($row = $st->fetch()) {
@@ -192,7 +219,9 @@ function cards_enrich_used_by_links($pdo, $groups)
                 $bind[$k] = $u;
                 $i++;
             }
-            $sql = 'SELECT id, sas_username FROM subscribers WHERE sas_username IN (' . implode(',', $ph) . ')';
+            $sql = 'SELECT id, sas_username FROM subscribers
+                    WHERE sas_username IN (' . implode(',', $ph) . ')
+                      AND tenant_id = ' . (int) (function_exists('current_tenant_id') ? current_tenant_id() : 1);
             $st = $pdo->prepare($sql);
             $st->execute($bind);
             while ($row = $st->fetch()) {
@@ -228,6 +257,75 @@ function cards_enrich_used_by_links($pdo, $groups)
     return $groups;
 }
 
+/**
+ * صفّ الكروت المستخدمة: فقط يوزرات ضمن نطاق الشركة/الوكيل الحالي
+ */
+function cards_filter_groups_scope($pdo, $groups)
+{
+    if (!is_array($groups) || !$groups) {
+        return $groups;
+    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    $allowed = array();
+    try {
+        $sql = 'SELECT username FROM sas_users_cache WHERE tenant_id = :t';
+        $params = array(':t' => $tid);
+        if (function_exists('is_agent_user') && is_agent_user()) {
+            $mid = function_exists('current_admin_sas_manager_id') ? (int) current_admin_sas_manager_id() : 0;
+            if ($mid <= 0) {
+                foreach ($groups as &$g0) {
+                    if (empty($g0['cards']) || !is_array($g0['cards'])) {
+                        continue;
+                    }
+                    $g0['cards'] = array_values(array_filter($g0['cards'], function ($c) {
+                        return empty($c['used']);
+                    }));
+                    $g0['used'] = 0;
+                    $g0['unused'] = count($g0['cards']);
+                    $g0['total'] = $g0['unused'];
+                }
+                unset($g0);
+                return $groups;
+            }
+            $sql .= ' AND parent_id = :p';
+            $params[':p'] = $mid;
+        }
+        $st = $pdo->prepare($sql);
+        $st->execute($params);
+        while ($r = $st->fetch()) {
+            $allowed[strtolower(trim((string) $r['username']))] = true;
+        }
+    } catch (Exception $e) {
+        return $groups;
+    }
+    foreach ($groups as &$g) {
+        if (empty($g['cards']) || !is_array($g['cards'])) {
+            continue;
+        }
+        $keep = array();
+        $usedN = 0;
+        $unusedN = 0;
+        foreach ($g['cards'] as $c) {
+            if (empty($c['used'])) {
+                $keep[] = $c;
+                $unusedN++;
+                continue;
+            }
+            $by = isset($c['used_by']) ? strtolower(trim((string) $c['used_by'])) : '';
+            if ($by !== '' && isset($allowed[$by])) {
+                $keep[] = $c;
+                $usedN++;
+            }
+        }
+        $g['cards'] = $keep;
+        $g['used'] = $usedN;
+        $g['unused'] = $unusedN;
+        $g['total'] = $usedN + $unusedN;
+    }
+    unset($g);
+    return $groups;
+}
+
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'inventory') {
     header('Content-Type: application/json; charset=utf-8');
     $force = (isset($_GET['refresh']) && $_GET['refresh'] === '1');
@@ -243,7 +341,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'inventory') {
     }
     try {
         list($groups, $fromCache) = cards_page_fetch_inventory($config, $force);
-        $out['groups'] = cards_enrich_used_by_links($pdo, $groups);
+        $out['groups'] = cards_filter_groups_scope($pdo, cards_enrich_used_by_links($pdo, $groups));
         $out['from_cache'] = $fromCache;
     } catch (Exception $e) {
         $out['ok'] = false;
@@ -253,9 +351,31 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'inventory') {
     exit;
 }
 
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'agent_price') {
+    header('Content-Type: application/json; charset=utf-8');
+    $aid = (int) (isset($_GET['agent']) ? $_GET['agent'] : 0);
+    $pid = (int) (isset($_GET['profile_id']) ? $_GET['profile_id'] : 0);
+    $pname = isset($_GET['profile_name']) ? trim((string) $_GET['profile_name']) : '';
+    $out = array('ok' => false, 'wholesale_price' => 0, 'agent_price' => 0);
+    if ($aid > 0 && function_exists('agent_card_price_get')) {
+        $pr = agent_card_price_get($pdo, $aid, $pid, $pname);
+        if ($pr) {
+            $out['ok'] = true;
+            $out['wholesale_price'] = (float) $pr['wholesale_price'];
+            $out['agent_price'] = (float) $pr['agent_price'];
+        }
+    }
+    echo json_encode($out);
+    exit;
+}
+
 $groups = array();
 $err = '';
 $fromCache = false;
+// الوكيل: مخزونه فقط — بدون مخزن الساس العام
+if (function_exists('is_agent_user') && is_agent_user()) {
+    $sasReady = false;
+}
 if ($sasReady) {
     // عرض فوري من كاش السيرفر — بدون انتظار SAS
     if (function_exists('sas_cards_inventory_load_persisted')) {
@@ -286,7 +406,7 @@ if ($sasReady) {
     $err = $isEn ? 'Enable SAS in settings first' : 'فعّل ربط SAS من الإعدادات أولاً';
 }
 
-$groups = cards_enrich_used_by_links($pdo, $groups);
+$groups = cards_filter_groups_scope($pdo, cards_enrich_used_by_links($pdo, $groups));
 
 $sumTotal = 0;
 $sumUsed = 0;
@@ -299,6 +419,40 @@ foreach ($groups as $g0) {
 
 render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 ?>
+<?php if ($agentStockPanel && !empty($agentStockPanel['stock']['rows'])): ?>
+<div class="panel">
+    <h2><?php echo e($isEn ? 'My card stock' : 'مخزون كروتي'); ?></h2>
+    <div class="table-wrap">
+        <table class="table-compact">
+            <thead>
+            <tr>
+                <th><?php echo e($isEn ? 'Package' : 'الباقة'); ?></th>
+                <th><?php echo e($isEn ? 'Qty' : 'الكمية'); ?></th>
+                <th><?php echo e($isEn ? 'Wholesale' : 'الجملة'); ?></th>
+                <th><?php echo e($isEn ? 'Agent price' : 'سعر الوكيل'); ?></th>
+            </tr>
+            </thead>
+            <tbody>
+            <?php foreach ($agentStockPanel['stock']['rows'] as $sr): ?>
+                <tr>
+                    <td><?php echo e($sr['profile_name']); ?></td>
+                    <td class="ltr"><?php echo (int) $sr['qty']; ?></td>
+                    <td class="ltr"><?php echo e($sr['wholesale_price']); ?></td>
+                    <td class="ltr"><?php echo e($sr['agent_price']); ?></td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+    </div>
+    <p class="meta"><?php echo e($isEn ? 'Total qty' : 'إجمالي الكمية'); ?>:
+        <strong><?php echo (int) $agentStockPanel['stock']['total_qty']; ?></strong></p>
+</div>
+<?php elseif (function_exists('is_agent_user') && is_agent_user()): ?>
+<div class="panel">
+    <h2><?php echo e($isEn ? 'My card stock' : 'مخزون كروتي'); ?></h2>
+    <p class="meta"><?php echo e($isEn ? 'No stock yet — ask admin to transfer cards.' : 'ماكو مخزون بعد — اطلب من الإدارة تحويل كروت.'); ?></p>
+</div>
+<?php endif; ?>
 <style>
 .cards-page .cards-summary {
   display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px;
@@ -431,7 +585,13 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
     <?php if ($canTransfer): ?>
     <div class="xfer-panel" id="card-transfer">
         <h2><?php echo e($isEn ? 'Card transfer' : 'تحويل كروت'); ?></h2>
-        <form method="post">
+        <?php if (user_can('users') || user_can('cards')): ?>
+            <p class="meta" style="margin:0 0 10px">
+                <a href="agent_prices.php"><?php echo e($isEn ? 'Manage agent card prices' : 'إدارة تسعير كروت الوكيل'); ?></a>
+                — <?php echo e($isEn ? 'prices auto-fill when you pick agent + package' : 'الأسعار تتعبّى تلقائياً عند اختيار الوكيل والباقة'); ?>
+            </p>
+        <?php endif; ?>
+        <form method="post" id="cardXferForm">
             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
             <input type="hidden" name="action" value="transfer">
             <div class="xfer-grid">
@@ -907,6 +1067,32 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
   var profileInput = document.querySelector('input[name="profile_name"]');
   var profileIdInput = document.getElementById('xferProfileId');
   var profileList = document.getElementById('cardProfileList');
+  var toAgentSel = document.querySelector('select[name="to_agent_id"]');
+  var wholesaleInput = document.querySelector('input[name="wholesale_price"]');
+  var agentPriceInput = document.querySelector('input[name="agent_price"]');
+
+  function fillAgentPrices() {
+    if (!toAgentSel || !wholesaleInput || !agentPriceInput) return;
+    var aid = parseInt(toAgentSel.value || '0', 10) || 0;
+    var pname = profileInput ? (profileInput.value || '') : '';
+    var pid = profileIdInput ? (profileIdInput.value || '0') : '0';
+    if (aid <= 0 || pname === '') return;
+    var url = 'cards.php?ajax=agent_price&agent=' + encodeURIComponent(aid)
+      + '&profile_id=' + encodeURIComponent(pid)
+      + '&profile_name=' + encodeURIComponent(pname);
+    fetch(url, { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d || !d.ok) return;
+        if (parseFloat(wholesaleInput.value || '0') <= 0) {
+          wholesaleInput.value = d.wholesale_price;
+        }
+        if (parseFloat(agentPriceInput.value || '0') <= 0) {
+          agentPriceInput.value = d.agent_price;
+        }
+      }).catch(function () {});
+  }
+
   if (profileInput && profileIdInput && profileList) {
     profileInput.addEventListener('change', function () {
       var val = profileInput.value || '';
@@ -918,6 +1104,14 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
           break;
         }
       }
+      fillAgentPrices();
+    });
+  }
+  if (toAgentSel) {
+    toAgentSel.addEventListener('change', function () {
+      if (wholesaleInput) wholesaleInput.value = '0';
+      if (agentPriceInput) agentPriceInput.value = '0';
+      fillAgentPrices();
     });
   }
 })();

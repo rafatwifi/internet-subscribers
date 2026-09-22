@@ -349,11 +349,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($agentId <= 0) {
             $agentId = default_admin_user_id($pdo);
         }
+        // نقل «تابع إلى» داخل نفس الشركة فقط
+        if ($agentId > 0 && function_exists('admin_user_same_tenant') && !admin_user_same_tenant($pdo, $agentId)) {
+            flash('error', $lang === 'en' ? 'Agent must be in the same company' : 'الوكيل لازم يكون بنفس الشركة');
+            redirect('subscribers.php');
+        }
         $n = 0;
         $st = $pdo->prepare('UPDATE subscribers SET agent_user_id = :a WHERE id = :id');
+        $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
         foreach ($ids as $sid) {
             $sid = (int) $sid;
             if ($sid <= 0) {
+                continue;
+            }
+            $okScope = true;
+            try {
+                $chk = $pdo->prepare('SELECT id FROM subscribers WHERE id = :id AND tenant_id = :t LIMIT 1');
+                $chk->execute(array(':id' => $sid, ':t' => $tid));
+                if (!$chk->fetchColumn()) {
+                    $okScope = false;
+                }
+            } catch (Exception $e) {
+                $okScope = true;
+            }
+            if (!$okScope) {
                 continue;
             }
             $st->execute(array(':a' => $agentId, ':id' => $sid));

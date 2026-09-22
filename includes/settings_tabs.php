@@ -24,7 +24,17 @@ function render_settings_tabs($current = 'general')
     <?php if ($can('settings')): ?>
     <a class="<?php echo $current === 'rental' ? 'on' : ''; ?>" href="settings.php?tab=rental"><?php echo e($isEn ? 'Rental devices' : 'أجهزة الإيجار'); ?></a>
     <a class="<?php echo $current === 'whatsapp' ? 'on' : ''; ?>" href="settings.php?tab=whatsapp"><?php echo e(t('settings_whatsapp')); ?></a>
-    <a class="<?php echo $current === 'sas' ? 'on' : ''; ?>" href="settings.php?tab=sas"><?php echo e(t('settings_sas')); ?></a>
+    <a class="<?php echo $current === 'sas' ? 'on' : ''; ?>" href="settings.php?tab=sas"><?php
+        $tidTab = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        if ($tidTab > 1) {
+            echo e($isEn ? 'SAS login' : 'تسجيل الدخول عبر SAS');
+        } else {
+            echo e(t('settings_sas'));
+        }
+    ?></a>
+    <?php if (function_exists('is_super_admin_user') && is_super_admin_user()): ?>
+    <a class="<?php echo $current === 'saas' ? 'on' : ''; ?>" href="settings.php?tab=saas"><?php echo e($isEn ? 'SaaS / ZainCash' : 'الاستضافة / زين كاش'); ?></a>
+    <?php endif; ?>
     <a class="<?php echo $current === 'update' ? 'on' : ''; ?>" href="settings.php?tab=update"><?php echo e($isEn ? 'System update' : 'تحديث النظام'); ?></a>
     <?php if ($can('clear_data')): ?>
     <a class="<?php echo $current === 'sensitive' ? 'on' : ''; ?>" href="settings.php?tab=sensitive"><?php echo e($isEn ? 'Sensitive data' : 'بيانات حساسة'); ?></a>

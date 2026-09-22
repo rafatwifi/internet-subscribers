@@ -45,6 +45,8 @@ function ensure_sas_columns($pdo)
     $done = true;
 }
 
+} // end if (!function_exists('ensure_sas_columns'))
+
 function sas_config($config)
 {
     if (!is_array($config) || !isset($config['sas']) || !is_array($config['sas'])) {
@@ -70,20 +72,11 @@ function sas_config($config)
         'password' => isset($s['password']) ? (string) $s['password'] : '',
         'parent_id' => isset($s['parent_id']) ? (int) $s['parent_id'] : 1,
         'default_password' => isset($s['default_password']) ? (string) $s['default_password'] : '',
-        'activate_units' => max(1, isset($s['activate_units']) ? (int) $s['activate_units'] : 1),
+        'activate_units' => isset($s['activate_units']) ? max(0, (int) $s['activate_units']) : 1,
         'extend_method' => (isset($s['extend_method']) && $s['extend_method'] === 'credit') ? 'credit' : 'reward_points',
         'extend_profile_id' => isset($s['extend_profile_id']) ? (int) $s['extend_profile_id'] : 0,
         'on_failure' => (isset($s['on_failure']) && $s['on_failure'] === 'rollback') ? 'rollback' : 'warn',
     );
-}
-
-function sas_is_ready($config)
-{
-    $s = sas_config($config);
-    return $s['enabled']
-        && $s['host'] !== ''
-        && $s['username'] !== ''
-        && $s['password'] !== '';
 }
 
 function sas_make_connector($config)
@@ -91,8 +84,35 @@ function sas_make_connector($config)
     if (!class_exists('SASConnector')) {
         return null;
     }
+    global $pdo;
+    if (isset($pdo) && $pdo && function_exists('sas_make_connector_for_tenant')) {
+        $c = sas_make_connector_for_tenant($pdo, $config);
+        if ($c) {
+            return $c;
+        }
+    }
     $s = sas_config($config);
+    if ($s['host'] === '' || $s['username'] === '' || $s['password'] === '') {
+        return null;
+    }
     return new SASConnector($s['host'], $s['username'], $s['password'], 'acp');
+}
+
+function sas_is_ready($config)
+{
+    global $pdo;
+    if (isset($pdo) && $pdo && function_exists('sas_config_for_tenant')) {
+        $s = sas_config_for_tenant($pdo, $config);
+        return !empty($s['enabled'])
+            && $s['host'] !== ''
+            && $s['username'] !== ''
+            && $s['password'] !== '';
+    }
+    $s = sas_config($config);
+    return $s['enabled']
+        && $s['host'] !== ''
+        && $s['username'] !== ''
+        && $s['password'] !== '';
 }
 
 /**
@@ -120,12 +140,7 @@ function sas_password_for_subscriber($subscriberRow, $config)
         return $s['default_password'];
     }
 
-    $phone = preg_replace('/\D+/', '', (string) (isset($subscriberRow['phone']) ? $subscriberRow['phone'] : ''));
-    if (strlen($phone) >= 6) {
-        return substr($phone, -6);
-    }
-
-    return '123456';
+    return '1234';
 }
 
 function sas_split_name($fullName)
@@ -306,7 +321,12 @@ function sas_sync_on_activate($pdo, $config, $subscriberRow, $plan, $opts = arra
     }
 
     $s = sas_config($config);
-    $units = isset($opts['sas_units']) ? max(1, (int) $opts['sas_units']) : $s['activate_units'];
+    if (isset($opts['sas_units'])) {
+        $units = max(1, (int) $opts['sas_units']);
+    } else {
+        // 0 = معطّل / يعتمد على الساس → وحدة واحدة افتراضية
+        $units = ((int) $s['activate_units'] > 0) ? (int) $s['activate_units'] : 1;
+    }
 
     if (!class_exists('SASConnector')) {
         return array(false, 'SAS: ملف الاتصال غير موجود');
@@ -1185,4 +1205,66 @@ function sas_manager_reward_points($config, $pdo = null)
     }
 }
 
+/**
+ * محاولة جلب Parent ID من حساب دخول الساس الحالي
+ * @return int 0 إذا تعذّر
+ */
+function sas_detect_parent_id($config)
+{
+    if (!function_exists('sas_is_ready') || !sas_is_ready($config) || !class_exists('SASConnector')) {
+        return 0;
+    }
+    try {
+        $api = function_exists('sas_make_connector') ? sas_make_connector($config) : null;
+        if (!$api || !$api->login()) {
+            return 0;
+        }
+        $login = method_exists($api, 'getLoginUser') ? $api->getLoginUser() : null;
+        if (is_array($login)) {
+            if (isset($login['user']) && is_array($login['user'])) {
+                $login = $login['user'];
+            } elseif (isset($login['manager']) && is_array($login['manager'])) {
+                $login = $login['manager'];
+            }
+            if (isset($login['id']) && is_numeric($login['id']) && (int) $login['id'] > 0) {
+                return (int) $login['id'];
+            }
+            if (isset($login['parent_id']) && is_numeric($login['parent_id']) && (int) $login['parent_id'] > 0) {
+                return (int) $login['parent_id'];
+            }
+        }
+        if (method_exists($api, 'getCurrentManagerLive')) {
+            $rows = $api->getCurrentManagerLive();
+            if (is_array($rows)) {
+                foreach ($rows as $row) {
+                    if (!is_array($row)) {
+                        continue;
+                    }
+                    if (isset($row['id']) && is_numeric($row['id']) && (int) $row['id'] > 0) {
+                        return (int) $row['id'];
+                    }
+                    if (isset($row['manager']['id']) && is_numeric($row['manager']['id'])) {
+                        return (int) $row['manager']['id'];
+                    }
+                }
+            }
+        }
+        if (method_exists($api, 'getDashboardManager')) {
+            $dash = $api->getDashboardManager();
+            if (is_array($dash)) {
+                if (isset($dash['id']) && is_numeric($dash['id'])) {
+                    return (int) $dash['id'];
+                }
+                if (isset($dash['manager']['id']) && is_numeric($dash['manager']['id'])) {
+                    return (int) $dash['manager']['id'];
+                }
+                if (isset($dash['data']['id']) && is_numeric($dash['data']['id'])) {
+                    return (int) $dash['data']['id'];
+                }
+            }
+        }
+    } catch (Exception $e) {
+        return 0;
+    }
+    return 0;
 }

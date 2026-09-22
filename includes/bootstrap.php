@@ -227,6 +227,14 @@ if (is_file($cardAccountingFile)) {
 }
 
 $pdo = db_connect($config);
+$tenantsFile = __DIR__ . '/tenants.php';
+if (is_file($tenantsFile)) {
+    require_once $tenantsFile;
+}
+$zaincashFile = __DIR__ . '/zaincash.php';
+if (is_file($zaincashFile)) {
+    require_once $zaincashFile;
+}
 if (function_exists('app_remember_try_restore')) {
     app_remember_try_restore($pdo);
 }
@@ -244,6 +252,19 @@ if (is_file($sasServiceFile)) {
 $sasCacheFile = __DIR__ . '/sas_cache.php';
 if (is_file($sasCacheFile)) {
     require_once $sasCacheFile;
+}
+if (function_exists('ensure_tenants_schema')) {
+    try {
+        ensure_tenants_schema($pdo, $config);
+    } catch (Exception $e) {
+    } catch (Throwable $e) {
+    }
+}
+if (!empty($_SESSION['admin_logged_in']) && function_exists('tenant_apply_wa_templates_to_config')) {
+    try {
+        tenant_apply_wa_templates_to_config($config, $pdo);
+    } catch (Exception $e) {
+    }
 }
 require_once __DIR__ . '/activate_service.php';
 $scheduleCutFile = __DIR__ . '/schedule_cut.php';

@@ -23,6 +23,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         flash('error', $isEn ? 'Invalid request' : 'طلب غير صالح');
         redirect('agents.php');
     }
+    // الوكيل يشوف القائمة فقط — بدون إنشاء/تعديل
+    if (function_exists('is_agent_user') && is_agent_user()) {
+        flash('error', $isEn ? 'View only' : 'عرض فقط — ما عندك صلاحية التعديل');
+        redirect('agents.php');
+    }
     $action = post('action');
 
     if ($action === 'create') {
@@ -60,11 +65,62 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 ->execute(array(':m' => $sasMid > 0 ? $sasMid : null, ':id' => $uid));
         } catch (Exception $e) {
         }
+        $phone = trim((string) post('phone', ''));
+        try {
+            $pdo->prepare('UPDATE admin_users SET phone = :p WHERE id = :id AND role = "agent"')
+                ->execute(array(':p' => $phone !== '' ? $phone : null, ':id' => $uid));
+        } catch (Exception $e) {
+        }
         $newPass = (string) post('password', '');
         if (strlen($newPass) >= 4) {
             change_user_password($pdo, $uid, $newPass);
         }
         flash('success', $isEn ? 'Agent updated' : 'تم تعديل الوكيل');
+        redirect('agents.php');
+    }
+
+    if ($action === 'transfer_subs') {
+        $fromId = (int) post('from_agent_id', '0');
+        $toId = (int) post('to_agent_id', '0');
+        if ($fromId <= 0 || $toId <= 0 || $fromId === $toId) {
+            flash('error', $isEn ? 'Pick two different agents' : 'اختر وكيلين مختلفين');
+            redirect('agents.php');
+        }
+        if (function_exists('admin_user_same_tenant')) {
+            if (!admin_user_same_tenant($pdo, $fromId) || !admin_user_same_tenant($pdo, $toId)) {
+                flash('error', $isEn ? 'Both agents must be in the same company' : 'الوكيلين لازم يكونون بنفس الشركة');
+                redirect('agents.php');
+            }
+        }
+        $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        try {
+            $st = $pdo->prepare(
+                'UPDATE subscribers SET agent_user_id = :to
+                 WHERE agent_user_id = :from AND tenant_id = :t'
+            );
+            $st->execute(array(':to' => $toId, ':from' => $fromId, ':t' => $tid));
+            $n = (int) $st->rowCount();
+        } catch (Exception $e) {
+            $st = $pdo->prepare('UPDATE subscribers SET agent_user_id = :to WHERE agent_user_id = :from');
+            $st->execute(array(':to' => $toId, ':from' => $fromId));
+            $n = (int) $st->rowCount();
+        }
+        flash('success', ($isEn ? 'Moved subscribers: ' : 'تم نقل المشتركين: ') . $n);
+        redirect('agents.php');
+    }
+
+    if ($action === 'disable_sas') {
+        $uid = (int) post('user_id', '0');
+        if (post('confirm_disable') !== '1') {
+            flash('error', $isEn ? 'Confirm required' : 'يلزم التأكيد');
+            redirect('agents.php');
+        }
+        if (function_exists('admin_user_same_tenant') && !admin_user_same_tenant($pdo, $uid)) {
+            flash('error', $isEn ? 'Wrong company' : 'شركة خاطئة');
+            redirect('agents.php');
+        }
+        list($okD, $msgD) = disable_agent_sas($pdo, $config, $uid, $meId);
+        flash($okD ? 'success' : 'error', $msgD);
         redirect('agents.php');
     }
 
@@ -369,9 +425,20 @@ render_header($isEn ? 'Agents' : 'الوكلاء', 'agents');
                             <div style="margin-top:6px">
                                 <input name="password" type="password" minlength="4" placeholder="<?php echo e($isEn ? 'New password (optional)' : 'كلمة مرور جديدة (اختياري)'); ?>">
                             </div>
+                            <div style="margin-top:6px">
+                                <input name="phone" value="<?php echo e(isset($a['phone']) ? $a['phone'] : ''); ?>" placeholder="<?php echo e($isEn ? 'WhatsApp phone' : 'هاتف واتساب'); ?>">
+                            </div>
                         </td>
                         <td class="actions" style="gap:6px">
                                 <button class="btn sm" type="submit"><?php echo e($isEn ? 'Save' : 'حفظ'); ?></button>
+                            </form>
+                            <a class="btn ghost sm" href="agent_prices.php?agent=<?php echo $aid; ?>"><?php echo e($isEn ? 'Prices' : 'تسعير'); ?></a>
+                            <form method="post" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Disable this agent SAS users? Debts stay.' : 'تعطيل يوزرات ساس الوكيل؟ الديون تبقى.'); ?>);">
+                                <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                                <input type="hidden" name="action" value="disable_sas">
+                                <input type="hidden" name="confirm_disable" value="1">
+                                <input type="hidden" name="user_id" value="<?php echo $aid; ?>">
+                                <button class="btn ghost sm" type="submit"><?php echo e($isEn ? 'Disable SAS' : 'تعطيل ساس'); ?></button>
                             </form>
                             <form method="post" onsubmit="return confirm('<?php echo e($isEn ? 'Delete this agent?' : 'تحذف هذا الوكيل؟'); ?>');">
                                 <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
@@ -386,6 +453,36 @@ render_header($isEn ? 'Agents' : 'الوكلاء', 'agents');
             </tbody>
         </table>
     </div>
+
+    <?php if ($agents && count($agents) >= 2): ?>
+    <h2 style="margin-top:28px"><?php echo e($isEn ? 'Transfer subscribers between agents' : 'نقل مشتركين بين وكلاء'); ?></h2>
+    <p class="meta"><?php echo e($isEn ? 'Same company only — debts stay linked to subscribers.' : 'داخل نفس الشركة فقط — الديون تبقى على المشتركين.'); ?></p>
+    <form method="post" class="form-grid" style="margin-bottom:22px">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="action" value="transfer_subs">
+        <div>
+            <label><?php echo e($isEn ? 'From agent' : 'من وكيل'); ?></label>
+            <select name="from_agent_id" required>
+                <?php foreach ($agents as $ag): ?>
+                    <option value="<?php echo (int) $ag['id']; ?>"><?php echo e($ag['display_name']); ?></option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+        <div>
+            <label><?php echo e($isEn ? 'To agent' : 'إلى وكيل'); ?></label>
+            <select name="to_agent_id" required>
+                <?php foreach ($agents as $ag): ?>
+                    <option value="<?php echo (int) $ag['id']; ?>"><?php echo e($ag['display_name']); ?></option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+        <div class="actions" style="align-items:end">
+            <button class="btn" type="submit" onclick="return confirm(<?php echo json_encode($isEn ? 'Move all subscribers?' : 'نقل كل المشتركين؟'); ?>);">
+                <?php echo e($isEn ? 'Transfer' : 'نقل'); ?>
+            </button>
+        </div>
+    </form>
+    <?php endif; ?>
 
     <h2 style="margin-top:28px"><?php echo e($isEn ? 'Add accountant' : 'إضافة محاسب'); ?></h2>
     <p class="meta"><?php echo e($isEn

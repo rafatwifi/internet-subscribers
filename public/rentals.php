@@ -14,6 +14,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = post('action');
     $id = (int) post('id', '0');
     if ($id > 0 && ($action === 'msg_rental_return' || $action === 'msg_rental_renew_hint')) {
+        if (function_exists('require_subscriber_access')) {
+            require_subscriber_access($pdo, $id);
+        }
         $st = $pdo->prepare('SELECT * FROM subscribers WHERE id = :id');
         $st->execute(array(':id' => $id));
         $sub = $st->fetch();
@@ -43,6 +46,9 @@ $params = array();
 $where = '(s.rental_enabled = 1 OR s.rental_enabled = "1")
  AND s.rental_device_id IS NOT NULL
  AND TRIM(s.rental_device_id) <> ""';
+if (function_exists('subscriber_agent_scope_sql')) {
+    $where .= subscriber_agent_scope_sql('s');
+}
 if ($q !== '') {
     $where .= ' AND (s.name LIKE :q OR s.phone LIKE :q OR s.sas_username LIKE :q
         OR c.username LIKE :q OR c.firstname LIKE :q OR c.display_name LIKE :q
@@ -50,6 +56,7 @@ if ($q !== '') {
     $params[':q'] = '%' . $q . '%';
 }
 
+$tidJoin = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
 $sql = 'SELECT s.*,
   COALESCE(c.username, cu.username) AS sas_username_live,
   COALESCE(c.expire_at, cu.expire_at) AS sas_expire_at,
@@ -65,8 +72,9 @@ $sql = 'SELECT s.*,
    ) OR (COALESCE(c.enabled, cu.enabled) = 1 AND COALESCE(c.expire_at, cu.expire_at) IS NOT NULL
         AND COALESCE(c.expire_at, cu.expire_at) >= NOW()) THEN 1 ELSE 0 END AS is_rent_active
  FROM subscribers s
- LEFT JOIN sas_users_cache c ON c.local_subscriber_id = s.id
- LEFT JOIN sas_users_cache cu ON CONVERT(cu.username USING utf8mb4) COLLATE utf8mb4_unicode_ci
+ LEFT JOIN sas_users_cache c ON c.local_subscriber_id = s.id AND c.tenant_id = ' . (int) $tidJoin . '
+ LEFT JOIN sas_users_cache cu ON cu.tenant_id = ' . (int) $tidJoin . '
+    AND CONVERT(cu.username USING utf8mb4) COLLATE utf8mb4_unicode_ci
     = CONVERT(s.sas_username USING utf8mb4) COLLATE utf8mb4_unicode_ci
  WHERE ' . $where . '
  ORDER BY is_rent_active ASC, s.name ASC';
@@ -85,6 +93,14 @@ foreach ($rows as $rChk) {
 
 render_header($lang === 'en' ? 'Rentals' : 'الإيجار', 'rentals');
 ?>
+<div class="panel" style="margin-bottom:12px">
+    <p class="meta" style="margin:0">
+        <?php echo e($lang === 'en'
+            ? 'To add a rental: open SAS list → click the rental cell on a subscriber → choose device.'
+            : 'لإضافة إيجار: من قائمة الساس اضغط خانة الإيجار عند المشترك واختر الجهاز.'); ?>
+        — <a href="sas.php"><?php echo e($lang === 'en' ? 'Open SAS' : 'افتح الساس'); ?></a>
+    </p>
+</div>
 <style>
 #rentalsTable.table-compact th,
 #rentalsTable.table-compact td {

@@ -49,6 +49,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         redirect('schedule.php');
     }
+    if ($section === 'card_debt_run') {
+        if (!function_exists('run_card_debt_reminders')) {
+            flash('error', $isEn ? 'Card remind missing' : 'دالة تذكير الكروت غير موجودة');
+        } else {
+            $run = run_card_debt_reminders($pdo, $config, 40);
+            flash('success', ($isEn ? 'Card debt reminders: checked ' : 'تذكير ديون الكروت: فحص ')
+                . (int) $run['checked']
+                . ($isEn ? ' — sent ' : ' — أُرسل ')
+                . (int) $run['sent']
+                . ($isEn ? ' — failed ' : ' — فشل ')
+                . (int) $run['failed']);
+        }
+        redirect('schedule.php');
+    }
     if ($section === 'schedule') {
         $expDays = (int) post('expiry_auto_remind_days', '1');
         if ($expDays < 0) {
@@ -537,6 +551,13 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
           <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
           <input type="hidden" name="section" value="expiry_run">
           <button class="btn ghost sm" type="submit"><?php echo e($isEn ? 'Test expiry now' : 'تجربة تذكير الانتهاء الآن'); ?></button>
+        </form>
+      <?php endif; ?>
+      <?php if (function_exists('run_card_debt_reminders')): ?>
+        <form method="post" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Send card debt reminders once now?' : 'ترسل تذكير ديون الكروت مرة الآن؟'); ?>);">
+          <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+          <input type="hidden" name="section" value="card_debt_run">
+          <button class="btn ghost sm" type="submit"><?php echo e($isEn ? 'Test card debt remind' : 'تجربة تذكير ديون الكروت'); ?></button>
         </form>
       <?php endif; ?>
       </div>

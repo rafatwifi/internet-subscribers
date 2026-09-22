@@ -708,12 +708,14 @@ function export_table_assoc($pdo, $sql)
 function export_offline_subscribers_full($pdo)
 {
     $stamp = date('Y-m-d');
-    $subs = export_table_assoc($pdo, 'SELECT * FROM subscribers ORDER BY name ASC, id ASC');
+    $scope = function_exists('subscriber_agent_scope_sql') ? subscriber_agent_scope_sql('s') : '';
+    $subs = export_table_assoc($pdo, 'SELECT s.* FROM subscribers s WHERE 1=1' . $scope . ' ORDER BY s.name ASC, s.id ASC');
     $invoices = export_table_assoc(
         $pdo,
         'SELECT i.*, s.name AS subscriber_name, s.phone AS subscriber_phone
          FROM invoices i
          JOIN subscribers s ON s.id = i.subscriber_id
+         WHERE 1=1' . $scope . '
          ORDER BY s.name ASC, i.due_date ASC, i.id ASC'
     );
     $subscriptions = export_table_assoc(
@@ -721,13 +723,15 @@ function export_offline_subscribers_full($pdo)
         'SELECT sub.*, s.name AS subscriber_name, s.phone AS subscriber_phone
          FROM subscriptions sub
          JOIN subscribers s ON s.id = sub.subscriber_id
+         WHERE 1=1' . $scope . '
          ORDER BY s.name ASC, sub.id DESC'
     );
     $messages = export_table_assoc(
         $pdo,
         'SELECT m.*, s.name AS subscriber_name
          FROM message_logs m
-         LEFT JOIN subscribers s ON s.id = m.subscriber_id
+         INNER JOIN subscribers s ON s.id = m.subscriber_id
+         WHERE 1=1' . $scope . '
          ORDER BY m.id DESC'
     );
     $activity = export_table_assoc(
@@ -735,7 +739,7 @@ function export_offline_subscribers_full($pdo)
         'SELECT a.*, s.name AS subscriber_name
          FROM activity_logs a
          LEFT JOIN subscribers s ON s.id = a.subscriber_id
-         WHERE a.subscriber_id IS NOT NULL
+         WHERE a.subscriber_id IS NOT NULL' . $scope . '
          ORDER BY a.id DESC'
     );
 

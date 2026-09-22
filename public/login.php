@@ -20,9 +20,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $error = ($lang === 'en') ? 'Invalid request' : 'طلب غير صالح';
     } elseif (attempt_login($pdo, $config, (string) post('username', ''), (string) post('password', ''))) {
         activity_log($pdo, null, 'system', null, 'login', 'تسجيل دخول: ' . current_admin_label(), '');
+        if (!empty($_SESSION['saas_force_billing'])) {
+            redirect('billing.php');
+        }
         redirect('index.php');
     } else {
-        $error = ($lang === 'en') ? 'Wrong username or password' : 'اسم المستخدم أو كلمة المرور غير صحيحة';
+        $reason = isset($GLOBALS['login_block_reason']) ? $GLOBALS['login_block_reason'] : '';
+        if ($reason === 'pending') {
+            $error = ($lang === 'en') ? 'Awaiting admin approval' : 'بانتظار موافقة الإدارة';
+        } elseif ($reason === 'suspended') {
+            $error = ($lang === 'en') ? 'Account suspended' : 'الحساب معلّق';
+        } else {
+            $error = ($lang === 'en') ? 'Wrong username or password' : 'اسم المستخدم أو كلمة المرور غير صحيحة';
+        }
     }
 }
 
@@ -226,6 +236,20 @@ $brandSrc = ($brandIconUrl !== '') ? $brandIconUrl : 'assets/favicon.svg?v=2';
         <div class="actions">
             <button class="btn" type="submit"><?php echo e(t('login')); ?></button>
         </div>
+        <?php
+        $regOpen = true;
+        if (function_exists('saas_settings')) {
+            $saasLogin = saas_settings(isset($settings) ? $settings : null);
+            $regOpen = !empty($saasLogin['registration_enabled']);
+        }
+        if ($regOpen):
+        ?>
+        <p style="margin:14px 0 0;text-align:center;font-size:13px;color:#5b6b7a">
+            <a href="register.php" style="color:#1d4ed8;font-weight:700;text-decoration:none">
+                <?php echo e($isEn ? 'Register as agent' : 'تسجيل وكيل جديد'); ?>
+            </a>
+        </p>
+        <?php endif; ?>
     </form>
 </div>
 <script>

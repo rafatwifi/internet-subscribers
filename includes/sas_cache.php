@@ -104,24 +104,84 @@ function ensure_sas_users_cache_table($pdo)
     }
 }
 
-function sas_sync_meta($pdo)
+function sas_sync_meta($pdo, $tenantId = null)
 {
     ensure_sas_users_cache_table($pdo);
-    $row = $pdo->query('SELECT * FROM sas_sync_meta WHERE id = 1')->fetch();
-    return $row ? $row : array(
+    $tenantId = $tenantId === null
+        ? (function_exists('current_tenant_id') ? (int) current_tenant_id() : 1)
+        : max(1, (int) $tenantId);
+    try {
+        $st = $pdo->prepare('SELECT * FROM sas_sync_meta WHERE tenant_id = :t LIMIT 1');
+        $st->execute(array(':t' => $tenantId));
+        $row = $st->fetch();
+        if ($row) {
+            return $row;
+        }
+    } catch (Exception $e) {
+    }
+    // لا تقرأ meta شركة أخرى — أنشئ صف فارغ لهذه الشركة
+    if ($tenantId === 1) {
+        try {
+            $row = $pdo->query('SELECT * FROM sas_sync_meta WHERE id = 1 LIMIT 1')->fetch();
+            if ($row) {
+                // تأكد أن الصف مربوط بـ tenant 1
+                if (!isset($row['tenant_id']) || (int) $row['tenant_id'] <= 0) {
+                    try {
+                        $pdo->exec('UPDATE sas_sync_meta SET tenant_id = 1 WHERE id = 1');
+                    } catch (Exception $e2) {
+                    }
+                }
+                return $row;
+            }
+        } catch (Exception $e) {
+        }
+    }
+    try {
+        $pdo->prepare(
+            'INSERT INTO sas_sync_meta (id, tenant_id, last_count) VALUES (:id, :t, 0)'
+        )->execute(array(':id' => min(255, max(1, $tenantId)), ':t' => $tenantId));
+    } catch (Exception $e) {
+        // قد يكون id مأخوذ — جرّب بدون id إن أمكن
+        try {
+            $pdo->prepare('INSERT INTO sas_sync_meta (tenant_id, last_count) VALUES (:t, 0)')
+                ->execute(array(':t' => $tenantId));
+        } catch (Exception $e2) {
+        }
+    }
+    try {
+        $st = $pdo->prepare('SELECT * FROM sas_sync_meta WHERE tenant_id = :t LIMIT 1');
+        $st->execute(array(':t' => $tenantId));
+        $row = $st->fetch();
+        if ($row) {
+            return $row;
+        }
+    } catch (Exception $e) {
+    }
+    return array(
         'last_ok_at' => null,
         'last_try_at' => null,
         'syncing_at' => null,
         'last_count' => 0,
         'last_error' => null,
+        'sync_offset' => 0,
+        'sync_expected' => 0,
+        'tenant_id' => $tenantId,
     );
 }
 
-function sas_sync_meta_save($pdo, $fields)
+function sas_sync_meta_save($pdo, $fields, $tenantId = null)
 {
+    $tenantId = $tenantId === null
+        ? (function_exists('current_tenant_id') ? (int) current_tenant_id() : 1)
+        : max(1, (int) $tenantId);
+    // تأكد من وجود صف الشركة قبل التحديث
+    sas_sync_meta($pdo, $tenantId);
     $cols = array();
-    $params = array();
+    $params = array(':t' => $tenantId);
     foreach ($fields as $k => $v) {
+        if ($k === 'tenant_id' || $k === 'id') {
+            continue;
+        }
         $cols[] = $k . ' = :' . $k;
         $params[':' . $k] = $v;
     }
@@ -129,19 +189,30 @@ function sas_sync_meta_save($pdo, $fields)
         return;
     }
     try {
-        $pdo->prepare('UPDATE sas_sync_meta SET ' . implode(', ', $cols) . ' WHERE id = 1')
-            ->execute($params);
-    } catch (Exception $e) {
-        unset($fields['sync_offset'], $fields['sync_expected']);
-        $cols = array();
-        $params = array();
-        foreach ($fields as $k => $v) {
-            $cols[] = $k . ' = :' . $k;
-            $params[':' . $k] = $v;
+        $n = $pdo->prepare(
+            'UPDATE sas_sync_meta SET ' . implode(', ', $cols) . ' WHERE tenant_id = :t'
+        );
+        $n->execute($params);
+        if ($n->rowCount() === 0) {
+            try {
+                $pdo->prepare(
+                    'INSERT INTO sas_sync_meta (id, tenant_id, last_count) VALUES (:id, :t, 0)'
+                )->execute(array(':id' => min(255, max(1, $tenantId)), ':t' => $tenantId));
+            } catch (Exception $e) {
+            }
+            $pdo->prepare(
+                'UPDATE sas_sync_meta SET ' . implode(', ', $cols) . ' WHERE tenant_id = :t'
+            )->execute($params);
         }
-        if ($cols) {
-            $pdo->prepare('UPDATE sas_sync_meta SET ' . implode(', ', $cols) . ' WHERE id = 1')
-                ->execute($params);
+    } catch (Exception $e) {
+        // لا تسقط على شركة أخرى
+        if ($tenantId === 1) {
+            try {
+                unset($params[':t']);
+                $pdo->prepare('UPDATE sas_sync_meta SET ' . implode(', ', $cols) . ' WHERE id = 1')
+                    ->execute($params);
+            } catch (Exception $e2) {
+            }
         }
     }
 }
@@ -1055,10 +1126,14 @@ function sas_cache_ensure_local($pdo, $config, $cacheRow)
     $parentId = isset($cacheRow['parent_id']) ? (int) $cacheRow['parent_id'] : 0;
     if ($parentId > 0) {
         try {
+            $tidScope = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
             $stAg = $pdo->prepare(
-                'SELECT id FROM admin_users WHERE role = "agent" AND sas_manager_id = :m AND is_active = 1 LIMIT 1'
+                'SELECT id FROM admin_users
+                 WHERE role = "agent" AND sas_manager_id = :m AND is_active = 1
+                   AND tenant_id = :t
+                 LIMIT 1'
             );
-            $stAg->execute(array(':m' => $parentId));
+            $stAg->execute(array(':m' => $parentId, ':t' => $tidScope));
             $agentId = (int) $stAg->fetchColumn();
         } catch (Exception $e) {
             $agentId = 0;
@@ -1072,6 +1147,10 @@ function sas_cache_ensure_local($pdo, $config, $cacheRow)
     }
 
     $graceDef = null; // حسب النظام
+    $tidIns = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tidIns <= 0) {
+        $tidIns = 1;
+    }
     $params = array(
         ':name' => $name,
         ':phone' => $phoneStore,
@@ -1081,33 +1160,70 @@ function sas_cache_ensure_local($pdo, $config, $cacheRow)
         ':sas_u' => $username,
         ':sas_id' => $sasUserId > 0 ? $sasUserId : null,
         ':grace' => $graceDef,
+        ':tid' => $tidIns,
     );
     try {
         $stmt = $pdo->prepare(
-            'INSERT INTO subscribers (name, phone, notes, preferred_plan_id, agent_user_id, sas_username, sas_user_id, grace_days)
-             VALUES (:name, :phone, :notes, :plan_id, :agent_id, :sas_u, :sas_id, :grace)'
+            'INSERT INTO subscribers (name, phone, notes, preferred_plan_id, agent_user_id, sas_username, sas_user_id, grace_days, tenant_id)
+             VALUES (:name, :phone, :notes, :plan_id, :agent_id, :sas_u, :sas_id, :grace, :tid)'
         );
         $stmt->execute($params);
     } catch (Exception $e) {
         unset($params[':grace']);
-        $stmt = $pdo->prepare(
-            'INSERT INTO subscribers (name, phone, notes, preferred_plan_id, agent_user_id, sas_username, sas_user_id)
-             VALUES (:name, :phone, :notes, :plan_id, :agent_id, :sas_u, :sas_id)'
-        );
-        $stmt->execute($params);
+        try {
+            $stmt = $pdo->prepare(
+                'INSERT INTO subscribers (name, phone, notes, preferred_plan_id, agent_user_id, sas_username, sas_user_id, tenant_id)
+                 VALUES (:name, :phone, :notes, :plan_id, :agent_id, :sas_u, :sas_id, :tid)'
+            );
+            $stmt->execute($params);
+        } catch (Exception $e2) {
+            unset($params[':tid']);
+            $stmt = $pdo->prepare(
+                'INSERT INTO subscribers (name, phone, notes, preferred_plan_id, agent_user_id, sas_username, sas_user_id)
+                 VALUES (:name, :phone, :notes, :plan_id, :agent_id, :sas_u, :sas_id)'
+            );
+            $stmt->execute($params);
+        }
     }
     $newId = (int) $pdo->lastInsertId();
-    $pdo->prepare('UPDATE sas_users_cache SET local_subscriber_id = :lid WHERE username = :u')
-        ->execute(array(':lid' => $newId, ':u' => $username));
+    $pdo->prepare('UPDATE sas_users_cache SET local_subscriber_id = :lid WHERE username = :u AND tenant_id = :t')
+        ->execute(array(':lid' => $newId, ':u' => $username, ':t' => $tidIns));
     return array($newId, '');
 }
 
 function sas_cache_get($pdo, $username)
 {
-    $st = $pdo->prepare('SELECT * FROM sas_users_cache WHERE username = :u LIMIT 1');
-    $st->execute(array(':u' => trim((string) $username)));
-    $row = $st->fetch();
-    return $row ? $row : null;
+    $username = trim((string) $username);
+    if ($username === '') {
+        return null;
+    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tid <= 0) {
+        $tid = 1;
+    }
+    try {
+        $st = $pdo->prepare('SELECT * FROM sas_users_cache WHERE username = :u AND tenant_id = :t LIMIT 1');
+        $st->execute(array(':u' => $username, ':t' => $tid));
+        $row = $st->fetch();
+        if ($row) {
+            return $row;
+        }
+    } catch (Exception $e) {
+    }
+    // توافق قديم بدون tenant_id على الاستعلام
+    try {
+        $st = $pdo->prepare('SELECT * FROM sas_users_cache WHERE username = :u LIMIT 1');
+        $st->execute(array(':u' => $username));
+        $row = $st->fetch();
+        if ($row) {
+            $rowTid = isset($row['tenant_id']) ? (int) $row['tenant_id'] : 1;
+            if ($rowTid === $tid || $tid === 1) {
+                return $row;
+            }
+        }
+    } catch (Exception $e) {
+    }
+    return null;
 }
 
 function sas_user_url($username, $focus = '')
@@ -1516,14 +1632,23 @@ function sas_cards_server_cache_dir()
     return $dir;
 }
 
+function sas_cards_tenant_suffix()
+{
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tid <= 0) {
+        $tid = 1;
+    }
+    return 't' . $tid;
+}
+
 function sas_cards_server_cache_path()
 {
-    return sas_cards_server_cache_dir() . '/dash_cards.json';
+    return sas_cards_server_cache_dir() . '/dash_cards_' . sas_cards_tenant_suffix() . '.json';
 }
 
 function sas_cards_inventory_cache_path()
 {
-    return sas_cards_server_cache_dir() . '/cards_inventory.json';
+    return sas_cards_server_cache_dir() . '/cards_inventory_' . sas_cards_tenant_suffix() . '.json';
 }
 
 function sas_dash_cards_build_payload($groups, $source = 'dash')
@@ -2615,8 +2740,14 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
 {
     $username = trim((string) $username);
     $fields = is_array($fields) ? $fields : array();
+    if (function_exists('sas_writes_allowed') && !sas_writes_allowed($pdo, $config)) {
+        return array(false, 'الساس غير متصل — الكتابة موقوفة مؤقتاً (البيانات المحلية محفوظة)', array());
+    }
     $api = sas_page_connector($config);
     if (!$api) {
+        if (function_exists('sas_mark_connection')) {
+            sas_mark_connection($pdo, $config, false, 'تعذر الدخول للساس');
+        }
         return array(false, 'تعذر الدخول للساس', array());
     }
     $cache = $username !== '' ? sas_cache_get($pdo, $username) : null;
@@ -3110,15 +3241,20 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
     if ($nowSql === null) {
         $nowSql = date('Y-m-d H:i:s');
     }
+    $tenantId = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tenantId <= 0) {
+        $tenantId = 1;
+    }
     if (!$ins) {
         $ins = $pdo->prepare(
             'INSERT INTO sas_users_cache
-                (username, sas_user_id, firstname, lastname, display_name, phone, profile_id, profile_name,
+                (tenant_id, username, sas_user_id, firstname, lastname, display_name, phone, profile_id, profile_name,
                  enabled, expire_at, parent_id, parent_name, city, email, company, last_online, is_online, framed_ip, daily_traffic, local_subscriber_id, synced_at)
              VALUES
-                (:username, :sas_user_id, :firstname, :lastname, :display_name, :phone, :profile_id, :profile_name,
+                (:tenant_id, :username, :sas_user_id, :firstname, :lastname, :display_name, :phone, :profile_id, :profile_name,
                  :enabled, :expire_at, :parent_id, :parent_name, :city, :email, :company, :last_online, :is_online, :framed_ip, :daily_traffic, :local_subscriber_id, :synced_at)
              ON DUPLICATE KEY UPDATE
+                tenant_id = VALUES(tenant_id),
                 sas_user_id = VALUES(sas_user_id),
                 firstname = VALUES(firstname),
                 lastname = VALUES(lastname),
@@ -3147,6 +3283,7 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
     $ln = isset($row['lastname']) && !is_array($row['lastname']) ? sas_clip($row['lastname'], 150) : '';
     try {
         $ins->execute(array(
+            ':tenant_id' => $tenantId,
             ':username' => $username,
             ':sas_user_id' => $sasUserId > 0 ? $sasUserId : null,
             ':firstname' => $fn !== '' ? $fn : null,
@@ -3337,7 +3474,19 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
         ));
         $meta = sas_sync_meta($pdo);
     }
-    if (!$force && !$reset && $offset <= 0 && !empty($meta['last_ok_at'])) {
+    $tenantId = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tenantId <= 0) {
+        $tenantId = 1;
+    }
+    $cacheNow = 0;
+    try {
+        $stC = $pdo->prepare('SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = :t');
+        $stC->execute(array(':t' => $tenantId));
+        $cacheNow = (int) $stC->fetchColumn();
+    } catch (Exception $e) {
+        $cacheNow = 0;
+    }
+    if (!$force && !$reset && $offset <= 0 && $cacheNow > 0 && !empty($meta['last_ok_at'])) {
         $okTs = strtotime($meta['last_ok_at']);
         if ($okTs && ($now - $okTs) < 180) {
             return array(true, (int) $meta['last_count'], 'cache', $meta);
@@ -3363,11 +3512,18 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
         $api->setTimeout(45);
         if (!$api->login()) {
             $err = $api->getLastError();
+            if (function_exists('sas_mark_connection')) {
+                sas_mark_connection($pdo, $config, false, $err !== '' ? $err : 'فشل الدخول للساس');
+            }
             sas_sync_meta_save($pdo, array(
                 'syncing_at' => null,
                 'last_error' => $err !== '' ? $err : 'فشل الدخول للساس',
             ));
+            // مهم: لا purge عند فشل الدخول
             return array(false, 0, 'error', sas_sync_meta($pdo));
+        }
+        if (function_exists('sas_mark_connection')) {
+            sas_mark_connection($pdo, $config, true, 'ok');
         }
 
         $pageSize = 100;
@@ -3385,35 +3541,10 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
             return array(false, 0, 'error', sas_sync_meta($pdo));
         }
 
-        $ins = $pdo->prepare(
-            'INSERT INTO sas_users_cache
-                (username, sas_user_id, firstname, lastname, display_name, phone, profile_id, profile_name,
-                 enabled, expire_at, parent_id, parent_name, city, email, company, last_online, is_online, framed_ip, daily_traffic, local_subscriber_id, synced_at)
-             VALUES
-                (:username, :sas_user_id, :firstname, :lastname, :display_name, :phone, :profile_id, :profile_name,
-                 :enabled, :expire_at, :parent_id, :parent_name, :city, :email, :company, :last_online, :is_online, :framed_ip, :daily_traffic, :local_subscriber_id, :synced_at)
-             ON DUPLICATE KEY UPDATE
-                sas_user_id = VALUES(sas_user_id),
-                firstname = VALUES(firstname),
-                lastname = VALUES(lastname),
-                display_name = VALUES(display_name),
-                phone = VALUES(phone),
-                profile_id = VALUES(profile_id),
-                profile_name = VALUES(profile_name),
-                enabled = VALUES(enabled),
-                expire_at = VALUES(expire_at),
-                parent_id = VALUES(parent_id),
-                parent_name = VALUES(parent_name),
-                city = VALUES(city),
-                email = VALUES(email),
-                company = VALUES(company),
-                last_online = IF(VALUES(last_online) IS NULL, last_online, VALUES(last_online)),
-                is_online = IF(VALUES(is_online) = 1, 1, is_online),
-                framed_ip = IF(VALUES(framed_ip) IS NULL OR VALUES(framed_ip) = "", framed_ip, VALUES(framed_ip)),
-                daily_traffic = IF(VALUES(daily_traffic) IS NULL, daily_traffic, VALUES(daily_traffic)),
-                local_subscriber_id = IF(VALUES(local_subscriber_id) IS NULL, local_subscriber_id, VALUES(local_subscriber_id)),
-                synced_at = VALUES(synced_at)'
-        );
+        $tenantId = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        if ($tenantId <= 0) {
+            $tenantId = 1;
+        }
 
         $page = $api->listUsersPage($start, $pageSize, '');
         $sasPer = isset($page['per_page']) ? (int) $page['per_page'] : 0;
@@ -3439,14 +3570,16 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
             if (!is_array($row)) {
                 continue;
             }
-            if (sas_cache_upsert_row($pdo, $row, $nowSql, $ins)) {
+            if (sas_cache_upsert_row($pdo, $row, $nowSql, null)) {
                 $saved++;
             }
         }
 
         $nextPage = $pageNum + 1;
         if (!$rows && $pageNum <= 1) {
-            $existing = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache')->fetchColumn();
+            $existing = (int) $pdo->query(
+                'SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = ' . (int) $tenantId
+            )->fetchColumn();
             if ($existing > 0) {
                 sas_sync_meta_save($pdo, array(
                     'syncing_at' => null,
@@ -3459,7 +3592,9 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
             || !$rows
             || ($expected > $pageSize && (($pageNum * $pageSize) >= $expected))
             || $pageNum >= 400;
-        $totalNow = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache')->fetchColumn();
+        $totalNow = (int) $pdo->query(
+            'SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = ' . (int) $tenantId
+        )->fetchColumn();
 
         if ($done) {
             $started = isset($meta['sync_started_at']) ? $meta['sync_started_at'] : '';
@@ -3468,18 +3603,25 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
             }
             if ($started !== '') {
                 try {
-                    $freshSt = $pdo->prepare('SELECT COUNT(*) FROM sas_users_cache WHERE synced_at >= :t');
-                    $freshSt->execute(array(':t' => $started));
+                    $freshSt = $pdo->prepare(
+                        'SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = :tid AND synced_at >= :t'
+                    );
+                    $freshSt->execute(array(':tid' => $tenantId, ':t' => $started));
                     $freshCnt = (int) $freshSt->fetchColumn();
                     $need = ($expected > 0) ? max(1, (int) ceil($expected * 0.5)) : 1;
                     if ($freshCnt >= $need) {
-                        $del = $pdo->prepare('DELETE FROM sas_users_cache WHERE synced_at < :t');
-                        $del->execute(array(':t' => $started));
+                        // امسح فقط كاش هذه الشركة — لا تلمس شركات أخرى ولا المشتركين/الديون
+                        $del = $pdo->prepare(
+                            'DELETE FROM sas_users_cache WHERE tenant_id = :tid AND synced_at < :t'
+                        );
+                        $del->execute(array(':tid' => $tenantId, ':t' => $started));
                     }
                 } catch (Exception $e) {
                 }
             }
-            $totalNow = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache')->fetchColumn();
+            $totalNow = (int) $pdo->query(
+                'SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = ' . (int) $tenantId
+            )->fetchColumn();
             try {
                 sas_refresh_online_flags($pdo, $config);
             } catch (Exception $e) {

@@ -153,6 +153,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         // Mirror legacy tpl_* for schedule/settings pages that still edit those fields.
         $legacyMap = function_exists('wa_legacy_tpl_field_map') ? wa_legacy_tpl_field_map() : array();
+        foreach ($legacyMap as $legacyField => $tplKey) {
+            if (isset($catalog[$tplKey]['body'])) {
+                $payload[$legacyField] = (string) $catalog[$tplKey]['body'];
+            }
+        }
+        // Case bindings from form (optional)
+        foreach ($caseKeys as $ck) {
+            $v = trim((string) post('wa_case_' . $ck, ''));
+            $v = function_exists('wa_sanitize_tpl_key') ? wa_sanitize_tpl_key($v) : $v;
+            if ($v !== '') {
+                $payload['wa_case_' . $ck] = $v;
+            }
+        }
+
+        $tidTpl = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        if ($tidTpl > 1 && function_exists('tenant_wa_templates_save')) {
+            $okSave = tenant_wa_templates_save($pdo, $catalog, $tidTpl);
+            if ($okSave && function_exists('tenant_apply_wa_templates_to_config')) {
+                tenant_apply_wa_templates_to_config($config, $pdo);
+            }
+            flash($okSave ? 'success' : 'error', $okSave ? t('saved') : ($lang === 'en' ? 'Save failed' : 'فشل الحفظ'));
+            redirect('messages.php?mode=templates');
+        }
+
         foreach ($legacyMap as $tKey => $field) {
             $payload[$field] = isset($catalog[$tKey]['body']) ? $catalog[$tKey]['body'] : '';
         }
@@ -590,8 +614,17 @@ $daysEmptyHint = '';
 if ($mode === 'log') {
     $where = '1=1';
     $params = array();
+    if (function_exists('subscriber_agent_scope_sql')) {
+        // سجلات بدون مشترك تظهر للأدمن فقط داخل الشركة؛ للوكيل نخفيها إن لم تطابق
+        $scopeLog = subscriber_agent_scope_sql('s');
+        if (is_agent_user()) {
+            $where .= ' AND m.subscriber_id IS NOT NULL' . $scopeLog;
+        } elseif ($scopeLog !== '') {
+            $where .= ' AND (m.subscriber_id IS NULL OR (1=1' . $scopeLog . '))';
+        }
+    }
     if ($logQ !== '') {
-        $where = '(m.body LIKE :q OR m.phone LIKE :q OR m.message_type LIKE :q OR s.name LIKE :q)';
+        $where .= ' AND (m.body LIKE :q OR m.phone LIKE :q OR m.message_type LIKE :q OR s.name LIKE :q)';
         $params[':q'] = '%' . $logQ . '%';
     }
     $autoTypes = array('expiry_auto', 'reminder_auto', 'unpaid_overdue', 'bulk_overdue', 'days_left', 'remind_days');

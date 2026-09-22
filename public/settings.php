@@ -43,7 +43,7 @@ $tab = isset($_GET['tab']) ? (string) $_GET['tab'] : 'general';
 if ($tab === 'templates') {
     redirect('messages.php?mode=templates');
 }
-if (!in_array($tab, array('general', 'whatsapp', 'rental', 'users', 'plans', 'sas', 'schedule', 'sensitive', 'update'), true)) {
+if (!in_array($tab, array('general', 'whatsapp', 'rental', 'users', 'plans', 'sas', 'saas', 'schedule', 'sensitive', 'update'), true)) {
     $tab = 'general';
 }
 
@@ -59,6 +59,12 @@ if ($tab === 'users') {
     require_perm('clear_data');
 } elseif ($tab === 'update') {
     require_perm('settings');
+} elseif ($tab === 'saas') {
+    require_perm('settings');
+    if (!function_exists('is_super_admin_user') || !is_super_admin_user()) {
+        flash('error', $lang === 'en' ? 'Super admin only' : 'للمدير العام فقط');
+        redirect('settings.php');
+    }
 } elseif ($isAgentWaOnly) {
     // الوكيل: QR فقط — بدون صلاحية settings كاملة
 } else {
@@ -492,27 +498,149 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $currSas = function_exists('sas_config') ? sas_config($config) : array();
             $pass = isset($currSas['password']) ? (string) $currSas['password'] : '';
         }
-        $units = (int) post('sas_activate_units', '1');
-        if ($units < 1) {
-            $units = 1;
+        $unitsRaw = trim((string) post('sas_activate_units', '1'));
+        if ($unitsRaw === 'off' || $unitsRaw === 'disabled') {
+            $units = 0;
+        } else {
+            $units = (int) $unitsRaw;
+            if ($units < 0) {
+                $units = 0;
+            }
         }
+        $parentId = (int) post('sas_parent_id', '0');
+        $defPass = trim((string) post('sas_default_password', '1234'));
+        if ($defPass === '') {
+            $defPass = '1234';
+        }
+        // طريقة التست أصبحت عبر بروفايل التمديد فقط — نحتفظ بالقيمة الحالية إن وُجدت
+        $currSettings = settings_load();
+        $extendMethod = (isset($currSettings['sas_extend_method']) && $currSettings['sas_extend_method'] === 'credit')
+            ? 'credit' : 'reward_points';
         $data = array(
             'sas_saved' => true,
             'sas_enabled' => post('sas_enabled') === '1',
-            'sas_host' => $host !== '' ? $host : 'reseller.nbtel.iq',
+            'sas_host' => $host,
             'sas_username' => trim((string) post('sas_username', '')),
             'sas_password' => $pass,
-            'sas_parent_id' => (int) post('sas_parent_id', '1'),
-            'sas_default_password' => (string) post('sas_default_password', ''),
+            'sas_parent_id' => $parentId > 0 ? $parentId : 1,
+            'sas_default_password' => $defPass,
             'sas_activate_units' => $units,
-            'sas_extend_method' => post('sas_extend_method') === 'credit' ? 'credit' : 'reward_points',
+            'sas_extend_method' => $extendMethod,
             'sas_extend_profile_id' => (int) post('sas_extend_profile_id', '0'),
             'sas_on_failure' => post('sas_on_failure') === 'rollback' ? 'rollback' : 'warn',
+        );
+        // محاولة جلب Parent ID من الساس إذا كان فارغاً أو 1 افتراضي والساس جاهز
+        if (($parentId <= 0 || $parentId === 1) && !empty($data['sas_enabled']) && $host !== '' && $data['sas_username'] !== '' && $pass !== '') {
+            $tmpCfg = $config;
+            $tmpCfg['sas'] = array(
+                'enabled' => true,
+                'host' => $host,
+                'username' => $data['sas_username'],
+                'password' => $pass,
+                'parent_id' => $parentId > 0 ? $parentId : 1,
+                'default_password' => $defPass,
+                'activate_units' => $units > 0 ? $units : 1,
+                'extend_method' => $extendMethod,
+                'extend_profile_id' => (int) $data['sas_extend_profile_id'],
+                'on_failure' => $data['sas_on_failure'],
+            );
+            if (function_exists('sas_detect_parent_id')) {
+                $detected = (int) sas_detect_parent_id($tmpCfg);
+                if ($detected > 0) {
+                    $data['sas_parent_id'] = $detected;
+                }
+            }
+        }
+        $tab = 'sas';
+        // شركة غير 1: احفظ على صف الـ tenant فقط — لا تلمس settings العامة
+        $tidSas = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        if ($tidSas > 1 && function_exists('tenant_save')) {
+            $passKeep = $pass;
+            if ($passKeep === '') {
+                $rowKeep = function_exists('tenant_row') ? tenant_row($pdo, $tidSas) : null;
+                $passKeep = $rowKeep && !empty($rowKeep['sas_password']) ? (string) $rowKeep['sas_password'] : '';
+            }
+            $tenantData = array(
+                'sas_enabled' => !empty($data['sas_enabled']) ? 1 : 0,
+                'sas_host' => $data['sas_host'],
+                'sas_username' => $data['sas_username'],
+                'sas_password' => $passKeep,
+                'sas_parent_id' => $data['sas_parent_id'],
+                'sas_default_password' => $data['sas_default_password'],
+                'sas_activate_units' => $data['sas_activate_units'],
+                'sas_extend_method' => $data['sas_extend_method'],
+                'sas_extend_profile_id' => $data['sas_extend_profile_id'],
+                'sas_on_failure' => $data['sas_on_failure'],
+            );
+            if (tenant_save($pdo, $tidSas, $tenantData)) {
+                $testAction = post('action');
+                if ($testAction === 'test' || post('sas_test') === '1') {
+                    list($okT, $msgT) = tenant_test_sas_connection(
+                        $tenantData['sas_host'],
+                        $tenantData['sas_username'],
+                        $passKeep
+                    );
+                    if (function_exists('sas_mark_connection')) {
+                        sas_mark_connection($pdo, $config, $okT, $msgT, $tidSas);
+                    }
+                    flash($okT ? 'success' : 'error', $msgT);
+                } else {
+                    // فحص سريع بعد الحفظ
+                    list($okT, $msgT) = tenant_test_sas_connection(
+                        $tenantData['sas_host'],
+                        $tenantData['sas_username'],
+                        $passKeep
+                    );
+                    if (function_exists('sas_mark_connection')) {
+                        sas_mark_connection($pdo, $config, $okT, $msgT, $tidSas);
+                    }
+                    flash($okT ? 'success' : 'error', $okT
+                        ? (($lang === 'en' ? 'Saved — connected' : 'تم الحفظ — متصل بهذا المكان') . ($msgT !== '' ? ': ' . $msgT : ''))
+                        : (($lang === 'en' ? 'Saved but not connected: ' : 'تم الحفظ لكن غير متصل: ') . $msgT));
+                }
+            } else {
+                flash('error', $lang === 'en' ? 'Save failed' : 'فشل الحفظ');
+            }
+            redirect('settings.php?tab=sas');
+        }
+    } elseif ($section === 'cpe') {
+        $data = array(
             'cpe_http_user' => trim((string) post('cpe_http_user', 'ubnt')),
             'cpe_http_pass' => (string) post('cpe_http_pass', 'ubnt'),
             'cpe_use_https' => post('cpe_use_https') === '1',
         );
-        $tab = 'sas';
+        $tab = 'rental';
+    } elseif ($section === 'saas') {
+        if (!function_exists('is_super_admin_user') || !is_super_admin_user()) {
+            flash('error', $lang === 'en' ? 'Super admin only' : 'للمدير العام فقط');
+            redirect('settings.php');
+        }
+        $plans = array(
+            'monthly' => array(
+                'label' => trim((string) post('plan_monthly_label', 'شهري')),
+                'days' => max(1, (int) post('plan_monthly_days', '30')),
+                'amount' => max(0, (float) post('plan_monthly_amount', '25000')),
+            ),
+            'yearly' => array(
+                'label' => trim((string) post('plan_yearly_label', 'سنوي')),
+                'days' => max(1, (int) post('plan_yearly_days', '365')),
+                'amount' => max(0, (float) post('plan_yearly_amount', '250000')),
+            ),
+        );
+        $secret = (string) post('zaincash_secret', '');
+        $data = array(
+            'saas_registration_enabled' => post('saas_registration_enabled') === '1',
+            'saas_trial_days' => max(0, (int) post('saas_trial_days', '7')),
+            'saas_plans' => $plans,
+            'zaincash_merchant_id' => trim((string) post('zaincash_merchant_id', '')),
+            'zaincash_msisdn' => trim((string) post('zaincash_msisdn', '')),
+            'zaincash_production' => post('zaincash_production') === '1',
+            'zaincash_redirect_base' => rtrim(trim((string) post('zaincash_redirect_base', '')), '/'),
+        );
+        if ($secret !== '') {
+            $data['zaincash_secret'] = $secret;
+        }
+        $tab = 'saas';
     } elseif ($section === 'schedule') {
         $data = array(
             'schedule_cut_enabled' => post('schedule_cut_enabled') === '1',
@@ -549,6 +677,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (!$skipSettingsSave) {
         if (settings_save($data)) {
+            if ($section === 'sas' && function_exists('tenant_sync_from_settings') && isset($pdo)) {
+                try {
+                    tenant_sync_from_settings($pdo, $data, function_exists('current_tenant_id') ? current_tenant_id() : 1);
+                } catch (Exception $e) {
+                }
+            }
             flash('success', t('saved'));
         } else {
             flash('error', 'Cannot write settings.json');
@@ -568,6 +702,14 @@ if ($tab === 'whatsapp') {
 $sasCfgUi = function_exists('sas_config') ? sas_config($config) : array();
 if (!is_array($sasCfgUi)) {
     $sasCfgUi = array();
+}
+$sasTenantIdUi = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+if ($sasTenantIdUi > 1 && function_exists('sas_config_for_tenant') && isset($pdo)) {
+    $sasCfgUi = sas_config_for_tenant($pdo, $config, $sasTenantIdUi);
+}
+$sasConnStatus = null;
+if ($tab === 'sas' && function_exists('sas_connection_status') && isset($pdo)) {
+    $sasConnStatus = sas_connection_status($pdo, $config, $sasTenantIdUi);
 }
 $sasTestOk = null;
 $sasTestMsg = '';
@@ -1229,6 +1371,42 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
         </div>
     </form>
 </div>
+<div class="panel glass-panel" style="margin-top:16px">
+    <h2><?php echo e($lang === 'en' ? 'Subscriber device login (IP click)' : 'دخول جهاز المشترك (ضغط IP)'); ?></h2>
+    <p style="color:var(--muted);margin-top:-6px;font-weight:600">
+        <?php echo e($lang === 'en'
+            ? 'Used when clicking a subscriber IP to open NanoStation / CPE login (ticket.cgi / login.cgi).'
+            : 'يُستخدم عند ضغط IP المشترك لفتح دخول الجهاز (نانو / CPE) تلقائياً.'); ?>
+    </p>
+    <form method="post">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="section" value="cpe">
+        <div class="form-grid cols-3">
+            <div>
+                <label><?php echo e($lang === 'en' ? 'Device username' : 'يوزر الجهاز'); ?></label>
+                <input class="ltr" name="cpe_http_user"
+                       value="<?php echo e(isset($s['cpe_http_user']) && $s['cpe_http_user'] !== '' ? $s['cpe_http_user'] : 'ubnt'); ?>"
+                       placeholder="ubnt">
+            </div>
+            <div>
+                <label><?php echo e($lang === 'en' ? 'Device password' : 'باسورد الجهاز'); ?></label>
+                <input class="ltr" name="cpe_http_pass"
+                       value="<?php echo e(isset($s['cpe_http_pass']) ? $s['cpe_http_pass'] : 'ubnt'); ?>"
+                       placeholder="ubnt">
+            </div>
+            <div>
+                <label class="toggle" style="display:flex;align-items:center;gap:10px;margin-top:22px">
+                    <input type="checkbox" name="cpe_use_https" value="1" <?php echo !isset($s['cpe_use_https']) || !empty($s['cpe_use_https']) ? 'checked' : ''; ?>>
+                    <span class="toggle-ui"></span>
+                    <span><?php echo e($lang === 'en' ? 'Prefer HTTPS' : 'تفضيل HTTPS'); ?></span>
+                </label>
+            </div>
+        </div>
+        <div class="actions">
+            <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
+        </div>
+    </form>
+</div>
 <script>
 (function () {
   var btn = document.getElementById('addRentalDeviceBtn');
@@ -1525,31 +1703,59 @@ setInterval(function () {
 <?php if ($tab === 'sas'): ?>
 <?php
 $isEn = ($lang === 'en');
-$sasHasPass = !empty($sasCfgUi['password']);
+$parentVal = (int) (isset($sasCfgUi['parent_id']) ? $sasCfgUi['parent_id'] : 0);
+$unitsVal = (int) (isset($sasCfgUi['activate_units']) ? $sasCfgUi['activate_units'] : 1);
+$defPassVal = isset($sasCfgUi['default_password']) && (string) $sasCfgUi['default_password'] !== ''
+    ? (string) $sasCfgUi['default_password']
+    : '1234';
+$sasTitle = ($sasTenantIdUi > 1)
+    ? ($isEn ? 'SAS login' : 'تسجيل الدخول عبر SAS')
+    : t('settings_sas');
+$stOk = $sasConnStatus && !empty($sasConnStatus['ok']);
+$stReady = $sasConnStatus && !empty($sasConnStatus['ready']);
+$stLabel = $sasConnStatus && isset($sasConnStatus['label']) ? $sasConnStatus['label'] : '';
+$stDetail = $sasConnStatus && isset($sasConnStatus['detail']) ? $sasConnStatus['detail'] : '';
 ?>
 <div class="panel">
-    <h2><?php echo e(t('settings_sas')); ?></h2>
+    <h2><?php echo e($sasTitle); ?></h2>
     <p style="color:#6b7a88;font-weight:600;margin-top:0">
         <?php echo e($isEn
-            ? 'Save NBTel/Snono login here. Activation in this system will create/activate the user on SAS.'
-            : 'احفظ دخول NBTel / سنونو هنا. التفعيل من هذا النظام ينشئ ويفعّل المشترك على SAS.'); ?>
+            ? 'Enter your SAS reseller login. Activation here creates/activates the subscriber on SAS.'
+            : 'أدخل بيانات دخول لوحة الساس. التفعيل من هذا النظام ينشئ ويفعّل المشترك على الساس.'); ?>
     </p>
+    <?php if ($stReady || $stLabel !== ''): ?>
+    <div class="alert <?php echo $stOk ? 'alert-success' : 'alert-error'; ?>" style="margin:10px 0;font-weight:700">
+        <?php
+        if ($stOk) {
+            echo e($isEn ? 'Connected to this place' : 'متصل بهذا المكان');
+        } elseif (!$stReady) {
+            echo e($stLabel !== '' ? $stLabel : ($isEn ? 'Not configured' : 'غير مضبوط'));
+        } else {
+            echo e($stDetail !== '' ? $stDetail : ($stLabel !== '' ? $stLabel : ($isEn ? 'Not connected' : 'غير متصل')));
+        }
+        ?>
+    </div>
+    <?php endif; ?>
     <form method="post">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="section" value="sas">
         <div class="form-grid cols-4">
             <div>
-                <label><?php echo e($isEn ? 'SAS link' : 'ربط SAS'); ?></label>
-                <select name="sas_enabled">
-                    <option value="1" <?php echo !empty($sasCfgUi['enabled']) ? 'selected' : ''; ?>><?php echo e($isEn ? 'ON' : 'تشغيل'); ?></option>
-                    <option value="0" <?php echo empty($sasCfgUi['enabled']) ? 'selected' : ''; ?>><?php echo e($isEn ? 'OFF' : 'إيقاف'); ?></option>
-                </select>
+                <label><?php echo e($isEn ? 'SAS connection' : 'ربط الساس'); ?></label>
+                <label class="toggle" style="display:flex;align-items:center;gap:10px;margin-top:8px">
+                    <input type="checkbox" name="sas_enabled" value="1" <?php echo !empty($sasCfgUi['enabled']) ? 'checked' : ''; ?>>
+                    <span class="toggle-ui"></span>
+                    <span><?php echo e($isEn ? 'ON / OFF' : 'تشغيل / إيقاف'); ?></span>
+                </label>
             </div>
             <div>
-                <label>Host</label>
+                <label><?php echo e($isEn ? 'SAS URL / Host' : 'رابط الساس (Host)'); ?></label>
                 <input class="ltr" name="sas_host" required
-                       value="<?php echo e(!empty($sasCfgUi['host']) ? $sasCfgUi['host'] : 'reseller.nbtel.iq'); ?>"
-                       placeholder="reseller.nbtel.iq">
+                       value="<?php echo e(!empty($sasCfgUi['host']) ? $sasCfgUi['host'] : ''); ?>"
+                       placeholder="s1.example.com">
+                <div class="hint" style="color:#6b7a88;font-size:12px;margin-top:4px">
+                    <?php echo e($isEn ? 'Enter the SAS panel domain without https://' : 'أدخل نطاق لوحة الساس بدون https://'); ?>
+                </div>
             </div>
             <div>
                 <label><?php echo e($isEn ? 'Username' : 'اسم المستخدم'); ?></label>
@@ -1558,42 +1764,38 @@ $sasHasPass = !empty($sasCfgUi['password']);
             </div>
             <div>
                 <label><?php echo e($isEn ? 'Password' : 'كلمة المرور'); ?></label>
-                <input class="ltr" type="password" name="sas_password" autocomplete="new-password"
-                       placeholder="<?php echo e($sasHasPass
-                           ? ($isEn ? 'Leave blank to keep current' : 'فارغ = إبقاء الحالي')
-                           : ''); ?>">
+                <input class="ltr" type="password" name="sas_password" autocomplete="new-password" value="">
             </div>
             <div>
                 <label>Parent ID</label>
-                <input type="number" name="sas_parent_id" min="1" step="1"
-                       value="<?php echo (int) (isset($sasCfgUi['parent_id']) ? $sasCfgUi['parent_id'] : 1); ?>">
-            </div>
-            <div>
-                <label><?php echo e($isEn ? '24h test / extend method' : 'طريقة تست 24 ساعة'); ?></label>
-                <select name="sas_extend_method">
-                    <option value="reward_points" <?php echo (isset($sasCfgUi['extend_method']) && $sasCfgUi['extend_method'] === 'credit') ? '' : 'selected'; ?>>
-                        <?php echo e($isEn ? 'Reward points (default)' : 'نقاط تشجيعية (افتراضي)'); ?>
-                    </option>
-                    <option value="credit" <?php echo (isset($sasCfgUi['extend_method']) && $sasCfgUi['extend_method'] === 'credit') ? 'selected' : ''; ?>>
-                        <?php echo e($isEn ? 'Manager balance' : 'رصيد المدير'); ?>
-                    </option>
-                </select>
-            </div>
-            <div>
-                <label><?php echo e($isEn ? 'Extend profile ID (optional)' : 'بروفايل التمديد (اختياري)'); ?></label>
-                <input type="number" name="sas_extend_profile_id" min="0" step="1"
-                       value="<?php echo (int) (isset($sasCfgUi['extend_profile_id']) ? $sasCfgUi['extend_profile_id'] : 0); ?>"
-                       placeholder="<?php echo e($isEn ? '0 = auto 24h extension' : '0 = اختيار تلقائي لبروفايل التمديد'); ?>">
+                <input type="number" name="sas_parent_id" min="0" step="1" value="<?php echo (int) $parentVal; ?>">
                 <div class="hint" style="color:#6b7a88;font-size:12px;margin-top:4px">
                     <?php echo e($isEn
-                        ? 'Must be an Extension profile ID from SAS, not the monthly plan profile.'
-                        : 'لازم رقم بروفايل Extension من SAS، مو بروفايل الباقة الشهرية. صفر = يختار تست 24 ساعة تلقائياً.'); ?>
+                        ? 'Auto-filled from SAS on save when possible'
+                        : 'يُملأ من الساس عند الحفظ إن أمكن'); ?>
+                </div>
+            </div>
+            <div>
+                <label><?php echo e($isEn ? 'Extend / 24h test profile' : 'بروفايل التمديد / تست 24 ساعة'); ?></label>
+                <input type="number" name="sas_extend_profile_id" min="0" step="1"
+                       value="<?php echo (int) (isset($sasCfgUi['extend_profile_id']) ? $sasCfgUi['extend_profile_id'] : 0); ?>"
+                       placeholder="0">
+                <div class="hint" style="color:#6b7a88;font-size:12px;margin-top:4px">
+                    <?php echo e($isEn
+                        ? 'Extension profile ID from SAS. 0 = auto-pick 24h test.'
+                        : 'رقم بروفايل التمديد من الساس. صفر = اختيار تلقائي للتست 24 ساعة.'); ?>
                 </div>
             </div>
             <div>
                 <label><?php echo e($isEn ? 'Activation units' : 'وحدات التفعيل'); ?></label>
-                <input type="number" name="sas_activate_units" min="1" step="1"
-                       value="<?php echo (int) (isset($sasCfgUi['activate_units']) ? $sasCfgUi['activate_units'] : 1); ?>">
+                <select name="sas_activate_units">
+                    <option value="0" <?php echo $unitsVal <= 0 ? 'selected' : ''; ?>>
+                        <?php echo e($isEn ? 'Disabled (use SAS default)' : 'تعطيل (حسب الساس)'); ?>
+                    </option>
+                    <?php for ($u = 1; $u <= 12; $u++): ?>
+                        <option value="<?php echo $u; ?>" <?php echo $unitsVal === $u ? 'selected' : ''; ?>><?php echo $u; ?></option>
+                    <?php endfor; ?>
+                </select>
             </div>
             <div>
                 <label><?php echo e($isEn ? 'If SAS fails' : 'عند فشل SAS'); ?></label>
@@ -1608,157 +1810,19 @@ $sasHasPass = !empty($sasCfgUi['password']);
             </div>
             <div>
                 <label><?php echo e($isEn ? 'Default SAS user password' : 'باسورد مستخدم SAS الافتراضي'); ?></label>
-                <input class="ltr" name="sas_default_password"
-                       value="<?php echo e(isset($sasCfgUi['default_password']) ? $sasCfgUi['default_password'] : ''); ?>"
-                       placeholder="<?php echo e($isEn ? 'Empty = last 6 digits of phone' : 'فارغ = آخر 6 أرقام من الهاتف'); ?>">
-            </div>
-            <div>
-                <label><?php echo e($isEn ? 'CPE login user (IP click)' : 'يوزر جهاز المشترك (ضغط IP)'); ?></label>
-                <input class="ltr" name="cpe_http_user"
-                       value="<?php echo e(isset($s['cpe_http_user']) && $s['cpe_http_user'] !== '' ? $s['cpe_http_user'] : 'ubnt'); ?>"
-                       placeholder="ubnt">
-            </div>
-            <div>
-                <label><?php echo e($isEn ? 'CPE login password' : 'باسورد جهاز المشترك'); ?></label>
-                <input class="ltr" name="cpe_http_pass"
-                       value="<?php echo e(isset($s['cpe_http_pass']) ? $s['cpe_http_pass'] : 'ubnt'); ?>"
-                       placeholder="ubnt">
-            </div>
-            <div>
-                <label class="toggle" style="display:flex;align-items:center;gap:10px;margin-top:22px">
-                    <input type="checkbox" name="cpe_use_https" value="1" <?php echo !isset($s['cpe_use_https']) || !empty($s['cpe_use_https']) ? 'checked' : ''; ?>>
-                    <span class="toggle-ui"></span>
-                    <span><?php echo e($isEn ? 'Prefer HTTPS (like UISP ticket link)' : 'تفضيل HTTPS (مثل رابط التكت في UISP)'); ?></span>
-                </label>
+                <input class="ltr" name="sas_default_password" value="<?php echo e($defPassVal); ?>">
             </div>
         </div>
-        <p class="meta" style="margin:0 0 10px"><?php echo e($isEn
-            ? 'Clicking IP opens auto-login bridge (tries ticket.cgi then login.cgi) using CPE user/pass below.'
-            : 'ضغط IP يفتح دخول تلقائي للجهاز (ticket.cgi ثم login.cgi) باليوزر/الباس أدناه.'); ?></p>
         <div class="actions">
             <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
-        </div>
-    </form>
-</div>
-
-<div class="panel">
-    <h2><?php echo e($isEn ? 'Connection & profiles' : 'الاتصال والبروفايلات'); ?></h2>
-    <table class="meta-table" style="margin:0 0 14px">
-        <tr><th><?php echo e($isEn ? 'Status' : 'الحالة'); ?></th>
-            <td><?php echo !empty($sasCfgUi['enabled']) ? ($isEn ? 'Enabled' : 'مفعّل') : ($isEn ? 'Disabled' : 'متوقف'); ?></td></tr>
-        <tr><th>Host</th><td class="ltr"><?php echo e(!empty($sasCfgUi['host']) ? $sasCfgUi['host'] : '—'); ?></td></tr>
-        <tr><th><?php echo e($isEn ? 'User' : 'المستخدم'); ?></th>
-            <td class="ltr"><?php echo e(!empty($sasCfgUi['username']) ? $sasCfgUi['username'] : '—'); ?></td></tr>
-        <tr><th>Parent ID</th><td><?php echo (int) (isset($sasCfgUi['parent_id']) ? $sasCfgUi['parent_id'] : 0); ?></td></tr>
-    </table>
-    <form method="post" style="margin-bottom:14px">
-        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
-        <input type="hidden" name="section" value="sas_test">
-        <button class="btn" type="submit"><?php echo e($isEn ? 'Test connection & load profiles' : 'اختبار الاتصال وجلب البروفايلات'); ?></button>
-        <a class="btn secondary" href="plans.php"><?php echo e($isEn ? 'Map profiles to plans' : 'ربط البروفايلات بالباقات'); ?></a>
-    </form>
-    <?php if ($sasLoadError !== ''): ?>
-        <div class="flash error" style="margin-bottom:12px"><?php echo e($sasLoadError); ?></div>
-    <?php endif; ?>
-    <?php if ($sasTestOk !== null): ?>
-        <div class="flash <?php echo $sasTestOk ? 'success' : 'error'; ?>" style="margin-bottom:12px">
-            <?php echo e($sasTestMsg); ?>
-        </div>
-        <?php if ($sasRewardPoints !== null): ?>
-            <p style="font-weight:700;margin-top:0">
-                Reward Points:
-                <?php echo e(((float) $sasRewardPoints == (int) $sasRewardPoints)
-                    ? number_format((int) $sasRewardPoints)
-                    : number_format((float) $sasRewardPoints, 2)); ?>
-            </p>
-        <?php endif; ?>
-    <?php endif; ?>
-
-    <?php if ($sasProfiles): ?>
-        <h3><?php echo e($isEn ? 'SAS profiles' : 'بروفايلات SAS'); ?></h3>
-        <p style="color:#6b7a88"><?php echo e($isEn
-            ? 'Monthly profiles go on the plan. Extension profiles are for 24h test / extend.'
-            : 'بروفايل الباقة الشهري للباقات. بروفايل Extension (تمديد) يُستخدم للتست 24 ساعة.'); ?></p>
-        <div class="table-wrap">
-            <table>
-                <thead><tr><th>ID</th><th><?php echo e($isEn ? 'Name' : 'الاسم'); ?></th><th><?php echo e($isEn ? 'Type' : 'النوع'); ?></th><th><?php echo e($isEn ? 'Price' : 'السعر'); ?></th></tr></thead>
-                <tbody>
-                <?php foreach ($sasProfiles as $pr): ?>
-                    <?php if (!is_array($pr)) { continue; } ?>
-                    <?php
-                    $ptype = '';
-                    foreach (array('type', 'profile_type', 'service_type', 'profileType') as $tk) {
-                        if (!empty($pr[$tk])) {
-                            $ptype = (string) $pr[$tk];
-                            break;
-                        }
-                    }
-                    ?>
-                    <tr>
-                        <td><strong><?php echo e(function_exists('sas_row_id') ? sas_row_id($pr) : ''); ?></strong></td>
-                        <td><?php echo e(function_exists('sas_row_name') ? sas_row_name($pr) : ''); ?></td>
-                        <td><?php echo e($ptype !== '' ? $ptype : '—'); ?></td>
-                        <td><?php echo e(isset($pr['price']) ? $pr['price'] : ''); ?></td>
-                    </tr>
-                <?php endforeach; ?>
-                </tbody>
-            </table>
-        </div>
-    <?php endif; ?>
-
-    <?php if ($sasManagers): ?>
-        <h3 style="margin-top:20px"><?php echo e($isEn ? 'Managers (Parent ID)' : 'المدراء (Parent ID)'); ?></h3>
-        <div class="table-wrap">
-            <table>
-                <thead><tr><th>ID</th><th>Username</th><th><?php echo e($isEn ? 'Name' : 'الاسم'); ?></th><th>Reward Points</th></tr></thead>
-                <tbody>
-                <?php foreach ($sasManagers as $m): ?>
-                    <?php if (!is_array($m)) { continue; } ?>
-                    <tr>
-                        <td><?php echo e(isset($m['id']) ? $m['id'] : ''); ?></td>
-                        <td><?php echo e(isset($m['username']) ? $m['username'] : ''); ?></td>
-                        <td><?php echo e(isset($m['name']) ? $m['name'] : ''); ?></td>
-                        <td><?php
-                            $mp = function_exists('sas_find_reward_points') ? sas_find_reward_points($m) : null;
-                            echo $mp === null ? '—' : e((string) $mp);
-                        ?></td>
-                    </tr>
-                <?php endforeach; ?>
-                </tbody>
-            </table>
-        </div>
-    <?php endif; ?>
-</div>
-
-<div class="panel">
-    <h2><?php echo e($isEn ? 'Local plans ↔ SAS' : 'الباقات المحلية ↔ SAS'); ?></h2>
-    <div class="table-wrap">
-        <table>
-            <thead>
-            <tr>
-                <th><?php echo e($isEn ? 'Plan' : 'الباقة'); ?></th>
-                <th>SAS Profile ID</th>
-            </tr>
-            </thead>
-            <tbody>
-            <?php if (!$sasPlans): ?>
-                <tr><td colspan="2"><?php echo e($isEn ? 'No plans yet' : 'لا توجد باقات'); ?></td></tr>
+            <button class="btn ghost" type="submit" name="action" value="test"><?php echo e($isEn ? 'Test connection' : 'فحص الاتصال'); ?></button>
+            <?php if ($sasTenantIdUi <= 1): ?>
+            <a class="btn secondary" href="plans.php"><?php echo e($isEn ? 'Local packages' : 'الباقات المحلية'); ?></a>
             <?php endif; ?>
-            <?php foreach ($sasPlans as $pl): ?>
-                <tr>
-                    <td><strong><?php echo e($pl['name']); ?></strong></td>
-                    <td><?php echo !empty($pl['sas_profile_id']) ? (int) $pl['sas_profile_id'] : '—'; ?></td>
-                </tr>
-            <?php endforeach; ?>
-            </tbody>
-        </table>
-    </div>
-    <div class="actions">
-        <a class="btn secondary" href="plans.php"><?php echo e($isEn ? 'Edit plans' : 'تعديل الباقات'); ?></a>
-    </div>
+        </div>
+    </form>
 </div>
 <?php endif; ?>
-
 <?php if ($tab === 'schedule'): ?>
 <?php
 $isEn = ($lang === 'en');
@@ -1810,6 +1874,98 @@ $sysGrace = (int) (isset($s['grace_days']) ? $s['grace_days'] : 3);
             <?php if (!empty($s['schedule_cut_enabled']) && function_exists('run_schedule_debt_cuts')): ?>
                 <button class="btn ghost" type="submit" name="schedule_run_now" value="1"><?php echo e($isEn ? 'Run once now' : 'تشغيل مرة الآن'); ?></button>
             <?php endif; ?>
+        </div>
+    </form>
+</div>
+<?php endif; ?>
+
+<?php if ($tab === 'saas'): ?>
+<?php
+$isEn = ($lang === 'en');
+$plansUi = isset($s['saas_plans']) && is_array($s['saas_plans']) ? $s['saas_plans'] : array();
+$pm = isset($plansUi['monthly']) && is_array($plansUi['monthly']) ? $plansUi['monthly'] : array('label' => 'شهري', 'days' => 30, 'amount' => 25000);
+$py = isset($plansUi['yearly']) && is_array($plansUi['yearly']) ? $plansUi['yearly'] : array('label' => 'سنوي', 'days' => 365, 'amount' => 250000);
+$zcConfigured = function_exists('zaincash_is_configured') && zaincash_is_configured($s);
+?>
+<div class="panel">
+    <h2><?php echo e($isEn ? 'SaaS hosting & ZainCash' : 'استضافة الوكلاء و ZainCash'); ?></h2>
+    <p class="meta" style="margin-top:-4px">
+        <?php echo e($isEn
+            ? 'Agents register publicly, you approve them, then they get a trial and pay via ZainCash. Your company #1 data stays separate.'
+            : 'الوكيل يسجّل علناً، توافق عليه، ثم يحصل على تجريبي ويدفع عبر زين كاش. بيانات شركتك رقم 1 تبقى معزولة.'); ?>
+        —
+        <a href="saas_agents.php"><?php echo e($isEn ? 'Manage agents' : 'إدارة الوكلاء'); ?></a>
+    </p>
+    <p class="meta"><?php echo e($zcConfigured
+        ? ($isEn ? 'ZainCash: configured' : 'ZainCash: مضبوط')
+        : ($isEn ? 'ZainCash: missing keys' : 'ZainCash: المفاتيح ناقصة')); ?></p>
+    <form method="post">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="section" value="saas">
+        <label class="toggle" style="display:flex;align-items:center;gap:10px;margin:10px 0">
+            <input type="checkbox" name="saas_registration_enabled" value="1" <?php echo !isset($s['saas_registration_enabled']) || !empty($s['saas_registration_enabled']) ? 'checked' : ''; ?>>
+            <span><?php echo e($isEn ? 'Allow public agent registration' : 'السماح بتسجيل الوكلاء علناً'); ?></span>
+        </label>
+        <div class="form-grid cols-2">
+            <div>
+                <label><?php echo e($isEn ? 'Trial days after approval' : 'أيام التجريبي بعد الموافقة'); ?></label>
+                <input class="ltr" type="number" min="0" name="saas_trial_days" value="<?php echo e(isset($s['saas_trial_days']) ? (int) $s['saas_trial_days'] : 7); ?>">
+            </div>
+            <div>
+                <label><?php echo e($isEn ? 'Public site base URL' : 'رابط الموقع العام'); ?></label>
+                <input class="ltr" name="zaincash_redirect_base" placeholder="https://example.com/public" value="<?php echo e(isset($s['zaincash_redirect_base']) ? $s['zaincash_redirect_base'] : ''); ?>">
+            </div>
+        </div>
+        <h3 style="font-size:15px;margin:18px 0 8px"><?php echo e($isEn ? 'Plans (IQD)' : 'الباقات (دينار)'); ?></h3>
+        <div class="form-grid cols-3">
+            <div>
+                <label><?php echo e($isEn ? 'Monthly label' : 'تسمية الشهري'); ?></label>
+                <input name="plan_monthly_label" value="<?php echo e(isset($pm['label']) ? $pm['label'] : 'شهري'); ?>">
+            </div>
+            <div>
+                <label><?php echo e($isEn ? 'Days' : 'الأيام'); ?></label>
+                <input class="ltr" type="number" min="1" name="plan_monthly_days" value="<?php echo e(isset($pm['days']) ? (int) $pm['days'] : 30); ?>">
+            </div>
+            <div>
+                <label><?php echo e($isEn ? 'Amount IQD' : 'المبلغ دينار'); ?></label>
+                <input class="ltr" type="number" min="0" step="1" name="plan_monthly_amount" value="<?php echo e(isset($pm['amount']) ? (int) $pm['amount'] : 25000); ?>">
+            </div>
+            <div>
+                <label><?php echo e($isEn ? 'Yearly label' : 'تسمية السنوي'); ?></label>
+                <input name="plan_yearly_label" value="<?php echo e(isset($py['label']) ? $py['label'] : 'سنوي'); ?>">
+            </div>
+            <div>
+                <label><?php echo e($isEn ? 'Days' : 'الأيام'); ?></label>
+                <input class="ltr" type="number" min="1" name="plan_yearly_days" value="<?php echo e(isset($py['days']) ? (int) $py['days'] : 365); ?>">
+            </div>
+            <div>
+                <label><?php echo e($isEn ? 'Amount IQD' : 'المبلغ دينار'); ?></label>
+                <input class="ltr" type="number" min="0" step="1" name="plan_yearly_amount" value="<?php echo e(isset($py['amount']) ? (int) $py['amount'] : 250000); ?>">
+            </div>
+        </div>
+        <h3 style="font-size:15px;margin:18px 0 8px"><?php echo e($isEn ? 'ZainCash keys' : 'مفاتيح زين كاش'); ?></h3>
+        <div class="form-grid cols-2">
+            <div>
+                <label>Merchant ID</label>
+                <input class="ltr" name="zaincash_merchant_id" value="<?php echo e(isset($s['zaincash_merchant_id']) ? $s['zaincash_merchant_id'] : ''); ?>">
+            </div>
+            <div>
+                <label>MSISDN</label>
+                <input class="ltr" name="zaincash_msisdn" value="<?php echo e(isset($s['zaincash_msisdn']) ? $s['zaincash_msisdn'] : ''); ?>">
+            </div>
+            <div>
+                <label>Secret <?php echo !empty($s['zaincash_secret']) ? '(' . ($isEn ? 'leave blank to keep' : 'اتركه فارغ للإبقاء') . ')' : ''; ?></label>
+                <input class="ltr" type="password" name="zaincash_secret" value="" autocomplete="new-password" placeholder="<?php echo !empty($s['zaincash_secret']) ? '••••••••' : ''; ?>">
+            </div>
+            <div>
+                <label class="toggle" style="display:flex;align-items:center;gap:10px;margin-top:28px">
+                    <input type="checkbox" name="zaincash_production" value="1" <?php echo !empty($s['zaincash_production']) ? 'checked' : ''; ?>>
+                    <span><?php echo e($isEn ? 'Production mode' : 'وضع الإنتاج'); ?></span>
+                </label>
+            </div>
+        </div>
+        <div class="actions" style="margin-top:14px">
+            <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
         </div>
     </form>
 </div>

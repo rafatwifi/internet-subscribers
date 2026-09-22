@@ -59,7 +59,7 @@ function settings_defaults()
         'sas_username' => '',
         'sas_password' => '',
         'sas_parent_id' => 1,
-        'sas_default_password' => '',
+        'sas_default_password' => '1234',
         'sas_activate_units' => 1,
         'sas_extend_method' => 'reward_points',
         'sas_extend_profile_id' => 0,
@@ -77,6 +77,17 @@ function settings_defaults()
         'app_update_note' => '',
         'app_update_file' => '',
         'app_update_at' => '',
+        'saas_registration_enabled' => true,
+        'saas_trial_days' => 7,
+        'saas_plans' => array(
+            'monthly' => array('label' => 'شهري', 'days' => 30, 'amount' => 25000),
+            'yearly' => array('label' => 'سنوي', 'days' => 365, 'amount' => 250000),
+        ),
+        'zaincash_merchant_id' => '',
+        'zaincash_secret' => '',
+        'zaincash_msisdn' => '',
+        'zaincash_production' => false,
+        'zaincash_redirect_base' => '',
     );
 }
 
@@ -627,11 +638,11 @@ function apply_settings_to_config($config, $settings)
             $config['sas']['password'] = (string) $settings['sas_password'];
         }
         $config['sas']['parent_id'] = isset($settings['sas_parent_id']) ? (int) $settings['sas_parent_id'] : 1;
-        $config['sas']['default_password'] = isset($settings['sas_default_password'])
+        $config['sas']['default_password'] = (isset($settings['sas_default_password']) && (string) $settings['sas_default_password'] !== '')
             ? (string) $settings['sas_default_password']
-            : '';
+            : '1234';
         $config['sas']['activate_units'] = isset($settings['sas_activate_units'])
-            ? max(1, (int) $settings['sas_activate_units'])
+            ? max(0, (int) $settings['sas_activate_units'])
             : 1;
         $config['sas']['extend_method'] = (isset($settings['sas_extend_method']) && $settings['sas_extend_method'] === 'credit')
             ? 'credit'

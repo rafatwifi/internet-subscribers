@@ -2,7 +2,7 @@
 
 function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $topToolsHtml = '')
 {
-    global $siteName, $lang, $settings;
+    global $siteName, $lang, $settings, $pdo, $config;
     $flash = get_flash();
     $name = isset($siteName) ? $siteName : 'WiFi-Net-SALES';
     $page = isset($_SERVER['PHP_SELF']) ? basename($_SERVER['PHP_SELF']) : 'index.php';
@@ -221,6 +221,19 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <?php if ($can('agents')): ?>
             <a class="<?php echo $active === 'agents' ? 'active' : ''; ?>" href="agents.php"><?php echo e($isEn ? 'Agents' : 'الوكلاء'); ?></a>
             <?php endif; ?>
+            <?php if (function_exists('is_super_admin_user') && is_super_admin_user()): ?>
+            <a class="<?php echo $active === 'companies' ? 'active' : ''; ?>" href="companies.php"><?php echo e($isEn ? 'Companies' : 'الشركات'); ?></a>
+            <a class="<?php echo $active === 'saas_agents' ? 'active' : ''; ?>" href="saas_agents.php"><?php echo e($isEn ? 'SaaS agents' : 'وكلاء الاستضافة'); ?></a>
+            <?php endif; ?>
+            <?php
+            $navTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+            if ($navTid > 1):
+            ?>
+            <a class="<?php echo $active === 'billing' ? 'active' : ''; ?>" href="billing.php"><?php echo e($isEn ? 'Billing' : 'الاشتراك'); ?></a>
+            <?php endif; ?>
+            <?php if ($can('cards') || $can('agents') || (function_exists('is_agent_user') && is_agent_user())): ?>
+            <a class="<?php echo $active === 'prices' || $active === 'agent_prices' ? 'active' : ''; ?>" href="agent_prices.php"><?php echo e($isEn ? 'Card prices' : 'تسعير الكروت'); ?></a>
+            <?php endif; ?>
             <?php if ($can('rentals')): ?>
             <a class="<?php echo $active === 'rentals' ? 'active' : ''; ?>" href="rentals.php"><?php echo e($isEn ? 'Rentals' : 'الإيجار'); ?></a>
             <?php endif; ?>
@@ -248,6 +261,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <?php if ($can('settings') || $can('users') || $can('plans') || $can('backup')): ?>
             <a class="<?php echo $settingsActive && $active !== 'schedule' ? 'active' : ''; ?>" href="settings.php"><?php echo e(t('settings')); ?></a>
             <?php endif; ?>
+            <a class="<?php echo $active === 'company' ? 'active' : ''; ?>" href="company.php"><?php echo e($isEn ? 'Company' : 'عن الشركة'); ?></a>
             <a href="logout.php"><?php echo e(t('logout')); ?></a>
         </nav>
     </aside>
@@ -341,6 +355,31 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <span class="wa-conn-text"><?php echo e($isEn ? 'Checking WhatsApp…' : 'جاري فحص واتساب…'); ?></span>
             <a class="wa-conn-link" href="settings.php?tab=whatsapp"><?php echo e($isEn ? 'Settings' : 'الإعدادات'); ?></a>
         </div>
+        <?php
+        // بانر حالة الساس — القراءة المحلية تبقى؛ الكتابة للساس تُمنع عند الانقطاع
+        $sasBanner = null;
+        if (!empty($pdo) && is_array(isset($config) ? $config : null) && function_exists('sas_connection_status') && function_exists('sas_is_ready') && sas_is_ready($config)) {
+            $lockTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+            $lockFile = dirname(__DIR__) . '/config/sas_status_t' . $lockTid . '.json';
+            if (is_file($lockFile)) {
+                $prev = @json_decode((string) @file_get_contents($lockFile), true);
+                if (is_array($prev) && array_key_exists('ok', $prev) && empty($prev['ok'])) {
+                    $sasBanner = $prev;
+                }
+            }
+        }
+        if ($sasBanner):
+            $banDetail = isset($sasBanner['detail']) ? (string) $sasBanner['detail'] : '';
+            ?>
+        <div class="alert alert-error" style="margin:10px 14px 0;border-radius:10px" role="status">
+            <?php echo e($isEn
+                ? 'SAS offline — local data (subscribers, debts, cards) stays available. Writes to SAS are blocked until reconnect.'
+                : 'الساس غير متصل — البيانات المحلية (مشتركين، ديون، كروت) تبقى. الكتابة للساس موقوفة حتى يعود الاتصال.'); ?>
+            <?php if ($banDetail !== ''): ?>
+                <span class="meta"> — <?php echo e($banDetail); ?></span>
+            <?php endif; ?>
+        </div>
+        <?php endif; ?>
         <main class="container">
             <?php if ($flash): ?>
                 <div class="alert alert-<?php echo e($flash['type']); ?>"><?php echo e($flash['message']); ?></div>

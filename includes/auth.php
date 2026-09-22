@@ -113,6 +113,7 @@ function role_permissions($role)
     if ($role === 'agent') {
         return array(
             'dashboard', 'subscribers', 'activate', 'debts', 'messages', 'rentals',
+            'cards', 'agents',
         );
     }
     return array(
@@ -220,8 +221,12 @@ function list_agent_users($pdo, $activeOnly = true)
 {
     try {
         ensure_admin_users_table($pdo);
-        $sql = "SELECT id, username, display_name, role, is_active, created_at, updated_at, sas_manager_id, wa_local_url, wa_local_key
-                FROM admin_users WHERE role = 'agent'";
+        $tenantSql = '';
+        if (function_exists('current_tenant_id')) {
+            $tenantSql = ' AND tenant_id = ' . (int) current_tenant_id();
+        }
+        $sql = "SELECT id, username, display_name, role, is_active, created_at, updated_at, sas_manager_id, wa_local_url, wa_local_key, tenant_id, phone
+                FROM admin_users WHERE role = 'agent'" . $tenantSql;
         if ($activeOnly) {
             $sql .= ' AND is_active = 1';
         }
@@ -229,8 +234,12 @@ function list_agent_users($pdo, $activeOnly = true)
         return $pdo->query($sql)->fetchAll();
     } catch (Exception $e) {
         try {
-            $sql = "SELECT id, username, display_name, role, is_active, created_at, updated_at
-                    FROM admin_users WHERE role = 'agent'";
+            $tenantSql = '';
+            if (function_exists('current_tenant_id')) {
+                $tenantSql = ' AND tenant_id = ' . (int) current_tenant_id();
+            }
+            $sql = "SELECT id, username, display_name, role, is_active, created_at, updated_at, tenant_id
+                    FROM admin_users WHERE role = 'agent'" . $tenantSql;
             if ($activeOnly) {
                 $sql .= ' AND is_active = 1';
             }
@@ -244,15 +253,24 @@ function list_agent_users($pdo, $activeOnly = true)
 
 function subscriber_agent_scope_sql($alias = 's')
 {
+    $a = preg_replace('/[^a-zA-Z0-9_]/', '', (string) $alias);
+    if ($a === '') {
+        $a = 's';
+    }
+    $tenantSql = '';
+    if (function_exists('current_tenant_id')) {
+        $tenantSql = ' AND ' . $a . '.tenant_id = ' . (int) current_tenant_id();
+    }
     if (!is_agent_user()) {
-        return '';
+        // أدمن/موظف: عزل الشركة فقط
+        return $tenantSql;
     }
     $u = current_admin();
     $id = $u ? (int) $u['id'] : 0;
     if ($id <= 0) {
         return ' AND 1=0';
     }
-    return ' AND ' . $alias . '.agent_user_id = ' . $id;
+    return $tenantSql . ' AND ' . $a . '.agent_user_id = ' . $id;
 }
 
 function user_can_access_subscriber($pdo, $subscriberId)
@@ -261,20 +279,28 @@ function user_can_access_subscriber($pdo, $subscriberId)
     if ($subscriberId <= 0) {
         return false;
     }
-    if (!is_agent_user()) {
-        return true;
-    }
-    $u = current_admin();
-    $uid = $u ? (int) $u['id'] : 0;
-    if ($uid <= 0) {
-        return false;
-    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
     try {
         ensure_subscriber_agent_column($pdo);
-        $st = $pdo->prepare('SELECT agent_user_id FROM subscribers WHERE id = :id LIMIT 1');
+        $st = $pdo->prepare('SELECT agent_user_id, tenant_id FROM subscribers WHERE id = :id LIMIT 1');
         $st->execute(array(':id' => $subscriberId));
-        $aid = $st->fetchColumn();
-        return $aid !== false && (int) $aid === $uid;
+        $row = $st->fetch();
+        if (!$row) {
+            return false;
+        }
+        $rowTid = isset($row['tenant_id']) ? (int) $row['tenant_id'] : 1;
+        if ($rowTid !== $tid) {
+            return false;
+        }
+        if (!is_agent_user()) {
+            return true;
+        }
+        $u = current_admin();
+        $uid = $u ? (int) $u['id'] : 0;
+        if ($uid <= 0) {
+            return false;
+        }
+        return (int) $row['agent_user_id'] === $uid;
     } catch (Exception $e) {
         return false;
     }
@@ -375,6 +401,17 @@ function ensure_admin_users_table($pdo, $config = null)
             }
         } catch (Exception $e) {
         }
+        try {
+            $col = $pdo->query("SHOW COLUMNS FROM admin_users LIKE 'tenant_id'")->fetch();
+            if (!$col) {
+                $pdo->exec('ALTER TABLE admin_users ADD COLUMN tenant_id INT UNSIGNED NOT NULL DEFAULT 1');
+            }
+            $col = $pdo->query("SHOW COLUMNS FROM admin_users LIKE 'phone'")->fetch();
+            if (!$col) {
+                $pdo->exec('ALTER TABLE admin_users ADD COLUMN phone VARCHAR(32) NULL DEFAULT NULL');
+            }
+        } catch (Exception $e) {
+        }
 
         $count = (int) $pdo->query('SELECT COUNT(*) FROM admin_users')->fetchColumn();
         if ($count === 0) {
@@ -412,6 +449,45 @@ function require_login()
     if (empty($_SESSION['admin_logged_in'])) {
         redirect('login.php');
     }
+    // اشتراك منتهٍ: يسمح فقط بصفحة الفوترة وتسجيل الخروج
+    $page = isset($_SERVER['PHP_SELF']) ? basename((string) $_SERVER['PHP_SELF']) : '';
+    $allowWhenExpired = array('billing.php', 'zaincash_callback.php', 'logout.php', 'login.php');
+    if (!empty($_SESSION['saas_force_billing']) && !in_array($page, $allowWhenExpired, true)) {
+        if (function_exists('flash')) {
+            flash('error', 'انتهى الاشتراك — جدّد من صفحة الفوترة');
+        }
+        redirect('billing.php');
+    }
+    global $pdo;
+    if ($pdo && function_exists('is_super_admin_user') && !is_super_admin_user() && function_exists('tenant_subscription_status')) {
+        $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        if ($tid > 1) {
+            try {
+                if (function_exists('saas_mark_expired_tenants')) {
+                    saas_mark_expired_tenants($pdo);
+                }
+            } catch (Exception $e) {
+            }
+            list($ok, $code) = tenant_subscription_status($pdo, $tid);
+            if (!$ok && ($code === 'expired' || $code === 'suspended' || $code === 'pending')) {
+                if ($code === 'expired') {
+                    $_SESSION['saas_force_billing'] = 1;
+                    if (!in_array($page, $allowWhenExpired, true)) {
+                        redirect('billing.php');
+                    }
+                } elseif ($code !== 'expired') {
+                    // معلق / pending — اخرج
+                    $_SESSION = array();
+                    if (function_exists('flash')) {
+                        flash('error', $code === 'pending' ? 'بانتظار موافقة الإدارة' : 'الحساب معلّق');
+                    }
+                    redirect('login.php');
+                }
+            } else {
+                unset($_SESSION['saas_force_billing']);
+            }
+        }
+    }
 }
 
 function current_admin()
@@ -428,6 +504,7 @@ function current_admin()
         'wa_local_url' => isset($_SESSION['admin_wa_local_url']) ? (string) $_SESSION['admin_wa_local_url'] : '',
         'wa_local_key' => isset($_SESSION['admin_wa_local_key']) ? (string) $_SESSION['admin_wa_local_key'] : '',
         'linked_agent_id' => isset($_SESSION['admin_linked_agent_id']) ? (int) $_SESSION['admin_linked_agent_id'] : 0,
+        'tenant_id' => isset($_SESSION['admin_tenant_id']) ? max(1, (int) $_SESSION['admin_tenant_id']) : 1,
     );
 }
 
@@ -447,19 +524,23 @@ function impersonation_real_admin_id()
  */
 function sas_agent_scope_sql($alias = 'c')
 {
+    $a = preg_replace('/[^a-zA-Z0-9_]/', '', (string) $alias);
+    if ($a === '') {
+        $a = 'c';
+    }
+    $tenantSql = '';
+    if (function_exists('current_tenant_id')) {
+        $tenantSql = ' AND ' . $a . '.tenant_id = ' . (int) current_tenant_id();
+    }
     if (!is_agent_user()) {
-        return '';
+        return $tenantSql;
     }
     $u = current_admin();
     $mid = $u && !empty($u['sas_manager_id']) ? (int) $u['sas_manager_id'] : 0;
     if ($mid <= 0) {
         return ' AND 1=0';
     }
-    $a = preg_replace('/[^a-zA-Z0-9_]/', '', (string) $alias);
-    if ($a === '') {
-        $a = 'c';
-    }
-    return ' AND ' . $a . '.parent_id = ' . $mid;
+    return $tenantSql . ' AND ' . $a . '.parent_id = ' . $mid;
 }
 
 function current_admin_sas_manager_id()
@@ -573,6 +654,7 @@ function set_admin_session_from_row($row)
     $_SESSION['admin_wa_local_url'] = isset($row['wa_local_url']) ? (string) $row['wa_local_url'] : '';
     $_SESSION['admin_wa_local_key'] = isset($row['wa_local_key']) ? (string) $row['wa_local_key'] : '';
     $_SESSION['admin_linked_agent_id'] = isset($row['linked_agent_id']) ? (int) $row['linked_agent_id'] : 0;
+    $_SESSION['admin_tenant_id'] = isset($row['tenant_id']) ? max(1, (int) $row['tenant_id']) : 1;
     unset($_SESSION['ui_prefs']);
 }
 
@@ -658,6 +740,31 @@ function attempt_login($pdo, $config, $username, $password)
             $stmt->execute(array(':u' => $username));
             $row = $stmt->fetch();
             if ($row && !empty($row['password_hash']) && admin_password_verify($password, $row['password_hash'])) {
+                // تحقق اشتراك الشركة (ما عدا السوبر / tenant 1)
+                $tid = isset($row['tenant_id']) ? (int) $row['tenant_id'] : 1;
+                global $pdo;
+                if ($tid > 1 && $pdo && function_exists('saas_mark_expired_tenants')) {
+                    try {
+                        saas_mark_expired_tenants($pdo);
+                    } catch (Exception $e) {
+                    }
+                }
+                if ($tid > 1 && $pdo && function_exists('tenant_subscription_status')) {
+                    list($okSub, $code) = tenant_subscription_status($pdo, $tid);
+                    if (!$okSub && $code === 'pending') {
+                        $GLOBALS['login_block_reason'] = 'pending';
+                        return false;
+                    }
+                    if (!$okSub && $code === 'suspended') {
+                        $GLOBALS['login_block_reason'] = 'suspended';
+                        return false;
+                    }
+                    if (!$okSub && $code === 'expired') {
+                        $_SESSION['saas_force_billing'] = 1;
+                    } else {
+                        unset($_SESSION['saas_force_billing']);
+                    }
+                }
                 set_admin_session_from_row($row);
                 if (function_exists('app_session_refresh_cookie')) {
                     app_session_refresh_cookie();
@@ -782,27 +889,45 @@ function create_admin_user($pdo, $username, $displayName, $password, $role, $lin
     if ($role === 'accountant' && $linkedAgentId !== null && (int) $linkedAgentId > 0) {
         $linkedVal = (int) $linkedAgentId;
     }
+    $tenantId = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tenantId <= 0) {
+        $tenantId = 1;
+    }
     try {
         $pdo->prepare(
-            'INSERT INTO admin_users (username, display_name, password_hash, role, is_active, linked_agent_id)
-             VALUES (:u, :d, :h, :r, 1, :la)'
+            'INSERT INTO admin_users (username, display_name, password_hash, role, is_active, linked_agent_id, tenant_id)
+             VALUES (:u, :d, :h, :r, 1, :la, :tid)'
         )->execute(array(
             ':u' => $username,
             ':d' => $displayName,
             ':h' => admin_password_hash($password),
             ':r' => $role,
             ':la' => $linkedVal,
+            ':tid' => $tenantId,
         ));
     } catch (Exception $e) {
-        $pdo->prepare(
-            'INSERT INTO admin_users (username, display_name, password_hash, role, is_active)
-             VALUES (:u, :d, :h, :r, 1)'
-        )->execute(array(
-            ':u' => $username,
-            ':d' => $displayName,
-            ':h' => admin_password_hash($password),
-            ':r' => $role,
-        ));
+        try {
+            $pdo->prepare(
+                'INSERT INTO admin_users (username, display_name, password_hash, role, is_active, tenant_id)
+                 VALUES (:u, :d, :h, :r, 1, :tid)'
+            )->execute(array(
+                ':u' => $username,
+                ':d' => $displayName,
+                ':h' => admin_password_hash($password),
+                ':r' => $role,
+                ':tid' => $tenantId,
+            ));
+        } catch (Exception $e2) {
+            $pdo->prepare(
+                'INSERT INTO admin_users (username, display_name, password_hash, role, is_active)
+                 VALUES (:u, :d, :h, :r, 1)'
+            )->execute(array(
+                ':u' => $username,
+                ':d' => $displayName,
+                ':h' => admin_password_hash($password),
+                ':r' => $role,
+            ));
+        }
     }
     return 'ok';
 }

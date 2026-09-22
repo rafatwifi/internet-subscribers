@@ -24,6 +24,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['card_payment']) && $s
         $payAgentId = $linked;
     }
     $amount = (float) post('amount', '0');
+    if (post('pay_all') === '1' && function_exists('card_agent_remaining_balance')) {
+        $amount = card_agent_remaining_balance($pdo, $payAgentId);
+    }
     $note = trim((string) post('payment_note', ''));
     $me = current_admin();
     $meId = $me ? (int) $me['id'] : 0;
@@ -52,6 +55,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['card_payment']) && $s
     } else {
         flash('error', card_transfer_error_message($code, isset($lang) ? $lang : 'ar'));
     }
+    redirect('index.php#card-accounting');
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['card_remind']) && $showCardAccountingDash) {
+    if (!verify_csrf(post('csrf'))) {
+        flash('error', $isEn ? 'Invalid request' : 'طلب غير صالح');
+        redirect('index.php');
+    }
+    $aid = accountant_linked_agent_id();
+    if ($aid <= 0) {
+        $aid = (int) post('agent_user_id', '0');
+    }
+    list($okR, $msgR) = card_agent_payment_remind($pdo, $config, $aid, isset($lang) ? $lang : 'ar');
+    flash($okR ? 'success' : 'error', $msgR);
+    redirect('index.php#card-accounting');
+}
+
+$canDisableAgentSas = $showCardAccountingDash
+    || (function_exists('is_admin_user') && is_admin_user() && function_exists('user_can') && user_can('agents'));
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['disable_agent_sas']) && $canDisableAgentSas) {
+    if (!verify_csrf(post('csrf'))) {
+        flash('error', $isEn ? 'Invalid request' : 'طلب غير صالح');
+        redirect('index.php');
+    }
+    if (post('confirm_disable') !== '1') {
+        flash('error', $isEn ? 'Confirm disable required' : 'يلزم التأكيد قبل التعطيل');
+        redirect('index.php#card-accounting');
+    }
+    $aid = (int) post('agent_user_id', '0');
+    if ($showCardAccountingDash) {
+        $linked = accountant_linked_agent_id();
+        if ($linked > 0) {
+            $aid = $linked;
+        }
+    }
+    $me = current_admin();
+    $meId = $me ? (int) $me['id'] : 0;
+    list($okD, $msgD) = disable_agent_sas($pdo, $config, $aid, $meId);
+    flash($okD ? 'success' : 'error', $msgD);
     redirect('index.php#card-accounting');
 }
 
@@ -346,11 +388,15 @@ if (!function_exists('dash_sas_box')) {
 
 $cardDash = null;
 $cardDashPayments = array();
+$cardDashLedger = array();
 if ($showCardAccountingDash && function_exists('card_accounting_dashboard')) {
     ensure_card_accounting_tables($pdo);
     if ($cardDashAgentId > 0) {
         $cardDash = card_accounting_dashboard($pdo, $cardDashAgentId);
         $cardDashPayments = list_recent_card_payments($pdo, $cardDashAgentId, 8);
+        if (function_exists('card_agent_transfers_ledger')) {
+            $cardDashLedger = card_agent_transfers_ledger($pdo, $cardDashAgentId, 40);
+        }
     }
 }
 
@@ -475,14 +521,66 @@ body:has(.sas-dash) .container {
         <input type="hidden" name="agent_user_id" value="<?php echo (int) $cardDashAgentId; ?>">
         <div>
             <label><?php echo e($isEn ? 'Payment amount' : 'مبلغ الدفعة'); ?></label>
-            <input name="amount" type="number" min="0.01" step="0.01" required placeholder="0">
+            <input name="amount" type="number" min="0.01" step="0.01" max="<?php echo e(max(0.01, (float) $cardDash['remaining'])); ?>"
+                   required placeholder="0"
+                   value="">
+            <p class="meta" style="margin:4px 0 0"><?php echo e($isEn ? 'Max = remaining' : 'الحد الأقصى = المتبقي'); ?>:
+                <?php echo e(money_format_iqd($cardDash['remaining'], $config['currency'])); ?></p>
         </div>
         <div style="flex:1;min-width:200px">
             <label><?php echo e($isEn ? 'Note (optional)' : 'ملاحظة (اختياري)'); ?></label>
             <input name="payment_note" maxlength="255" style="width:100%" placeholder="<?php echo e($isEn ? 'Payment note…' : 'ملاحظة…'); ?>">
         </div>
-        <button class="btn" type="submit"><?php echo e($isEn ? 'Record payment' : 'تسجيل دفعة'); ?></button>
+        <button class="btn" type="submit"><?php echo e($isEn ? 'Partial pay' : 'تسديد جزئي'); ?></button>
+        <button class="btn secondary" type="submit" name="pay_all" value="1"
+                onclick="var a=this.form.amount; if(a){a.removeAttribute('required'); a.value='<?php echo e(number_format(max(0.01, (float) $cardDash['remaining']), 2, '.', '')); ?>';} return confirm(<?php echo json_encode($isEn ? 'Pay full remaining?' : 'تسديد كل المتبقي؟'); ?>);">
+            <?php echo e($isEn ? 'Pay all remaining' : 'تسديد الكل'); ?>
+        </button>
     </form>
+    <div class="actions" style="display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px">
+        <form method="post" style="display:inline" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Send WhatsApp payment reminder?' : 'إرسال تذكير واتساب بالتسديد؟'); ?>);">
+            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+            <input type="hidden" name="card_remind" value="1">
+            <input type="hidden" name="agent_user_id" value="<?php echo (int) $cardDashAgentId; ?>">
+            <button class="btn ghost" type="submit"><?php echo e($isEn ? 'WA remind' : 'تذكير واتساب'); ?></button>
+        </form>
+        <form method="post" style="display:inline" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Disable this agent SAS users? Debts/cache stay.' : 'تعطيل يوزرات ساس هذا الوكيل؟ الديون والكاش يبقون.'); ?>);">
+            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+            <input type="hidden" name="disable_agent_sas" value="1">
+            <input type="hidden" name="confirm_disable" value="1">
+            <input type="hidden" name="agent_user_id" value="<?php echo (int) $cardDashAgentId; ?>">
+            <button class="btn ghost" type="submit" style="color:#b91c1c"><?php echo e($isEn ? 'Disable agent SAS' : 'تعطيل ساس الوكيل'); ?></button>
+        </form>
+    </div>
+    <?php if ($cardDashLedger): ?>
+        <h3 style="margin:8px 0;font-size:14px"><?php echo e($isEn ? 'Transfer ledger' : 'سجل التحويلات'); ?></h3>
+        <div class="table-wrap" style="margin:0 0 18px">
+            <table class="table-compact" style="font-size:13px">
+                <thead>
+                <tr>
+                    <th><?php echo e($isEn ? 'Date' : 'التاريخ'); ?></th>
+                    <th><?php echo e($isEn ? 'Package' : 'الباقة'); ?></th>
+                    <th><?php echo e($isEn ? 'Qty' : 'الكمية'); ?></th>
+                    <th><?php echo e($isEn ? 'Total' : 'المبلغ'); ?></th>
+                    <th><?php echo e($isEn ? 'From' : 'من'); ?></th>
+                </tr>
+                </thead>
+                <tbody>
+                <?php foreach ($cardDashLedger as $lg):
+                    $lineTotal = (float) $lg['agent_price'] * (int) $lg['qty'];
+                    ?>
+                    <tr>
+                        <td><?php echo e(isset($lg['created_at']) ? $lg['created_at'] : ''); ?></td>
+                        <td><?php echo e(isset($lg['profile_name']) ? $lg['profile_name'] : ''); ?></td>
+                        <td><?php echo (int) $lg['qty']; ?></td>
+                        <td><?php echo e(money_format_iqd($lineTotal, $config['currency'])); ?></td>
+                        <td><?php echo e(isset($lg['from_name']) ? $lg['from_name'] : '—'); ?></td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+    <?php endif; ?>
     <?php if ($cardDashPayments): ?>
         <div class="table-wrap" style="margin:0 0 18px">
             <table class="table-compact" style="font-size:13px">

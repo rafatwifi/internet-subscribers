@@ -736,7 +736,10 @@ if (strlen($parentFilter) > 80) {
 
 $cacheCount = 0;
 try {
-    $cacheCount = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache')->fetchColumn();
+    $tidCnt = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    $stCnt = $pdo->prepare('SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = :t');
+    $stCnt->execute(array(':t' => $tidCnt));
+    $cacheCount = (int) $stCnt->fetchColumn();
 } catch (Exception $e) {
     $cacheCount = 0;
     if ($pageError === '') {

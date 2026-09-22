@@ -355,6 +355,9 @@ $sql = 'SELECT i.*, s.name, s.phone
         JOIN subscribers s ON s.id = i.subscriber_id
         WHERE 1=1';
 $params = array();
+if (function_exists('subscriber_agent_scope_sql')) {
+    $sql .= subscriber_agent_scope_sql('s');
+}
 if ($status !== 'all') {
     $sql .= ' AND i.status = :status';
     $params[':status'] = $status;
@@ -375,11 +378,19 @@ $stmt = $pdo->prepare($sql);
 $stmt->execute($params);
 $rows = $stmt->fetchAll();
 
-$totalDebt = (float) $pdo->query("SELECT COALESCE(SUM(amount),0) FROM invoices WHERE status='unpaid'")->fetchColumn();
+$debtScope = function_exists('subscriber_agent_scope_sql') ? subscriber_agent_scope_sql('s') : '';
+$totalDebt = (float) $pdo->query(
+    "SELECT COALESCE(SUM(i.amount),0) FROM invoices i
+     JOIN subscribers s ON s.id = i.subscriber_id
+     WHERE i.status='unpaid'" . $debtScope
+)->fetchColumn();
 $unpaidBySub = array();
 try {
     $ut = $pdo->query(
-        "SELECT subscriber_id, COALESCE(SUM(amount),0) AS t FROM invoices WHERE status = 'unpaid' GROUP BY subscriber_id"
+        "SELECT i.subscriber_id, COALESCE(SUM(i.amount),0) AS t FROM invoices i
+         JOIN subscribers s ON s.id = i.subscriber_id
+         WHERE i.status = 'unpaid'" . $debtScope . '
+         GROUP BY i.subscriber_id'
     );
     foreach ($ut->fetchAll() as $u) {
         $unpaidBySub[(int) $u['subscriber_id']] = (float) $u['t'];
@@ -387,7 +398,7 @@ try {
 } catch (Exception $e) {
 }
 $subscribers = $pdo->query(
-    'SELECT id, name, phone, rental_enabled, rental_device_id FROM subscribers ORDER BY name'
+    'SELECT id, name, phone, rental_enabled, rental_device_id FROM subscribers s WHERE 1=1' . $debtScope . ' ORDER BY name'
 )->fetchAll();
 $settingsDebt = settings_load();
 $rentFeeGlobal = (float) rental_fee_amount($settingsDebt);
