@@ -817,7 +817,7 @@ function saas_register_agent($pdo, $agencyName, $username, $displayName, $passwo
     if ($agencyName === '' || $username === '' || strlen($password) < 4) {
         return array(false, 'أكمل الحقول (الباسورد 4 أحرف على الأقل)', 0, 0);
     }
-    if (!preg_match('/^[a-zA-Z0-9._-]{2,40}$/', $username)) {
+    if (!preg_match('/^[a-zA-Z0-9._@-]{2,40}$/', $username)) {
         return array(false, 'اسم الدخول غير صالح', 0, 0);
     }
     try {

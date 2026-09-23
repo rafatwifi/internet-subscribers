@@ -807,7 +807,7 @@ render_settings_tabs($tab);
         <div class="form-grid cols-4">
             <div>
                 <label><?php echo e($lang === 'en' ? 'Username' : 'اسم الدخول'); ?></label>
-                <input name="username" required pattern="[A-Za-z0-9._-]{2,40}" placeholder="yousif">
+                <input name="username" required pattern="[A-Za-z0-9._@-]{2,40}" placeholder="yousif">
             </div>
             <div>
                 <label><?php echo e($lang === 'en' ? 'Display name' : 'الاسم الظاهر'); ?></label>

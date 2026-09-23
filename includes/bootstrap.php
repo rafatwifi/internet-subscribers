@@ -235,6 +235,10 @@ $zaincashFile = __DIR__ . '/zaincash.php';
 if (is_file($zaincashFile)) {
     require_once $zaincashFile;
 }
+$tenantMigrateFile = __DIR__ . '/tenant_migrate.php';
+if (is_file($tenantMigrateFile)) {
+    require_once $tenantMigrateFile;
+}
 if (function_exists('app_remember_try_restore')) {
     app_remember_try_restore($pdo);
 }

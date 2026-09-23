@@ -74,7 +74,7 @@ $loginBgColor = function_exists('login_bg_color') ? login_bg_color($settings) : 
         <label><?php echo e($isEn ? 'Your name' : 'اسمك'); ?></label>
         <input name="display_name" value="<?php echo e(post('display_name', '')); ?>">
         <label><?php echo e($isEn ? 'Username' : 'اسم الدخول'); ?></label>
-        <input class="ltr" name="username" required pattern="[A-Za-z0-9._\-]{2,40}" value="<?php echo e(post('username', '')); ?>">
+        <input class="ltr" name="username" required pattern="[A-Za-z0-9._@\-]{2,40}" value="<?php echo e(post('username', '')); ?>">
         <label><?php echo e($isEn ? 'Phone' : 'الهاتف'); ?></label>
         <input class="ltr" name="phone" value="<?php echo e(post('phone', '')); ?>">
         <label><?php echo e($isEn ? 'Password' : 'كلمة المرور'); ?></label>

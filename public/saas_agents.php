@@ -51,13 +51,71 @@ try {
     }));
 }
 
+$plat = function_exists('platform_card_summary') ? platform_card_summary($pdo) : array();
+$hasWifi = false;
+try {
+    $hasWifi = (bool) $pdo->query(
+        "SELECT id FROM admin_users WHERE username IN ('wifi@office','wifi.office','wifioffice') LIMIT 1"
+    )->fetchColumn();
+} catch (Exception $e) {
+}
+
 render_header($isEn ? 'SaaS agents' : 'وكلاء الاستضافة', 'saas_agents');
 ?>
 <div class="panel">
+    <h2><?php echo e($isEn ? 'Platform overview' : 'ملخص المنصة'); ?></h2>
+    <p class="meta"><?php echo e($isEn
+        ? 'System login is separate from SAS. Your office subscribers should live under wifi@office — not company #1.'
+        : 'دخول النظام غير دخول الساس. مشتركو مكتبك المفروض تحت wifi@office — مو الشركة 1.'); ?></p>
+    <div class="form-grid cols-2" style="margin:12px 0;gap:10px">
+        <div class="panel" style="padding:10px;margin:0">
+            <div class="meta"><?php echo e($isEn ? 'Agencies' : 'الوكالات'); ?></div>
+            <strong style="font-size:20px"><?php echo (int) (isset($plat['agencies']) ? $plat['agencies'] : 0); ?></strong>
+            <span class="meta"> (<?php echo e($isEn ? 'active' : 'نشط'); ?>: <?php echo (int) (isset($plat['agencies_active']) ? $plat['agencies_active'] : 0); ?>)</span>
+        </div>
+        <div class="panel" style="padding:10px;margin:0">
+            <div class="meta"><?php echo e($isEn ? 'Stock available' : 'كروت متوفرة'); ?></div>
+            <strong style="font-size:20px"><?php echo (int) (isset($plat['available_cards']) ? $plat['available_cards'] : 0); ?></strong>
+        </div>
+        <div class="panel" style="padding:10px;margin:0">
+            <div class="meta"><?php echo e($isEn ? 'Transferred to agents' : 'محوّل للوكلاء'); ?></div>
+            <strong style="font-size:20px"><?php echo (int) (isset($plat['transfer_qty']) ? $plat['transfer_qty'] : 0); ?></strong>
+        </div>
+        <div class="panel" style="padding:10px;margin:0">
+            <div class="meta"><?php echo e($isEn ? 'Capital (wholesale)' : 'رأس المال'); ?></div>
+            <strong style="font-size:20px"><?php echo e(number_format((float) (isset($plat['wholesale_amount']) ? $plat['wholesale_amount'] : 0), 0)); ?></strong>
+        </div>
+        <div class="panel" style="padding:10px;margin:0">
+            <div class="meta"><?php echo e($isEn ? 'Sold (agent price)' : 'المباع'); ?></div>
+            <strong style="font-size:20px"><?php echo e(number_format((float) (isset($plat['sold_amount']) ? $plat['sold_amount'] : 0), 0)); ?></strong>
+        </div>
+        <div class="panel" style="padding:10px;margin:0">
+            <div class="meta"><?php echo e($isEn ? 'Received' : 'المستلم'); ?></div>
+            <strong style="font-size:20px"><?php echo e(number_format((float) (isset($plat['received']) ? $plat['received'] : 0), 0)); ?></strong>
+        </div>
+        <div class="panel" style="padding:10px;margin:0">
+            <div class="meta"><?php echo e($isEn ? 'Debt remaining' : 'الدين المتبقي'); ?></div>
+            <strong style="font-size:20px"><?php echo e(number_format((float) (isset($plat['remaining']) ? $plat['remaining'] : 0), 0)); ?></strong>
+        </div>
+        <div class="panel" style="padding:10px;margin:0">
+            <div class="meta"><?php echo e($isEn ? 'Profit' : 'الربح'); ?></div>
+            <strong style="font-size:20px"><?php echo e(number_format((float) (isset($plat['profit']) ? $plat['profit'] : 0), 0)); ?></strong>
+        </div>
+    </div>
+    <div class="actions" style="margin-bottom:16px;flex-wrap:wrap;gap:8px">
+        <?php if (!$hasWifi): ?>
+            <a class="btn" href="migrate_owner_agency.php"><?php echo e($isEn ? 'Create wifi@office & move my data' : 'إنشاء wifi@office ونقل بياناتي'); ?></a>
+        <?php else: ?>
+            <span class="meta"><?php echo e($isEn ? 'wifi@office exists — manage it like any agency below.' : 'wifi@office موجود — أدِره مثل باقي الوكالات تحت.'); ?></span>
+        <?php endif; ?>
+        <a class="btn ghost" href="settings.php?tab=saas"><?php echo e($isEn ? 'SaaS / ZainCash' : 'الاستضافة / ZainCash'); ?></a>
+    </div>
+</div>
+<div class="panel">
     <h2><?php echo e($isEn ? 'Registered agencies' : 'الوكالات المسجّلة'); ?></h2>
     <p class="meta"><?php echo e($isEn
-        ? 'Approve pending agents to start their trial. Tenant #1 (your data) is never listed here.'
-        : 'وافق على الطلبات لبدء التجريبي. الشركة رقم 1 (بياناتك) ما تظهر هنا.'); ?></p>
+        ? 'Approve pending agents to start their trial. Each agency binds its own SAS (not system login).'
+        : 'وافق على الطلبات لبدء التجريبي. كل وكالة تربط ساسها بنفسها (مو دخول النظام).'); ?></p>
     <div class="table-wrap">
         <table class="table-compact">
             <thead>
@@ -126,6 +184,7 @@ render_header($isEn ? 'SaaS agents' : 'وكلاء الاستضافة', 'saas_age
             </tbody>
         </table>
     </div>
-    <p class="meta"><a href="settings.php?tab=saas"><?php echo e($isEn ? 'SaaS / ZainCash settings' : 'إعدادات الاستضافة / ZainCash'); ?></a></p>
+    <p class="meta"><a href="settings.php?tab=saas"><?php echo e($isEn ? 'SaaS / ZainCash settings' : 'إعدادات الاستضافة / ZainCash'); ?></a>
+        · <a href="migrate_owner_agency.php"><?php echo e($isEn ? 'Office migration' : 'ترحيل المكتب'); ?></a></p>
 </div>
 <?php render_footer(); ?>

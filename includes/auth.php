@@ -877,7 +877,7 @@ function create_admin_user($pdo, $username, $displayName, $password, $role, $lin
     if ($username === '' || $displayName === '' || strlen((string) $password) < 4) {
         return 'invalid';
     }
-    if (!preg_match('/^[a-zA-Z0-9._-]{2,40}$/', $username)) {
+    if (!preg_match('/^[a-zA-Z0-9._@-]{2,40}$/', $username)) {
         return 'username';
     }
     $exists = $pdo->prepare('SELECT id FROM admin_users WHERE username = :u LIMIT 1');

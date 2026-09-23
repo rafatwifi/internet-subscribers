@@ -2442,9 +2442,20 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
         <p style="color:#dd4b39;font-weight:700"><?php echo e($pageError); ?></p>
     <?php endif; ?>
     <?php if (!$sasReady): ?>
-        <p><?php echo e($lang === 'en' ? 'Enable SAS in settings first.' : 'فعّل ربط SAS من الإعدادات أولاً.'); ?>
-            <a href="settings.php?tab=sas"><?php echo e($lang === 'en' ? 'SAS settings' : 'إعدادات SAS'); ?></a>
-        </p>
+        <?php
+        $tidUi = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        ?>
+        <div class="alert alert-error" style="margin:10px 0;font-weight:700">
+            <?php if ($tidUi > 1): ?>
+                <?php echo e($lang === 'en'
+                    ? 'This agency has no SAS login yet. Open Settings → SAS login, enter YOUR page host/user/password, save, then sync. System login is separate from SAS.'
+                    : 'هذي الوكالة ما مربوط لها ساس بعد. ادخل إعدادات → تسجيل الدخول عبر SAS، اكتب رابط/يوزر/باسورد صفحتك، احفظ، ثم اعمل مزامنة. دخول النظام غير دخول الساس.'); ?>
+                — <a href="settings.php?tab=sas"><?php echo e($lang === 'en' ? 'SAS login' : 'تسجيل الدخول عبر SAS'); ?></a>
+            <?php else: ?>
+                <?php echo e($lang === 'en' ? 'Enable SAS in settings first.' : 'فعّل ربط SAS من الإعدادات أولاً.'); ?>
+                <a href="settings.php?tab=sas"><?php echo e($lang === 'en' ? 'SAS settings' : 'إعدادات SAS'); ?></a>
+            <?php endif; ?>
+        </div>
     <?php endif; ?>
 
     <div class="sas-legend">
@@ -2534,9 +2545,16 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
             <?php
             $n = $offset + 1;
             if (!$rows) {
-                $emptyMsg = ($sasReady && $cacheCount <= 0)
-                    ? ($lang === 'en' ? 'Loading users from SAS…' : 'جاري جلب المشتركين من الساس…')
-                    : ($lang === 'en' ? 'No SAS users in cache yet' : 'ماكو مشتركين من الساس بعد');
+                $tidUi2 = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+                if (!$sasReady && $tidUi2 > 1) {
+                    $emptyMsg = ($lang === 'en')
+                        ? 'No users — bind your SAS page in Settings first (system login ≠ SAS).'
+                        : 'ماكو يوزرات — اربط صفحة الساس من الإعدادات أولاً (دخول النظام ≠ دخول الساس).';
+                } elseif ($sasReady && $cacheCount <= 0) {
+                    $emptyMsg = ($lang === 'en') ? 'Loading users from SAS…' : 'جاري جلب المشتركين من الساس…';
+                } else {
+                    $emptyMsg = ($lang === 'en') ? 'No SAS users in cache yet' : 'ماكو مشتركين من الساس بعد';
+                }
                 echo '<tr><td colspan="17">' . e($emptyMsg) . '</td></tr>';
             }
             if (function_exists('phones_known_register_from_rows')) {
