@@ -599,14 +599,31 @@ function subscriber_name_taken($pdo, $name, $excludeId = 0)
     }
     $sql = 'SELECT id FROM subscribers WHERE LOWER(TRIM(name)) = LOWER(:name)';
     $params = array(':name' => $name);
+    if (function_exists('current_tenant_id')) {
+        $sql .= ' AND tenant_id = :tid';
+        $params[':tid'] = (int) current_tenant_id();
+    }
     if ((int) $excludeId > 0) {
         $sql .= ' AND id <> :id';
         $params[':id'] = (int) $excludeId;
     }
     $sql .= ' LIMIT 1';
-    $st = $pdo->prepare($sql);
-    $st->execute($params);
-    return (bool) $st->fetchColumn();
+    try {
+        $st = $pdo->prepare($sql);
+        $st->execute($params);
+        return (bool) $st->fetchColumn();
+    } catch (Exception $e) {
+        $sql2 = 'SELECT id FROM subscribers WHERE LOWER(TRIM(name)) = LOWER(:name)';
+        $params2 = array(':name' => $name);
+        if ((int) $excludeId > 0) {
+            $sql2 .= ' AND id <> :id';
+            $params2[':id'] = (int) $excludeId;
+        }
+        $sql2 .= ' LIMIT 1';
+        $st = $pdo->prepare($sql2);
+        $st->execute($params2);
+        return (bool) $st->fetchColumn();
+    }
 }
 
 /** منع تكرار الاسم في قاعدة البيانات (إن لم توجد مكررات). */

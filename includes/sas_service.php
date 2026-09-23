@@ -85,11 +85,19 @@ function sas_make_connector($config)
         return null;
     }
     global $pdo;
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
     if (isset($pdo) && $pdo && function_exists('sas_make_connector_for_tenant')) {
-        $c = sas_make_connector_for_tenant($pdo, $config);
+        $c = sas_make_connector_for_tenant($pdo, $config, $tid);
         if ($c) {
             return $c;
         }
+        // شركة غير 1: لا تسقط على بيانات ساس العامة (شركة أخرى)
+        if ($tid > 1) {
+            return null;
+        }
+    }
+    if ($tid > 1) {
+        return null;
     }
     $s = sas_config($config);
     if ($s['host'] === '' || $s['username'] === '' || $s['password'] === '') {

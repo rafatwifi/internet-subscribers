@@ -296,6 +296,19 @@ function cards_filter_groups_scope($pdo, $groups)
             $allowed[strtolower(trim((string) $r['username']))] = true;
         }
     } catch (Exception $e) {
+        // فشل الفلترة = لا تُظهر كروت مستخدمة أجنبية
+        foreach ($groups as &$g0) {
+            if (empty($g0['cards']) || !is_array($g0['cards'])) {
+                continue;
+            }
+            $g0['cards'] = array_values(array_filter($g0['cards'], function ($c) {
+                return empty($c['used']);
+            }));
+            $g0['used'] = 0;
+            $g0['unused'] = count($g0['cards']);
+            $g0['total'] = $g0['unused'];
+        }
+        unset($g0);
         return $groups;
     }
     foreach ($groups as &$g) {

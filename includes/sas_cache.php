@@ -960,22 +960,45 @@ function sas_cache_pick_local($pdo, $username, $sasUserId, $phone)
 {
     $username = trim((string) $username);
     $sasUserId = (int) $sasUserId;
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tid <= 0) {
+        $tid = 1;
+    }
+    $tenantSql = ' AND tenant_id = ' . (int) $tid;
 
     if ($sasUserId > 0) {
-        $st = $pdo->prepare('SELECT * FROM subscribers WHERE sas_user_id = :id LIMIT 1');
-        $st->execute(array(':id' => $sasUserId));
-        $row = $st->fetch();
-        if ($row) {
-            return $row;
+        try {
+            $st = $pdo->prepare('SELECT * FROM subscribers WHERE sas_user_id = :id' . $tenantSql . ' LIMIT 1');
+            $st->execute(array(':id' => $sasUserId));
+            $row = $st->fetch();
+            if ($row) {
+                return $row;
+            }
+        } catch (Exception $e) {
+            $st = $pdo->prepare('SELECT * FROM subscribers WHERE sas_user_id = :id LIMIT 1');
+            $st->execute(array(':id' => $sasUserId));
+            $row = $st->fetch();
+            if ($row) {
+                return $row;
+            }
         }
     }
 
     if ($username !== '') {
-        $st = $pdo->prepare('SELECT * FROM subscribers WHERE sas_username = :u LIMIT 1');
-        $st->execute(array(':u' => $username));
-        $row = $st->fetch();
-        if ($row) {
-            return $row;
+        try {
+            $st = $pdo->prepare('SELECT * FROM subscribers WHERE sas_username = :u' . $tenantSql . ' LIMIT 1');
+            $st->execute(array(':u' => $username));
+            $row = $st->fetch();
+            if ($row) {
+                return $row;
+            }
+        } catch (Exception $e) {
+            $st = $pdo->prepare('SELECT * FROM subscribers WHERE sas_username = :u LIMIT 1');
+            $st->execute(array(':u' => $username));
+            $row = $st->fetch();
+            if ($row) {
+                return $row;
+            }
         }
     }
 
@@ -984,19 +1007,35 @@ function sas_cache_pick_local($pdo, $username, $sasUserId, $phone)
         return null;
     }
 
-    $st = $pdo->prepare(
-        'SELECT s.*,
-            (SELECT COALESCE(SUM(amount),0) FROM invoices i WHERE i.subscriber_id = s.id AND i.status = "unpaid") AS debt
-         FROM subscribers s
-         WHERE REPLACE(REPLACE(REPLACE(s.phone, "+", ""), "-", ""), " ", "") LIKE :tail
-            OR s.phone LIKE :q
-         ORDER BY debt DESC, s.id ASC'
-    );
-    $st->execute(array(
-        ':tail' => '%' . $digits,
-        ':q' => '%' . $digits . '%',
-    ));
-    $matches = $st->fetchAll();
+    try {
+        $st = $pdo->prepare(
+            'SELECT s.*,
+                (SELECT COALESCE(SUM(amount),0) FROM invoices i WHERE i.subscriber_id = s.id AND i.status = "unpaid") AS debt
+             FROM subscribers s
+             WHERE (REPLACE(REPLACE(REPLACE(s.phone, "+", ""), "-", ""), " ", "") LIKE :tail
+                OR s.phone LIKE :q)' . $tenantSql . '
+             ORDER BY debt DESC, s.id ASC'
+        );
+        $st->execute(array(
+            ':tail' => '%' . $digits,
+            ':q' => '%' . $digits . '%',
+        ));
+        $matches = $st->fetchAll();
+    } catch (Exception $e) {
+        $st = $pdo->prepare(
+            'SELECT s.*,
+                (SELECT COALESCE(SUM(amount),0) FROM invoices i WHERE i.subscriber_id = s.id AND i.status = "unpaid") AS debt
+             FROM subscribers s
+             WHERE REPLACE(REPLACE(REPLACE(s.phone, "+", ""), "-", ""), " ", "") LIKE :tail
+                OR s.phone LIKE :q
+             ORDER BY debt DESC, s.id ASC'
+        );
+        $st->execute(array(
+            ':tail' => '%' . $digits,
+            ':q' => '%' . $digits . '%',
+        ));
+        $matches = $st->fetchAll();
+    }
     if (!$matches) {
         return null;
     }
@@ -1097,8 +1136,14 @@ function sas_cache_ensure_local($pdo, $config, $cacheRow)
     $local = sas_cache_pick_local($pdo, $username, $sasUserId, $phone);
     if ($local) {
         $id = sas_cache_link_local_fields($pdo, $local, $username, $sasUserId);
-        $pdo->prepare('UPDATE sas_users_cache SET local_subscriber_id = :lid WHERE username = :u')
-            ->execute(array(':lid' => $id, ':u' => $username));
+        $tidLink = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        try {
+            $pdo->prepare('UPDATE sas_users_cache SET local_subscriber_id = :lid WHERE username = :u AND tenant_id = :t')
+                ->execute(array(':lid' => $id, ':u' => $username, ':t' => $tidLink));
+        } catch (Exception $e) {
+            $pdo->prepare('UPDATE sas_users_cache SET local_subscriber_id = :lid WHERE username = :u')
+                ->execute(array(':lid' => $id, ':u' => $username));
+        }
         // إذا المحلي وهمي والكاش فيه رقم حقيقي — حدّث المحلي
         $localPhone = isset($local['phone']) ? (string) $local['phone'] : '';
         if ($phone !== '' && function_exists('phone_is_placeholder') && phone_is_placeholder($localPhone)
@@ -3245,73 +3290,118 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
     if ($tenantId <= 0) {
         $tenantId = 1;
     }
-    if (!$ins) {
-        $ins = $pdo->prepare(
-            'INSERT INTO sas_users_cache
-                (tenant_id, username, sas_user_id, firstname, lastname, display_name, phone, profile_id, profile_name,
-                 enabled, expire_at, parent_id, parent_name, city, email, company, last_online, is_online, framed_ip, daily_traffic, local_subscriber_id, synced_at)
-             VALUES
-                (:tenant_id, :username, :sas_user_id, :firstname, :lastname, :display_name, :phone, :profile_id, :profile_name,
-                 :enabled, :expire_at, :parent_id, :parent_name, :city, :email, :company, :last_online, :is_online, :framed_ip, :daily_traffic, :local_subscriber_id, :synced_at)
-             ON DUPLICATE KEY UPDATE
-                tenant_id = VALUES(tenant_id),
-                sas_user_id = VALUES(sas_user_id),
-                firstname = VALUES(firstname),
-                lastname = VALUES(lastname),
-                display_name = VALUES(display_name),
-                phone = VALUES(phone),
-                profile_id = VALUES(profile_id),
-                profile_name = VALUES(profile_name),
-                enabled = VALUES(enabled),
-                expire_at = VALUES(expire_at),
-                parent_id = VALUES(parent_id),
-                parent_name = VALUES(parent_name),
-                city = VALUES(city),
-                email = VALUES(email),
-                company = VALUES(company),
-                last_online = IF(VALUES(last_online) IS NULL, last_online, VALUES(last_online)),
-                is_online = IF(VALUES(is_online) = 1, 1, is_online),
-                framed_ip = IF(VALUES(framed_ip) IS NULL OR VALUES(framed_ip) = "", framed_ip, VALUES(framed_ip)),
-                daily_traffic = IF(VALUES(daily_traffic) IS NULL, daily_traffic, VALUES(daily_traffic)),
-                local_subscriber_id = IF(VALUES(local_subscriber_id) IS NULL, local_subscriber_id, VALUES(local_subscriber_id)),
-                synced_at = VALUES(synced_at)'
-        );
+    // حاول إصلاح PK المركب قبل الكتابة (لا تسرق صف شركة أخرى)
+    if (function_exists('tenants_migrate_sas_cache_pk')) {
+        try {
+            tenants_migrate_sas_cache_pk($pdo);
+        } catch (Exception $e) {
+        }
     }
     $sasUserId = function_exists('sas_extract_user_id') ? sas_extract_user_id($row) : 0;
     $phone = sas_clip(sas_cache_phone_raw($row), 40);
     $fn = isset($row['firstname']) && !is_array($row['firstname']) ? sas_clip($row['firstname'], 150) : '';
     $ln = isset($row['lastname']) && !is_array($row['lastname']) ? sas_clip($row['lastname'], 150) : '';
+    $params = array(
+        ':tenant_id' => $tenantId,
+        ':username' => $username,
+        ':sas_user_id' => $sasUserId > 0 ? $sasUserId : null,
+        ':firstname' => $fn !== '' ? $fn : null,
+        ':lastname' => $ln !== '' ? $ln : null,
+        ':display_name' => sas_clip(sas_cache_display_name($row), 200),
+        ':phone' => $phone !== '' ? $phone : null,
+        ':profile_id' => ($pid = sas_cache_profile_id($row)) > 0 ? $pid : null,
+        ':profile_name' => (($pn = sas_cache_profile_name($row)) !== '' ? sas_clip($pn, 150) : null),
+        ':enabled' => sas_cache_enabled($row),
+        ':expire_at' => sas_cache_expire_at($row),
+        ':parent_id' => ($parId = sas_cache_parent_id($row)) > 0 ? $parId : null,
+        ':parent_name' => (($parN = sas_cache_parent_name($row)) !== '' ? sas_clip($parN, 80) : null),
+        ':city' => (($city = sas_cache_str_field($row, array('city'))) !== '' ? sas_clip($city, 120) : null),
+        ':email' => (($em = sas_cache_str_field($row, array('email'))) !== '' ? sas_clip($em, 150) : null),
+        ':company' => (($co = sas_cache_str_field($row, array('company'))) !== '' ? sas_clip($co, 150) : null),
+        ':last_online' => sas_cache_last_online($row),
+        ':is_online' => sas_cache_is_online_row($row),
+        ':framed_ip' => (($ip = sas_cache_framed_ip($row)) !== '' ? sas_clip($ip, 45) : null),
+        ':daily_traffic' => (($tr = sas_cache_daily_traffic($row)) !== '' ? sas_clip($tr, 60) : null),
+        ':synced_at' => $nowSql,
+    );
     try {
-        $ins->execute(array(
-            ':tenant_id' => $tenantId,
-            ':username' => $username,
-            ':sas_user_id' => $sasUserId > 0 ? $sasUserId : null,
-            ':firstname' => $fn !== '' ? $fn : null,
-            ':lastname' => $ln !== '' ? $ln : null,
-            ':display_name' => sas_clip(sas_cache_display_name($row), 200),
-            ':phone' => $phone !== '' ? $phone : null,
-            ':profile_id' => ($pid = sas_cache_profile_id($row)) > 0 ? $pid : null,
-            ':profile_name' => (($pn = sas_cache_profile_name($row)) !== '' ? sas_clip($pn, 150) : null),
-            ':enabled' => sas_cache_enabled($row),
-            ':expire_at' => sas_cache_expire_at($row),
-            ':parent_id' => ($parId = sas_cache_parent_id($row)) > 0 ? $parId : null,
-            ':parent_name' => (($parN = sas_cache_parent_name($row)) !== '' ? sas_clip($parN, 80) : null),
-            ':city' => (($city = sas_cache_str_field($row, array('city'))) !== '' ? sas_clip($city, 120) : null),
-            ':email' => (($em = sas_cache_str_field($row, array('email'))) !== '' ? sas_clip($em, 150) : null),
-            ':company' => (($co = sas_cache_str_field($row, array('company'))) !== '' ? sas_clip($co, 150) : null),
-            ':last_online' => sas_cache_last_online($row),
-            ':is_online' => sas_cache_is_online_row($row),
-            ':framed_ip' => (($ip = sas_cache_framed_ip($row)) !== '' ? sas_clip($ip, 45) : null),
-            ':daily_traffic' => (($tr = sas_cache_daily_traffic($row)) !== '' ? sas_clip($tr, 60) : null),
-            ':local_subscriber_id' => null,
-            ':synced_at' => $nowSql,
-        ));
+        // هل يوجد صف لهذه الشركة؟
+        $ex = $pdo->prepare('SELECT 1 FROM sas_users_cache WHERE tenant_id = :t AND username = :u LIMIT 1');
+        $ex->execute(array(':t' => $tenantId, ':u' => $username));
+        $exists = (bool) $ex->fetchColumn();
+        if ($exists) {
+            // تحديث صف هذه الشركة فقط — لا تلمس tenant آخر حتى لو PK قديم على username فقط
+            $upd = $pdo->prepare(
+                'UPDATE sas_users_cache SET
+                    sas_user_id = :sas_user_id,
+                    firstname = :firstname,
+                    lastname = :lastname,
+                    display_name = :display_name,
+                    phone = :phone,
+                    profile_id = :profile_id,
+                    profile_name = :profile_name,
+                    enabled = :enabled,
+                    expire_at = :expire_at,
+                    parent_id = :parent_id,
+                    parent_name = :parent_name,
+                    city = :city,
+                    email = :email,
+                    company = :company,
+                    last_online = IF(:last_online_chk IS NULL, last_online, :last_online2),
+                    is_online = IF(:is_online_chk = 1, 1, is_online),
+                    framed_ip = IF(:framed_ip_chk IS NULL OR :framed_ip_chk = "", framed_ip, :framed_ip2),
+                    daily_traffic = IF(:daily_traffic_chk IS NULL, daily_traffic, :daily_traffic2),
+                    synced_at = :synced_at
+                 WHERE tenant_id = :tenant_id AND username = :username'
+            );
+            $updParams = $params;
+            $updParams[':last_online_chk'] = $params[':last_online'];
+            $updParams[':last_online2'] = $params[':last_online'];
+            $updParams[':framed_ip_chk'] = $params[':framed_ip'];
+            $updParams[':framed_ip2'] = $params[':framed_ip'];
+            $updParams[':daily_traffic_chk'] = $params[':daily_traffic'];
+            $updParams[':daily_traffic2'] = $params[':daily_traffic'];
+            $updParams[':is_online_chk'] = $params[':is_online'];
+            $upd->execute($updParams);
+            return true;
+        }
+        // لا يوجد صف لهذه الشركة — أدخل صفاً جديداً
+        $insSql = $pdo->prepare(
+            'INSERT INTO sas_users_cache
+                (tenant_id, username, sas_user_id, firstname, lastname, display_name, phone, profile_id, profile_name,
+                 enabled, expire_at, parent_id, parent_name, city, email, company, last_online, is_online, framed_ip, daily_traffic, local_subscriber_id, synced_at)
+             VALUES
+                (:tenant_id, :username, :sas_user_id, :firstname, :lastname, :display_name, :phone, :profile_id, :profile_name,
+                 :enabled, :expire_at, :parent_id, :parent_name, :city, :email, :company, :last_online, :is_online, :framed_ip, :daily_traffic, NULL, :synced_at)'
+        );
+        $insSql->execute($params);
         return true;
     } catch (Exception $e) {
+        // إن تعارض username بسبب PK قديم: حدّث فقط إن كان نفس الشركة، وإلا تجاهل السرقة
+        try {
+            $chk = $pdo->prepare('SELECT tenant_id FROM sas_users_cache WHERE username = :u LIMIT 1');
+            $chk->execute(array(':u' => $username));
+            $existTid = (int) $chk->fetchColumn();
+            if ($existTid === $tenantId) {
+                $pdo->prepare(
+                    'UPDATE sas_users_cache SET synced_at = :s, display_name = :d, enabled = :e, expire_at = :x, parent_id = :p
+                     WHERE username = :u AND tenant_id = :t'
+                )->execute(array(
+                    ':s' => $nowSql,
+                    ':d' => $params[':display_name'],
+                    ':e' => $params[':enabled'],
+                    ':x' => $params[':expire_at'],
+                    ':p' => $params[':parent_id'],
+                    ':u' => $username,
+                    ':t' => $tenantId,
+                ));
+                return true;
+            }
+        } catch (Exception $e2) {
+        }
         return false;
     }
 }
-
 function sas_cache_sync_local_phone($pdo, $username, $phone)
 {
     $username = trim((string) $username);
@@ -3322,14 +3412,15 @@ function sas_cache_sync_local_phone($pdo, $username, $phone)
     if ($store === '') {
         $store = trim((string) $phone);
     }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
     try {
         $lid = 0;
-        $st = $pdo->prepare('SELECT local_subscriber_id FROM sas_users_cache WHERE username = :u LIMIT 1');
-        $st->execute(array(':u' => $username));
+        $st = $pdo->prepare('SELECT local_subscriber_id FROM sas_users_cache WHERE username = :u AND tenant_id = :t LIMIT 1');
+        $st->execute(array(':u' => $username, ':t' => $tid));
         $lid = (int) $st->fetchColumn();
         if ($lid <= 0) {
-            $st2 = $pdo->prepare('SELECT id FROM subscribers WHERE sas_username = :u LIMIT 1');
-            $st2->execute(array(':u' => $username));
+            $st2 = $pdo->prepare('SELECT id FROM subscribers WHERE sas_username = :u AND tenant_id = :t LIMIT 1');
+            $st2->execute(array(':u' => $username, ':t' => $tid));
             $lid = (int) $st2->fetchColumn();
         }
         if ($lid > 0) {
@@ -3451,6 +3542,12 @@ function sas_cache_pull_search($pdo, $config, $q)
 function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
 {
     ensure_sas_users_cache_table($pdo);
+    if (function_exists('tenants_migrate_sas_cache_pk')) {
+        try {
+            tenants_migrate_sas_cache_pk($pdo);
+        } catch (Exception $e) {
+        }
+    }
     $meta = sas_sync_meta($pdo);
 
     if (!function_exists('sas_is_ready') || !sas_is_ready($config)) {
@@ -3574,6 +3671,17 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
                 $saved++;
             }
         }
+        if ($rows && $saved <= 0) {
+            $pkHint = '';
+            if (function_exists('tenants_sas_cache_pk_is_ok') && !tenants_sas_cache_pk_is_ok($pdo)) {
+                $pkHint = ' — مفتاح كاش الساس غير مركّب (tenant_id+username)';
+            }
+            sas_sync_meta_save($pdo, array(
+                'syncing_at' => null,
+                'last_error' => 'الساس رجّع مشتركين لكن ما انحفظوا بالكاش' . $pkHint,
+            ));
+            return array(false, 0, 'error', sas_sync_meta($pdo));
+        }
 
         $nextPage = $pageNum + 1;
         if (!$rows && $pageNum <= 1) {
@@ -3622,6 +3730,13 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
             $totalNow = (int) $pdo->query(
                 'SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = ' . (int) $tenantId
             )->fetchColumn();
+            if ($expected > 0 && $totalNow <= 0) {
+                sas_sync_meta_save($pdo, array(
+                    'syncing_at' => null,
+                    'last_error' => 'انتهت المزامنة بدون حفظ مشتركين لهذه الشركة',
+                ));
+                return array(false, 0, 'error', sas_sync_meta($pdo));
+            }
             try {
                 sas_refresh_online_flags($pdo, $config);
             } catch (Exception $e) {

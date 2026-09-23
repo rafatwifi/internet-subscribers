@@ -195,35 +195,61 @@ function tenants_ensure_column($pdo, $table, $col, $sqlType)
     }
 }
 
-function tenants_migrate_sas_cache_pk($pdo)
+function tenants_sas_cache_pk_is_ok($pdo)
 {
-    static $pkDone = false;
-    if ($pkDone) {
-        return;
-    }
-    $pkDone = true;
     try {
         $pk = $pdo->query("SHOW KEYS FROM sas_users_cache WHERE Key_name = 'PRIMARY'")->fetchAll();
         $cols = array();
         foreach ($pk as $r) {
             $cols[] = isset($r['Column_name']) ? $r['Column_name'] : '';
         }
-        if (in_array('tenant_id', $cols, true) && in_array('username', $cols, true) && count($cols) >= 2) {
-            return;
+        return in_array('tenant_id', $cols, true) && in_array('username', $cols, true) && count($cols) >= 2;
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+function tenants_migrate_sas_cache_pk($pdo)
+{
+    static $pkDone = false;
+    static $pkOk = false;
+    if ($pkDone && $pkOk) {
+        return $pkOk;
+    }
+    if (function_exists('ensure_sas_users_cache_table')) {
+        try {
+            ensure_sas_users_cache_table($pdo);
+        } catch (Exception $e) {
         }
-        // إسقاط PK القديم ثم مركّب
+    }
+    tenants_ensure_column($pdo, 'sas_users_cache', 'tenant_id', 'INT UNSIGNED NOT NULL DEFAULT 1');
+    try {
+        $pdo->exec('UPDATE sas_users_cache SET tenant_id = 1 WHERE tenant_id IS NULL OR tenant_id = 0');
+    } catch (Exception $e) {
+    }
+    if (tenants_sas_cache_pk_is_ok($pdo)) {
+        $pkDone = true;
+        $pkOk = true;
+        return true;
+    }
+    try {
         try {
             $pdo->exec('ALTER TABLE sas_users_cache DROP PRIMARY KEY');
         } catch (Exception $e) {
         }
         $pdo->exec('ALTER TABLE sas_users_cache ADD PRIMARY KEY (tenant_id, username)');
     } catch (Exception $e) {
-        // ignore — قد يكون الجدول فارغاً أو القفل مشغولاً
+        $pkDone = false;
+        $pkOk = false;
+        return false;
     }
     try {
         $pdo->exec('ALTER TABLE sas_users_cache ADD INDEX idx_sas_tenant (tenant_id)');
     } catch (Exception $e) {
     }
+    $pkOk = tenants_sas_cache_pk_is_ok($pdo);
+    $pkDone = $pkOk;
+    return $pkOk;
 }
 
 function tenants_migrate_sync_meta($pdo)
