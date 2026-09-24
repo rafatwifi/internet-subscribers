@@ -1968,7 +1968,7 @@ if ($sasTenantIdUi > 1) {
                         <option value="<?php echo $cid; ?>"
                                 data-host="<?php echo e($cHost); ?>"
                             <?php echo $sasCompanyIdUi === $cid ? 'selected' : ''; ?>>
-                            <?php echo e($co['name']); ?> — <?php echo e($cHost); ?>
+                            <?php echo e($co['name']); ?>
                         </option>
                     <?php endforeach; ?>
                 </select>

@@ -243,6 +243,10 @@ $tenantSasAccountsFile = __DIR__ . '/tenant_sas_accounts.php';
 if (is_file($tenantSasAccountsFile)) {
     require_once $tenantSasAccountsFile;
 }
+$platformAdminFile = __DIR__ . '/platform_admin.php';
+if (is_file($platformAdminFile)) {
+    require_once $platformAdminFile;
+}
 if (function_exists('app_remember_try_restore')) {
     app_remember_try_restore($pdo);
 }

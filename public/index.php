@@ -403,6 +403,7 @@ if ($showCardAccountingDash && function_exists('card_accounting_dashboard')) {
 render_header(t('dashboard'), 'dashboard', '');
 $dashTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
 $dashSasReady = function_exists('sas_is_ready') && sas_is_ready($config);
+$isPlatformDash = function_exists('is_super_admin_user') && is_super_admin_user();
 if ($dashTid > 1 && !$dashSasReady):
 ?>
 <div class="alert alert-error" style="margin:12px 14px;font-weight:700">
@@ -413,6 +414,100 @@ if ($dashTid > 1 && !$dashSasReady):
     <a href="settings.php?tab=sas"><?php echo e($isEn ? 'Add SAS account' : 'إضافة حساب ساس'); ?></a>
 </div>
 <?php
+endif;
+
+if ($isPlatformDash && function_exists('platform_admin_dashboard_stats')):
+    $pad = platform_admin_dashboard_stats($pdo, $config);
+    $fmtMs = function ($ms) {
+        if ($ms === null || $ms === '') {
+            return '—';
+        }
+        return number_format((float) $ms, 0) . ' ms';
+    };
+?>
+<style>
+.sas-dash { font-family: inherit; width: 100%; box-sizing: border-box; }
+.sas-dash .sas-boxes {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin: 0 0 18px;
+  width: 100%;
+}
+@media (max-width: 1100px) { .sas-dash .sas-boxes { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .sas-dash .sas-boxes { grid-template-columns: 1fr; gap: 11px; } }
+.sas-box {
+  --c1: #0f766e; --c2: #115e59; --ink: #ffffff;
+  position: relative; overflow: hidden; display: flex; flex-direction: column; justify-content: space-between;
+  color: var(--ink) !important; text-decoration: none !important; border-radius: 2px 20px 2px 16px;
+  min-height: 112px; padding: 16px 16px 14px 18px;
+  background: linear-gradient(145deg, var(--c1) 0%, var(--c2) 100%);
+  box-shadow: 6px 7px 0 rgba(15, 23, 42, 0.12);
+}
+.sas-box-title { font-size: 13px; font-weight: 800; opacity: .95; z-index: 1; }
+.sas-box-sub { font-size: 11px; font-weight: 600; opacity: .8; margin-top: 2px; z-index: 1; }
+.sas-box-val { font-size: 28px; font-weight: 800; margin-top: 10px; z-index: 1; }
+.sas-box.tone-blue { --c1: #38bdf8; --c2: #0369a1; }
+.sas-box.tone-green { --c1: #4ade80; --c2: #15803d; }
+.sas-box.tone-red { --c1: #fb7185; --c2: #be123c; }
+.sas-box.tone-yellow { --c1: #fbbf24; --c2: #b45309; }
+.sas-box.tone-teal { --c1: #2dd4bf; --c2: #0f766e; }
+.sas-box.tone-navy { --c1: #64748b; --c2: #1e293b; }
+.sas-box.tone-lime { --c1: #a3e635; --c2: #4d7c0f; }
+.sas-box.tone-purple { --c1: #fb923c; --c2: #c2410c; }
+.sas-box.tone-aqua { --c1: #22d3ee; --c2: #0e7490; }
+.plat-ping-table { width:100%; border-collapse:collapse; font-size:13px; }
+.plat-ping-table th, .plat-ping-table td { padding:8px 10px; border-bottom:1px solid #e2e8f0; text-align:start; }
+</style>
+<div class="sas-dash" style="padding:12px 14px">
+    <h2 style="font-size:16px;margin:0 0 12px"><?php echo e($isEn ? 'Platform overview' : 'لوحة المنصة'); ?></h2>
+    <div class="sas-boxes">
+    <?php
+    $en = $isEn;
+    dash_sas_box('saas_agents.php', 'tone-blue', $en ? 'System users' : 'مستخدمي النظام', $en ? 'Agencies' : 'الوكالات', (string) (int) $pad['users_total'], '👥');
+    dash_sas_box('saas_agents.php', 'tone-green', $en ? 'Active' : 'الفعالين', '', (string) (int) $pad['users_active'], '✓');
+    dash_sas_box('saas_agents.php', 'tone-red', $en ? 'Expired' : 'منتهية الاشتراك', '', (string) (int) $pad['users_expired'], '⏱');
+    dash_sas_box('saas_agents.php', 'tone-yellow', $en ? 'Trial' : 'تجريبيين', $en ? 'Pending: ' . (int) $pad['users_pending'] : ('بانتظار: ' . (int) $pad['users_pending']), (string) (int) $pad['users_trial'], '🧪');
+    dash_sas_box('settings.php', 'tone-navy', $en ? 'System version' : 'إصدار النظام', '', 'v' . (string) $pad['version'], '📦');
+    dash_sas_box('settings.php', 'tone-lime', $en ? 'Google bank' : 'البنك على كوكل', $pad['google_ok'] ? ($en ? 'OK' : 'شغال') : ($en ? 'Down' : 'توقف'), $fmtMs($pad['google_ms']), '🌐');
+    dash_sas_box('index.php', 'tone-teal', $en ? 'Date & time' : 'الوقت والتاريخ', '', (string) $pad['datetime'], '🕒');
+    dash_sas_box('saas_agents.php', 'tone-purple', $en ? 'Sales' : 'المبيعات', $en ? 'Card transfers' : 'تحويلات الكروت', money_format_iqd($pad['sales'], $config['currency']), '🧾');
+    dash_sas_box('saas_agents.php', 'tone-aqua', $en ? 'Received' : 'المستلم', '', money_format_iqd($pad['received'], $config['currency']), '💵');
+    dash_sas_box('saas_agents.php', 'tone-red', $en ? 'Debt' : 'الدين', '', money_format_iqd($pad['debt'], $config['currency']), '📄');
+    ?>
+    </div>
+    <div class="panel" style="padding:12px 14px;margin:0">
+        <h3 style="margin:0 0 10px;font-size:15px"><?php echo e($isEn ? 'Reseller ping per company' : 'البنك على الريسيلر لكل شركة'); ?></h3>
+        <?php if (empty($pad['companies'])): ?>
+            <p class="meta"><?php echo e($isEn ? 'Add companies (name + host) first.' : 'أضف شركات (اسم + هوست) أولاً من صفحة الشركات.'); ?>
+                — <a href="companies.php"><?php echo e($isEn ? 'Companies' : 'الشركات'); ?></a></p>
+        <?php else: ?>
+        <table class="plat-ping-table">
+            <thead>
+            <tr>
+                <th><?php echo e($isEn ? 'Company' : 'الشركة'); ?></th>
+                <th><?php echo e($isEn ? 'Host' : 'الهوست'); ?></th>
+                <th><?php echo e($isEn ? 'Ping' : 'البنك'); ?></th>
+                <th><?php echo e($isEn ? 'Status' : 'الحالة'); ?></th>
+            </tr>
+            </thead>
+            <tbody>
+            <?php foreach ($pad['companies'] as $co): ?>
+                <tr>
+                    <td><?php echo e($co['name']); ?></td>
+                    <td class="ltr"><?php echo e($co['host']); ?></td>
+                    <td class="ltr"><?php echo e($fmtMs($co['ms'])); ?></td>
+                    <td><?php echo !empty($co['ok']) ? e($isEn ? 'OK' : 'شغال') : e($isEn ? 'Fail' : 'فشل'); ?></td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+        <?php endif; ?>
+    </div>
+</div>
+<?php
+    render_footer();
+    return;
 endif;
 ?>
 <style>

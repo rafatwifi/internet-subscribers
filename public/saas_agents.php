@@ -60,7 +60,7 @@ try {
 } catch (Exception $e) {
 }
 
-render_header($isEn ? 'SaaS agents' : 'وكلاء الاستضافة', 'saas_agents');
+render_header($isEn ? 'System users' : 'مستخدمي النظام', 'saas_agents');
 ?>
 <div class="panel">
     <h2><?php echo e($isEn ? 'Platform overview' : 'ملخص المنصة'); ?></h2>
@@ -112,7 +112,7 @@ render_header($isEn ? 'SaaS agents' : 'وكلاء الاستضافة', 'saas_age
     </div>
 </div>
 <div class="panel">
-    <h2><?php echo e($isEn ? 'Registered agencies' : 'الوكالات المسجّلة'); ?></h2>
+    <h2><?php echo e($isEn ? 'System users (agencies)' : 'مستخدمي النظام (الوكالات)'); ?></h2>
     <p class="meta"><?php echo e($isEn
         ? 'Approve pending agents to start their trial. Each agency binds its own SAS (not system login).'
         : 'وافق على الطلبات لبدء التجريبي. كل وكالة تربط ساسها بنفسها (مو دخول النظام).'); ?></p>

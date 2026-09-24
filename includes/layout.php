@@ -206,16 +206,38 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <button class="sidebar-close" type="button" id="sidebarClose" aria-label="<?php echo e(t('menu')); ?>">×</button>
         </div>
         <nav class="side-links">
+            <?php
+            $isPlatformAdmin = function_exists('is_super_admin_user') && is_super_admin_user();
+            $navTidEarly = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+            ?>
+            <?php if ($isPlatformAdmin): ?>
+            <?php /* —— قائمة أدمن المنصة فقط —— */ ?>
+            <a class="<?php echo $active === 'dashboard' ? 'active' : ''; ?>" href="index.php"><?php echo e(t('dashboard')); ?></a>
+            <a class="<?php echo $active === 'companies' ? 'active' : ''; ?>" href="companies.php"><?php echo e($isEn ? 'Companies' : 'الشركات'); ?></a>
+            <a class="<?php echo $active === 'saas_agents' ? 'active' : ''; ?>" href="saas_agents.php"><?php echo e($isEn ? 'System users' : 'مستخدمي النظام'); ?></a>
+            <?php if ($can('subscribers')): ?>
+            <a class="<?php echo $active === 'import_export' ? 'active' : ''; ?>" href="import_export.php"><?php echo e($isEn ? 'Import & Export' : 'استيراد وتصدير'); ?></a>
+            <?php endif; ?>
+            <?php if ($can('subscriptions')): ?>
+            <a class="<?php echo $active === 'subscriptions' ? 'active' : ''; ?>" href="subscriptions.php"><?php echo e($isEn ? 'System activity' : 'حركات النظام'); ?></a>
+            <?php endif; ?>
+            <?php if ($can('logs')): ?>
+            <a class="<?php echo $active === 'logs' ? 'active' : ''; ?>" href="logs.php"><?php echo e($isEn ? 'Log' : 'اللوك'); ?></a>
+            <?php endif; ?>
+            <?php if ($can('settings') || $can('users') || $can('plans') || $can('backup')): ?>
+            <a class="<?php echo $settingsActive && $active !== 'schedule' ? 'active' : ''; ?>" href="settings.php"><?php echo e(t('settings')); ?></a>
+            <?php endif; ?>
+            <a class="<?php echo $active === 'company' ? 'active' : ''; ?>" href="company.php"><?php echo e($isEn ? 'About company' : 'عن الشركة'); ?></a>
+            <a href="logout.php"><?php echo e(t('logout')); ?></a>
+            <?php else: ?>
+            <?php /* —— قائمة الوكالة / الوكيل (كل خصائص المشتركين تبقى هنا) —— */ ?>
             <?php if ($can('dashboard')): ?>
             <a class="<?php echo $active === 'dashboard' ? 'active' : ''; ?>" href="index.php"><?php echo e(t('dashboard')); ?></a>
             <?php endif; ?>
             <?php if ($can('subscribers')): ?>
             <a class="<?php echo $active === 'sas' ? 'active' : ''; ?>" href="sas.php"><?php echo e(t('sas')); ?></a>
             <?php endif; ?>
-            <?php
-            $navTidEarly = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
-            if ($navTidEarly > 1):
-            ?>
+            <?php if ($navTidEarly > 1): ?>
             <a class="<?php echo ($active === 'settings' || $active === 'my_sas') ? 'active' : ''; ?>" href="settings.php?tab=sas"><?php echo e($isEn ? 'SAS accounts' : 'حسابات الساس'); ?></a>
             <?php endif; ?>
             <?php if ($can('cards')): ?>
@@ -226,10 +248,6 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <?php endif; ?>
             <?php if ($can('agents')): ?>
             <a class="<?php echo $active === 'agents' ? 'active' : ''; ?>" href="agents.php"><?php echo e($isEn ? 'Agents' : 'الوكلاء'); ?></a>
-            <?php endif; ?>
-            <?php if (function_exists('is_super_admin_user') && is_super_admin_user()): ?>
-            <a class="<?php echo $active === 'companies' ? 'active' : ''; ?>" href="companies.php"><?php echo e($isEn ? 'Companies' : 'الشركات'); ?></a>
-            <a class="<?php echo $active === 'saas_agents' ? 'active' : ''; ?>" href="saas_agents.php"><?php echo e($isEn ? 'SaaS agents' : 'وكلاء الاستضافة'); ?></a>
             <?php endif; ?>
             <?php if ($can('cards') || $can('agents') || (function_exists('is_agent_user') && is_agent_user())): ?>
             <a class="<?php echo $active === 'prices' || $active === 'agent_prices' ? 'active' : ''; ?>" href="agent_prices.php"><?php echo e($isEn ? 'Card prices' : 'تسعير الكروت'); ?></a>
@@ -263,17 +281,17 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <?php endif; ?>
             <a class="<?php echo $active === 'company' ? 'active' : ''; ?>" href="company.php"><?php echo e($isEn ? 'Company' : 'عن الشركة'); ?></a>
             <?php
-            $navTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+            $navTid = $navTidEarly;
             if ($navTid > 1):
             ?>
             <a class="<?php echo $active === 'billing' ? 'active' : ''; ?>" href="billing.php"><?php echo e($isEn ? 'Billing' : 'الاشتراك'); ?></a>
             <?php endif; ?>
             <?php
-            // وكيل / وكالة: بدون تسجيل خروج بالقائمة الجانبية (من القائمة العلوية)
             $hideSideLogout = (function_exists('is_agent_user') && is_agent_user()) || $navTid > 1;
             if (!$hideSideLogout):
             ?>
             <a href="logout.php"><?php echo e(t('logout')); ?></a>
+            <?php endif; ?>
             <?php endif; ?>
         </nav>
     </aside>

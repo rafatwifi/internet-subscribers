@@ -484,10 +484,30 @@ function tenants_list($pdo)
 
 /**
  * شركات الإدمن اللي عليها هوست ساس — لاختيار الوكالة
- * (يفضّل الشركات بدون مالك SaaS، مع إبقاء أي هوست فريد موجود)
+ * يفضّل جدول platform_companies ثم القديم من tenants
  */
 function tenants_sas_company_catalog($pdo, $config = null)
 {
+    if (function_exists('ensure_platform_companies_schema')) {
+        ensure_platform_companies_schema($pdo);
+    }
+    if (function_exists('platform_companies_list')) {
+        $pc = platform_companies_list($pdo, true);
+        if ($pc) {
+            $out = array();
+            foreach ($pc as $r) {
+                $out[] = array(
+                    'id' => (int) $r['id'],
+                    'name' => $r['name'],
+                    'sas_host' => $r['sas_host'],
+                    'sas_enabled' => 1,
+                    'owner_user_id' => null,
+                    '_from' => 'platform',
+                );
+            }
+            return $out;
+        }
+    }
     ensure_tenants_schema($pdo);
     $raw = array();
     try {
@@ -508,7 +528,6 @@ function tenants_sas_company_catalog($pdo, $config = null)
     } catch (Exception $e) {
         $raw = array();
     }
-    // إن كانت الشركة 1 فاضي بالجدول لكن مضبوط بالإعدادات العامة
     $has1 = false;
     foreach ($raw as $r) {
         if ((int) $r['id'] === 1) {
@@ -529,7 +548,6 @@ function tenants_sas_company_catalog($pdo, $config = null)
             ));
         }
     }
-    // هوست فريد واحد لكل سيرفر (أول ظهور حسب الأولوية)
     $out = array();
     $seenHost = array();
     foreach ($raw as $r) {
@@ -551,6 +569,13 @@ function tenant_company_sas_host($pdo, $companyId, $config = null)
     $companyId = (int) $companyId;
     if ($companyId <= 0) {
         return '';
+    }
+    // أولاً كتالوج المنصة
+    if (function_exists('platform_company_row')) {
+        $pc = platform_company_row($pdo, $companyId);
+        if ($pc && isset($pc['sas_host']) && trim((string) $pc['sas_host']) !== '') {
+            return preg_replace('#^https?://#i', '', rtrim(trim((string) $pc['sas_host']), '/'));
+        }
     }
     $row = tenant_row($pdo, $companyId);
     if ($row && isset($row['sas_host']) && trim((string) $row['sas_host']) !== '') {
