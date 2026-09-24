@@ -7,7 +7,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     $name = isset($siteName) ? $siteName : 'WiFi-Net-SALES';
     $page = isset($_SERVER['PHP_SELF']) ? basename($_SERVER['PHP_SELF']) : 'index.php';
     $isEn = ($lang === 'en');
-    $settingsActive = ($active === 'settings' || $active === 'whatsapp' || $active === 'backup' || $active === 'users' || $active === 'schedule');
+    $settingsActive = ($active === 'settings' || $active === 'whatsapp' || $active === 'backup' || $active === 'users' || $active === 'schedule' || $active === 'my_sas');
     $adminNow = function_exists('current_admin') ? current_admin() : null;
     $can = function ($p) {
         return function_exists('user_can') ? user_can($p) : true;
@@ -211,6 +211,12 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <?php endif; ?>
             <?php if ($can('subscribers')): ?>
             <a class="<?php echo $active === 'sas' ? 'active' : ''; ?>" href="sas.php"><?php echo e(t('sas')); ?></a>
+            <?php endif; ?>
+            <?php
+            $navTidEarly = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+            if ($navTidEarly > 1):
+            ?>
+            <a class="<?php echo ($active === 'settings' || $active === 'my_sas') ? 'active' : ''; ?>" href="settings.php?tab=sas"><?php echo e($isEn ? 'SAS accounts' : 'حسابات الساس'); ?></a>
             <?php endif; ?>
             <?php if ($can('cards')): ?>
             <a class="<?php echo $active === 'cards' ? 'active' : ''; ?>" href="cards.php"><?php echo e($isEn ? 'Cards' : 'الكارتات'); ?></a>

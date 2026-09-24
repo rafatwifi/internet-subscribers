@@ -401,6 +401,19 @@ if ($showCardAccountingDash && function_exists('card_accounting_dashboard')) {
 }
 
 render_header(t('dashboard'), 'dashboard', '');
+$dashTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+$dashSasReady = function_exists('sas_is_ready') && sas_is_ready($config);
+if ($dashTid > 1 && !$dashSasReady):
+?>
+<div class="alert alert-error" style="margin:12px 14px;font-weight:700">
+    <?php echo e($isEn
+        ? 'No SAS reseller linked yet — add your account to see subscribers.'
+        : 'ما مربوط حساب ريسيلر ساس بعد — أضف حسابك حتى تطلع المشتركين.'); ?>
+    —
+    <a href="settings.php?tab=sas"><?php echo e($isEn ? 'Add SAS account' : 'إضافة حساب ساس'); ?></a>
+</div>
+<?php
+endif;
 ?>
 <style>
 .sas-dash { font-family: inherit; width: 100%; box-sizing: border-box; }

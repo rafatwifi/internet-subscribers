@@ -43,11 +43,18 @@ $tab = isset($_GET['tab']) ? (string) $_GET['tab'] : 'general';
 if ($tab === 'templates') {
     redirect('messages.php?mode=templates');
 }
+// POST لربط الساس من الوكالة: احسب التبويب من القسم حتى ما تنرفض الصلاحية
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'sas') {
+    $tab = 'sas';
+}
 if (!in_array($tab, array('general', 'whatsapp', 'rental', 'users', 'plans', 'sas', 'saas', 'schedule', 'sensitive', 'update'), true)) {
     $tab = 'general';
 }
 
 $isAgentWaOnly = ($tab === 'whatsapp' && function_exists('is_agent_user') && is_agent_user());
+$agencyTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+// وكالة: تبويب ربط الساس مسموح بدون صلاحية settings كاملة
+$isAgencySasOnly = ($tab === 'sas' && $agencyTid > 1);
 
 if ($tab === 'users') {
     require_perm('users');
@@ -65,9 +72,13 @@ if ($tab === 'users') {
         flash('error', $lang === 'en' ? 'Super admin only' : 'للمدير العام فقط');
         redirect('settings.php');
     }
-} elseif ($isAgentWaOnly) {
-    // الوكيل: QR فقط — بدون صلاحية settings كاملة
+} elseif ($isAgentWaOnly || $isAgencySasOnly) {
+    // واتساب للوكيل / ربط ساس للوكالة — بدون صلاحية settings كاملة
 } else {
+    // وكالة بدون صلاحية settings: وجّه مباشرة لربط الساس
+    if ($agencyTid > 1 && !user_can('settings') && $tab === 'general') {
+        redirect('settings.php?tab=sas');
+    }
     require_perm('settings');
 }
 
