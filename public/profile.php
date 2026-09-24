@@ -25,12 +25,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if ($action === 'profile') {
         $display = trim((string) post('display_name', ''));
+        $phone = trim((string) post('phone', ''));
         if ($display === '') {
             flash('error', $lang === 'en' ? 'Name required' : 'الاسم مطلوب');
             redirect('profile.php');
         }
         update_admin_user_meta($pdo, $me['id'], $display, null);
         $_SESSION['admin_display_name'] = $display;
+        $avatar = isset($row['avatar_path']) ? (string) $row['avatar_path'] : '';
+        if (!empty($_FILES['avatar']['tmp_name']) && is_uploaded_file($_FILES['avatar']['tmp_name'])) {
+            $ext = strtolower(pathinfo($_FILES['avatar']['name'], PATHINFO_EXTENSION));
+            if (in_array($ext, array('png', 'jpg', 'jpeg', 'webp', 'gif'), true)) {
+                $dir = dirname(__DIR__) . '/public/uploads/avatars';
+                if (!is_dir($dir)) {
+                    @mkdir($dir, 0755, true);
+                }
+                $fname = 'u' . (int) $me['id'] . '_' . time() . '.' . $ext;
+                if (@move_uploaded_file($_FILES['avatar']['tmp_name'], $dir . '/' . $fname)) {
+                    $avatar = 'uploads/avatars/' . $fname;
+                }
+            }
+        }
+        try {
+            $pdo->prepare('UPDATE admin_users SET phone = :p, avatar_path = :a WHERE id = :id')
+                ->execute(array(
+                    ':p' => $phone !== '' ? $phone : null,
+                    ':a' => $avatar !== '' ? $avatar : null,
+                    ':id' => (int) $me['id'],
+                ));
+        } catch (Exception $e) {
+        }
         activity_log($pdo, null, 'system', $me['id'], 'profile_update', 'تحديث البروفايل', $display);
         flash('success', $lang === 'en' ? 'Profile saved' : 'تم حفظ البروفايل');
         redirect('profile.php');
@@ -68,12 +92,16 @@ render_header($lang === 'en' ? 'My profile' : 'بروفايلي', 'profile');
     <h2><?php echo e($lang === 'en' ? 'My profile' : 'بروفايلي'); ?></h2>
     <div class="profile-summary">
         <div class="profile-avatar"><?php
+            if (!empty($row['avatar_path'])):
+                ?><img src="<?php echo e($row['avatar_path']); ?>" alt="" style="width:72px;height:72px;border-radius:50%;object-fit:cover"><?php
+            else:
             $dn = (string) $row['display_name'];
             if (function_exists('mb_substr')) {
                 echo e(mb_substr($dn, 0, 1, 'UTF-8'));
             } else {
                 echo e(substr($dn, 0, 1));
             }
+            endif;
         ?></div>
         <div>
             <div class="profile-name"><?php echo e($row['display_name']); ?></div>
@@ -87,7 +115,7 @@ render_header($lang === 'en' ? 'My profile' : 'بروفايلي', 'profile');
 
 <div class="panel panel-compact">
     <h2><?php echo e($lang === 'en' ? 'Edit profile' : 'تعديل البروفايل'); ?></h2>
-    <form method="post">
+    <form method="post" enctype="multipart/form-data">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="action" value="profile">
         <div class="form-grid cols-2">
@@ -98,6 +126,14 @@ render_header($lang === 'en' ? 'My profile' : 'بروفايلي', 'profile');
             <div>
                 <label><?php echo e($lang === 'en' ? 'Display name' : 'الاسم الظاهر'); ?></label>
                 <input name="display_name" value="<?php echo e($row['display_name']); ?>" required>
+            </div>
+            <div>
+                <label><?php echo e($lang === 'en' ? 'Phone' : 'رقم الهاتف'); ?></label>
+                <input class="ltr" name="phone" value="<?php echo e(isset($row['phone']) ? $row['phone'] : ''); ?>">
+            </div>
+            <div>
+                <label><?php echo e($lang === 'en' ? 'Photo' : 'الصورة'); ?></label>
+                <input type="file" name="avatar" accept="image/*">
             </div>
         </div>
         <div class="actions">

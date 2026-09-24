@@ -272,6 +272,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <?php endif; ?>
             <?php if ($can('reports')): ?>
             <a class="<?php echo $active === 'reports' ? 'active' : ''; ?>" href="reports.php"><?php echo e(t('reports')); ?></a>
+            <a class="<?php echo $active === 'profit' ? 'active' : ''; ?>" href="profit_report.php"><?php echo e($isEn ? 'Profits' : 'الأرباح'); ?></a>
             <?php endif; ?>
             <?php if ($can('logs')): ?>
             <a class="<?php echo $active === 'logs' ? 'active' : ''; ?>" href="logs.php"><?php echo e($isEn ? 'Log' : 'اللوك'); ?></a>
@@ -328,7 +329,26 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
                     <div class="top-admin-menu" id="topAdminMenu">
                         <button type="button" class="top-profile-btn" id="topAdminBtn" aria-haspopup="true" aria-expanded="false">
                             <span class="top-profile-avatar" aria-hidden="true">
+                                <?php
+                                $meAv = function_exists('current_admin') ? current_admin() : null;
+                                $avPath = '';
+                                if ($meAv && !empty($meAv['id']) && isset($pdo)) {
+                                    try {
+                                        $avSt = $pdo->prepare('SELECT avatar_path, phone FROM admin_users WHERE id = :id LIMIT 1');
+                                        $avSt->execute(array(':id' => (int) $meAv['id']));
+                                        $avRow = $avSt->fetch();
+                                        if ($avRow && !empty($avRow['avatar_path'])) {
+                                            $avPath = (string) $avRow['avatar_path'];
+                                        }
+                                    } catch (Exception $e) {
+                                    }
+                                }
+                                if ($avPath !== ''):
+                                ?>
+                                <img src="<?php echo e($avPath); ?>" alt="" width="28" height="28" style="border-radius:50%;object-fit:cover">
+                                <?php else: ?>
                                 <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 12a4.5 4.5 0 1 0-4.5-4.5A4.5 4.5 0 0 0 12 12zm0 2.25c-3.6 0-6.75 1.8-6.75 4V20h13.5v-1.75c0-2.2-3.15-4-6.75-4z"/></svg>
+                                <?php endif; ?>
                             </span>
                             <?php if ($userLabel !== ''): ?>
                                 <span class="top-profile-name"><?php echo e($userLabel); ?></span>

@@ -36,6 +36,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $password = (string) post('password', '');
         $res = create_admin_user($pdo, $username, $display, $password, 'agent');
         if ($res === 'ok') {
+            if (function_exists('is_group_manager_user') && is_group_manager_user() && $meId > 0) {
+                try {
+                    $newId = (int) $pdo->query('SELECT id FROM admin_users WHERE username = ' . $pdo->quote($username) . ' LIMIT 1')->fetchColumn();
+                    if ($newId > 0) {
+                        $pdo->prepare('UPDATE admin_users SET reports_to_user_id = :r WHERE id = :id')
+                            ->execute(array(':r' => $meId, ':id' => $newId));
+                    }
+                } catch (Exception $e) {
+                }
+            }
             flash('success', $isEn ? 'Agent created' : 'تم إضافة الوكيل');
         } elseif ($res === 'taken') {
             flash('error', $isEn ? 'Username taken' : 'اسم المستخدم مستخدم');
@@ -287,6 +297,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $agents = list_agent_users($pdo, false);
+$gmMissingPrices = 0;
+if (function_exists('is_group_manager_user') && is_group_manager_user()) {
+    $team = group_manager_team_ids($pdo);
+    $agents = array_values(array_filter($agents, function ($a) use ($team) {
+        return in_array((int) $a['id'], $team, true);
+    }));
+    if (function_exists('agent_card_prices_list')) {
+        foreach ($agents as $a) {
+            $pr = agent_card_prices_list($pdo, (int) $a['id']);
+            if (!$pr) {
+                $gmMissingPrices++;
+            }
+        }
+    }
+}
 $accountants = list_accountant_users($pdo, false);
 $counts = array();
 try {
@@ -315,6 +340,17 @@ if ($sasReady && function_exists('sas_page_connector') && function_exists('sas_m
 render_header($isEn ? 'Agents' : 'الوكلاء', 'agents');
 ?>
 <div class="panel">
+    <?php if (!empty($gmMissingPrices)): ?>
+    <div class="alert alert-error" style="font-weight:700">
+        <?php echo e($isEn
+            ? ($gmMissingPrices . ' agents have no prices. Set package/card prices so profit is calculated.')
+            : ($gmMissingPrices . ' وكلاء بدون تسعير. لازم تسعر الباقات/الكروت حتى ينحسب الربح.')); ?>
+        — <a href="agent_prices.php"><?php echo e($isEn ? 'Set prices' : 'تسعير'); ?></a>
+    </div>
+    <?php endif; ?>
+    <?php if (function_exists('is_group_manager_user') && is_group_manager_user()): ?>
+    <p class="meta"><a href="profit_report.php"><?php echo e($isEn ? 'Activation profit report' : 'تقرير أرباح التفعيل'); ?></a></p>
+    <?php endif; ?>
     <p class="meta" style="margin-top:0">
         <?php echo e($isEn
             ? 'Agents log in and only see their own subscribers. Import them from SAS managers, then edit passwords and status.'

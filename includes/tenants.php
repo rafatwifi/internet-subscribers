@@ -146,6 +146,7 @@ function ensure_tenants_schema($pdo, $config = null)
     tenants_ensure_column($pdo, 'tenants', 'company_address', 'VARCHAR(255) NULL DEFAULT NULL');
     tenants_ensure_column($pdo, 'tenants', 'company_about', 'TEXT NULL');
     tenants_ensure_column($pdo, 'tenants', 'company_logo', 'VARCHAR(255) NULL DEFAULT NULL');
+    tenants_ensure_column($pdo, 'tenants', 'company_map_url', 'VARCHAR(500) NULL DEFAULT NULL');
     tenants_ensure_column($pdo, 'tenants', 'wa_templates', 'LONGTEXT NULL');
     tenants_ensure_column($pdo, 'tenants', 'sas_company_id', 'INT UNSIGNED NULL DEFAULT NULL');
     try {
@@ -396,7 +397,7 @@ function tenant_save($pdo, $tenantId, $fields)
         'sas_parent_id', 'sas_default_password', 'sas_activate_units', 'sas_extend_method',
         'sas_extend_profile_id', 'sas_on_failure',
         'status', 'owner_user_id', 'trial_ends_at', 'subscription_expires_at', 'plan_code', 'contact_phone',
-        'company_email', 'company_address', 'company_about', 'company_logo', 'wa_templates', 'sas_company_id',
+        'company_email', 'company_address', 'company_about', 'company_logo', 'company_map_url', 'wa_templates', 'sas_company_id',
     );
     $cols = array();
     $params = array(':id' => $tenantId);

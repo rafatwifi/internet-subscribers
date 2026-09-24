@@ -143,6 +143,11 @@ if ($canReports && isset($_GET['export']) && $_GET['export'] === 'report') {
 $pageTitle = $lang === 'en' ? 'Import & Export' : 'استيراد وتصدير';
 render_header($pageTitle, 'import_export', $lang === 'en' ? 'CSV import/export tools' : 'أدوات الاستيراد والتصدير');
 ?>
+<div class="panel" style="margin-bottom:12px">
+    <a class="btn" href="import_map.php"><?php echo e($lang === 'en' ? 'Import Excel with column mapping' : 'استيراد Excel مع مطابقة الأعمدة'); ?></a>
+    <a class="btn ghost" href="profit_report.php"><?php echo e($lang === 'en' ? 'Profit report' : 'تقرير الأرباح'); ?></a>
+</div>
+<?php
 <div class="panel">
     <h2><?php echo e($lang === 'en' ? 'Import subscribers' : 'استيراد مشتركين'); ?></h2>
     <p class="meta" style="margin:0 0 14px">

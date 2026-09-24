@@ -47,6 +47,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canEdit) {
         'company_address' => trim((string) post('company_address', '')),
         'company_about' => trim((string) post('company_about', '')),
         'company_logo' => $logoPath,
+        'company_map_url' => trim((string) post('company_map_url', '')),
     );
     if ($data['name'] === '') {
         flash('error', $isEn ? 'Name required' : 'اسم الشركة مطلوب');
@@ -100,7 +101,13 @@ render_header($isEn ? 'Company' : 'عن الشركة', 'company');
         <div class="company-meta">
             <h2><?php echo e(isset($row['name']) ? $row['name'] : ''); ?></h2>
             <?php if (!empty($row['company_address'])): ?>
-                <p><span class="label"><?php echo e($isEn ? 'Address' : 'العنوان'); ?>:</span><?php echo e($row['company_address']); ?></p>
+                <p><span class="label"><?php echo e($isEn ? 'Address' : 'العنوان'); ?>:</span><?php echo e($row['company_address']); ?>
+                <?php if (!empty($row['company_map_url'])): ?>
+                    — <a class="ltr" target="_blank" rel="noopener" href="<?php echo e($row['company_map_url']); ?>"><?php echo e($isEn ? 'Map' : 'الخريطة'); ?></a>
+                <?php endif; ?>
+                </p>
+            <?php elseif (!empty($row['company_map_url'])): ?>
+                <p><a target="_blank" rel="noopener" href="<?php echo e($row['company_map_url']); ?>"><?php echo e($isEn ? 'Open map' : 'فتح الخريطة'); ?></a></p>
             <?php endif; ?>
             <?php if (!empty($row['contact_phone'])): ?>
                 <p><span class="label"><?php echo e($isEn ? 'Phone' : 'الهاتف'); ?>:</span>
@@ -140,6 +147,11 @@ render_header($isEn ? 'Company' : 'عن الشركة', 'company');
             <div>
                 <label><?php echo e($isEn ? 'Address' : 'العنوان'); ?></label>
                 <input name="company_address" value="<?php echo e(isset($row['company_address']) ? $row['company_address'] : ''); ?>">
+            </div>
+            <div>
+                <label><?php echo e($isEn ? 'Map link' : 'رابط الخريطة'); ?></label>
+                <input class="ltr" name="company_map_url" placeholder="https://maps.google.com/..."
+                       value="<?php echo e(isset($row['company_map_url']) ? $row['company_map_url'] : ''); ?>">
             </div>
             <div style="grid-column:1/-1">
                 <label><?php echo e($isEn ? 'About' : 'نبذة'); ?></label>

@@ -37,7 +37,7 @@ function admin_password_verify($plain, $hash)
 /** الأدوار المتاحة */
 function admin_roles()
 {
-    return array('admin', 'manager', 'staff', 'agent', 'accountant');
+    return array('admin', 'group_manager', 'manager', 'staff', 'agent', 'accountant');
 }
 
 function admin_role_label($role, $lang = null)
@@ -47,6 +47,7 @@ function admin_role_label($role, $lang = null)
     }
     $map = array(
         'admin' => array('ar' => 'مدير', 'en' => 'Admin'),
+        'group_manager' => array('ar' => 'مدير وكلاء', 'en' => 'Group manager'),
         'manager' => array('ar' => 'مشرف', 'en' => 'Manager'),
         'staff' => array('ar' => 'موظف', 'en' => 'Staff'),
         'agent' => array('ar' => 'وكيل', 'en' => 'Agent'),
@@ -68,6 +69,11 @@ function admin_role_hint($role, $lang = null)
             ? 'Full access: users, settings, money, delete'
             : 'كل الصلاحيات: مستخدمين، إعدادات، فلوس، حذف';
     }
+    if ($role === 'group_manager') {
+        return $lang === 'en'
+            ? 'Sees agents under him, their subscribers, cards and profits'
+            : 'يشوف الوكلاء تحته ومشتركيهم والكروت والأرباح';
+    }
     if ($role === 'manager') {
         return $lang === 'en'
             ? 'Daily work + reports + log (no settings/users)'
@@ -75,8 +81,8 @@ function admin_role_hint($role, $lang = null)
     }
     if ($role === 'agent') {
         return $lang === 'en'
-            ? 'Only own subscribers + messages (no settings)'
-            : 'مشتركيه فقط + رسائل (بدون إعدادات النظام)';
+            ? 'Only own subscribers + messages (no other agents)'
+            : 'يوزراته فقط + رسائل (بدون وكلاء ثانيين)';
     }
     if ($role === 'accountant') {
         return $lang === 'en'
@@ -99,6 +105,12 @@ function role_permissions($role)
             'settings', 'users', 'agents', 'backup', 'clear_data',
         );
     }
+    if ($role === 'group_manager') {
+        return array(
+            'dashboard', 'subscribers', 'activate', 'debts', 'edit_debts', 'messages', 'rentals',
+            'subscriptions', 'reports', 'agents', 'cards', 'card_accounting', 'plans',
+        );
+    }
     if ($role === 'manager') {
         return array(
             'dashboard', 'subscribers', 'activate', 'debts', 'messages', 'rentals',
@@ -113,12 +125,73 @@ function role_permissions($role)
     if ($role === 'agent') {
         return array(
             'dashboard', 'subscribers', 'activate', 'debts', 'messages', 'rentals',
-            'cards', 'agents',
+            'cards',
         );
     }
     return array(
         'dashboard', 'subscribers', 'activate', 'debts', 'messages', 'rentals',
     );
+}
+
+function is_group_manager_user($u = null)
+{
+    if ($u === null) {
+        $u = current_admin();
+    }
+    if (!$u) {
+        return false;
+    }
+    return normalize_admin_role(isset($u['role']) ? $u['role'] : '') === 'group_manager';
+}
+
+/** معرفات مدير الكروب + الوكلاء التابعين له */
+function group_manager_team_ids($pdo)
+{
+    $u = current_admin();
+    $id = $u ? (int) $u['id'] : 0;
+    if ($id <= 0) {
+        return array();
+    }
+    $ids = array($id);
+    if (!$pdo) {
+        return $ids;
+    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    try {
+        $st = $pdo->prepare(
+            'SELECT id FROM admin_users WHERE reports_to_user_id = :id AND tenant_id = :t'
+        );
+        $st->execute(array(':id' => $id, ':t' => $tid));
+        foreach ($st->fetchAll() as $r) {
+            $ids[] = (int) $r['id'];
+        }
+    } catch (Exception $e) {
+    }
+    return array_values(array_unique($ids));
+}
+
+function group_manager_sas_parent_ids($pdo)
+{
+    $ids = group_manager_team_ids($pdo);
+    if (!$ids || !$pdo) {
+        return array();
+    }
+    $mids = array();
+    try {
+        $in = implode(',', array_map('intval', $ids));
+        $rows = $pdo->query(
+            'SELECT sas_manager_id FROM admin_users WHERE id IN (' . $in . ') AND sas_manager_id IS NOT NULL AND sas_manager_id > 0'
+        )->fetchAll();
+        foreach ($rows as $r) {
+            $mids[] = (int) $r['sas_manager_id'];
+        }
+    } catch (Exception $e) {
+    }
+    $me = current_admin();
+    if ($me && !empty($me['sas_manager_id'])) {
+        $mids[] = (int) $me['sas_manager_id'];
+    }
+    return array_values(array_unique(array_filter($mids)));
 }
 
 function is_agent_user($u = null)
@@ -261,7 +334,7 @@ function subscriber_agent_scope_sql($alias = 's')
     if (function_exists('current_tenant_id')) {
         $tenantSql = ' AND ' . $a . '.tenant_id = ' . (int) current_tenant_id();
     }
-    if (!is_agent_user()) {
+    if (!is_agent_user() && !is_group_manager_user()) {
         // أدمن/موظف: عزل الشركة فقط
         return $tenantSql;
     }
@@ -269,6 +342,14 @@ function subscriber_agent_scope_sql($alias = 's')
     $id = $u ? (int) $u['id'] : 0;
     if ($id <= 0) {
         return ' AND 1=0';
+    }
+    if (is_group_manager_user()) {
+        global $pdo;
+        $team = isset($pdo) && $pdo ? group_manager_team_ids($pdo) : array($id);
+        if (!$team) {
+            return ' AND 1=0';
+        }
+        return $tenantSql . ' AND ' . $a . '.agent_user_id IN (' . implode(',', array_map('intval', $team)) . ')';
     }
     return $tenantSql . ' AND ' . $a . '.agent_user_id = ' . $id;
 }
@@ -292,13 +373,17 @@ function user_can_access_subscriber($pdo, $subscriberId)
         if ($rowTid !== $tid) {
             return false;
         }
-        if (!is_agent_user()) {
+        if (!is_agent_user() && !is_group_manager_user()) {
             return true;
         }
         $u = current_admin();
         $uid = $u ? (int) $u['id'] : 0;
         if ($uid <= 0) {
             return false;
+        }
+        if (is_group_manager_user()) {
+            $team = group_manager_team_ids($pdo);
+            return in_array((int) $row['agent_user_id'], $team, true);
         }
         return (int) $row['agent_user_id'] === $uid;
     } catch (Exception $e) {
@@ -409,6 +494,20 @@ function ensure_admin_users_table($pdo, $config = null)
             $col = $pdo->query("SHOW COLUMNS FROM admin_users LIKE 'phone'")->fetch();
             if (!$col) {
                 $pdo->exec('ALTER TABLE admin_users ADD COLUMN phone VARCHAR(32) NULL DEFAULT NULL');
+            }
+        } catch (Exception $e) {
+        }
+        try {
+            $col = $pdo->query("SHOW COLUMNS FROM admin_users LIKE 'reports_to_user_id'")->fetch();
+            if (!$col) {
+                $pdo->exec('ALTER TABLE admin_users ADD COLUMN reports_to_user_id INT UNSIGNED NULL DEFAULT NULL');
+            }
+        } catch (Exception $e) {
+        }
+        try {
+            $col = $pdo->query("SHOW COLUMNS FROM admin_users LIKE 'avatar_path'")->fetch();
+            if (!$col) {
+                $pdo->exec('ALTER TABLE admin_users ADD COLUMN avatar_path VARCHAR(255) NULL DEFAULT NULL');
             }
         } catch (Exception $e) {
         }
@@ -532,10 +631,19 @@ function sas_agent_scope_sql($alias = 'c')
     if (function_exists('current_tenant_id')) {
         $tenantSql = ' AND ' . $a . '.tenant_id = ' . (int) current_tenant_id();
     }
-    if (!is_agent_user()) {
+    if (!is_agent_user() && !is_group_manager_user()) {
         return $tenantSql;
     }
     $u = current_admin();
+    if (is_group_manager_user()) {
+        global $pdo;
+        $mids = (isset($pdo) && $pdo) ? group_manager_sas_parent_ids($pdo) : array();
+        if (!$mids) {
+            return $tenantSql . ' AND 1=0';
+        }
+        $in = implode(',', array_map('intval', $mids));
+        return $tenantSql . ' AND ' . $a . '.parent_id IN (' . $in . ')';
+    }
     $mid = $u && !empty($u['sas_manager_id']) ? (int) $u['sas_manager_id'] : 0;
     if ($mid <= 0) {
         return ' AND 1=0';
@@ -555,20 +663,27 @@ function user_can_access_sas_username($pdo, $username)
     if ($username === '') {
         return false;
     }
-    if (!is_agent_user()) {
+    if (!is_agent_user() && !is_group_manager_user()) {
         return true;
     }
     $mid = current_admin_sas_manager_id();
-    if ($mid <= 0) {
+    $allowed = array();
+    if (is_group_manager_user()) {
+        $allowed = group_manager_sas_parent_ids($pdo);
+    } elseif ($mid > 0) {
+        $allowed = array($mid);
+    }
+    if (!$allowed) {
         return false;
     }
     try {
+        $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
         $st = $pdo->prepare(
-            'SELECT parent_id FROM sas_users_cache WHERE username = :u LIMIT 1'
+            'SELECT parent_id FROM sas_users_cache WHERE username = :u AND tenant_id = :t LIMIT 1'
         );
-        $st->execute(array(':u' => $username));
+        $st->execute(array(':u' => $username, ':t' => $tid));
         $pid = $st->fetchColumn();
-        return $pid !== false && (int) $pid === $mid;
+        return $pid !== false && in_array((int) $pid, $allowed, true);
     } catch (Exception $e) {
         return false;
     }

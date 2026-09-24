@@ -161,6 +161,12 @@ function transfer_cards($pdo, $fromAgentId, $toAgentId, $profileId, $profileName
     if ($qty <= 0) {
         return array(false, 'qty_invalid', 0);
     }
+    if (function_exists('agent_card_prices_list')) {
+        $priced = agent_card_prices_list($pdo, $toAgentId);
+        if (!$priced) {
+            return array(false, 'price_required', 0);
+        }
+    }
     if ($fromAgentId > 0 && $fromAgentId === $toAgentId) {
         return array(false, 'same_agent', 0);
     }
@@ -465,6 +471,7 @@ function card_transfer_error_message($code, $lang = 'ar')
     $map = array(
         'to_agent_required' => $isEn ? 'Select destination agent' : 'اختر الوكيل المستلم',
         'qty_invalid' => $isEn ? 'Quantity must be greater than zero' : 'الكمية لازم أكبر من صفر',
+        'price_required' => $isEn ? 'Set card/package prices for this agent first' : 'لازم تسعر الباقات/الكروت لهذا الوكيل أولاً',
         'same_agent' => $isEn ? 'Source and destination must differ' : 'المصدر والوجهة لازم يختلفون',
         'insufficient_stock' => $isEn ? 'Insufficient stock at source agent' : 'المخزون غير كافٍ عند الوكيل المصدر',
         'stock_update_failed' => $isEn ? 'Could not update stock' : 'تعذر تحديث المخزون',
