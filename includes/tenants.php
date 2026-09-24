@@ -333,6 +333,19 @@ function sas_config_for_tenant($pdo, $config, $tenantId = null)
         'on_failure' => 'warn',
     );
 
+    // حسابات ريسيلر متعددة — استخدم الافتراضي إن وُجد
+    if (function_exists('ensure_tenant_sas_accounts_schema')) {
+        ensure_tenant_sas_accounts_schema($pdo);
+    }
+    if (function_exists('tenant_sas_account_default')) {
+        $acc = tenant_sas_account_default($pdo, $tenantId);
+        if ($acc && trim((string) $acc['sas_host']) !== '' && trim((string) $acc['sas_username']) !== '') {
+            $cfg = sas_config_from_account_row($acc);
+            $cfg['tenant_id'] = $tenantId;
+            return $cfg;
+        }
+    }
+
     $row = tenant_row($pdo, $tenantId);
     if (!$row) {
         return $base;

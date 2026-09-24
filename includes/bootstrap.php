@@ -239,6 +239,10 @@ $tenantMigrateFile = __DIR__ . '/tenant_migrate.php';
 if (is_file($tenantMigrateFile)) {
     require_once $tenantMigrateFile;
 }
+$tenantSasAccountsFile = __DIR__ . '/tenant_sas_accounts.php';
+if (is_file($tenantSasAccountsFile)) {
+    require_once $tenantSasAccountsFile;
+}
 if (function_exists('app_remember_try_restore')) {
     app_remember_try_restore($pdo);
 }

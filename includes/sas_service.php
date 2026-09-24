@@ -109,6 +109,15 @@ function sas_make_connector($config)
 function sas_is_ready($config)
 {
     global $pdo;
+    if (isset($pdo) && $pdo && function_exists('tenant_sas_accounts_ready') && function_exists('current_tenant_id')) {
+        $tid = (int) current_tenant_id();
+        if ($tid > 0) {
+            $readyAcc = tenant_sas_accounts_ready($pdo, $tid);
+            if ($readyAcc) {
+                return true;
+            }
+        }
+    }
     if (isset($pdo) && $pdo && function_exists('sas_config_for_tenant')) {
         $s = sas_config_for_tenant($pdo, $config);
         return !empty($s['enabled'])

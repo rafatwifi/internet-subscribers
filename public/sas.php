@@ -814,6 +814,17 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'refresh_now') {
     if (function_exists('set_time_limit')) {
         @set_time_limit(40);
     }
+    if (!$sasReady) {
+        echo json_encode(array(
+            'ok' => false,
+            'count' => 0,
+            'mode' => 'error',
+            'last_error' => ($lang === 'en'
+                ? 'SAS not linked — add a reseller account in Settings first'
+                : 'الساس غير مربوط — أضف حساب ريسيلر من الإعدادات أولاً'),
+        ));
+        exit;
+    }
     $qNow = isset($_GET['q']) ? trim((string) $_GET['q']) : '';
     $n = 0;
     try {
@@ -823,7 +834,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'refresh_now') {
         }
         if ($qNow !== '' && function_exists('sas_cache_pull_search')) {
             $n = sas_cache_pull_search($pdo, $config, $qNow);
-        } elseif ($sasReady) {
+        } else {
             $apiNow = function_exists('sas_page_connector') ? sas_page_connector($config) : null;
             if ($apiNow && method_exists($apiNow, 'listUsersPage')) {
                 if (method_exists($apiNow, 'setTimeout')) {
@@ -846,7 +857,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'refresh_now') {
                 $n = $nOnline;
             }
         }
-        echo json_encode(array('ok' => true, 'count' => $n, 'mode' => 'synced'));
+        echo json_encode(array('ok' => true, 'count' => $n, 'mode' => 'synced', 'ready' => true));
     } catch (Exception $e) {
         echo json_encode(array('ok' => false, 'count' => 0, 'mode' => 'error', 'last_error' => $e->getMessage()));
     } catch (Error $e) {
@@ -3024,6 +3035,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   var maintBlockActivate = <?php echo !empty($maintBlockActivate) ? 'true' : 'false'; ?>;
   var maintBlockGiveTest = <?php echo !empty($maintBlockGiveTest) ? 'true' : 'false'; ?>;
   var stale = <?php echo json_encode($syncMode === 'stale'); ?>;
+  var sasReadyJs = <?php echo json_encode(!empty($sasReady)); ?>;
   var refreshSec = <?php echo (int) $savedRefreshSec; ?>;
   try {
     var rs = localStorage.getItem('sas_refresh_sec_v1');
@@ -4744,6 +4756,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     }
   }
   function showSyncOkBanner() {
+    if (!sasReadyJs) return;
     setOfflineBanner(false);
     showAppToast(<?php echo json_encode($lang === 'en' ? 'Synced successfully' : 'تمت المزامنة بنجاح'); ?>, 'ok');
   }
@@ -4762,9 +4775,11 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
       if (flashObj && flashObj.t) {
         showAppToast(flashObj.t, flashObj.k === 'error' ? 'error' : 'ok');
       }
-    } else if (sessionStorage.getItem('sas_sync_ok') === '1') {
+    } else if (sasReadyJs && sessionStorage.getItem('sas_sync_ok') === '1') {
       sessionStorage.removeItem('sas_sync_ok');
       showSyncOkBanner();
+    } else {
+      sessionStorage.removeItem('sas_sync_ok');
     }
   } catch (e) {}
   function markSyncOkAndReload() {
@@ -4781,6 +4796,10 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     });
   }
   function runQuickRefresh() {
+    if (!sasReadyJs) {
+      showAppToast(<?php echo json_encode($lang === 'en' ? 'SAS not linked yet' : 'الساس غير مربوط بعد'); ?>, 'error');
+      return Promise.resolve({ ok: false });
+    }
     var q = filter ? filter.value.trim() : '';
     showSyncNote(<?php echo json_encode($lang === 'en' ? 'Refreshing from SAS…' : 'جاري التحديث من الساس…'); ?>);
     return fetch('sas.php?ajax=refresh_now&q=' + encodeURIComponent(q), { credentials: 'same-origin' })
@@ -4815,8 +4834,12 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
         showSyncNote((<?php echo json_encode($lang === 'en' ? 'Loading from SAS…' : 'جاري الجلب من الساس…'); ?>) + ' ' + (d.count || 0) + (d.expected ? (' / ' + d.expected) : ''));
         return runSync(false);
       }
-      if (d.ok && (d.mode === 'synced' || d.mode === 'cache') && (d.count > 0 || d.mode === 'synced')) {
+      if (sasReadyJs && d.ok && (d.mode === 'synced' || d.mode === 'cache') && (d.count > 0 || d.mode === 'cache')) {
         markSyncOkAndReload();
+      } else if (sasReadyJs && d.ok && d.mode === 'synced' && d.count === 0) {
+        // متصل لكن القائمة فاضية — لا إشعار نجاح مضلل
+        showSyncNote(<?php echo json_encode($lang === 'en' ? 'Connected — no users on this reseller' : 'متصل — ماكو يوزرات بهالحساب'); ?>);
+        refreshTableLive();
       }
       return d;
     }).catch(function (err) {
@@ -5234,10 +5257,10 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 
   prefetchCards(false).then(function () {
     loadProfiles();
-    if (stale) runDiagThenSync();
+    if (stale && sasReadyJs) runDiagThenSync();
   }).catch(function () {
     loadProfiles();
-    if (stale) runDiagThenSync();
+    if (stale && sasReadyJs) runDiagThenSync();
   });
   setInterval(function () {
     softRefreshCards(false).then(function () { refreshActCardsIfOpen(); });

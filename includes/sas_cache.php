@@ -3324,6 +3324,15 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
         ':daily_traffic' => (($tr = sas_cache_daily_traffic($row)) !== '' ? sas_clip($tr, 60) : null),
         ':synced_at' => $nowSql,
     );
+    $accountId = 0;
+    if (isset($row['_sas_account_id'])) {
+        $accountId = (int) $row['_sas_account_id'];
+    } elseif (!empty($GLOBALS['sas_force_account']['id'])) {
+        $accountId = (int) $GLOBALS['sas_force_account']['id'];
+    }
+    if ($accountId > 0) {
+        $params[':sas_account_id'] = $accountId;
+    }
     try {
         // هل يوجد صف لهذه الشركة؟
         $ex = $pdo->prepare('SELECT 1 FROM sas_users_cache WHERE tenant_id = :t AND username = :u LIMIT 1');
@@ -3331,6 +3340,7 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
         $exists = (bool) $ex->fetchColumn();
         if ($exists) {
             // تحديث صف هذه الشركة فقط — لا تلمس tenant آخر حتى لو PK قديم على username فقط
+            $accSet = ($accountId > 0) ? ', sas_account_id = :sas_account_id' : '';
             $upd = $pdo->prepare(
                 'UPDATE sas_users_cache SET
                     sas_user_id = :sas_user_id,
@@ -3351,7 +3361,7 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
                     is_online = IF(:is_online_chk = 1, 1, is_online),
                     framed_ip = IF(:framed_ip_chk IS NULL OR :framed_ip_chk = "", framed_ip, :framed_ip2),
                     daily_traffic = IF(:daily_traffic_chk IS NULL, daily_traffic, :daily_traffic2),
-                    synced_at = :synced_at
+                    synced_at = :synced_at' . $accSet . '
                  WHERE tenant_id = :tenant_id AND username = :username'
             );
             $updParams = $params;
@@ -3366,14 +3376,25 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
             return true;
         }
         // لا يوجد صف لهذه الشركة — أدخل صفاً جديداً
-        $insSql = $pdo->prepare(
-            'INSERT INTO sas_users_cache
-                (tenant_id, username, sas_user_id, firstname, lastname, display_name, phone, profile_id, profile_name,
-                 enabled, expire_at, parent_id, parent_name, city, email, company, last_online, is_online, framed_ip, daily_traffic, local_subscriber_id, synced_at)
-             VALUES
-                (:tenant_id, :username, :sas_user_id, :firstname, :lastname, :display_name, :phone, :profile_id, :profile_name,
-                 :enabled, :expire_at, :parent_id, :parent_name, :city, :email, :company, :last_online, :is_online, :framed_ip, :daily_traffic, NULL, :synced_at)'
-        );
+        if ($accountId > 0) {
+            $insSql = $pdo->prepare(
+                'INSERT INTO sas_users_cache
+                    (tenant_id, username, sas_user_id, firstname, lastname, display_name, phone, profile_id, profile_name,
+                     enabled, expire_at, parent_id, parent_name, city, email, company, last_online, is_online, framed_ip, daily_traffic, local_subscriber_id, synced_at, sas_account_id)
+                 VALUES
+                    (:tenant_id, :username, :sas_user_id, :firstname, :lastname, :display_name, :phone, :profile_id, :profile_name,
+                     :enabled, :expire_at, :parent_id, :parent_name, :city, :email, :company, :last_online, :is_online, :framed_ip, :daily_traffic, NULL, :synced_at, :sas_account_id)'
+            );
+        } else {
+            $insSql = $pdo->prepare(
+                'INSERT INTO sas_users_cache
+                    (tenant_id, username, sas_user_id, firstname, lastname, display_name, phone, profile_id, profile_name,
+                     enabled, expire_at, parent_id, parent_name, city, email, company, last_online, is_online, framed_ip, daily_traffic, local_subscriber_id, synced_at)
+                 VALUES
+                    (:tenant_id, :username, :sas_user_id, :firstname, :lastname, :display_name, :phone, :profile_id, :profile_name,
+                     :enabled, :expire_at, :parent_id, :parent_name, :city, :email, :company, :last_online, :is_online, :framed_ip, :daily_traffic, NULL, :synced_at)'
+            );
+        }
         $insSql->execute($params);
         return true;
     } catch (Exception $e) {
@@ -3548,6 +3569,73 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
         } catch (Exception $e) {
         }
     }
+    if (function_exists('ensure_tenant_sas_accounts_schema')) {
+        ensure_tenant_sas_accounts_schema($pdo);
+    }
+
+    $tenantIdEarly = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    // مزامنة كل حسابات الريسيلر دفعة واحدة (بدون تكرار متداخل)
+    if (empty($GLOBALS['sas_sync_multi_lock'])
+        && function_exists('tenant_sas_accounts_ready')
+        && $tenantIdEarly > 0
+    ) {
+        $readyAcc = tenant_sas_accounts_ready($pdo, $tenantIdEarly);
+        if (count($readyAcc) > 1) {
+            $GLOBALS['sas_sync_multi_lock'] = true;
+            $GLOBALS['sas_sync_skip_purge'] = true;
+            $anyOk = false;
+            $sum = 0;
+            $lastMode = 'error';
+            $lastMeta = sas_sync_meta($pdo);
+            $first = true;
+            foreach ($readyAcc as $acc) {
+                $GLOBALS['sas_force_account'] = $acc;
+                $resetThis = $first ? $reset : true;
+                $first = false;
+                $accOk = false;
+                $accN = 0;
+                $guard = 0;
+                do {
+                    list($ok, $n, $mode, $meta) = sas_sync_users_from_api($pdo, $config, true, $resetThis);
+                    $resetThis = false;
+                    $lastMeta = $meta;
+                    $lastMode = $mode;
+                    if ($ok) {
+                        $accOk = true;
+                        $accN = max($accN, (int) $n);
+                    }
+                    $guard++;
+                } while ($ok && $mode === 'progress' && $guard < 500);
+                if ($accOk) {
+                    $anyOk = true;
+                    $sum += $accN;
+                }
+                try {
+                    $pdo->prepare(
+                        'UPDATE tenant_sas_accounts SET last_ok_at = IF(:ok = 1, NOW(), last_ok_at), last_error = :e WHERE id = :id'
+                    )->execute(array(
+                        ':ok' => $accOk ? 1 : 0,
+                        ':e' => $accOk ? null : (isset($lastMeta['last_error']) ? $lastMeta['last_error'] : 'fail'),
+                        ':id' => (int) $acc['id'],
+                    ));
+                } catch (Exception $e) {
+                }
+            }
+            unset($GLOBALS['sas_force_account'], $GLOBALS['sas_sync_multi_lock'], $GLOBALS['sas_sync_skip_purge']);
+            if ($anyOk) {
+                sas_sync_meta_save($pdo, array(
+                    'last_ok_at' => date('Y-m-d H:i:s'),
+                    'last_count' => $sum,
+                    'syncing_at' => null,
+                    'sync_offset' => 0,
+                    'last_error' => null,
+                ));
+                return array(true, $sum, 'synced', sas_sync_meta($pdo));
+            }
+            return array(false, $sum, $lastMode, $lastMeta);
+        }
+    }
+
     $meta = sas_sync_meta($pdo);
 
     if (!function_exists('sas_is_ready') || !sas_is_ready($config)) {
@@ -3590,7 +3678,11 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
         }
     }
 
-    $api = sas_make_connector($config);
+    if (!empty($GLOBALS['sas_force_account']) && function_exists('sas_make_connector_from_account')) {
+        $api = sas_make_connector_from_account($GLOBALS['sas_force_account']);
+    } else {
+        $api = sas_make_connector($config);
+    }
     if (!$api) {
         sas_sync_meta_save($pdo, array(
             'last_try_at' => date('Y-m-d H:i:s'),
@@ -3717,7 +3809,7 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
                     $freshSt->execute(array(':tid' => $tenantId, ':t' => $started));
                     $freshCnt = (int) $freshSt->fetchColumn();
                     $need = ($expected > 0) ? max(1, (int) ceil($expected * 0.5)) : 1;
-                    if ($freshCnt >= $need) {
+                    if ($freshCnt >= $need && empty($GLOBALS['sas_sync_skip_purge'])) {
                         // امسح فقط كاش هذه الشركة — لا تلمس شركات أخرى ولا المشتركين/الديون
                         $del = $pdo->prepare(
                             'DELETE FROM sas_users_cache WHERE tenant_id = :tid AND synced_at < :t'

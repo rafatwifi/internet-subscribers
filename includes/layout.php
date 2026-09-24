@@ -225,12 +225,6 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <a class="<?php echo $active === 'companies' ? 'active' : ''; ?>" href="companies.php"><?php echo e($isEn ? 'Companies' : 'الشركات'); ?></a>
             <a class="<?php echo $active === 'saas_agents' ? 'active' : ''; ?>" href="saas_agents.php"><?php echo e($isEn ? 'SaaS agents' : 'وكلاء الاستضافة'); ?></a>
             <?php endif; ?>
-            <?php
-            $navTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
-            if ($navTid > 1):
-            ?>
-            <a class="<?php echo $active === 'billing' ? 'active' : ''; ?>" href="billing.php"><?php echo e($isEn ? 'Billing' : 'الاشتراك'); ?></a>
-            <?php endif; ?>
             <?php if ($can('cards') || $can('agents') || (function_exists('is_agent_user') && is_agent_user())): ?>
             <a class="<?php echo $active === 'prices' || $active === 'agent_prices' ? 'active' : ''; ?>" href="agent_prices.php"><?php echo e($isEn ? 'Card prices' : 'تسعير الكروت'); ?></a>
             <?php endif; ?>
@@ -262,7 +256,19 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <a class="<?php echo $settingsActive && $active !== 'schedule' ? 'active' : ''; ?>" href="settings.php"><?php echo e(t('settings')); ?></a>
             <?php endif; ?>
             <a class="<?php echo $active === 'company' ? 'active' : ''; ?>" href="company.php"><?php echo e($isEn ? 'Company' : 'عن الشركة'); ?></a>
+            <?php
+            $navTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+            if ($navTid > 1):
+            ?>
+            <a class="<?php echo $active === 'billing' ? 'active' : ''; ?>" href="billing.php"><?php echo e($isEn ? 'Billing' : 'الاشتراك'); ?></a>
+            <?php endif; ?>
+            <?php
+            // وكيل / وكالة: بدون تسجيل خروج بالقائمة الجانبية (من القائمة العلوية)
+            $hideSideLogout = (function_exists('is_agent_user') && is_agent_user()) || $navTid > 1;
+            if (!$hideSideLogout):
+            ?>
             <a href="logout.php"><?php echo e(t('logout')); ?></a>
+            <?php endif; ?>
         </nav>
     </aside>
 

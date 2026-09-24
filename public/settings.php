@@ -552,9 +552,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
         $tab = 'sas';
-        // شركة غير 1: احفظ على صف الـ tenant فقط — لا تلمس settings العامة
+        // شركة غير 1: حسابات ريسيلر متعددة
         $tidSas = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
-        if ($tidSas > 1 && function_exists('tenant_save')) {
+        if ($tidSas > 1 && function_exists('tenant_sas_account_save')) {
+            $accAction = post('action');
+            if ($accAction === 'delete_account') {
+                $delId = (int) post('account_id', '0');
+                list($okD, $msgD) = tenant_sas_account_delete($pdo, $tidSas, $delId);
+                flash($okD ? 'success' : 'error', $msgD);
+                redirect('settings.php?tab=sas');
+            }
+            if ($accAction === 'set_default') {
+                $defId = (int) post('account_id', '0');
+                flash(tenant_sas_account_set_default($pdo, $tidSas, $defId) ? 'success' : 'error',
+                    $lang === 'en' ? 'Default updated' : 'تم تعيين الافتراضي');
+                redirect('settings.php?tab=sas');
+            }
             $companyId = (int) post('sas_company_id', '0');
             if ($companyId > 0 && function_exists('tenant_company_sas_host')) {
                 $hostFromCo = tenant_company_sas_host($pdo, $companyId, $config);
@@ -568,7 +581,92 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 flash('error', $lang === 'en' ? 'Choose a company first' : 'اختار الشركة أولاً');
                 redirect('settings.php?tab=sas');
             }
-            // الوكالة: تشغيل الربط تلقائياً عند إدخال يوزر/باسورد
+            $editId = (int) post('account_id', '0');
+            $label = trim((string) post('account_label', ''));
+            $fieldsAcc = array(
+                'label' => $label,
+                'company_id' => $companyId > 0 ? $companyId : null,
+                'sas_enabled' => 1,
+                'sas_host' => $data['sas_host'],
+                'sas_username' => $data['sas_username'],
+                'sas_password' => $pass,
+                'sas_parent_id' => $data['sas_parent_id'],
+                'sas_default_password' => $data['sas_default_password'],
+                'sas_activate_units' => $data['sas_activate_units'] > 0 ? $data['sas_activate_units'] : 1,
+                'sas_extend_method' => $data['sas_extend_method'],
+                'sas_extend_profile_id' => $data['sas_extend_profile_id'],
+                'sas_on_failure' => $data['sas_on_failure'],
+                'is_default' => post('is_default') === '1' || $editId <= 0,
+            );
+            // اكتشاف Parent
+            $passKeep = $pass;
+            if ($passKeep === '' && $editId > 0) {
+                $prevA = tenant_sas_account_row($pdo, $editId, $tidSas);
+                $passKeep = $prevA ? (string) $prevA['sas_password'] : '';
+            }
+            if ($data['sas_username'] === '' || ($passKeep === '' && $editId <= 0)) {
+                flash('error', $lang === 'en' ? 'Reseller SAS username and password required' : 'يوزر وباسورد وكالة الساس مطلوبين');
+                redirect('settings.php?tab=sas');
+            }
+            if (($fieldsAcc['sas_parent_id'] <= 0 || (int) $fieldsAcc['sas_parent_id'] === 1)
+                && $passKeep !== '' && function_exists('sas_detect_parent_id')
+            ) {
+                $tmpCfg2 = $config;
+                $tmpCfg2['sas'] = array(
+                    'enabled' => true,
+                    'host' => $fieldsAcc['sas_host'],
+                    'username' => $fieldsAcc['sas_username'],
+                    'password' => $passKeep,
+                    'parent_id' => 1,
+                    'default_password' => $fieldsAcc['sas_default_password'],
+                    'activate_units' => max(1, (int) $fieldsAcc['sas_activate_units']),
+                    'extend_method' => $fieldsAcc['sas_extend_method'],
+                    'extend_profile_id' => (int) $fieldsAcc['sas_extend_profile_id'],
+                    'on_failure' => $fieldsAcc['sas_on_failure'],
+                );
+                $detected2 = (int) sas_detect_parent_id($tmpCfg2);
+                if ($detected2 > 0) {
+                    $fieldsAcc['sas_parent_id'] = $detected2;
+                }
+            }
+            $fieldsAcc['sas_password'] = $passKeep !== '' ? $passKeep : $pass;
+            list($okS, $msgS, $newId) = tenant_sas_account_save($pdo, $tidSas, $fieldsAcc, $editId);
+            if ($okS) {
+                list($okT, $msgT) = tenant_test_sas_connection(
+                    $fieldsAcc['sas_host'],
+                    $fieldsAcc['sas_username'],
+                    $fieldsAcc['sas_password']
+                );
+                if (function_exists('sas_mark_connection')) {
+                    sas_mark_connection($pdo, $config, $okT, $msgT, $tidSas);
+                }
+                if ($accAction === 'test' || post('sas_test') === '1') {
+                    flash($okT ? 'success' : 'error', $msgT);
+                } else {
+                    flash($okT ? 'success' : 'error', $okT
+                        ? (($lang === 'en' ? 'Saved — connected' : 'تم الحفظ — متصل') . ($msgT !== '' ? ': ' . $msgT : ''))
+                        : (($lang === 'en' ? 'Saved but not connected: ' : 'تم الحفظ لكن غير متصل: ') . $msgT));
+                }
+            } else {
+                flash('error', $msgS);
+            }
+            redirect('settings.php?tab=sas');
+        }
+        if ($tidSas > 1 && function_exists('tenant_save')) {
+            // توافق قديم إن ملف الحسابات غير موجود
+            $companyId = (int) post('sas_company_id', '0');
+            if ($companyId > 0 && function_exists('tenant_company_sas_host')) {
+                $hostFromCo = tenant_company_sas_host($pdo, $companyId, $config);
+                if ($hostFromCo === '') {
+                    flash('error', $lang === 'en' ? 'Selected company has no SAS host' : 'الشركة المختارة ما عندها هوست ساس');
+                    redirect('settings.php?tab=sas');
+                }
+                $data['sas_host'] = $hostFromCo;
+                $host = $hostFromCo;
+            } elseif ($host === '') {
+                flash('error', $lang === 'en' ? 'Choose a company first' : 'اختار الشركة أولاً');
+                redirect('settings.php?tab=sas');
+            }
             if ($data['sas_username'] !== '' && $pass !== '') {
                 $data['sas_enabled'] = true;
             }
@@ -580,26 +678,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($data['sas_username'] === '' || $passKeep === '') {
                 flash('error', $lang === 'en' ? 'Agency SAS username and password required' : 'يوزر وباسورد وكالة الساس مطلوبين');
                 redirect('settings.php?tab=sas');
-            }
-            // أعِد اكتشاف Parent بعد تثبيت الهوست من الشركة
-            if (($data['sas_parent_id'] <= 0 || (int) $data['sas_parent_id'] === 1) && function_exists('sas_detect_parent_id')) {
-                $tmpCfg2 = $config;
-                $tmpCfg2['sas'] = array(
-                    'enabled' => true,
-                    'host' => $data['sas_host'],
-                    'username' => $data['sas_username'],
-                    'password' => $passKeep,
-                    'parent_id' => 1,
-                    'default_password' => $data['sas_default_password'],
-                    'activate_units' => max(1, (int) $data['sas_activate_units']),
-                    'extend_method' => $data['sas_extend_method'],
-                    'extend_profile_id' => (int) $data['sas_extend_profile_id'],
-                    'on_failure' => $data['sas_on_failure'],
-                );
-                $detected2 = (int) sas_detect_parent_id($tmpCfg2);
-                if ($detected2 > 0) {
-                    $data['sas_parent_id'] = $detected2;
-                }
             }
             $tenantData = array(
                 'sas_enabled' => !empty($data['sas_enabled']) ? 1 : 0,
@@ -615,31 +693,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'sas_company_id' => $companyId > 0 ? $companyId : null,
             );
             if (tenant_save($pdo, $tidSas, $tenantData)) {
-                $testAction = post('action');
-                if ($testAction === 'test' || post('sas_test') === '1') {
-                    list($okT, $msgT) = tenant_test_sas_connection(
-                        $tenantData['sas_host'],
-                        $tenantData['sas_username'],
-                        $passKeep
-                    );
-                    if (function_exists('sas_mark_connection')) {
-                        sas_mark_connection($pdo, $config, $okT, $msgT, $tidSas);
-                    }
-                    flash($okT ? 'success' : 'error', $msgT);
-                } else {
-                    // فحص سريع بعد الحفظ
-                    list($okT, $msgT) = tenant_test_sas_connection(
-                        $tenantData['sas_host'],
-                        $tenantData['sas_username'],
-                        $passKeep
-                    );
-                    if (function_exists('sas_mark_connection')) {
-                        sas_mark_connection($pdo, $config, $okT, $msgT, $tidSas);
-                    }
-                    flash($okT ? 'success' : 'error', $okT
-                        ? (($lang === 'en' ? 'Saved — connected' : 'تم الحفظ — متصل بهذا المكان') . ($msgT !== '' ? ': ' . $msgT : ''))
-                        : (($lang === 'en' ? 'Saved but not connected: ' : 'تم الحفظ لكن غير متصل: ') . $msgT));
+                list($okT, $msgT) = tenant_test_sas_connection(
+                    $tenantData['sas_host'],
+                    $tenantData['sas_username'],
+                    $passKeep
+                );
+                if (function_exists('sas_mark_connection')) {
+                    sas_mark_connection($pdo, $config, $okT, $msgT, $tidSas);
                 }
+                flash($okT ? 'success' : 'error', $okT
+                    ? (($lang === 'en' ? 'Saved — connected' : 'تم الحفظ — متصل بهذا المكان') . ($msgT !== '' ? ': ' . $msgT : ''))
+                    : (($lang === 'en' ? 'Saved but not connected: ' : 'تم الحفظ لكن غير متصل: ') . $msgT));
             } else {
                 flash('error', $lang === 'en' ? 'Save failed' : 'فشل الحفظ');
             }
@@ -1809,6 +1873,67 @@ if ($sasTenantIdUi > 1) {
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="section" value="sas">
         <?php if ($sasTenantIdUi > 1): ?>
+        </form>
+        <?php
+        if (function_exists('ensure_tenant_sas_accounts_schema')) {
+            ensure_tenant_sas_accounts_schema($pdo);
+        }
+        $sasAccountsList = function_exists('tenant_sas_accounts_list')
+            ? tenant_sas_accounts_list($pdo, $sasTenantIdUi)
+            : array();
+        ?>
+        <h3 style="font-size:15px;margin:0 0 8px"><?php echo e($isEn ? 'Your SAS reseller accounts' : 'حسابات ريسيلر الساس'); ?></h3>
+        <p class="meta" style="margin:0 0 10px"><?php echo e($isEn
+            ? 'Add one account per company. All subscribers sync into one list.'
+            : 'أضف حساب لكل شركة. كل المشتركين يندمجون بقائمة واحدة عند المزامنة.'); ?></p>
+        <?php if ($sasAccountsList): ?>
+        <div class="table-wrap" style="margin-bottom:14px">
+            <table class="table-compact">
+                <thead>
+                <tr>
+                    <th><?php echo e($isEn ? 'Label' : 'الاسم'); ?></th>
+                    <th><?php echo e($isEn ? 'Host' : 'الهوست'); ?></th>
+                    <th><?php echo e($isEn ? 'User' : 'اليوزر'); ?></th>
+                    <th></th>
+                </tr>
+                </thead>
+                <tbody>
+                <?php foreach ($sasAccountsList as $acc): ?>
+                    <tr>
+                        <td><?php echo e($acc['label']); ?><?php if (!empty($acc['is_default'])): ?> <span class="meta">(<?php echo e($isEn ? 'default' : 'افتراضي'); ?>)</span><?php endif; ?></td>
+                        <td class="ltr"><?php echo e($acc['sas_host']); ?></td>
+                        <td class="ltr"><?php echo e($acc['sas_username']); ?></td>
+                        <td class="actions" style="gap:4px;flex-wrap:wrap">
+                            <?php if (empty($acc['is_default'])): ?>
+                            <form method="post" class="inline-form">
+                                <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                                <input type="hidden" name="section" value="sas">
+                                <input type="hidden" name="action" value="set_default">
+                                <input type="hidden" name="account_id" value="<?php echo (int) $acc['id']; ?>">
+                                <button class="btn ghost sm" type="submit"><?php echo e($isEn ? 'Default' : 'افتراضي'); ?></button>
+                            </form>
+                            <?php endif; ?>
+                            <form method="post" class="inline-form" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Delete this SAS account?' : 'حذف حساب الساس؟'); ?>);">
+                                <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                                <input type="hidden" name="section" value="sas">
+                                <input type="hidden" name="action" value="delete_account">
+                                <input type="hidden" name="account_id" value="<?php echo (int) $acc['id']; ?>">
+                                <button class="btn ghost sm" type="submit"><?php echo e($isEn ? 'Delete' : 'حذف'); ?></button>
+                            </form>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php else: ?>
+        <div class="alert alert-error" style="margin:10px 0"><?php echo e($isEn ? 'No SAS accounts yet — add one below.' : 'ماكو حسابات ساس بعد — أضف واحد تحت.'); ?></div>
+        <?php endif; ?>
+
+        <h3 style="font-size:15px;margin:16px 0 8px"><?php echo e($isEn ? 'Add / update account' : 'إضافة / تحديث حساب'); ?></h3>
+        <form method="post">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="section" value="sas">
         <?php if (!$sasCompanyCatalog): ?>
         <div class="alert alert-error" style="margin:10px 0">
             <?php echo e($isEn
@@ -1817,6 +1942,10 @@ if ($sasTenantIdUi > 1) {
         </div>
         <?php endif; ?>
         <div class="form-grid cols-2">
+            <div>
+                <label><?php echo e($isEn ? 'Label (optional)' : 'اسم اختياري'); ?></label>
+                <input name="account_label" placeholder="<?php echo e($isEn ? 'e.g. Company A reseller' : 'مثلاً: ريسيلر شركة أ'); ?>">
+            </div>
             <div>
                 <label><?php echo e($isEn ? 'Company' : 'الشركة'); ?></label>
                 <select name="sas_company_id" id="sasCompanyPick" required <?php echo !$sasCompanyCatalog ? 'disabled' : ''; ?>>
@@ -1840,27 +1969,32 @@ if ($sasTenantIdUi > 1) {
                        placeholder="—">
             </div>
             <div>
-                <label><?php echo e($isEn ? 'Agency SAS username' : 'يوزر وكالة الساس'); ?></label>
+                <label><?php echo e($isEn ? 'Reseller SAS username' : 'يوزر وكالة الساس'); ?></label>
                 <input class="ltr" name="sas_username" required
-                       value="<?php echo e(isset($sasCfgUi['username']) ? $sasCfgUi['username'] : ''); ?>"
+                       value=""
                        placeholder="<?php echo e($isEn ? 'Your SAS page user' : 'يوزر صفحتك بالساس'); ?>">
             </div>
             <div>
                 <label><?php echo e($isEn ? 'Agency SAS password' : 'باسورد وكالة الساس'); ?></label>
-                <input class="ltr" type="password" name="sas_password" autocomplete="new-password" value=""
-                       placeholder="<?php echo e(!empty($sasCfgUi['username']) ? ($isEn ? 'Leave blank to keep' : 'اتركه فاضي للإبقاء') : ''); ?>"
-                    <?php echo empty($sasCfgUi['username']) ? 'required' : ''; ?>>
+                <input class="ltr" type="password" name="sas_password" autocomplete="new-password" value="" required>
+            </div>
+            <div>
+                <label class="toggle" style="display:flex;align-items:center;gap:10px;margin-top:22px">
+                    <input type="checkbox" name="is_default" value="1" checked>
+                    <span><?php echo e($isEn ? 'Set as default' : 'اجعله الافتراضي'); ?></span>
+                </label>
             </div>
         </div>
+        <input type="hidden" name="account_id" value="0">
         <input type="hidden" name="sas_enabled" value="1">
-        <input type="hidden" name="sas_parent_id" value="<?php echo (int) $parentVal; ?>">
-        <input type="hidden" name="sas_extend_profile_id" value="<?php echo (int) (isset($sasCfgUi['extend_profile_id']) ? $sasCfgUi['extend_profile_id'] : 0); ?>">
-        <input type="hidden" name="sas_activate_units" value="<?php echo $unitsVal > 0 ? (int) $unitsVal : 1; ?>">
-        <input type="hidden" name="sas_on_failure" value="<?php echo e(isset($sasCfgUi['on_failure']) && $sasCfgUi['on_failure'] === 'rollback' ? 'rollback' : 'warn'); ?>">
-        <input type="hidden" name="sas_default_password" value="<?php echo e($defPassVal); ?>">
+        <input type="hidden" name="sas_parent_id" value="1">
+        <input type="hidden" name="sas_extend_profile_id" value="0">
+        <input type="hidden" name="sas_activate_units" value="1">
+        <input type="hidden" name="sas_on_failure" value="warn">
+        <input type="hidden" name="sas_default_password" value="1234">
         <div class="actions" style="margin-top:12px">
-            <button class="btn" type="submit" <?php echo !$sasCompanyCatalog ? 'disabled' : ''; ?>><?php echo e(t('save')); ?></button>
-            <button class="btn ghost" type="submit" name="action" value="test" <?php echo !$sasCompanyCatalog ? 'disabled' : ''; ?>><?php echo e($isEn ? 'Test connection' : 'فحص الاتصال'); ?></button>
+            <button class="btn" type="submit" <?php echo !$sasCompanyCatalog ? 'disabled' : ''; ?>><?php echo e($isEn ? 'Add account' : 'إضافة حساب'); ?></button>
+            <button class="btn ghost" type="submit" name="action" value="test" <?php echo !$sasCompanyCatalog ? 'disabled' : ''; ?>><?php echo e($isEn ? 'Test & save' : 'فحص وحفظ'); ?></button>
         </div>
         <script>
         (function () {
