@@ -111,8 +111,8 @@ render_header($isEn ? 'Companies' : 'الشركات', 'companies');
 <div class="panel">
     <h2><?php echo e($isEn ? 'Companies (SAS accounts)' : 'الشركات (حسابات الساس)'); ?></h2>
     <p class="meta"><?php echo e($isEn
-        ? 'Each company has its own SAS login. Current live data stays under company #1 — never wiped.'
-        : 'كل شركة لها ساس خاص. بياناتك الحالية تبقى تحت الشركة رقم 1 — ما تنمسح.'); ?></p>
+        ? 'Add SAS hosts here. Agencies pick a company in Settings → SAS login (host auto-fills), then enter their own SAS user/pass.'
+        : 'أضف هنا هوستات الساس. الوكالة تختار الشركة من إعدادات → تسجيل الدخول عبر SAS (الهوست تلقائي) ثم تدخل يوزر/باسورد وكالتها.'); ?></p>
 
     <div class="form-grid cols-2" style="align-items:start">
         <div>

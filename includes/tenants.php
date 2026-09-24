@@ -147,6 +147,7 @@ function ensure_tenants_schema($pdo, $config = null)
     tenants_ensure_column($pdo, 'tenants', 'company_about', 'TEXT NULL');
     tenants_ensure_column($pdo, 'tenants', 'company_logo', 'VARCHAR(255) NULL DEFAULT NULL');
     tenants_ensure_column($pdo, 'tenants', 'wa_templates', 'LONGTEXT NULL');
+    tenants_ensure_column($pdo, 'tenants', 'sas_company_id', 'INT UNSIGNED NULL DEFAULT NULL');
     try {
         $pdo->exec("UPDATE tenants SET status = 'active' WHERE id = 1 AND (status IS NULL OR status = '')");
     } catch (Exception $e) {
@@ -382,7 +383,7 @@ function tenant_save($pdo, $tenantId, $fields)
         'sas_parent_id', 'sas_default_password', 'sas_activate_units', 'sas_extend_method',
         'sas_extend_profile_id', 'sas_on_failure',
         'status', 'owner_user_id', 'trial_ends_at', 'subscription_expires_at', 'plan_code', 'contact_phone',
-        'company_email', 'company_address', 'company_about', 'company_logo', 'wa_templates',
+        'company_email', 'company_address', 'company_about', 'company_logo', 'wa_templates', 'sas_company_id',
     );
     $cols = array();
     $params = array(':id' => $tenantId);
@@ -466,6 +467,88 @@ function tenants_list($pdo)
     } catch (Exception $e) {
         return array();
     }
+}
+
+/**
+ * شركات الإدمن اللي عليها هوست ساس — لاختيار الوكالة
+ * (يفضّل الشركات بدون مالك SaaS، مع إبقاء أي هوست فريد موجود)
+ */
+function tenants_sas_company_catalog($pdo, $config = null)
+{
+    ensure_tenants_schema($pdo);
+    $raw = array();
+    try {
+        $raw = $pdo->query(
+            "SELECT id, name, sas_host, sas_enabled, owner_user_id
+             FROM tenants
+             WHERE is_active = 1
+               AND sas_host IS NOT NULL AND TRIM(sas_host) <> ''
+             ORDER BY
+               CASE WHEN id = 1 THEN 0
+                    WHEN owner_user_id IS NULL OR owner_user_id = 0 THEN 1
+                    ELSE 2 END,
+               id ASC"
+        )->fetchAll();
+        if (!is_array($raw)) {
+            $raw = array();
+        }
+    } catch (Exception $e) {
+        $raw = array();
+    }
+    // إن كانت الشركة 1 فاضي بالجدول لكن مضبوط بالإعدادات العامة
+    $has1 = false;
+    foreach ($raw as $r) {
+        if ((int) $r['id'] === 1) {
+            $has1 = true;
+            break;
+        }
+    }
+    if (!$has1 && is_array($config) && function_exists('sas_config')) {
+        $base = sas_config($config);
+        $h = isset($base['host']) ? trim((string) $base['host']) : '';
+        if ($h !== '') {
+            array_unshift($raw, array(
+                'id' => 1,
+                'name' => 'الشركة الرئيسية',
+                'sas_host' => $h,
+                'sas_enabled' => !empty($base['enabled']) ? 1 : 0,
+                'owner_user_id' => null,
+            ));
+        }
+    }
+    // هوست فريد واحد لكل سيرفر (أول ظهور حسب الأولوية)
+    $out = array();
+    $seenHost = array();
+    foreach ($raw as $r) {
+        $h = strtolower(preg_replace('#^https?://#i', '', rtrim(trim((string) $r['sas_host']), '/')));
+        if ($h === '' || isset($seenHost[$h])) {
+            continue;
+        }
+        $seenHost[$h] = true;
+        $out[] = $r;
+    }
+    return $out;
+}
+
+/**
+ * هوست الشركة المختارة (لربط وكالة)
+ */
+function tenant_company_sas_host($pdo, $companyId, $config = null)
+{
+    $companyId = (int) $companyId;
+    if ($companyId <= 0) {
+        return '';
+    }
+    $row = tenant_row($pdo, $companyId);
+    if ($row && isset($row['sas_host']) && trim((string) $row['sas_host']) !== '') {
+        return preg_replace('#^https?://#i', '', rtrim(trim((string) $row['sas_host']), '/'));
+    }
+    if ($companyId === 1 && is_array($config) && function_exists('sas_config')) {
+        $base = sas_config($config);
+        $h = isset($base['host']) ? trim((string) $base['host']) : '';
+        return $h !== '' ? preg_replace('#^https?://#i', '', rtrim($h, '/')) : '';
+    }
+    return '';
 }
 
 function is_super_admin_user($user = null)
