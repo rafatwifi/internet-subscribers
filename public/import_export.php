@@ -21,6 +21,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             flash('error', 'اختر ملف CSV');
             redirect('import_export.php');
         }
+        if (function_exists('platform_backup_snapshot')) {
+            list($bakOk, $bakPath, $bakMsg) = platform_backup_snapshot($pdo, $config, 'pre-import-csv');
+            if (!$bakOk) {
+                flash('error', 'توقف الاستيراد — النسخة فشلت: ' . $bakMsg);
+                redirect('import_export.php');
+            }
+        }
         $handle = fopen($_FILES['csv_file']['tmp_name'], 'r');
         if (!$handle) {
             flash('error', 'تعذر قراءة الملف');
@@ -103,6 +110,21 @@ if (isset($_GET['export']) && $_GET['export'] === 'subscribers') {
     redirect('import_export.php');
 }
 
+if (isset($_GET['export']) && $_GET['export'] === 'agents' && function_exists('platform_agents_pack_zip')) {
+    $tid = (function_exists('is_super_admin_user') && is_super_admin_user())
+        ? 0
+        : (function_exists('current_tenant_id') ? (int) current_tenant_id() : 1);
+    list($packOk, $packPath, $packMsg) = platform_agents_pack_zip($pdo, $tid);
+    if (!$packOk || !is_file($packPath)) {
+        flash('error', $packMsg);
+        redirect('import_export.php');
+    }
+    header('Content-Type: application/zip');
+    header('Content-Disposition: attachment; filename="' . basename($packPath) . '"');
+    readfile($packPath);
+    exit;
+}
+
 if ($canReports && isset($_GET['export']) && $_GET['export'] === 'report') {
     $month = isset($_GET['month']) ? trim((string) $_GET['month']) : date('Y-m');
     if (!preg_match('/^\d{4}-\d{2}$/', $month)) {
@@ -146,8 +168,9 @@ render_header($pageTitle, 'import_export', $lang === 'en' ? 'CSV import/export t
 <div class="panel" style="margin-bottom:12px">
     <a class="btn" href="import_map.php"><?php echo e($lang === 'en' ? 'Import Excel with column mapping' : 'استيراد Excel مع مطابقة الأعمدة'); ?></a>
     <a class="btn ghost" href="profit_report.php"><?php echo e($lang === 'en' ? 'Profit report' : 'تقرير الأرباح'); ?></a>
+    <a class="btn secondary" href="import_export.php?export=agents"><?php echo e($lang === 'en' ? 'Export agents pack' : 'تصدير حزمة الوكلاء'); ?></a>
+    <a class="btn ghost" href="backup.php"><?php echo e($lang === 'en' ? 'Backup & Google Drive' : 'نسخ وكوكل درايف'); ?></a>
 </div>
-<?php
 <div class="panel">
     <h2><?php echo e($lang === 'en' ? 'Import subscribers' : 'استيراد مشتركين'); ?></h2>
     <p class="meta" style="margin:0 0 14px">
@@ -177,7 +200,7 @@ render_header($pageTitle, 'import_export', $lang === 'en' ? 'CSV import/export t
     <p class="meta" style="margin:0 0 14px">
         <?php echo e($lang === 'en'
             ? 'Backup of local invoices/debts, subscriptions, WhatsApp logs, and activity.'
-            : 'نسخة من الفواتير/الديون والاشتراكات المحلية وسجل الرسائل والحركات.'); ?>
+            : 'تنزل الآن: الوكيل يشوف مشتركيه فقط، ومدير الوكالة يشوف وكالته، وأدمن المنصة يشوف الكل.'); ?>
     </p>
     <div class="actions" style="margin-top:0">
         <a class="btn secondary" href="import_export.php?export=subscribers"><?php echo e($lang === 'en' ? 'Download full backup' : 'تنزيل النسخة الكاملة'); ?></a>

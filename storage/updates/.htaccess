@@ -1,0 +1,2 @@
+# Deny web access to update packages
+Deny from all

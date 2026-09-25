@@ -227,6 +227,16 @@ function fetch_subscriber_activity($pdo, $subscriberId, $limit = 100)
 
 function fetch_global_activity($pdo, $limit = 300, $q = '')
 {
+    return fetch_activity_filtered($pdo, $limit, $q, '');
+}
+
+function fetch_system_activity($pdo, $limit = 300, $q = '')
+{
+    return fetch_activity_filtered($pdo, $limit, $q, 'system');
+}
+
+function fetch_activity_filtered($pdo, $limit, $q, $scope)
+{
     ensure_activity_logs_table($pdo);
     $limit = (int) $limit;
     if ($limit < 1) {
@@ -234,6 +244,9 @@ function fetch_global_activity($pdo, $limit = 300, $q = '')
     }
     $params = array();
     $where = '1=1';
+    if ($scope === 'system') {
+        $where .= " AND (a.subscriber_id IS NULL OR a.entity_type IN ('system','tenant','user','saas','backup','auth'))";
+    }
     $q = trim((string) $q);
     if ($q !== '') {
         $where .= ' AND (a.summary LIKE :q OR a.details LIKE :q OR a.actor_name LIKE :q OR a.action LIKE :q OR s.name LIKE :q)';

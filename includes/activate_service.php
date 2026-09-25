@@ -167,6 +167,19 @@ function activate_one_subscriber($pdo, $config, $subscriberId, $opts = array())
     $serviceName = $plan['name'];
     $monthlyPrice = (float) $plan['monthly_price'];
     $costPrice = isset($plan['cost_price']) ? (float) $plan['cost_price'] : 0;
+    if (function_exists('current_admin') && function_exists('agent_card_prices_list')) {
+        $priceMe = current_admin();
+        $priceUid = $priceMe ? (int) $priceMe['id'] : 0;
+        if ($priceUid > 0) {
+            foreach (agent_card_prices_list($pdo, $priceUid) as $priceRow) {
+                if (strcasecmp(trim((string) $priceRow['profile_name']), trim((string) $serviceName)) === 0
+                    && (float) $priceRow['agent_price'] > 0) {
+                    $monthlyPrice = (float) $priceRow['agent_price'];
+                    break;
+                }
+            }
+        }
+    }
     $planIdSaved = isset($plan['id']) ? (int) $plan['id'] : 0;
 
     if ($daysLeftPost >= 0) {

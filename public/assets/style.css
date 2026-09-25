@@ -1,4 +1,4 @@
-﻿:root {
+:root {
   --sidebar: rgba(47, 56, 68, 0.94);
   --bg: #f3f0ea;
   --bg2: #eef2f4;
@@ -3104,6 +3104,15 @@ th.status-cell {
     border-radius: 10px;
   }
   table { min-width: 0 !important; }
+}
+.wa-miss {
+  display: inline-block;
+  margin-inline-start: 4px;
+  color: #b91c1c;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
 }
 
 .status-sq {

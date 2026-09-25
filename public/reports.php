@@ -18,6 +18,7 @@ if (!preg_match('/^\d{4}-\d{2}$/', $month)) {
     $month = date('Y-m');
 }
 $isCurrentMonth = ($month === date('Y-m'));
+$reportScope = function_exists('subscriber_agent_scope_sql') ? subscriber_agent_scope_sql('s') : '';
 
 $archiveRow = null;
 try {
@@ -34,7 +35,7 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
             "SELECT i.*, s.name, s.phone
              FROM invoices i
              JOIN subscribers s ON s.id = i.subscriber_id
-             WHERE i.status = 'paid' AND DATE_FORMAT(i.paid_at, '%Y-%m') = :m
+             WHERE i.status = 'paid' AND DATE_FORMAT(i.paid_at, '%Y-%m') = :m" . $reportScope . "
              ORDER BY i.paid_at DESC"
         );
         $details->execute(array(':m' => $month));
@@ -69,37 +70,37 @@ $cost = 0.0;
 $monthDebt = 0.0;
 $fromArchive = false;
 
-if (!$isCurrentMonth && $archiveRow) {
-    $activated = (int) $archiveRow['activations'];
-    $sales = (float) $archiveRow['sales'];
-    $received = (float) $archiveRow['collected'];
-    $profit = (float) $archiveRow['profit'];
-    $cost = (float) $archiveRow['cost'];
-    $monthDebt = (float) $archiveRow['debt'];
-    $fromArchive = true;
-} else {
-    try {
-        if (function_exists('compute_month_stats')) {
-            $stats = compute_month_stats($pdo, $month);
-            $activated = $stats['activations'];
-            $sales = $stats['sales'];
-            $received = $stats['collected'];
-            $profit = $stats['profit'];
-            $cost = $stats['cost'];
-            $monthDebt = $stats['debt'];
-        } else {
-            $st = $pdo->prepare("SELECT COUNT(*), COALESCE(SUM(monthly_price),0) FROM subscriptions WHERE DATE_FORMAT(created_at, '%Y-%m') = :m");
-            $st->execute(array(':m' => $month));
-            $row = $st->fetch(PDO::FETCH_NUM);
-            $activated = (int) $row[0];
-            $sales = (float) $row[1];
-            $st = $pdo->prepare("SELECT COALESCE(SUM(amount),0) FROM invoices WHERE status = 'paid' AND DATE_FORMAT(paid_at, '%Y-%m') = :m");
-            $st->execute(array(':m' => $month));
-            $received = (float) $st->fetchColumn();
-        }
-    } catch (Exception $e) {
-    } catch (Throwable $e) {
+try {
+    if (function_exists('compute_month_stats')) {
+        $stats = compute_month_stats($pdo, $month, $reportScope);
+        $activated = $stats['activations'];
+        $sales = $stats['sales'];
+        $received = $stats['collected'];
+        $profit = $stats['profit'];
+        $cost = $stats['cost'];
+        $monthDebt = $stats['debt'];
+    } else {
+        $st = $pdo->prepare(
+            "SELECT COUNT(*), COALESCE(SUM(sub.monthly_price),0)
+             FROM subscriptions sub
+             JOIN subscribers s ON s.id = sub.subscriber_id
+             WHERE DATE_FORMAT(sub.created_at, '%Y-%m') = :m" . $reportScope
+        );
+        $st->execute(array(':m' => $month));
+        $row = $st->fetch(PDO::FETCH_NUM);
+        $activated = (int) $row[0];
+        $sales = (float) $row[1];
+        $st = $pdo->prepare(
+            "SELECT COALESCE(SUM(i.amount),0)
+             FROM invoices i
+             JOIN subscribers s ON s.id = i.subscriber_id
+             WHERE i.status = 'paid' AND DATE_FORMAT(i.paid_at, '%Y-%m') = :m" . $reportScope
+        );
+        $st->execute(array(':m' => $month));
+        $received = (float) $st->fetchColumn();
     }
+} catch (Exception $e) {
+} catch (Throwable $e) {
 }
 
 $paidRows = array();
@@ -111,7 +112,7 @@ try {
         "SELECT i.*, s.name, s.phone
          FROM invoices i
          JOIN subscribers s ON s.id = i.subscriber_id
-         WHERE i.status = 'paid' AND DATE_FORMAT(i.paid_at, '%Y-%m') = :m
+         WHERE i.status = 'paid' AND DATE_FORMAT(i.paid_at, '%Y-%m') = :m" . $reportScope . "
          ORDER BY i.paid_at DESC"
     );
     $details->execute(array(':m' => $month));
@@ -125,7 +126,7 @@ try {
         "SELECT sub.*, s.name, s.phone
          FROM subscriptions sub
          JOIN subscribers s ON s.id = sub.subscriber_id
-         WHERE DATE_FORMAT(sub.created_at, '%Y-%m') = :m
+         WHERE DATE_FORMAT(sub.created_at, '%Y-%m') = :m" . $reportScope . "
          ORDER BY sub.id DESC"
     );
     $salesRows->execute(array(':m' => $month));
@@ -135,8 +136,32 @@ try {
 }
 
 try {
-    if (function_exists('list_monthly_archives')) {
-        $archives = list_monthly_archives($pdo);
+    if (function_exists('compute_month_stats')) {
+        $ymSt = $pdo->query(
+            "SELECT DISTINCT DATE_FORMAT(sub.created_at, '%Y-%m') AS ym
+             FROM subscriptions sub
+             JOIN subscribers s ON s.id = sub.subscriber_id
+             WHERE sub.created_at IS NOT NULL" . $reportScope . "
+             ORDER BY ym DESC
+             LIMIT 18"
+        );
+        $ymRows = $ymSt ? $ymSt->fetchAll() : array();
+        $curYm = date('Y-m');
+        foreach ($ymRows as $ymRow) {
+            $ym = isset($ymRow['ym']) ? (string) $ymRow['ym'] : '';
+            if (!preg_match('/^\d{4}-\d{2}$/', $ym) || $ym >= $curYm) {
+                continue;
+            }
+            $one = compute_month_stats($pdo, $ym, $reportScope);
+            $archives[] = array(
+                'year_month' => $ym,
+                'activations' => $one['activations'],
+                'sales' => $one['sales'],
+                'collected' => $one['collected'],
+                'profit' => $one['profit'],
+                'archived_at' => '',
+            );
+        }
     }
 } catch (Exception $e) {
 } catch (Throwable $e) {
@@ -150,7 +175,7 @@ $curStats = array(
 );
 try {
     if (function_exists('compute_month_stats')) {
-        $curStats = compute_month_stats($pdo, date('Y-m'));
+        $curStats = compute_month_stats($pdo, date('Y-m'), $reportScope);
     }
 } catch (Exception $e) {
 } catch (Throwable $e) {
@@ -271,8 +296,8 @@ render_header(t('reports'), 'reports');
     <h2><?php echo e($lang === 'en' ? 'Monthly archive' : 'أرشيف الأشهر'); ?></h2>
     <p class="meta" style="margin-top:-4px">
         <?php echo e($lang === 'en'
-            ? 'When a month ends, totals are frozen here for reports.'
-            : 'من يخلص الشهر، أرقامه تنحفظ هنا وتظهر بالتقارير.'); ?>
+            ? 'Totals below are only for this agency.'
+            : 'الأرقام تحت لوكالة هذا الحساب فقط.'); ?>
     </p>
     <div class="table-wrap">
         <table class="table-compact">
@@ -309,7 +334,7 @@ render_header(t('reports'), 'reports');
                     <td><?php echo e(money_format_iqd($ar['sales'], $config['currency'])); ?></td>
                     <td><?php echo e(money_format_iqd($ar['collected'], $config['currency'])); ?></td>
                     <td><?php echo e(money_format_iqd($ar['profit'], $config['currency'])); ?></td>
-                    <td><?php echo e($ar['archived_at']); ?></td>
+                    <td><?php echo e($ar['archived_at'] !== '' ? $ar['archived_at'] : '—'); ?></td>
                     <td><a class="link-act act-blue" href="?month=<?php echo e(urlencode($ar['year_month'])); ?>"><?php echo e(t('show')); ?></a></td>
                 </tr>
             <?php endforeach; ?>

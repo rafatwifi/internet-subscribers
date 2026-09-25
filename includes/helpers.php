@@ -62,11 +62,10 @@ function phone_is_placeholder($phone)
     if ($d === null || $d === '') {
         return true;
     }
-    if ($d === '964000000000' || $d === '0000000000' || $d === '00000000000') {
+    if ($d === '964000000000' || $d === '0000000000' || $d === '00000000000' || $d === '00000000') {
         return true;
     }
-    // كل الأرقام أصفار
-    if (preg_match('/^0+$/', $d)) {
+    if (preg_match('/^(964)?0+$/', $d)) {
         return true;
     }
     return false;
@@ -725,7 +724,9 @@ function export_table_assoc($pdo, $sql)
 function export_offline_subscribers_full($pdo)
 {
     $stamp = date('Y-m-d');
-    $scope = function_exists('subscriber_agent_scope_sql') ? subscriber_agent_scope_sql('s') : '';
+    $scope = function_exists('backup_subscriber_scope_sql')
+        ? backup_subscriber_scope_sql('s')
+        : (function_exists('subscriber_agent_scope_sql') ? subscriber_agent_scope_sql('s') : '');
     $subs = export_table_assoc($pdo, 'SELECT s.* FROM subscribers s WHERE 1=1' . $scope . ' ORDER BY s.name ASC, s.id ASC');
     $invoices = export_table_assoc(
         $pdo,

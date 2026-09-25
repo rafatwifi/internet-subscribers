@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Deploy: Desktop replace folder
 
-Whenever the user asks for app changes that need uploading to the live server:
+After every code change that should reach the live server, do not upload the files yourself. Put them in Desktop folder `123` and tell the user to upload that folder.
 
 1. After finishing code changes, create **one folder on the Desktop named exactly `123`** (`C:\Users\rafat\Desktop\123`) containing **only the files that must be replaced**, keeping the same path hierarchy (`includes/…`, `public/…`, `cron/…`, etc.).
 2. **Always** use folder name `123` (wipe/recreate it each pack so it does not mix old unrelated files). Do not invent other pack folder names unless the user asks.

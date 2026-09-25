@@ -88,6 +88,10 @@ function settings_defaults()
         'zaincash_msisdn' => '',
         'zaincash_production' => false,
         'zaincash_redirect_base' => '',
+        'gdrive_client_id' => '',
+        'gdrive_client_secret' => '',
+        'gdrive_refresh_token' => '',
+        'gdrive_folder_id' => '',
     );
 }
 

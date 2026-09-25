@@ -29,19 +29,43 @@ if ($action === 'search') {
     }
     $q = trim((string) (isset($_GET['q']) ? $_GET['q'] : (isset($_POST['q']) ? $_POST['q'] : '')));
     $rows = array();
+    $kind = isset($_GET['kind']) ? (string) $_GET['kind'] : 'system';
     if ($q !== '') {
         try {
             ensure_admin_users_table($pdo);
-            $st = $pdo->prepare(
-                'SELECT id, username, display_name, role, sas_manager_id
-                 FROM admin_users
-                 WHERE is_active = 1 AND role = "agent"
-                   AND (display_name LIKE :q OR username LIKE :q2)
-                 ORDER BY display_name ASC
-                 LIMIT 20'
-            );
-            $like = '%' . $q . '%';
-            $st->execute(array(':q' => $like, ':q2' => $like));
+            if ($kind === 'agent') {
+                $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+                $st = $pdo->prepare(
+                    'SELECT u.id, u.username, u.display_name, u.role
+                     FROM admin_users u
+                     WHERE u.is_active = 1 AND u.role IN ("agent", "group_manager")
+                       AND u.tenant_id = :t
+                       AND (u.display_name LIKE :q OR u.username LIKE :q2)
+                       AND EXISTS (
+                         SELECT 1 FROM admin_users c
+                         WHERE c.reports_to_user_id = u.id AND c.tenant_id = u.tenant_id
+                           AND c.role IN ("agent", "group_manager")
+                       )
+                     ORDER BY u.display_name ASC
+                     LIMIT 20'
+                );
+                $like = '%' . $q . '%';
+                $st->execute(array(':t' => $tid, ':q' => $like, ':q2' => $like));
+            } else {
+                if (!function_exists('is_super_admin_user') || !is_super_admin_user()) {
+                    impersonate_json(false, $lang === 'en' ? 'Super admin only' : 'للمدير العام فقط');
+                }
+                $st = $pdo->prepare(
+                    'SELECT id, username, display_name, role
+                     FROM admin_users
+                     WHERE is_active = 1 AND role = "admin" AND tenant_id > 1
+                       AND (display_name LIKE :q OR username LIKE :q2)
+                     ORDER BY username ASC
+                     LIMIT 20'
+                );
+                $like = '%' . $q . '%';
+                $st->execute(array(':q' => $like, ':q2' => $like));
+            }
             $rows = $st->fetchAll();
         } catch (Exception $e) {
             $rows = array();
@@ -86,11 +110,15 @@ if ($action === 'stop') {
 if ($action === 'start') {
     $tid = (int) post('user_id', '0');
     list($ok, $msg) = impersonate_start($pdo, $tid);
+    $dest = 'index.php';
+    if ($ok && function_exists('is_agent_user') && (is_agent_user() || (function_exists('is_group_manager_user') && is_group_manager_user()))) {
+        $dest = 'sas.php';
+    }
     if ($wantsJson) {
-        impersonate_json($ok, $msg, array('redirect' => 'sas.php'));
+        impersonate_json($ok, $msg, array('redirect' => $dest));
     }
     flash($ok ? 'success' : 'error', $msg);
-    redirect($ok ? 'sas.php' : 'index.php');
+    redirect($ok ? $dest : 'index.php');
 }
 
 if ($wantsJson) {

@@ -247,6 +247,18 @@ $platformAdminFile = __DIR__ . '/platform_admin.php';
 if (is_file($platformAdminFile)) {
     require_once $platformAdminFile;
 }
+$gdriveFile = __DIR__ . '/gdrive.php';
+if (is_file($gdriveFile)) {
+    require_once $gdriveFile;
+}
+$platformBackupFile = __DIR__ . '/platform_backup.php';
+if (is_file($platformBackupFile)) {
+    require_once $platformBackupFile;
+}
+$userHoldFile = __DIR__ . '/user_hold.php';
+if (is_file($userHoldFile)) {
+    require_once $userHoldFile;
+}
 if (function_exists('app_remember_try_restore')) {
     app_remember_try_restore($pdo);
 }
@@ -275,6 +287,12 @@ if (function_exists('ensure_tenants_schema')) {
 if (!empty($_SESSION['admin_logged_in']) && function_exists('tenant_apply_wa_templates_to_config')) {
     try {
         tenant_apply_wa_templates_to_config($config, $pdo);
+    } catch (Exception $e) {
+    }
+}
+if (!empty($_SESSION['admin_logged_in']) && function_exists('tenant_attach_owner_data_if_empty')) {
+    try {
+        tenant_attach_owner_data_if_empty($pdo, $config);
     } catch (Exception $e) {
     }
 }

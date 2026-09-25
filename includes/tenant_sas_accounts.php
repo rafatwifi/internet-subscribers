@@ -358,6 +358,44 @@ function tenant_sas_account_save($pdo, $tenantId, $fields, $accountId = 0)
     }
 }
 
+function tenant_sas_account_logout($pdo, $tenantId, $accountId)
+{
+    ensure_tenant_sas_accounts_schema($pdo);
+    $tenantId = (int) $tenantId;
+    $accountId = (int) $accountId;
+    $row = tenant_sas_account_row($pdo, $accountId, $tenantId);
+    if (!$row) {
+        return array(false, 'الحساب غير موجود');
+    }
+    try {
+        $pdo->prepare(
+            'UPDATE tenant_sas_accounts SET sas_enabled = 0, is_default = 0, updated_at = NOW() WHERE id = :id AND tenant_id = :t'
+        )->execute(array(':id' => $accountId, ':t' => $tenantId));
+        $left = tenant_sas_accounts_list($pdo, $tenantId);
+        $hasDef = false;
+        foreach ($left as $r) {
+            if (!empty($r['is_default']) && !empty($r['sas_enabled'])) {
+                $hasDef = true;
+                break;
+            }
+        }
+        if (!$hasDef) {
+            foreach ($left as $r) {
+                if (!empty($r['sas_enabled'])) {
+                    tenant_sas_account_set_default($pdo, $tenantId, (int) $r['id']);
+                    break;
+                }
+            }
+        }
+        if (function_exists('tenant_sas_accounts_mirror_default')) {
+            tenant_sas_accounts_mirror_default($pdo, $tenantId);
+        }
+        return array(true, 'تم تسجيل الخروج');
+    } catch (Exception $e) {
+        return array(false, 'تعذر تسجيل الخروج');
+    }
+}
+
 function tenant_sas_account_delete($pdo, $tenantId, $accountId)
 {
     ensure_tenant_sas_accounts_schema($pdo);

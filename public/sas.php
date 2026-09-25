@@ -139,6 +139,9 @@ if (isset($_GET['ajax']) && ($_GET['ajax'] === 'profiles' || $_GET['ajax'] === '
 
 if (isset($_GET['ajax']) && ($_GET['ajax'] === 'sync' || $_GET['ajax'] === 'pull' || $_GET['ajax'] === 'diag')) {
     header('Content-Type: application/json; charset=utf-8');
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
     if (function_exists('set_time_limit')) {
         @set_time_limit(60);
     }
@@ -736,6 +739,15 @@ if (strlen($parentFilter) > 80) {
 
 $cacheCount = 0;
 try {
+    if (function_exists('shop_restore_sep22_if_empty')) {
+        shop_restore_sep22_if_empty($pdo);
+    }
+    if (function_exists('sas_cache_fill_from_subscribers')) {
+        sas_cache_fill_from_subscribers($pdo);
+    }
+    if (function_exists('sas_relink_ledger_rows')) {
+        sas_relink_ledger_rows($pdo);
+    }
     $tidCnt = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
     $stCnt = $pdo->prepare('SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = :t');
     $stCnt->execute(array(':t' => $tidCnt));
@@ -777,7 +789,12 @@ if (function_exists('sas_agent_scope_sql')) {
     $where .= sas_agent_scope_sql('c');
 }
 if ($parentFilter !== '') {
-    $where .= ' AND c.parent_name = :parent_name';
+    $selfLab = function_exists('sas_owner_parent_label') ? sas_owner_parent_label($pdo) : '';
+    if ($selfLab !== '' && $parentFilter === $selfLab) {
+        $where .= ' AND (c.parent_name IS NULL OR c.parent_name = "" OR c.parent_name = :parent_name)';
+    } else {
+        $where .= ' AND c.parent_name = :parent_name';
+    }
     $params[':parent_name'] = $parentFilter;
 }
 
@@ -1091,7 +1108,16 @@ if ($lastOk !== '') {
     $syncHint .= ($lang === 'en' ? ' · last sync ' : ' · آخر تحديث ') . $lastOk;
 }
 $sasLastErr = (!empty($syncMeta['last_error'])) ? (string) $syncMeta['last_error'] : '';
-$sasOfflineSnap = $sasReady && $sasLastErr !== '';
+$sasKnownOnline = false;
+if ($sasReady && function_exists('sas_connection_status')) {
+    try {
+        $cst = sas_connection_status($pdo, $config);
+        $sasKnownOnline = is_array($cst) && !empty($cst['ok']);
+    } catch (Exception $e) {
+        $sasKnownOnline = false;
+    }
+}
+$sasOfflineSnap = $sasReady && $sasLastErr !== '' && !$sasKnownOnline;
 $uiPrefs = function_exists('admin_ui_prefs_load') ? admin_ui_prefs_load($pdo) : array();
 if (!is_array($uiPrefs)) {
     $uiPrefs = array();
@@ -1111,6 +1137,21 @@ try {
     )->fetchAll(PDO::FETCH_COLUMN);
     if (!is_array($parentNames)) {
         $parentNames = array();
+    }
+    $selfLab = function_exists('sas_owner_parent_label') ? sas_owner_parent_label($pdo) : '';
+    if ($selfLab !== '') {
+        $emptyParents = 0;
+        try {
+            $emptyParents = (int) $pdo->query(
+                'SELECT COUNT(*) FROM sas_users_cache c
+                 WHERE (c.parent_name IS NULL OR c.parent_name = "")' . $parentScope
+            )->fetchColumn();
+        } catch (Exception $e) {
+            $emptyParents = 0;
+        }
+        if ($emptyParents > 0 && !in_array($selfLab, $parentNames, true)) {
+            array_unshift($parentNames, $selfLab);
+        }
     }
 } catch (Exception $e) {
     $parentNames = array();
@@ -4745,9 +4786,11 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   var offlineBannerText = <?php echo json_encode($lang === 'en'
       ? 'No connection to SAS — showing stored offline snapshot. Sync will resume automatically when SAS is back.'
       : 'ماكو اتصال بالساس — البيانات مخزّنة أوف لاين (لقطة محلية). عند رجوع الساس تبدأ المزامنة تلقائياً.'); ?>;
+  var sasKnownOnline = <?php echo !empty($sasKnownOnline) ? 'true' : 'false'; ?>;
   function setOfflineBanner(on) {
     var b = document.getElementById('sasOfflineBanner');
     if (!b) return;
+    if (sasKnownOnline) on = false;
     if (on) {
       b.hidden = false;
       b.textContent = offlineBannerText;
@@ -4849,7 +4892,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     });
   }
   function runDiagThenSync() {
-    return runSync(true);
+    return runSync(false);
   }
   var refreshBtn = document.getElementById('refreshTableBtn');
   if (refreshBtn) {

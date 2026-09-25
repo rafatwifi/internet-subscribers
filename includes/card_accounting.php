@@ -453,7 +453,7 @@ function list_accountant_users($pdo, $activeOnly = true)
         if (function_exists('current_tenant_id')) {
             $tenantSql = ' AND tenant_id = ' . (int) current_tenant_id();
         }
-        $sql = 'SELECT id, username, display_name, role, is_active, linked_agent_id, created_at, tenant_id
+        $sql = 'SELECT id, username, display_name, role, is_active, linked_agent_id, created_at, tenant_id, can_activate
                 FROM admin_users WHERE role = "accountant"' . $tenantSql;
         if ($activeOnly) {
             $sql .= ' AND is_active = 1';

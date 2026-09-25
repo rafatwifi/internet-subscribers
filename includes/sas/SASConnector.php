@@ -748,7 +748,7 @@ class SASConnector
     /**
      * قائمة المستخدمين — صيغة SAS الرسمية: page / count / sortBy
      */
-    public function listUsersPage($start, $length, $search = '')
+    public function listUsersPage($start, $length, $search = '', $parentId = 0)
     {
         if (!$this->token && !$this->login()) {
             return array(
@@ -773,6 +773,11 @@ class SASConnector
             'status' => '',
             'with_traffic' => 1,
         );
+        $parentId = (int) $parentId;
+        if ($parentId > 0) {
+            $payload['parent_id'] = $parentId;
+            $payload['manager_id'] = $parentId;
+        }
         $full = $this->decodeApiBody($this->post('index/user', $payload, true), false);
         if (isset($full['__http_error']) || isset($full['__auth_error']) || isset($full['__curl_error'])
             || isset($full['__decrypt_error']) || isset($full['__exception']) || isset($full['__json_error'])) {

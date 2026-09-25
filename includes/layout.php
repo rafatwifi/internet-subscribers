@@ -219,7 +219,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <a class="<?php echo $active === 'import_export' ? 'active' : ''; ?>" href="import_export.php"><?php echo e($isEn ? 'Import & Export' : 'استيراد وتصدير'); ?></a>
             <?php endif; ?>
             <?php if ($can('subscriptions')): ?>
-            <a class="<?php echo $active === 'subscriptions' ? 'active' : ''; ?>" href="subscriptions.php"><?php echo e($isEn ? 'System activity' : 'حركات النظام'); ?></a>
+            <a class="<?php echo $active === 'system_activity' ? 'active' : ''; ?>" href="logs.php?scope=system"><?php echo e($isEn ? 'System activity' : 'حركات النظام'); ?></a>
             <?php endif; ?>
             <?php if ($can('logs')): ?>
             <a class="<?php echo $active === 'logs' ? 'active' : ''; ?>" href="logs.php"><?php echo e($isEn ? 'Log' : 'اللوك'); ?></a>
@@ -237,17 +237,25 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <?php if ($can('subscribers')): ?>
             <a class="<?php echo $active === 'sas' ? 'active' : ''; ?>" href="sas.php"><?php echo e(t('sas')); ?></a>
             <?php endif; ?>
-            <?php if ($navTidEarly > 1): ?>
-            <a class="<?php echo ($active === 'settings' || $active === 'my_sas') ? 'active' : ''; ?>" href="settings.php?tab=sas"><?php echo e($isEn ? 'SAS accounts' : 'حسابات الساس'); ?></a>
-            <?php endif; ?>
             <?php if ($can('cards')): ?>
             <a class="<?php echo $active === 'cards' ? 'active' : ''; ?>" href="cards.php"><?php echo e($isEn ? 'Cards' : 'الكارتات'); ?></a>
             <?php endif; ?>
             <?php if ($can('plans')): ?>
             <a class="<?php echo $active === 'plans' ? 'active' : ''; ?>" href="plans.php"><?php echo e(t('plans')); ?></a>
             <?php endif; ?>
-            <?php if ($can('agents')): ?>
+            <?php
+            $navChildAgents = 0;
+            if (isset($pdo) && function_exists('admin_user_child_count') && function_exists('current_admin')) {
+                $navMe = current_admin();
+                if ($navMe) {
+                    $navChildAgents = admin_user_child_count($pdo, (int) $navMe['id'], $navTidEarly);
+                }
+            }
+            if ($can('agents') && $navChildAgents > 0): ?>
             <a class="<?php echo $active === 'agents' ? 'active' : ''; ?>" href="agents.php"><?php echo e($isEn ? 'Agents' : 'الوكلاء'); ?></a>
+            <?php endif; ?>
+            <?php if ($can('agents') || (function_exists('is_agent_user') && is_agent_user()) || (function_exists('is_group_manager_user') && is_group_manager_user())): ?>
+            <a class="<?php echo $active === 'accountants' ? 'active' : ''; ?>" href="agents.php?view=accountant"><?php echo e($isEn ? 'Accountant' : 'المحاسب'); ?></a>
             <?php endif; ?>
             <?php if ($can('cards') || $can('agents') || (function_exists('is_agent_user') && is_agent_user())): ?>
             <a class="<?php echo $active === 'prices' || $active === 'agent_prices' ? 'active' : ''; ?>" href="agent_prices.php"><?php echo e($isEn ? 'Card prices' : 'تسعير الكروت'); ?></a>
@@ -318,7 +326,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
                 <?php
                 $pendingUpd = function_exists('app_update_pending') ? app_update_pending(isset($settings) ? $settings : null) : null;
                 $isImpersonating = function_exists('is_impersonating') && is_impersonating();
-                $canLoginAs = function_exists('is_admin_user') && is_admin_user() && !$isImpersonating;
+                $canLoginAs = function_exists('is_super_admin_user') && is_super_admin_user() && !$isImpersonating;
                 ?>
                 <?php if ($pendingUpd && !$isImpersonating && function_exists('user_can') && user_can('settings')): ?>
                     <a class="top-update-pill" href="settings.php?tab=update" title="<?php echo e($isEn ? 'System update available' : 'تحديث نظام متاح'); ?>">
@@ -354,13 +362,18 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
                                 <span class="top-profile-name"><?php echo e($userLabel); ?></span>
                             <?php endif; ?>
                             <?php if ($isImpersonating): ?>
-                                <span class="top-as-agent"><?php echo e($isEn ? 'as agent' : 'وكيل'); ?></span>
+                                <?php
+                                $asLabel = (function_exists('is_agent_user') && (is_agent_user() || (function_exists('is_group_manager_user') && is_group_manager_user())))
+                                    ? ($isEn ? 'as agent' : 'وكيل')
+                                    : ($isEn ? 'as user' : 'مستخدم نظام');
+                                ?>
+                                <span class="top-as-agent"><?php echo e($asLabel); ?></span>
                             <?php endif; ?>
                         </button>
                         <div class="top-admin-dropdown" id="topAdminDropdown" hidden>
                             <a href="profile.php"><?php echo e($isEn ? 'My profile' : 'البروفايل الشخصي'); ?></a>
                             <?php if ($canLoginAs): ?>
-                                <button type="button" id="topLoginAsBtn"><?php echo e($isEn ? 'Login as agent…' : 'الدخول بصفة وكيل…'); ?></button>
+                                <button type="button" id="topLoginAsBtn"><?php echo e($isEn ? 'Login as system user…' : 'الدخول بصفة مستخدم نظام…'); ?></button>
                             <?php endif; ?>
                             <?php if ($isImpersonating): ?>
                                 <form method="post" action="impersonate.php" class="top-admin-exit-form">
@@ -381,9 +394,9 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
         <?php if ($canLoginAs): ?>
         <div class="login-as-modal" id="loginAsModal" hidden>
             <div class="login-as-card" role="dialog" aria-modal="true" aria-labelledby="loginAsTitle">
-                <h3 id="loginAsTitle"><?php echo e($isEn ? 'Login as agent' : 'الدخول بصفة وكيل'); ?></h3>
-                <p class="meta"><?php echo e($isEn ? 'Type the agent name, then choose from matches.' : 'اكتب اسم الوكيل، ثم اختَر من النتائج المطابقة.'); ?></p>
-                <input type="search" id="loginAsQ" autocomplete="off" placeholder="<?php echo e($isEn ? 'Agent name…' : 'اسم الوكيل…'); ?>">
+                <h3 id="loginAsTitle"><?php echo e($isEn ? 'Login as system user' : 'الدخول بصفة مستخدم نظام'); ?></h3>
+                <p class="meta"><?php echo e($isEn ? 'Type the username, then choose from matches.' : 'اكتب اسم المستخدم، ثم اختَر من النتائج المطابقة.'); ?></p>
+                <input type="search" id="loginAsQ" autocomplete="off" placeholder="<?php echo e($isEn ? 'Username…' : 'اسم المستخدم…'); ?>">
                 <div id="loginAsResults" class="login-as-results"></div>
                 <div class="actions">
                     <button type="button" class="btn ghost sm" id="loginAsClose"><?php echo e($isEn ? 'Close' : 'إغلاق'); ?></button>
@@ -744,7 +757,7 @@ body.nav-pending .nav-progress { display: block; }
           return;
         }
         var xhr = new XMLHttpRequest();
-        xhr.open('GET', 'impersonate.php?action=search&ajax=1&q=' + encodeURIComponent(q), true);
+        xhr.open('GET', 'impersonate.php?action=search&ajax=1&kind=system&q=' + encodeURIComponent(q), true);
         xhr.onload = function () {
           var data = null;
           try { data = JSON.parse(xhr.responseText); } catch (e) {}

@@ -142,6 +142,7 @@ function ensure_tenants_schema($pdo, $config = null)
     tenants_ensure_column($pdo, 'tenants', 'subscription_expires_at', 'DATETIME NULL DEFAULT NULL');
     tenants_ensure_column($pdo, 'tenants', 'plan_code', "VARCHAR(32) NULL DEFAULT NULL");
     tenants_ensure_column($pdo, 'tenants', 'contact_phone', 'VARCHAR(32) NULL DEFAULT NULL');
+    tenants_ensure_column($pdo, 'tenants', 'contact_email', 'VARCHAR(150) NULL DEFAULT NULL');
     tenants_ensure_column($pdo, 'tenants', 'company_email', 'VARCHAR(150) NULL DEFAULT NULL');
     tenants_ensure_column($pdo, 'tenants', 'company_address', 'VARCHAR(255) NULL DEFAULT NULL');
     tenants_ensure_column($pdo, 'tenants', 'company_about', 'TEXT NULL');
@@ -396,7 +397,7 @@ function tenant_save($pdo, $tenantId, $fields)
         'name', 'is_active', 'sas_enabled', 'sas_host', 'sas_username', 'sas_password',
         'sas_parent_id', 'sas_default_password', 'sas_activate_units', 'sas_extend_method',
         'sas_extend_profile_id', 'sas_on_failure',
-        'status', 'owner_user_id', 'trial_ends_at', 'subscription_expires_at', 'plan_code', 'contact_phone',
+        'status', 'owner_user_id', 'trial_ends_at', 'subscription_expires_at', 'plan_code', 'contact_phone', 'contact_email',
         'company_email', 'company_address', 'company_about', 'company_logo', 'company_map_url', 'wa_templates', 'sas_company_id',
     );
     $cols = array();
@@ -929,14 +930,15 @@ function saas_settings($settings = null)
  * تسجيل وكيل جديد → tenant pending + مستخدم admin غير نشط للدخول حتى الموافقة
  * @return array(bool, string message, int tenantId, int userId)
  */
-function saas_register_agent($pdo, $agencyName, $username, $displayName, $password, $phone)
+function saas_register_agent($pdo, $agencyName, $username, $displayName, $password, $phone, $email = '')
 {
     ensure_tenants_schema($pdo);
     $agencyName = trim((string) $agencyName);
     $username = trim((string) $username);
     $displayName = trim((string) $displayName);
     $phone = trim((string) $phone);
-    if ($agencyName === '' || $username === '' || strlen($password) < 4) {
+    $email = trim((string) $email);
+    if ($username === '' || strlen($password) < 4) {
         return array(false, 'أكمل الحقول (الباسورد 4 أحرف على الأقل)', 0, 0);
     }
     if (!preg_match('/^[a-zA-Z0-9._@-]{2,40}$/', $username)) {
@@ -955,12 +957,13 @@ function saas_register_agent($pdo, $agencyName, $username, $displayName, $passwo
     try {
         $pdo->beginTransaction();
         $st = $pdo->prepare(
-            'INSERT INTO tenants (name, is_active, status, contact_phone, sas_enabled)
-             VALUES (:n, 0, "pending", :ph, 0)'
+            'INSERT INTO tenants (name, is_active, status, contact_phone, contact_email, sas_enabled)
+             VALUES (:n, 0, "pending", :ph, :em, 0)'
         );
         $st->execute(array(
-            ':n' => $agencyName,
+            ':n' => ($agencyName !== '' ? $agencyName : $username),
             ':ph' => $phone !== '' ? $phone : null,
+            ':em' => $email !== '' ? $email : null,
         ));
         $tenantId = (int) $pdo->lastInsertId();
         if ($tenantId <= 0) {
@@ -1078,6 +1081,127 @@ function saas_extend_subscription($pdo, $tenantId, $periodDays, $planCode = null
     } catch (Exception $e) {
     }
     return true;
+}
+
+/**
+ * إضافة مستخدم نظام من الأدمن: وكالة + دخول فعّال فوراً
+ * @return array(bool, string)
+ */
+function saas_admin_create_user($pdo, $agencyName, $username, $displayName, $password, $phone, $settings = null, $email = '')
+{
+    list($ok, $msg, $tenantId) = saas_register_agent($pdo, $agencyName, $username, $displayName, $password, $phone, $email);
+    if (!$ok) {
+        return array(false, $msg);
+    }
+    list($ok2, $msg2) = saas_approve_tenant($pdo, $tenantId, $settings);
+    return array($ok2, $ok2 ? 'تمت إضافة المستخدم وتفعيله' : $msg2);
+}
+
+/**
+ * تعديل وكالة ومالكها
+ * @return array(bool, string)
+ */
+function saas_admin_update_user($pdo, $tenantId, $agencyName, $username, $displayName, $password, $phone, $email = '')
+{
+    $tenantId = (int) $tenantId;
+    if ($tenantId <= 1) {
+        return array(false, 'لا يمكن تعديل شركة المنصة');
+    }
+    $agencyName = trim((string) $agencyName);
+    $username = trim((string) $username);
+    $displayName = trim((string) $displayName);
+    $phone = trim((string) $phone);
+    $email = trim((string) $email);
+    if ($username === '') {
+        return array(false, 'اسم الدخول مطلوب');
+    }
+    if ($agencyName === '') {
+        $agencyName = $username;
+    }
+    if (!preg_match('/^[a-zA-Z0-9._@-]{2,40}$/', $username)) {
+        return array(false, 'اسم الدخول غير صالح');
+    }
+    $owner = $pdo->prepare('SELECT owner_user_id FROM tenants WHERE id = :id LIMIT 1');
+    $owner->execute(array(':id' => $tenantId));
+    $ownerId = (int) $owner->fetchColumn();
+    if ($ownerId <= 0) {
+        $own = $pdo->prepare('SELECT id FROM admin_users WHERE tenant_id = :t AND role = "admin" ORDER BY id ASC LIMIT 1');
+        $own->execute(array(':t' => $tenantId));
+        $ownerId = (int) $own->fetchColumn();
+    }
+    $ex = $pdo->prepare('SELECT id FROM admin_users WHERE username = :u AND id <> :id LIMIT 1');
+    $ex->execute(array(':u' => $username, ':id' => $ownerId));
+    if ($ex->fetchColumn()) {
+        return array(false, 'اسم الدخول مستخدم');
+    }
+    try {
+        $pdo->prepare('UPDATE tenants SET name = :n, contact_phone = :ph, contact_email = :em WHERE id = :id')
+            ->execute(array(
+                ':n' => $agencyName,
+                ':ph' => $phone !== '' ? $phone : null,
+                ':em' => $email !== '' ? $email : null,
+                ':id' => $tenantId,
+            ));
+        if ($ownerId > 0) {
+            $pdo->prepare(
+                'UPDATE admin_users SET username = :u, display_name = :d, phone = :ph WHERE id = :id'
+            )->execute(array(
+                ':u' => $username,
+                ':d' => $displayName !== '' ? $displayName : $agencyName,
+                ':ph' => $phone !== '' ? $phone : null,
+                ':id' => $ownerId,
+            ));
+            $pdo->prepare('UPDATE tenants SET owner_user_id = :u WHERE id = :id')
+                ->execute(array(':u' => $ownerId, ':id' => $tenantId));
+            if (strlen((string) $password) >= 4 && function_exists('admin_password_hash')) {
+                $pdo->prepare('UPDATE admin_users SET password_hash = :h WHERE id = :id')
+                    ->execute(array(':h' => admin_password_hash($password), ':id' => $ownerId));
+            }
+        }
+        return array(true, 'تم التعديل');
+    } catch (Exception $e) {
+        return array(false, 'تعذر التعديل');
+    }
+}
+
+/**
+ * حذف وكالة ومستخدمي دخولها وبياناتها
+ * @return array(bool, string)
+ */
+function saas_admin_delete_user($pdo, $tenantId)
+{
+    $tenantId = (int) $tenantId;
+    if ($tenantId <= 1) {
+        return array(false, 'لا يمكن حذف شركة المنصة');
+    }
+    try {
+        $pdo->beginTransaction();
+        $ids = $pdo->prepare('SELECT id FROM subscribers WHERE tenant_id = :t');
+        $ids->execute(array(':t' => $tenantId));
+        $subIds = $ids->fetchAll(PDO::FETCH_COLUMN);
+        if ($subIds) {
+            $in = implode(',', array_map('intval', $subIds));
+            $pdo->exec('DELETE FROM invoices WHERE subscriber_id IN (' . $in . ')');
+            $pdo->exec('DELETE FROM subscriptions WHERE subscriber_id IN (' . $in . ')');
+            $pdo->exec('DELETE FROM subscribers WHERE tenant_id = ' . $tenantId);
+        }
+        foreach (array('tenant_sas_accounts', 'agent_card_prices', 'agent_card_stock', 'agent_card_transfers', 'agent_card_payments') as $table) {
+            try {
+                $pdo->exec('DELETE FROM `' . $table . '` WHERE tenant_id = ' . $tenantId);
+            } catch (Exception $e2) {
+            }
+        }
+        $pdo->prepare('DELETE FROM admin_users WHERE tenant_id = :t')->execute(array(':t' => $tenantId));
+        $pdo->prepare('DELETE FROM tenants WHERE id = :id AND id > 1')->execute(array(':id' => $tenantId));
+        $pdo->commit();
+        return array(true, 'تم حذف المستخدم وبيانات وكالته');
+    } catch (Exception $e) {
+        try {
+            $pdo->rollBack();
+        } catch (Exception $e2) {
+        }
+        return array(false, 'تعذر الحذف');
+    }
 }
 
 function saas_mark_expired_tenants($pdo)

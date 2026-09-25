@@ -46,9 +46,22 @@ $params = array();
 $where = '(s.rental_enabled = 1 OR s.rental_enabled = "1")
  AND s.rental_device_id IS NOT NULL
  AND TRIM(s.rental_device_id) <> ""';
-if (function_exists('subscriber_agent_scope_sql')) {
-    $where .= subscriber_agent_scope_sql('s');
-}
+$tidJoin = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+$where .= ' AND (
+    s.tenant_id = ' . (int) $tidJoin . '
+    OR EXISTS (
+        SELECT 1 FROM sas_users_cache c2
+        WHERE c2.tenant_id = ' . (int) $tidJoin . '
+          AND (
+            c2.local_subscriber_id = s.id
+            OR (
+                s.sas_username IS NOT NULL AND s.sas_username <> ""
+                AND CONVERT(c2.username USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                    = CONVERT(s.sas_username USING utf8mb4) COLLATE utf8mb4_unicode_ci
+            )
+          )
+    )
+)';
 if ($q !== '') {
     $where .= ' AND (s.name LIKE :q OR s.phone LIKE :q OR s.sas_username LIKE :q
         OR c.username LIKE :q OR c.firstname LIKE :q OR c.display_name LIKE :q

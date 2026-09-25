@@ -383,6 +383,16 @@ function subscriber_no_whatsapp_for_current($response, $logPhone, $currentPhones
 }
 }
 
+if (!function_exists('wa_miss_html')) {
+function wa_miss_html($noWa)
+{
+    if (!$noWa) {
+        return '';
+    }
+    return '<span class="wa-miss" title="لا يتوفر واتساب">⊘</span>';
+}
+}
+
 if (!function_exists('subscriber_row_is_no_whatsapp')) {
 function subscriber_row_is_no_whatsapp($row)
 {

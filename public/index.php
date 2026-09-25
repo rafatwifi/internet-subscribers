@@ -228,6 +228,7 @@ if (empty($_SESSION['archive_months_at']) || (time() - (int) $_SESSION['archive_
     $_SESSION['archive_months_at'] = time();
 }
 
+/* لا تنقل دفتر أو مشتركين وكالة ثانية عند فتح اللوحة */
 $agentScope = function_exists('subscriber_agent_scope_sql') ? subscriber_agent_scope_sql('s') : '';
 $totalSubscribers = (int) $pdo->query('SELECT COUNT(*) FROM subscribers s WHERE 1=1' . $agentScope)->fetchColumn();
 $totalDebt = (float) $pdo->query(

@@ -22,7 +22,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     $action = post('action');
     $tid = (int) post('tenant_id', '0');
-    if ($action === 'approve') {
+    if ($action === 'create') {
+        $loginName = trim((string) post('username', ''));
+        list($ok, $msg) = saas_admin_create_user(
+            $pdo,
+            $loginName,
+            $loginName,
+            post('display_name', ''),
+            post('password', ''),
+            post('phone', ''),
+            $settings,
+            post('email', '')
+        );
+        flash($ok ? 'success' : 'error', $msg);
+    } elseif ($action === 'update') {
+        $loginName = trim((string) post('username', ''));
+        list($ok, $msg) = saas_admin_update_user(
+            $pdo,
+            $tid,
+            $loginName,
+            $loginName,
+            post('display_name', ''),
+            post('password', ''),
+            post('phone', ''),
+            post('email', '')
+        );
+        flash($ok ? 'success' : 'error', $msg);
+    } elseif ($action === 'delete') {
+        list($ok, $msg) = saas_admin_delete_user($pdo, $tid);
+        flash($ok ? 'success' : 'error', $msg);
+    } elseif ($action === 'approve') {
         list($ok, $msg) = saas_approve_tenant($pdo, $tid, $settings);
         flash($ok ? 'success' : 'error', $msg);
     } elseif ($action === 'reject') {
@@ -60,8 +89,57 @@ try {
 } catch (Exception $e) {
 }
 
+$editId = isset($_GET['edit']) ? (int) $_GET['edit'] : 0;
+$editRow = null;
+if ($editId > 1) {
+    foreach ($rows as $r) {
+        if ((int) $r['id'] === $editId) {
+            $editRow = $r;
+            break;
+        }
+    }
+}
+
 render_header($isEn ? 'System users' : 'مستخدمي النظام', 'saas_agents');
 ?>
+<div class="panel">
+    <h2><?php echo e($editRow ? ($isEn ? 'Edit system user' : 'تعديل مستخدم النظام') : ($isEn ? 'Add system user' : 'إضافة مستخدم نظام')); ?></h2>
+    <form method="post">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="action" value="<?php echo $editRow ? 'update' : 'create'; ?>">
+        <?php if ($editRow): ?>
+            <input type="hidden" name="tenant_id" value="<?php echo (int) $editRow['id']; ?>">
+        <?php endif; ?>
+        <div class="form-grid cols-2">
+            <div>
+                <label><?php echo e($isEn ? 'Username' : 'اسم المستخدم'); ?></label>
+                <input class="ltr" name="username" required pattern="[A-Za-z0-9._@\-]{2,40}" value="<?php echo e($editRow && isset($editRow['owner_username']) ? $editRow['owner_username'] : ''); ?>" placeholder="wifi@faris">
+            </div>
+            <div>
+                <label><?php echo e($isEn ? 'Owner name' : 'اسم المالك'); ?></label>
+                <input name="display_name" value="<?php echo e($editRow && isset($editRow['owner_name']) ? $editRow['owner_name'] : ''); ?>" placeholder="<?php echo e($isEn ? 'Owner' : 'فارس البواب'); ?>">
+            </div>
+            <div>
+                <label><?php echo e($editRow ? ($isEn ? 'New password (optional)' : 'باسورد جديد (اختياري)') : ($isEn ? 'Password' : 'الباسورد')); ?></label>
+                <input type="password" name="password" <?php echo $editRow ? '' : 'required'; ?> minlength="4">
+            </div>
+            <div>
+                <label><?php echo e($isEn ? 'Phone' : 'الهاتف'); ?></label>
+                <input class="ltr" name="phone" value="<?php echo e($editRow && !empty($editRow['contact_phone']) ? $editRow['contact_phone'] : ''); ?>" placeholder="07xxxxxxxxx">
+            </div>
+            <div>
+                <label><?php echo e($isEn ? 'Email' : 'الإيميل'); ?></label>
+                <input class="ltr" type="email" name="email" value="<?php echo e($editRow && !empty($editRow['contact_email']) ? $editRow['contact_email'] : ''); ?>" placeholder="name@example.com">
+            </div>
+        </div>
+        <div class="actions">
+            <button class="btn" type="submit"><?php echo e($editRow ? ($isEn ? 'Save' : 'حفظ التعديل') : ($isEn ? 'Add' : 'إضافة')); ?></button>
+            <?php if ($editRow): ?>
+                <a class="btn ghost" href="saas_agents.php"><?php echo e($isEn ? 'Cancel' : 'إلغاء'); ?></a>
+            <?php endif; ?>
+        </div>
+    </form>
+</div>
 <div class="panel">
     <h2><?php echo e($isEn ? 'Platform overview' : 'ملخص المنصة'); ?></h2>
     <p class="meta"><?php echo e($isEn
@@ -121,7 +199,7 @@ render_header($isEn ? 'System users' : 'مستخدمي النظام', 'saas_agen
             <thead>
             <tr>
                 <th>#</th>
-                <th><?php echo e($isEn ? 'Agency' : 'الوكالة'); ?></th>
+                <th><?php echo e($isEn ? 'Username' : 'اسم المستخدم'); ?></th>
                 <th><?php echo e($isEn ? 'Owner' : 'المالك'); ?></th>
                 <th><?php echo e($isEn ? 'Status' : 'الحالة'); ?></th>
                 <th><?php echo e($isEn ? 'Trial / Sub' : 'تجريبي / اشتراك'); ?></th>
@@ -138,7 +216,7 @@ render_header($isEn ? 'System users' : 'مستخدمي النظام', 'saas_agen
                 ?>
                 <tr>
                     <td><?php echo $tid; ?></td>
-                    <td><?php echo e($r['name']); ?><?php if (!empty($r['contact_phone'])): ?><br><small class="meta ltr"><?php echo e($r['contact_phone']); ?></small><?php endif; ?></td>
+                    <td><?php echo e(!empty($r['owner_username']) ? $r['owner_username'] : $r['name']); ?><?php if (!empty($r['contact_phone'])): ?><br><small class="meta ltr"><?php echo e($r['contact_phone']); ?></small><?php endif; ?></td>
                     <td><?php echo e(isset($r['owner_name']) ? $r['owner_name'] : '—'); ?>
                         <?php if (!empty($r['owner_username'])): ?><br><small class="meta ltr"><?php echo e($r['owner_username']); ?></small><?php endif; ?>
                     </td>
@@ -178,6 +256,33 @@ render_header($isEn ? 'System users' : 'مستخدمي النظام', 'saas_agen
                             </form>
                             <?php endif; ?>
                         <?php endif; ?>
+                        <?php
+                        $loginUid = !empty($r['owner_user_id']) ? (int) $r['owner_user_id'] : 0;
+                        if ($loginUid <= 0 && $st === 'active') {
+                            try {
+                                $ownSt = $pdo->prepare('SELECT id FROM admin_users WHERE tenant_id = :t AND role = "admin" AND is_active = 1 ORDER BY id ASC LIMIT 1');
+                                $ownSt->execute(array(':t' => $tid));
+                                $loginUid = (int) $ownSt->fetchColumn();
+                            } catch (Exception $e) {
+                                $loginUid = 0;
+                            }
+                        }
+                        ?>
+                        <?php if ($st === 'active' && $loginUid > 0): ?>
+                        <form method="post" action="impersonate.php" class="inline-form">
+                            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                            <input type="hidden" name="action" value="start">
+                            <input type="hidden" name="user_id" value="<?php echo $loginUid; ?>">
+                            <button class="btn sm" type="submit"><?php echo e($isEn ? 'Login as user' : 'دخول بصفة المستخدم'); ?></button>
+                        </form>
+                        <?php endif; ?>
+                        <a class="btn secondary sm" href="saas_agents.php?edit=<?php echo $tid; ?>"><?php echo e($isEn ? 'Edit' : 'تعديل'); ?></a>
+                        <form method="post" class="inline-form" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Delete this user and their agency data?' : 'حذف هذا المستخدم وبيانات وكالته؟'); ?>);">
+                            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                            <input type="hidden" name="action" value="delete">
+                            <input type="hidden" name="tenant_id" value="<?php echo $tid; ?>">
+                            <button class="btn danger sm" type="submit"><?php echo e($isEn ? 'Delete' : 'حذف'); ?></button>
+                        </form>
                     </td>
                 </tr>
             <?php endforeach; ?>

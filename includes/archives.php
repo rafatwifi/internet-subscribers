@@ -26,7 +26,7 @@ function ensure_monthly_archives_table($pdo)
     }
 }
 
-function compute_month_stats($pdo, $ym)
+function compute_month_stats($pdo, $ym, $scopeSql = '')
 {
     $out = array(
         'activations' => 0,
@@ -36,11 +36,15 @@ function compute_month_stats($pdo, $ym)
         'profit' => 0.0,
         'debt' => 0.0,
     );
+    $scopeSql = (string) $scopeSql;
+    $joinSub = ($scopeSql !== '') ? ' JOIN subscribers s ON s.id = sub.subscriber_id' : '';
+    $joinInv = ($scopeSql !== '') ? ' JOIN subscribers s ON s.id = i.subscriber_id' : '';
 
     try {
         $st = $pdo->prepare(
-            "SELECT COUNT(*), COALESCE(SUM(monthly_price),0)
-             FROM subscriptions WHERE DATE_FORMAT(created_at, '%Y-%m') = :m"
+            "SELECT COUNT(*), COALESCE(SUM(sub.monthly_price),0)
+             FROM subscriptions sub" . $joinSub . "
+             WHERE DATE_FORMAT(sub.created_at, '%Y-%m') = :m" . $scopeSql
         );
         $st->execute(array(':m' => $ym));
         $row = $st->fetch(PDO::FETCH_NUM);
@@ -53,11 +57,11 @@ function compute_month_stats($pdo, $ym)
 
     try {
         $st = $pdo->prepare(
-            "SELECT COALESCE(SUM(amount),0),
-                    COALESCE(SUM(cost_price),0),
-                    COALESCE(SUM(profit),0)
-             FROM invoices
-             WHERE status = 'paid' AND DATE_FORMAT(paid_at, '%Y-%m') = :m"
+            "SELECT COALESCE(SUM(i.amount),0),
+                    COALESCE(SUM(i.cost_price),0),
+                    COALESCE(SUM(i.profit),0)
+             FROM invoices i" . $joinInv . "
+             WHERE i.status = 'paid' AND DATE_FORMAT(i.paid_at, '%Y-%m') = :m" . $scopeSql
         );
         $st->execute(array(':m' => $ym));
         $row = $st->fetch(PDO::FETCH_NUM);
@@ -69,8 +73,8 @@ function compute_month_stats($pdo, $ym)
     } catch (Exception $e) {
         try {
             $st = $pdo->prepare(
-                "SELECT COALESCE(SUM(amount),0) FROM invoices
-                 WHERE status = 'paid' AND DATE_FORMAT(paid_at, '%Y-%m') = :m"
+                "SELECT COALESCE(SUM(i.amount),0) FROM invoices i" . $joinInv . "
+                 WHERE i.status = 'paid' AND DATE_FORMAT(i.paid_at, '%Y-%m') = :m" . $scopeSql
             );
             $st->execute(array(':m' => $ym));
             $out['collected'] = (float) $st->fetchColumn();
@@ -80,8 +84,8 @@ function compute_month_stats($pdo, $ym)
 
     try {
         $st = $pdo->prepare(
-            "SELECT COALESCE(SUM(amount),0) FROM invoices
-             WHERE status = 'unpaid' AND DATE_FORMAT(due_date, '%Y-%m') = :m"
+            "SELECT COALESCE(SUM(i.amount),0) FROM invoices i" . $joinInv . "
+             WHERE i.status = 'unpaid' AND DATE_FORMAT(i.due_date, '%Y-%m') = :m" . $scopeSql
         );
         $st->execute(array(':m' => $ym));
         $out['debt'] = (float) $st->fetchColumn();

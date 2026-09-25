@@ -6,13 +6,22 @@ require_login();
 require_perm('logs');
 
 $q = isset($_GET['q']) ? trim((string) $_GET['q']) : '';
-$rows = fetch_global_activity($pdo, 400, $q);
+$scope = isset($_GET['scope']) ? (string) $_GET['scope'] : '';
+if ($scope === 'system' && function_exists('fetch_system_activity')) {
+    $rows = fetch_system_activity($pdo, 400, $q);
+} else {
+    $rows = fetch_global_activity($pdo, 400, $q);
+}
+$title = ($scope === 'system')
+    ? ($lang === 'en' ? 'System activity' : 'حركات النظام')
+    : ($lang === 'en' ? 'Audit log' : 'اللوك');
 
-render_header($lang === 'en' ? 'Audit log' : 'اللوك', 'logs');
+render_header($title, $scope === 'system' ? 'system_activity' : 'logs');
 ?>
 <div class="panel panel-compact">
     <div class="actions" style="margin-top:0;margin-bottom:10px">
         <form method="get" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;flex:1">
+            <?php if ($scope === 'system'): ?><input type="hidden" name="scope" value="system"><?php endif; ?>
             <input name="q" value="<?php echo e($q); ?>" placeholder="<?php echo e($lang === 'en' ? 'Search action, user, subscriber…' : 'بحث بالحركة أو المستخدم أو المشترك…'); ?>" style="max-width:320px">
             <button class="btn secondary sm" type="submit"><?php echo e($lang === 'en' ? 'Search' : 'بحث'); ?></button>
             <?php if ($q !== ''): ?>

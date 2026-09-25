@@ -5,6 +5,8 @@ require_once __DIR__ . '/../includes/layout.php';
 require_login();
 require_perm('subscriptions');
 
+$movScope = function_exists('subscriber_agent_scope_sql') ? subscriber_agent_scope_sql('s') : '';
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf(post('csrf'))) {
         flash('error', $lang === 'en' ? 'Invalid request' : 'طلب غير صالح');
@@ -15,26 +17,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if ($action === 'expire') {
         $id = (int) post('id', '0');
-        if (function_exists('reverse_subscription_movement')) {
+        $info = $pdo->prepare(
+            'SELECT sub.subscriber_id, sub.service_name
+             FROM subscriptions sub
+             JOIN subscribers s ON s.id = sub.subscriber_id
+             WHERE sub.id = :id' . $movScope . ' LIMIT 1'
+        );
+        $info->execute(array(':id' => $id));
+        $subRow = $info->fetch();
+        if ($subRow && function_exists('reverse_subscription_movement')) {
             list($okRev, $msgRev) = reverse_subscription_movement($pdo, $id);
             flash($okRev ? 'success' : 'error', $msgRev);
-        } else {
-            $info = $pdo->prepare('SELECT subscriber_id, service_name FROM subscriptions WHERE id = :id');
-            $info->execute(array(':id' => $id));
-            $subRow = $info->fetch();
+        } elseif ($subRow) {
             $pdo->prepare('UPDATE subscriptions SET status = "expired" WHERE id = :id')
                 ->execute(array(':id' => $id));
-            if ($subRow) {
-                activity_log(
-                    $pdo,
-                    (int) $subRow['subscriber_id'],
-                    'subscription',
-                    $id,
-                    'expire',
-                    'إنهاء اشتراك: ' . $subRow['service_name'],
-                    ''
-                );
-            }
+            activity_log(
+                $pdo,
+                (int) $subRow['subscriber_id'],
+                'subscription',
+                $id,
+                'expire',
+                'إنهاء اشتراك: ' . $subRow['service_name'],
+                ''
+            );
             flash('success', $lang === 'en' ? 'Ended' : 'تم إنهاء الاشتراك');
         }
         redirect('subscriptions.php');
@@ -43,25 +48,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'delete_selected') {
         $ids = isset($_POST['ids']) && is_array($_POST['ids']) ? $_POST['ids'] : array();
         $n = 0;
-        $info = $pdo->prepare('SELECT subscriber_id, service_name FROM subscriptions WHERE id = :id');
+        $info = $pdo->prepare(
+            'SELECT sub.subscriber_id, sub.service_name
+             FROM subscriptions sub
+             JOIN subscribers s ON s.id = sub.subscriber_id
+             WHERE sub.id = :id' . $movScope . ' LIMIT 1'
+        );
         $stmt = $pdo->prepare('DELETE FROM subscriptions WHERE id = :id');
         foreach ($ids as $idRaw) {
             $id = (int) $idRaw;
             if ($id > 0) {
                 $info->execute(array(':id' => $id));
                 $subRow = $info->fetch();
-                $stmt->execute(array(':id' => $id));
-                if ($subRow) {
-                    activity_log(
-                        $pdo,
-                        (int) $subRow['subscriber_id'],
-                        'subscription',
-                        $id,
-                        'delete',
-                        'حذف حركة اشتراك: ' . $subRow['service_name'],
-                        ''
-                    );
+                if (!$subRow) {
+                    continue;
                 }
+                $stmt->execute(array(':id' => $id));
+                activity_log(
+                    $pdo,
+                    (int) $subRow['subscriber_id'],
+                    'subscription',
+                    $id,
+                    'delete',
+                    'حذف حركة اشتراك: ' . $subRow['service_name'],
+                    ''
+                );
                 $n++;
             }
         }
@@ -71,38 +82,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $pdo->exec(
-    "UPDATE subscriptions SET status = 'expired'
-     WHERE status = 'active' AND end_date < CURDATE()"
+    "UPDATE subscriptions sub
+     JOIN subscribers s ON s.id = sub.subscriber_id
+     SET sub.status = 'expired'
+     WHERE sub.status = 'active' AND sub.end_date < CURDATE()" . $movScope
 );
 
 $filterSid = isset($_GET['subscriber_id']) ? (int) $_GET['subscriber_id'] : 0;
 $filterName = '';
+$listSql = "SELECT sub.*, s.name, s.phone
+     FROM subscriptions sub
+     JOIN subscribers s ON s.id = sub.subscriber_id
+     WHERE 1=1" . $movScope;
+$listParams = array();
 if ($filterSid > 0) {
-    $st = $pdo->prepare(
-        "SELECT sub.*, s.name, s.phone
-         FROM subscriptions sub
-         JOIN subscribers s ON s.id = sub.subscriber_id
-         WHERE sub.subscriber_id = :sid
-         ORDER BY sub.id DESC
-         LIMIT 500"
-    );
-    $st->execute(array(':sid' => $filterSid));
-    $list = $st->fetchAll();
-    if ($list) {
-        $filterName = $list[0]['name'];
-    } else {
-        $nm = $pdo->prepare('SELECT name FROM subscribers WHERE id = :id');
-        $nm->execute(array(':id' => $filterSid));
-        $filterName = (string) $nm->fetchColumn();
-    }
-} else {
-    $list = $pdo->query(
-        "SELECT sub.*, s.name, s.phone
-         FROM subscriptions sub
-         JOIN subscribers s ON s.id = sub.subscriber_id
-         ORDER BY sub.id DESC
-         LIMIT 500"
-    )->fetchAll();
+    $listSql .= ' AND sub.subscriber_id = :sid';
+    $listParams[':sid'] = $filterSid;
+}
+$listSql .= ' ORDER BY sub.id DESC LIMIT 500';
+$st = $pdo->prepare($listSql);
+$st->execute($listParams);
+$list = $st->fetchAll();
+if ($filterSid > 0 && $list) {
+    $filterName = $list[0]['name'];
 }
 
 render_header(t('movements'), 'subscriptions');

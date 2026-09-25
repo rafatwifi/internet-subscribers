@@ -812,7 +812,8 @@ function render_subscriber_table_row($row, $n, $config, $lang)
     $html .= rental_badge_html($row);
     $html .= '</td>';
     $phoneDisp = format_phone_display($row['phone']);
-    $html .= '<td class="col-phone"><span class="cell-edit phone-edit" tabindex="0" data-edit="phone" data-id="' . (int) $row['id'] . '" data-value="' . e($row['phone']) . '" title="' . e($lang === 'en' ? 'Click to edit' : 'اضغط للتعديل') . '">' . e($phoneDisp) . '</span></td>';
+    $html .= '<td class="col-phone"><span class="cell-edit phone-edit" tabindex="0" data-edit="phone" data-id="' . (int) $row['id'] . '" data-value="' . e($row['phone']) . '" title="' . e($lang === 'en' ? 'Click to edit' : 'اضغط للتعديل') . '">' . e($phoneDisp) . '</span>'
+        . (function_exists('wa_miss_html') ? wa_miss_html($noWa) : '') . '</td>';
     $html .= '<td class="col-pkg">' . e($pkgLabel);
     if (!empty($row['active_service']) && isset($row['active_price']) && (float) $row['active_price'] <= 0) {
         $html .= ' <span class="badge" style="background:#f59e0b;color:#111;font-size:11px;padding:1px 6px">' . e($lang === 'en' ? 'TEST' : 'تست') . '</span>';

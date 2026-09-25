@@ -1326,7 +1326,14 @@ function sas_profiles_for_ui($api)
         if ($id <= 0) {
             continue;
         }
-        $out[] = array('id' => $id, 'name' => $name !== '' ? $name : ('#' . $id));
+        $price = 0;
+        foreach (array('price', 'user_price', 'unit_price', 'monthly_price') as $pk) {
+            if (isset($p[$pk]) && is_numeric($p[$pk])) {
+                $price = (float) $p[$pk];
+                break;
+            }
+        }
+        $out[] = array('id' => $id, 'name' => $name !== '' ? $name : ('#' . $id), 'price' => $price);
     }
     if ($out) {
         $_SESSION['sas_profiles_ui'] = $out;
@@ -2171,8 +2178,286 @@ function sas_unused_cards_grouped($api)
     return sas_group_unused_cards(sas_unused_cards_cached($api, false));
 }
 
+function sas_cache_fill_from_subscribers($pdo)
+{
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tid <= 0) {
+        $tid = 1;
+    }
+    try {
+        $have = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = ' . $tid)->fetchColumn();
+        if ($have > 0) {
+            return $have;
+        }
+    } catch (Exception $e) {
+        $have = 0;
+    }
+    $subs = array();
+    try {
+        $subs = $pdo->query(
+            'SELECT s.id, s.name, s.phone, s.sas_username, s.sas_user_id,
+                    (SELECT sub.end_date FROM subscriptions sub WHERE sub.subscriber_id = s.id ORDER BY sub.id DESC LIMIT 1) AS end_date,
+                    (SELECT sub.service_name FROM subscriptions sub WHERE sub.subscriber_id = s.id ORDER BY sub.id DESC LIMIT 1) AS service_name,
+                    (SELECT sub.status FROM subscriptions sub WHERE sub.subscriber_id = s.id ORDER BY sub.id DESC LIMIT 1) AS sub_status
+             FROM subscribers s
+             WHERE s.tenant_id = ' . $tid . ' AND s.sas_username IS NOT NULL AND s.sas_username <> ""'
+        )->fetchAll();
+    } catch (Exception $e) {
+        try {
+            $subs = $pdo->query(
+                'SELECT s.id, s.name, s.phone, s.sas_username, s.sas_user_id, NULL AS end_date, NULL AS service_name, NULL AS sub_status
+                 FROM subscribers s
+                 WHERE s.sas_username IS NOT NULL AND s.sas_username <> ""'
+            )->fetchAll();
+        } catch (Exception $e2) {
+            return 0;
+        }
+    }
+    $n = 0;
+    foreach ($subs as $s) {
+        $user = trim((string) $s['sas_username']);
+        if ($user === '') {
+            continue;
+        }
+        $exp = !empty($s['end_date']) ? ($s['end_date'] . ' 23:59:59') : null;
+        $row = array(
+            'username' => $user,
+            'id' => (int) $s['sas_user_id'],
+            'user_id' => (int) $s['sas_user_id'],
+            'firstname' => (string) $s['name'],
+            'name' => (string) $s['name'],
+            'phone' => (string) $s['phone'],
+            'profile' => isset($s['service_name']) ? (string) $s['service_name'] : '',
+            'enabled' => (!empty($s['sub_status']) && $s['sub_status'] === 'expired') ? 0 : 1,
+            'expiration' => $exp,
+        );
+        $ok = false;
+        if (function_exists('sas_cache_upsert_row')) {
+            $ok = sas_cache_upsert_row($pdo, $row);
+        }
+        try {
+            $pdo->prepare('UPDATE sas_users_cache SET local_subscriber_id = :lid, display_name = :n WHERE username = :u AND tenant_id = :t')
+                ->execute(array(
+                    ':lid' => (int) $s['id'],
+                    ':n' => (string) $s['name'],
+                    ':u' => $user,
+                    ':t' => $tid,
+                ));
+            $ok = true;
+        } catch (Exception $e) {
+            try {
+                $pdo->prepare('UPDATE sas_users_cache SET local_subscriber_id = :lid, display_name = :n WHERE username = :u')
+                    ->execute(array(
+                        ':lid' => (int) $s['id'],
+                        ':n' => (string) $s['name'],
+                        ':u' => $user,
+                    ));
+                $ok = true;
+            } catch (Exception $e2) {
+            }
+        }
+        if ($ok) {
+            $n++;
+        }
+    }
+    return $n;
+}
+
+/** اربط كاش الساس بصف المشترك اللي عليه الفواتير، وانقل الدفتر للوكالة الحالية */
+function sas_relink_ledger_rows($pdo)
+{
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tid <= 0) {
+        $tid = 1;
+    }
+    $rows = array();
+    try {
+        $st = $pdo->prepare(
+            'SELECT s.id, s.sas_username, s.name, s.phone, s.tenant_id,
+                    (SELECT COUNT(*) FROM invoices i WHERE i.subscriber_id = s.id) AS inv_n
+             FROM subscribers s
+             WHERE s.sas_username IS NOT NULL AND s.sas_username <> ""
+               AND (
+                    s.tenant_id IS NULL OR s.tenant_id = 0 OR s.tenant_id = 1 OR s.tenant_id = :t
+                    OR s.sas_username IN (SELECT c.username FROM sas_users_cache c WHERE c.tenant_id = :t2)
+               )
+             ORDER BY inv_n DESC, s.id ASC'
+        );
+        $st->execute(array(':t' => $tid, ':t2' => $tid));
+        $rows = $st->fetchAll();
+    } catch (Exception $e) {
+        try {
+            $rows = $pdo->query(
+                'SELECT s.id, s.sas_username, s.name, s.phone, s.tenant_id,
+                        (SELECT COUNT(*) FROM invoices i WHERE i.subscriber_id = s.id) AS inv_n
+                 FROM subscribers s
+                 WHERE s.sas_username IS NOT NULL AND s.sas_username <> ""
+                 ORDER BY inv_n DESC, s.id ASC'
+            )->fetchAll();
+        } catch (Exception $e2) {
+            return 0;
+        }
+    }
+    $best = array();
+    foreach ($rows as $s) {
+        $u = trim((string) $s['sas_username']);
+        if ($u === '' || isset($best[$u])) {
+            continue;
+        }
+        $best[$u] = $s;
+    }
+    $n = 0;
+    foreach ($best as $u => $s) {
+        $rowTid = isset($s['tenant_id']) ? (int) $s['tenant_id'] : 0;
+        if ($rowTid !== $tid) {
+            continue;
+        }
+        $phone = (string) $s['phone'];
+        $setPhone = ($phone !== '' && (!function_exists('phone_is_placeholder') || !phone_is_placeholder($phone)));
+        try {
+            if ($setPhone) {
+                $pdo->prepare(
+                    'UPDATE sas_users_cache
+                     SET local_subscriber_id = :lid, display_name = :n, phone = :p
+                     WHERE username = :u AND tenant_id = :t'
+                )->execute(array(
+                    ':lid' => (int) $s['id'],
+                    ':n' => (string) $s['name'],
+                    ':p' => $phone,
+                    ':u' => $u,
+                    ':t' => $tid,
+                ));
+            } else {
+                $pdo->prepare(
+                    'UPDATE sas_users_cache
+                     SET local_subscriber_id = :lid, display_name = :n
+                     WHERE username = :u AND tenant_id = :t'
+                )->execute(array(
+                    ':lid' => (int) $s['id'],
+                    ':n' => (string) $s['name'],
+                    ':u' => $u,
+                    ':t' => $tid,
+                ));
+            }
+            $n++;
+        } catch (Exception $e) {
+            try {
+                $pdo->prepare('UPDATE sas_users_cache SET local_subscriber_id = :lid, display_name = :n WHERE username = :u')
+                    ->execute(array(
+                        ':lid' => (int) $s['id'],
+                        ':n' => (string) $s['name'],
+                        ':u' => $u,
+                    ));
+                $n++;
+            } catch (Exception $e2) {
+            }
+        }
+    }
+    return $n;
+}
+
+function shop_tenant_unpaid_sum($pdo, $tid)
+{
+    try {
+        $st = $pdo->prepare(
+            'SELECT COALESCE(SUM(i.amount),0) FROM invoices i
+             JOIN subscribers s ON s.id = i.subscriber_id
+             WHERE i.status = "unpaid" AND s.tenant_id = :t'
+        );
+        $st->execute(array(':t' => (int) $tid));
+        return (float) $st->fetchColumn();
+    } catch (Exception $e) {
+        return 0.0;
+    }
+}
+
+/** إذا ديون الوكالة صفر، رجّع دفتر 22 أيلول مرة وحدة على الحساب الحالي */
+function shop_restore_sep22_if_empty($pdo)
+{
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tid <= 0) {
+        $tid = 1;
+    }
+    $lockFile = dirname(__DIR__) . '/storage/shop_home_tenant.txt';
+    $lockedHome = is_file($lockFile) ? (int) trim((string) @file_get_contents($lockFile)) : 0;
+    if ($lockedHome <= 0 || $tid !== $lockedHome) {
+        return false;
+    }
+    if (function_exists('sas_relink_ledger_rows')) {
+        sas_relink_ledger_rows($pdo);
+    }
+    if (shop_tenant_unpaid_sum($pdo, $tid) > 0) {
+        return false;
+    }
+    $sqlFile = dirname(__DIR__) . '/public/shop_restore.sql';
+    $doneFile = dirname(__DIR__) . '/storage/shop_restore_done.txt';
+    if (!is_file($sqlFile)) {
+        return false;
+    }
+    $done = is_file($doneFile) ? (string) @file_get_contents($doneFile) : '';
+    if (strpos($done, 'tenant=' . $tid . ' ') !== false && strpos($done, 'unpaid=0') === false && strpos($done, 'applied=1') !== false) {
+        return false;
+    }
+    $sql = @file_get_contents($sqlFile);
+    if ($sql === false || trim($sql) === '') {
+        return false;
+    }
+    $allow = array(
+        'subscribers' => true,
+        'service_plans' => true,
+        'subscriptions' => true,
+        'invoices' => true,
+    );
+    $parts = preg_split('/;\s*\n/', $sql);
+    try {
+        $pdo->exec('SET FOREIGN_KEY_CHECKS=0');
+        foreach ($parts as $stmt) {
+            $stmt = trim($stmt);
+            if ($stmt === '' || strpos($stmt, '--') === 0 || strpos($stmt, 'SET ') === 0) {
+                continue;
+            }
+            if (!preg_match('/^(TRUNCATE TABLE|INSERT INTO|REPLACE INTO)\s+`([a-z0-9_]+)`/i', $stmt, $m)) {
+                continue;
+            }
+            $table = strtolower($m[2]);
+            if (empty($allow[$table]) || stripos($stmt, 'TRUNCATE') === 0) {
+                continue;
+            }
+            $stmt = preg_replace('/^INSERT INTO/i', 'REPLACE INTO', $stmt, 1);
+            $pdo->exec($stmt);
+        }
+        try {
+            if ($lockedHome > 0 && $tid === $lockedHome) {
+                $pdo->prepare('UPDATE subscribers SET tenant_id = :t WHERE id BETWEEN 1 AND 76 AND (tenant_id IS NULL OR tenant_id = 0 OR tenant_id = :t2)')
+                    ->execute(array(':t' => $tid, ':t2' => $tid));
+            }
+        } catch (Exception $e) {
+        }
+        $pdo->exec('SET FOREIGN_KEY_CHECKS=1');
+    } catch (Exception $e) {
+        try {
+            $pdo->exec('SET FOREIGN_KEY_CHECKS=1');
+        } catch (Exception $e2) {
+        }
+        return false;
+    }
+    if (function_exists('sas_relink_ledger_rows')) {
+        sas_relink_ledger_rows($pdo);
+    }
+    $sum = shop_tenant_unpaid_sum($pdo, $tid);
+    @file_put_contents($doneFile, date('c') . ' tenant=' . $tid . ' applied=1 unpaid=' . $sum);
+    @file_put_contents(dirname(__DIR__) . '/storage/shop_home_tenant.txt', (string) $tid);
+    return $sum > 0;
+}
+
 function sas_dash_user_counts($pdo)
 {
+    if (function_exists('sas_cache_fill_from_subscribers')) {
+        sas_cache_fill_from_subscribers($pdo);
+    }
+    if (function_exists('sas_relink_ledger_rows')) {
+        sas_relink_ledger_rows($pdo);
+    }
     ensure_sas_users_cache_table($pdo);
     $out = array(
         'total' => 0,
@@ -2194,7 +2479,7 @@ function sas_dash_user_counts($pdo)
         )->fetchColumn();
         $out['expired'] = (int) $pdo->query(
             'SELECT COUNT(*) FROM sas_users_cache c
-             WHERE c.enabled = 1 AND (c.expire_at IS NULL OR c.expire_at < NOW())' . $scope
+             WHERE c.enabled = 1 AND c.expire_at IS NOT NULL AND c.expire_at < NOW()' . $scope
         )->fetchColumn();
         $out['soon'] = (int) $pdo->query(
             'SELECT COUNT(*) FROM sas_users_cache c
@@ -2205,6 +2490,58 @@ function sas_dash_user_counts($pdo)
              WHERE c.enabled = 1 AND DATE(c.expire_at) = CURDATE()' . $scope
         )->fetchColumn();
     } catch (Exception $e) {
+    }
+    return $out;
+}
+
+/** تاريخ الساس أبعد من آخر اشتراك مسجّل — ما ينكتب دين ولا تفعيل */
+function sas_sas_ahead_of_ledger($pdo)
+{
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tid <= 0) {
+        $tid = 1;
+    }
+    $scope = function_exists('sas_agent_scope_sql') ? sas_agent_scope_sql('c') : '';
+    $sql = 'SELECT c.username, c.display_name, c.firstname, c.local_subscriber_id,
+            DATE(c.expire_at) AS sas_end,
+            (SELECT sub.end_date FROM subscriptions sub
+             WHERE sub.subscriber_id = c.local_subscriber_id
+             ORDER BY sub.end_date DESC, sub.id DESC LIMIT 1) AS local_end
+            FROM sas_users_cache c
+            WHERE c.tenant_id = ' . $tid . '
+              AND c.expire_at IS NOT NULL
+              AND c.local_subscriber_id IS NOT NULL' . $scope;
+    try {
+        $rows = $pdo->query($sql)->fetchAll();
+    } catch (Exception $e) {
+        return array();
+    }
+    $out = array();
+    foreach ($rows as $r) {
+        $sasEnd = isset($r['sas_end']) ? (string) $r['sas_end'] : '';
+        $localEnd = isset($r['local_end']) ? (string) $r['local_end'] : '';
+        if ($sasEnd === '' || $sasEnd === '0000-00-00') {
+            continue;
+        }
+        if ($localEnd === '' || $localEnd === '0000-00-00' || $sasEnd <= $localEnd) {
+            continue;
+        }
+        $name = trim((string) $r['firstname']);
+        if ($name === '') {
+            $name = (string) $r['display_name'];
+        }
+        $days = 0;
+        if ($localEnd !== '' && $localEnd !== '0000-00-00') {
+            $days = (int) round((strtotime($sasEnd) - strtotime($localEnd)) / 86400);
+        }
+        $out[] = array(
+            'username' => (string) $r['username'],
+            'name' => $name,
+            'sas_end' => $sasEnd,
+            'local_end' => $localEnd,
+            'days' => $days,
+            'id' => (int) $r['local_subscriber_id'],
+        );
     }
     return $out;
 }
@@ -3372,8 +3709,17 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
             $updParams[':daily_traffic_chk'] = $params[':daily_traffic'];
             $updParams[':daily_traffic2'] = $params[':daily_traffic'];
             $updParams[':is_online_chk'] = $params[':is_online'];
+            unset(
+                $updParams[':last_online'],
+                $updParams[':is_online'],
+                $updParams[':framed_ip'],
+                $updParams[':daily_traffic']
+            );
             $upd->execute($updParams);
             return true;
+        }
+        if ($ins === false) {
+            return false;
         }
         // لا يوجد صف لهذه الشركة — أدخل صفاً جديداً
         if ($accountId > 0) {
@@ -3400,8 +3746,8 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
     } catch (Exception $e) {
         // إن تعارض username بسبب PK قديم: حدّث فقط إن كان نفس الشركة، وإلا تجاهل السرقة
         try {
-            $chk = $pdo->prepare('SELECT tenant_id FROM sas_users_cache WHERE username = :u LIMIT 1');
-            $chk->execute(array(':u' => $username));
+            $chk = $pdo->prepare('SELECT tenant_id FROM sas_users_cache WHERE username = :u AND tenant_id = :t LIMIT 1');
+            $chk->execute(array(':u' => $username, ':t' => $tenantId));
             $existTid = (int) $chk->fetchColumn();
             if ($existTid === $tenantId) {
                 $pdo->prepare(
@@ -3560,6 +3906,60 @@ function sas_cache_pull_search($pdo, $config, $q)
  * يرجع array($ok, $count, $mode, $meta)
  * $mode: cache | progress | synced | busy | error
  */
+function sas_sync_submanager_users($pdo, $api, $nowSql)
+{
+    if (!$api || !method_exists($api, 'getManagers') || !method_exists($api, 'listUsersPage')) {
+        return 0;
+    }
+    $raw = $api->getManagers();
+    if (function_exists('sas_response_is_error') && sas_response_is_error($raw)) {
+        return 0;
+    }
+    $rows = is_array($raw) ? $raw : array();
+    if (isset($rows['data']) && is_array($rows['data'])) {
+        $rows = $rows['data'];
+    }
+    $saved = 0;
+    $seen = array();
+    foreach ($rows as $m) {
+        if (!is_array($m)) {
+            continue;
+        }
+        $pid = 0;
+        if (isset($m['id']) && is_numeric($m['id'])) {
+            $pid = (int) $m['id'];
+        }
+        if ($pid <= 0 || isset($seen[$pid])) {
+            continue;
+        }
+        $seen[$pid] = true;
+        $pageNum = 1;
+        $guard = 0;
+        do {
+            $page = $api->listUsersPage(($pageNum - 1) * 100, 100, '', $pid);
+            if (empty($page['ok'])) {
+                break;
+            }
+            $users = isset($page['rows']) ? $page['rows'] : array();
+            if (!$users) {
+                break;
+            }
+            foreach ($users as $row) {
+                if (!is_array($row)) {
+                    continue;
+                }
+                if (sas_cache_upsert_row($pdo, $row, $nowSql, false)) {
+                    $saved++;
+                }
+            }
+            $pageNum++;
+            $guard++;
+            $complete = !empty($page['complete']);
+        } while (!$complete && $guard < 40);
+    }
+    return $saved;
+}
+
 function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
 {
     ensure_sas_users_cache_table($pdo);
@@ -3797,6 +4197,7 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
         )->fetchColumn();
 
         if ($done) {
+            sas_sync_submanager_users($pdo, $api, $nowSql);
             $started = isset($meta['sync_started_at']) ? $meta['sync_started_at'] : '';
             if ($started === '' && !empty($meta['last_try_at'])) {
                 $started = $meta['last_try_at'];
@@ -3870,6 +4271,27 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
     }
 }
 
+function sas_owner_parent_label($pdo = null)
+{
+    if (!$pdo && isset($GLOBALS['pdo'])) {
+        $pdo = $GLOBALS['pdo'];
+    }
+    $label = '';
+    if ($pdo && function_exists('tenant_row') && function_exists('current_tenant_id')) {
+        $row = tenant_row($pdo, current_tenant_id());
+        if ($row && !empty($row['name'])) {
+            $label = trim((string) $row['name']);
+        }
+    }
+    if ($label === '' && $pdo && function_exists('sas_config_for_tenant')) {
+        $cfg = sas_config_for_tenant($pdo, isset($GLOBALS['config']) ? $GLOBALS['config'] : array());
+        if (!empty($cfg['username'])) {
+            $label = trim((string) $cfg['username']);
+        }
+    }
+    return $label;
+}
+
 function sas_cache_search_sql($q, &$params)
 {
     $where = '1=1';
@@ -3885,12 +4307,15 @@ function sas_cache_search_sql($q, &$params)
         OR c.firstname LIKE :q
         OR c.lastname LIKE :q
         OR c.profile_name LIKE :q
+        OR c.parent_name LIKE :q
+        OR IFNULL(NULLIF(c.parent_name, ""), :selflab) LIKE :q
         OR CONCAT(IFNULL(c.firstname,""), " ", IFNULL(c.lastname,"")) LIKE :q
         OR CONCAT(IFNULL(c.lastname,""), " ", IFNULL(c.firstname,"")) LIKE :q
         OR REPLACE(REPLACE(IFNULL(c.display_name,""), " ", ""), "-", "") LIKE :qns
     ';
     $params[':q'] = '%' . $q . '%';
     $params[':qns'] = '%' . preg_replace('/[\s\-]+/', '', $q) . '%';
+    $params[':selflab'] = function_exists('sas_owner_parent_label') ? sas_owner_parent_label() : '';
     if ($qDigits !== '') {
         $where .= ' OR c.username LIKE :qd OR c.phone LIKE :qd';
         $params[':qd'] = '%' . $qDigits . '%';
@@ -3923,7 +4348,7 @@ function sas_cache_filter_sql($subFilter)
         return ' AND c.enabled = 0';
     }
     if ($subFilter === 'expired') {
-        return ' AND (c.enabled = 0 OR c.expire_at IS NULL OR c.expire_at < NOW())';
+        return ' AND c.enabled = 1 AND c.expire_at IS NOT NULL AND c.expire_at < NOW()';
     }
     if ($subFilter === 'today') {
         return ' AND c.expire_at IS NOT NULL AND DATE(c.expire_at) = CURDATE()';
@@ -4024,7 +4449,20 @@ function sas_render_table_row($row, $n, $config, $lang)
     $name = isset($row['display_name']) && $row['display_name'] !== ''
         ? (string) $row['display_name']
         : ($fn !== '' ? trim($fn . ' ' . $ln) : $username);
-    $phone = isset($row['phone']) && $row['phone'] !== '' ? (string) $row['phone'] : '';
+    $phone = '';
+    if (isset($row['local_phone']) && trim((string) $row['local_phone']) !== '') {
+        $localP = (string) $row['local_phone'];
+        if (!function_exists('phone_is_placeholder') || !phone_is_placeholder($localP)) {
+            $phone = $localP;
+        }
+    }
+    if ($phone === '' && isset($row['phone']) && $row['phone'] !== '') {
+        $phone = (string) $row['phone'];
+    }
+    if ($phone !== '' && function_exists('format_phone_display')) {
+        $shown = format_phone_display($phone);
+        $phone = ($shown === '—') ? '' : $shown;
+    }
     $localId = !empty($row['local_id']) ? (int) $row['local_id'] : (!empty($row['local_subscriber_id']) ? (int) $row['local_subscriber_id'] : 0);
     $debt = isset($row['debt']) ? (float) $row['debt'] : 0.0;
     $enabled = isset($row['enabled']) ? (int) $row['enabled'] : 1;
@@ -4059,7 +4497,10 @@ function sas_render_table_row($row, $n, $config, $lang)
             : (string) (int) round((strtotime(date('Y-m-d', strtotime($expireAt))) - strtotime(date('Y-m-d'))) / 86400);
     }
     $pkgLabel = !empty($row['profile_name']) ? $row['profile_name'] : '-';
-    $parentName = !empty($row['parent_name']) ? $row['parent_name'] : '-';
+    $parentName = !empty($row['parent_name']) ? $row['parent_name'] : (function_exists('sas_owner_parent_label') ? sas_owner_parent_label() : '');
+    if ($parentName === '') {
+        $parentName = '-';
+    }
     $expireDisp = '-';
     if ($hasExpire) {
         $expireDisp = function_exists('sas_format_expire_display')
@@ -4164,7 +4605,8 @@ function sas_render_table_row($row, $n, $config, $lang)
         . ($rentBadge !== '' ? '<span class="sas-rent-mini" title="' . e($rentDevName) . '">' . $rentBadge . '</span>' : '')
         . '</span></td>';
     $html .= '<td class="col-ln"><span class="cell-edit" tabindex="0" data-edit="lastname" data-allow-empty="1" data-id="' . e($username) . '" data-value="' . e($ln) . '" title="' . e($editTip) . '">' . e($ln !== '' ? $ln : '-') . '</span></td>';
-    $html .= '<td class="col-phone"><span class="cell-edit" tabindex="0" data-edit="phone" data-allow-empty="1" data-id="' . e($username) . '" data-value="' . e($phone) . '" title="' . e($editTip) . '">' . e($phone !== '' ? $phone : '-') . '</span></td>';
+    $html .= '<td class="col-phone"><span class="cell-edit" tabindex="0" data-edit="phone" data-allow-empty="1" data-id="' . e($username) . '" data-value="' . e($phone) . '" title="' . e($editTip) . '">' . e($phone !== '' ? $phone : '-') . '</span>'
+        . (function_exists('wa_miss_html') ? wa_miss_html($noWa) : '') . '</td>';
     $html .= '<td class="col-exp">' . (function_exists('sas_format_expire_html')
         ? sas_format_expire_html($hasExpire ? $expireAt : '')
         : '<span class="sas-expire-dt" dir="ltr">' . e($expireDisp) . '</span>') . '</td>';
@@ -4226,3 +4668,4 @@ function sas_render_table_row($row, $n, $config, $lang)
 }
 
 }
+

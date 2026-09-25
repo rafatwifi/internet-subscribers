@@ -126,6 +126,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         $map = isset($_POST['map']) && is_array($_POST['map']) ? $_POST['map'] : array();
         $rows = import_map_rows_from_file($path);
+        if (function_exists('platform_backup_snapshot')) {
+            list($bakOk, $bakPath, $bakMsg) = platform_backup_snapshot($pdo, $config, 'pre-import');
+            if (!$bakOk) {
+                flash('error', ($isEn ? 'Import stopped — backup failed: ' : 'توقف الاستيراد — النسخة فشلت: ') . $bakMsg);
+                redirect('import_map.php?step=map');
+            }
+        }
         $added = 0;
         $skipped = 0;
         $debts = 0;
@@ -185,9 +192,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
         unset($_SESSION['import_map_file'], $_SESSION['import_map_headers']);
+        $bakNote = isset($bakMsg) ? (' — ' . $bakMsg) : '';
         flash('success', ($isEn ? 'Imported ' : 'تم استيراد ') . $added
             . ($isEn ? ' / debts ' : ' / ديون ') . $debts
-            . ($isEn ? ' / skipped ' : ' / تخطي ') . $skipped);
+            . ($isEn ? ' / skipped ' : ' / تخطي ') . $skipped
+            . $bakNote);
         redirect('import_map.php');
     }
 }
