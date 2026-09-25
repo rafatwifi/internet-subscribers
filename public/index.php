@@ -9,8 +9,42 @@ $isEn = (isset($lang) && $lang === 'en');
 $showCardAccountingDash = function_exists('is_accountant_user') && is_accountant_user()
     && function_exists('user_can') && user_can('card_accounting');
 $cardDashAgentId = 0;
+$acctTargets = array();
 if ($showCardAccountingDash) {
     $cardDashAgentId = accountant_linked_agent_id();
+    $accLv = function_exists('accountant_scope_level') ? accountant_scope_level($pdo) : '';
+    $treeIds = function_exists('accountant_tree_ids') ? accountant_tree_ids($pdo) : array();
+    foreach ($treeIds as $treeUid) {
+        if ((int) $treeUid === (int) $cardDashAgentId) {
+            continue;
+        }
+        $treeRow = function_exists('get_admin_user') ? get_admin_user($pdo, (int) $treeUid) : null;
+        if (!$treeRow) {
+            continue;
+        }
+        $treeRole = isset($treeRow['role']) ? $treeRow['role'] : '';
+        if ($accLv === 'admin' && $treeRole !== 'group_manager') {
+            continue;
+        }
+        if ($accLv === 'group_manager' && $treeRole !== 'agent') {
+            continue;
+        }
+        $acctTargets[] = $treeRow;
+    }
+    $pickAcct = isset($_GET['acct']) ? (int) $_GET['acct'] : 0;
+    $picked = false;
+    if ($pickAcct > 0) {
+        foreach ($acctTargets as $tRow) {
+            if ((int) $tRow['id'] === $pickAcct) {
+                $cardDashAgentId = $pickAcct;
+                $picked = true;
+                break;
+            }
+        }
+    }
+    if (!$picked && $acctTargets) {
+        $cardDashAgentId = (int) $acctTargets[0]['id'];
+    }
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['card_payment']) && $showCardAccountingDash) {
@@ -19,9 +53,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['card_payment']) && $s
         redirect('index.php');
     }
     $payAgentId = (int) post('agent_user_id', '0');
-    $linked = accountant_linked_agent_id();
-    if ($linked > 0) {
-        $payAgentId = $linked;
+    $allowedPay = array();
+    foreach ($acctTargets as $tRow) {
+        $allowedPay[] = (int) $tRow['id'];
+    }
+    if (!$allowedPay && $cardDashAgentId > 0) {
+        $allowedPay[] = (int) $cardDashAgentId;
+    }
+    if (!in_array($payAgentId, $allowedPay, true)) {
+        flash('error', $isEn ? 'This agent is outside your tree' : 'هذا الوكيل مو ضمن شجرتك');
+        redirect('index.php#card-accounting');
     }
     $amount = (float) post('amount', '0');
     if (post('pay_all') === '1' && function_exists('card_agent_remaining_balance')) {
@@ -63,9 +104,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['card_remind']) && $sh
         flash('error', $isEn ? 'Invalid request' : 'طلب غير صالح');
         redirect('index.php');
     }
-    $aid = accountant_linked_agent_id();
+    $aid = (int) post('agent_user_id', '0');
     if ($aid <= 0) {
-        $aid = (int) post('agent_user_id', '0');
+        $aid = (int) $cardDashAgentId;
     }
     list($okR, $msgR) = card_agent_payment_remind($pdo, $config, $aid, isset($lang) ? $lang : 'ar');
     flash($okR ? 'success' : 'error', $msgR);
@@ -84,11 +125,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['disable_agent_sas']) 
         redirect('index.php#card-accounting');
     }
     $aid = (int) post('agent_user_id', '0');
-    if ($showCardAccountingDash) {
-        $linked = accountant_linked_agent_id();
-        if ($linked > 0) {
-            $aid = $linked;
-        }
+    if ($showCardAccountingDash && $aid <= 0) {
+        $aid = (int) $cardDashAgentId;
     }
     $me = current_admin();
     $meId = $me ? (int) $me['id'] : 0;
@@ -365,7 +403,8 @@ $sasCounts = array(
 $sasCardGroups = array();
 $sasBalanceDisp = '—';
 if ($sasReadyDash) {
-    if (function_exists('sas_dash_user_counts')) {
+    $keepScopedCounts = function_exists('is_accountant_user') && is_accountant_user();
+    if (!$keepScopedCounts && function_exists('sas_dash_user_counts')) {
         $sasCounts = sas_dash_user_counts($pdo);
     }
     // أولاً: كاش السيرفر الأدق (جرد الكروت) — بدون انتظار SAS
@@ -634,7 +673,18 @@ body:has(.sas-dash) .container {
     <form method="post" class="acct-pay-row" id="acct-pay">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="card_payment" value="1">
+        <?php if (count($acctTargets) > 1): ?>
+        <div>
+            <label><?php echo e($isEn ? 'Agent' : 'الوكيل'); ?></label>
+            <select name="agent_user_id" onchange="location.href='index.php?acct='+this.value+'#card-accounting'">
+                <?php foreach ($acctTargets as $tRow): ?>
+                <option value="<?php echo (int) $tRow['id']; ?>"<?php echo ((int) $tRow['id'] === (int) $cardDashAgentId) ? ' selected' : ''; ?>><?php echo e($tRow['display_name']); ?></option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+        <?php else: ?>
         <input type="hidden" name="agent_user_id" value="<?php echo (int) $cardDashAgentId; ?>">
+        <?php endif; ?>
         <div>
             <label><?php echo e($isEn ? 'Payment amount' : 'مبلغ الدفعة'); ?></label>
             <input name="amount" type="number" min="0.01" step="0.01" max="<?php echo e(max(0.01, (float) $cardDash['remaining'])); ?>"
@@ -724,7 +774,6 @@ body:has(.sas-dash) .container {
     <?php endif; ?>
 </div>
 <?php endif; ?>
-<?php if (!is_accountant_user()): ?>
 <div class="sas-dash">
 <div class="sas-boxes">
 <?php
@@ -772,8 +821,7 @@ if ($sasReadyDash) {
 ?>
 </div>
 </div>
-<?php endif; ?>
-<?php if ($sasReadyDash && !is_accountant_user()): ?>
+<?php if ($sasReadyDash): ?>
 <script>
 (function () {
   function applyDash(d) {
@@ -806,7 +854,6 @@ if ($sasReadyDash) {
 </script>
 <?php endif; ?>
 
-<?php if (!is_accountant_user()): ?>
 <div class="panel chart-panel glass-panel panel-compact">
     <div class="chart-head chart-head-row">
         <div>
@@ -834,5 +881,4 @@ if ($sasReadyDash) {
         <?php endfor; ?>
     </div>
 </div>
-<?php endif; ?>
 <?php render_footer(); ?>

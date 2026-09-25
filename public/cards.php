@@ -11,7 +11,9 @@ ensure_card_accounting_tables($pdo);
 $isEn = ($lang === 'en');
 $me = current_admin();
 $meId = $me ? (int) $me['id'] : 0;
-$canTransfer = function_exists('is_accountant_user') && is_accountant_user();
+$accLevel = (function_exists('is_accountant_user') && is_accountant_user() && function_exists('accountant_scope_level'))
+    ? accountant_scope_level($pdo) : '';
+$canTransfer = ($accLevel === 'admin' || $accLevel === 'group_manager');
 $sasReady = function_exists('sas_is_ready') && sas_is_ready($config);
 $agents = list_agent_users($pdo, true);
 $tidCards = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
@@ -45,8 +47,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
     }
     $action = post('action');
     if ($action === 'transfer') {
-        $fromAgentId = (int) post('from_agent_id', '0');
+        $bossPost = function_exists('accountant_boss_row') ? accountant_boss_row($pdo) : null;
+        $fromAgentId = $bossPost ? (int) $bossPost['id'] : (int) post('from_agent_id', '0');
         $toAgentId = (int) post('to_agent_id', '0');
+        $treePost = function_exists('accountant_tree_ids') ? accountant_tree_ids($pdo) : array();
+        if ($toAgentId <= 0 || !in_array($toAgentId, $treePost, true) || $toAgentId === $fromAgentId) {
+            flash('error', $isEn ? 'Select an agent under you' : 'اختر وكيلاً من الشجرة اللي تحتك');
+            redirect('cards.php#card-transfer');
+        }
         $profileId = (int) post('profile_id', '0');
         $profileName = trim((string) post('profile_name', ''));
         $qty = (int) post('qty', '0');
@@ -609,24 +617,27 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
             ? 'Amount is taken from the agent price set by the admin.'
             : 'المبلغ ينحسب من تسعيرة الوكيل اللي حاطها الأدمن.'); ?></p>
         <?php
-        $fromId = $meId;
-        $fromLabel = $me && !empty($me['display_name']) ? (string) $me['display_name'] : ($me ? (string) $me['username'] : '');
-        if ($tidCards > 1) {
-            try {
-                $ownSt = $pdo->prepare('SELECT t.owner_user_id, t.name, u.display_name, u.username
-                    FROM tenants t LEFT JOIN admin_users u ON u.id = t.owner_user_id WHERE t.id = :id LIMIT 1');
-                $ownSt->execute(array(':id' => $tidCards));
-                $ownRow = $ownSt->fetch();
-                if ($ownRow && (int) $ownRow['owner_user_id'] > 0) {
-                    $fromId = (int) $ownRow['owner_user_id'];
-                    $fromLabel = trim((string) $ownRow['display_name']) !== '' ? $ownRow['display_name'] : (string) $ownRow['username'];
-                } elseif ($ownRow && trim((string) $ownRow['name']) !== '') {
-                    $fromLabel = (string) $ownRow['name'];
-                }
-            } catch (Exception $e) {
+        $boss = function_exists('accountant_boss_row') ? accountant_boss_row($pdo) : null;
+        $fromId = $boss ? (int) $boss['id'] : $meId;
+        $fromLabel = $boss
+            ? (trim((string) $boss['display_name']) !== '' ? $boss['display_name'] : (string) $boss['username'])
+            : ($me && !empty($me['display_name']) ? (string) $me['display_name'] : '');
+        $treeIds = function_exists('accountant_tree_ids') ? accountant_tree_ids($pdo) : array();
+        $toAgents = array();
+        foreach ($agents as $ag) {
+            $aid = (int) $ag['id'];
+            if ($aid === $fromId || ($treeIds && !in_array($aid, $treeIds, true))) {
+                continue;
             }
+            $roleAg = isset($ag['role']) ? $ag['role'] : 'agent';
+            if ($accLevel === 'admin' && $roleAg !== 'group_manager') {
+                continue;
+            }
+            if ($accLevel === 'group_manager' && $roleAg !== 'agent') {
+                continue;
+            }
+            $toAgents[] = $ag;
         }
-        $toAgents = $agents;
         usort($toAgents, function ($a, $b) {
             $an = isset($a['display_name']) ? (string) $a['display_name'] : '';
             $bn = isset($b['display_name']) ? (string) $b['display_name'] : '';

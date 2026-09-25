@@ -227,6 +227,64 @@ function accountant_linked_agent_id($u = null)
     return isset($u['linked_agent_id']) ? (int) $u['linked_agent_id'] : 0;
 }
 
+function accountant_boss_row($pdo)
+{
+    $id = accountant_linked_agent_id();
+    if ($id <= 0 || !$pdo || !function_exists('get_admin_user')) {
+        return null;
+    }
+    $row = get_admin_user($pdo, $id);
+    return $row ? $row : null;
+}
+
+/** agent | group_manager | admin — مستوى الشخص اللي المحاسب تابع له */
+function accountant_scope_level($pdo)
+{
+    $boss = accountant_boss_row($pdo);
+    if (!$boss) {
+        return '';
+    }
+    $role = normalize_admin_role(isset($boss['role']) ? $boss['role'] : '');
+    if ($role === 'admin') {
+        return 'admin';
+    }
+    if ($role === 'group_manager') {
+        return 'group_manager';
+    }
+    return 'agent';
+}
+
+/** من الحساب المرتبط ونزولاً بكل الشجرة */
+function accountant_tree_ids($pdo)
+{
+    $root = accountant_linked_agent_id();
+    if ($root <= 0 || !$pdo) {
+        return array();
+    }
+    $ids = array($root);
+    $frontier = array($root);
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    for ($depth = 0; $depth < 8 && $frontier; $depth++) {
+        $in = implode(',', array_map('intval', $frontier));
+        try {
+            $rows = $pdo->query(
+                'SELECT id FROM admin_users WHERE tenant_id = ' . $tid . ' AND reports_to_user_id IN (' . $in . ')'
+            )->fetchAll();
+        } catch (Exception $e) {
+            break;
+        }
+        $frontier = array();
+        foreach ($rows as $r) {
+            $cid = (int) $r['id'];
+            if ($cid > 0 && !in_array($cid, $ids, true)) {
+                $ids[] = $cid;
+                $frontier[] = $cid;
+            }
+        }
+    }
+    return $ids;
+}
+
 function is_admin_user($u = null)
 {
     if ($u === null) {
@@ -340,19 +398,9 @@ function subscriber_agent_scope_sql($alias = 's')
         if ($aid <= 0) {
             return ' AND 1=0';
         }
-        $ids = array($aid);
-        if (isset($pdo) && $pdo) {
-            $tidAcc = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
-            try {
-                $stAcc = $pdo->prepare(
-                    'SELECT id FROM admin_users WHERE reports_to_user_id = :id AND tenant_id = :t AND role IN ("agent","group_manager")'
-                );
-                $stAcc->execute(array(':id' => $aid, ':t' => $tidAcc));
-                foreach ($stAcc->fetchAll() as $ar) {
-                    $ids[] = (int) $ar['id'];
-                }
-            } catch (Exception $e) {
-            }
+        $ids = function_exists('accountant_tree_ids') ? accountant_tree_ids($pdo) : array($aid);
+        if (!$ids) {
+            $ids = array($aid);
         }
         return $tenantSql . ' AND ' . $a . '.agent_user_id IN (' . implode(',', array_map('intval', $ids)) . ')';
     }
@@ -399,20 +447,7 @@ function user_can_access_subscriber($pdo, $subscriberId)
             if ($aid <= 0) {
                 return false;
             }
-            if ((int) $row['agent_user_id'] === $aid) {
-                return true;
-            }
-            $team = array($aid);
-            try {
-                $stAcc = $pdo->prepare(
-                    'SELECT id FROM admin_users WHERE reports_to_user_id = :id AND tenant_id = :t'
-                );
-                $stAcc->execute(array(':id' => $aid, ':t' => $tid));
-                foreach ($stAcc->fetchAll() as $ar) {
-                    $team[] = (int) $ar['id'];
-                }
-            } catch (Exception $e) {
-            }
+            $team = function_exists('accountant_tree_ids') ? accountant_tree_ids($pdo) : array($aid);
             return in_array((int) $row['agent_user_id'], $team, true);
         }
         if (!is_agent_user() && !is_group_manager_user()) {
@@ -461,9 +496,19 @@ function user_can($perm, $role = null)
     if (in_array($perm, $perms, true)) {
         return true;
     }
-    if ($perm === 'activate' && $role === 'accountant') {
-        $u = current_admin();
-        return $u && !empty($u['can_activate']);
+    if ($role === 'accountant') {
+        if (in_array($perm, array('subscriptions', 'cards', 'messages', 'reports', 'rentals'), true)) {
+            return true;
+        }
+        if ($perm === 'activate') {
+            $u = current_admin();
+            return $u && !empty($u['can_activate']);
+        }
+        if ($perm === 'card_accounting') {
+            global $pdo;
+            $lv = function_exists('accountant_scope_level') ? accountant_scope_level(isset($pdo) ? $pdo : null) : '';
+            return $lv === 'admin' || $lv === 'group_manager';
+        }
     }
     return false;
 }
