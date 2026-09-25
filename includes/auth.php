@@ -108,7 +108,7 @@ function role_permissions($role)
     if ($role === 'group_manager') {
         return array(
             'dashboard', 'subscribers', 'activate', 'debts', 'edit_debts', 'messages', 'rentals',
-            'subscriptions', 'reports', 'agents', 'cards', 'card_accounting', 'plans',
+            'subscriptions', 'reports', 'agents', 'cards', 'card_accounting', 'plans', 'users',
         );
     }
     if ($role === 'manager') {
@@ -371,10 +371,6 @@ function subscriber_agent_scope_sql($alias = 's')
             return $tenantSql;
         }
         return $tenantSql . ' AND ' . $a . '.agent_user_id IN (' . implode(',', array_map('intval', $team)) . ')';
-    }
-    $mid = $u && !empty($u['sas_manager_id']) ? (int) $u['sas_manager_id'] : 0;
-    if ($mid <= 0) {
-        return $tenantSql;
     }
     return $tenantSql . ' AND ' . $a . '.agent_user_id = ' . $id;
 }
@@ -842,6 +838,176 @@ function set_admin_session_from_row($row)
 /**
  * دخول بصفة وكيل (للأدمن فقط) مع حفظ الجلسة الأصلية.
  */
+function agency_has_downline($pdo, $tenantId, $exceptId)
+{
+    $tenantId = (int) $tenantId;
+    $exceptId = (int) $exceptId;
+    if ($tenantId <= 1 || !$pdo) {
+        return false;
+    }
+    try {
+        $st = $pdo->prepare(
+            'SELECT COUNT(*) FROM admin_users
+             WHERE tenant_id = :t AND id <> :me AND is_active = 1
+               AND role IN ("agent", "group_manager")'
+        );
+        $st->execute(array(':t' => $tenantId, ':me' => $exceptId));
+        return ((int) $st->fetchColumn()) > 0;
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+/** super = أدمن المنصة، agency = حساب الوكالة، parent = وكيل تحته وكلاء */
+function portal_sas_host_key($host)
+{
+    $host = strtolower(trim((string) $host));
+    $host = preg_replace('#^https?://#i', '', $host);
+    return rtrim($host, '/');
+}
+
+/** وكالات البوابة اللي تحت نفس حساب الساس الحالي (مثل wifi@office تحت وكالة wifi) */
+function portal_agencies_under_current($pdo, $q = '')
+{
+    $me = current_admin();
+    $myTid = $me && isset($me['tenant_id']) ? (int) $me['tenant_id'] : 1;
+    $myId = $me ? (int) $me['id'] : 0;
+    if ($myTid <= 1 || $myId <= 0 || !$pdo) {
+        return array();
+    }
+    if (function_exists('is_super_admin_user') && is_super_admin_user()) {
+        return array();
+    }
+    $myHosts = array();
+    try {
+        $hs = $pdo->prepare('SELECT sas_host FROM tenants WHERE id = :id LIMIT 1');
+        $hs->execute(array(':id' => $myTid));
+        $k = portal_sas_host_key($hs->fetchColumn());
+        if ($k !== '') {
+            $myHosts[$k] = true;
+        }
+    } catch (Exception $e) {
+    }
+    try {
+        $ha = $pdo->prepare('SELECT sas_host FROM tenant_sas_accounts WHERE tenant_id = :id');
+        $ha->execute(array(':id' => $myTid));
+        foreach ($ha->fetchAll() as $hr) {
+            $k = portal_sas_host_key(isset($hr['sas_host']) ? $hr['sas_host'] : '');
+            if ($k !== '') {
+                $myHosts[$k] = true;
+            }
+        }
+    } catch (Exception $e) {
+    }
+    $q = trim((string) $q);
+    try {
+        $sql = 'SELECT u.id, u.username, u.display_name, u.role, u.is_active, u.created_at, u.updated_at,
+                       u.sas_manager_id, u.tenant_id, u.phone, t.sas_host, t.name AS tenant_name
+                FROM admin_users u
+                INNER JOIN tenants t ON t.id = u.tenant_id
+                WHERE u.role = "admin" AND u.tenant_id > 1 AND u.tenant_id <> :my AND u.id <> :uid
+                  AND (
+                    t.owner_user_id = u.id
+                    OR t.owner_user_id IS NULL
+                    OR t.owner_user_id = 0
+                  )';
+        $params = array(':my' => $myTid, ':uid' => $myId);
+        if ($q !== '') {
+            $sql .= ' AND (u.username LIKE :q OR u.display_name LIKE :q2 OR t.name LIKE :q3)';
+            $like = '%' . $q . '%';
+            $params[':q'] = $like;
+            $params[':q2'] = $like;
+            $params[':q3'] = $like;
+        }
+        $sql .= ' ORDER BY u.username ASC LIMIT 40';
+        $st = $pdo->prepare($sql);
+        $st->execute($params);
+        $rows = $st->fetchAll();
+    } catch (Exception $e) {
+        return array();
+    }
+    $out = array();
+    $seen = array();
+    foreach ($rows as $r) {
+        $uid = (int) $r['id'];
+        if ($uid <= 0 || isset($seen[$uid])) {
+            continue;
+        }
+        $theirHost = portal_sas_host_key(isset($r['sas_host']) ? $r['sas_host'] : '');
+        $sameHost = ($theirHost !== '' && isset($myHosts[$theirHost]));
+        if (!$sameHost && !empty($r['tenant_id'])) {
+            try {
+                $ha = $pdo->prepare('SELECT sas_host FROM tenant_sas_accounts WHERE tenant_id = :id');
+                $ha->execute(array(':id' => (int) $r['tenant_id']));
+                foreach ($ha->fetchAll() as $hr) {
+                    $k = portal_sas_host_key(isset($hr['sas_host']) ? $hr['sas_host'] : '');
+                    if ($k !== '' && isset($myHosts[$k])) {
+                        $sameHost = true;
+                        break;
+                    }
+                }
+            } catch (Exception $e) {
+                $sameHost = false;
+            }
+        }
+        $inCache = false;
+        if (!$sameHost) {
+            try {
+                $ck = $pdo->prepare(
+                    'SELECT 1 FROM sas_users_cache
+                     WHERE tenant_id = :t
+                       AND (parent_name = :u OR parent_name = :d OR parent_name = :tn)
+                     LIMIT 1'
+                );
+                $ck->execute(array(
+                    ':t' => $myTid,
+                    ':u' => (string) $r['username'],
+                    ':d' => (string) $r['display_name'],
+                    ':tn' => isset($r['tenant_name']) ? (string) $r['tenant_name'] : '',
+                ));
+                $inCache = (bool) $ck->fetchColumn();
+            } catch (Exception $e) {
+                $inCache = false;
+            }
+        }
+        if (!$sameHost && !$inCache) {
+            continue;
+        }
+        $seen[$uid] = true;
+        $out[] = $r;
+    }
+    return $out;
+}
+
+function impersonate_actor_mode($pdo)
+{
+    if (is_impersonating()) {
+        return '';
+    }
+    if (function_exists('is_super_admin_user') && is_super_admin_user()) {
+        return 'super';
+    }
+    $me = current_admin();
+    if (!$me) {
+        return '';
+    }
+    $tid = isset($me['tenant_id']) ? (int) $me['tenant_id'] : 1;
+    $id = (int) $me['id'];
+    if ($tid <= 1 || $id <= 0) {
+        return '';
+    }
+    if (is_admin_user() || is_group_manager_user()) {
+        return 'agency';
+    }
+    if (function_exists('user_can') && user_can('agents') && !is_agent_user() && !is_accountant_user()) {
+        return 'agency';
+    }
+    if (admin_user_child_count($pdo, $id, $tid) > 0) {
+        return 'parent';
+    }
+    return '';
+}
+
 function admin_user_child_count($pdo, $userId, $tenantId)
 {
     $userId = (int) $userId;
@@ -873,22 +1039,36 @@ function impersonate_start($pdo, $targetUserId)
         return array(false, 'لا يمكن');
     }
     $already = is_impersonating();
+    $mode = impersonate_actor_mode($pdo);
     if ($already) {
         if (!is_admin_user()) {
             return array(false, 'غير مسموح');
         }
-    } elseif (!is_admin_user()) {
+    } elseif ($mode === '') {
         return array(false, 'غير مسموح');
     }
     try {
         ensure_admin_users_table($pdo);
+        $activeSql = ($mode === 'agency' || $mode === 'parent') ? '' : ' AND is_active = 1';
         $st = $pdo->prepare(
-            'SELECT * FROM admin_users WHERE id = :id AND is_active = 1 LIMIT 1'
+            'SELECT * FROM admin_users WHERE id = :id' . $activeSql . ' LIMIT 1'
         );
         $st->execute(array(':id' => $targetUserId));
         $row = $st->fetch();
         if (!$row) {
             return array(false, 'المستخدم غير موجود');
+        }
+        $selfNames = array();
+        if (!empty($me['username'])) {
+            $selfNames[strtolower(trim((string) $me['username']))] = true;
+        }
+        if (!empty($me['display_name'])) {
+            $selfNames[strtolower(trim((string) $me['display_name']))] = true;
+        }
+        $rowUser = strtolower(trim((string) (isset($row['username']) ? $row['username'] : '')));
+        $rowName = strtolower(trim((string) (isset($row['display_name']) ? $row['display_name'] : '')));
+        if (isset($selfNames[$rowUser]) || ($rowName !== '' && isset($selfNames[$rowName]))) {
+            return array(false, 'هذا حسابك');
         }
         $role = normalize_admin_role(isset($row['role']) ? $row['role'] : '');
         $tid = isset($row['tenant_id']) ? (int) $row['tenant_id'] : 1;
@@ -903,16 +1083,38 @@ function impersonate_start($pdo, $targetUserId)
                 $isOwner = false;
             }
         }
-        if (($role === 'admin' || $isOwner) && $tid > 1) {
+        $underMe = false;
+        if (($role === 'admin' || $isOwner) && $tid > 1 && $tid !== $myTid && function_exists('portal_agencies_under_current')) {
+            foreach (portal_agencies_under_current($pdo, '') as $sib) {
+                if ((int) $sib['id'] === (int) $row['id']) {
+                    $underMe = true;
+                    break;
+                }
+            }
+        }
+        if (($role === 'admin' || $isOwner) && $tid > 1 && !$underMe) {
             if ($already || !function_exists('is_super_admin_user') || !is_super_admin_user()) {
                 return array(false, 'دخول مستخدم النظام للمدير العام فقط');
             }
+        } elseif ($underMe) {
+            // وكالة البوابة التابعة لنفس الساس
         } elseif ($role === 'agent' || $role === 'group_manager') {
-            if ($tid !== $myTid && $myTid > 1) {
+            if ($tid !== $myTid) {
                 return array(false, 'الوكيل من وكالة ثانية');
             }
-            if (admin_user_child_count($pdo, (int) $row['id'], $tid) < 1) {
-                return array(false, 'الدخول بصفة وكيل فقط إذا عنده وكلاء فرعيين');
+            if ($mode === 'agency') {
+                // أي وكيل داخل نفس الوكالة
+            } elseif ($mode === 'parent') {
+                $rep = isset($row['reports_to_user_id']) ? (int) $row['reports_to_user_id'] : 0;
+                if ($rep !== (int) $me['id']) {
+                    return array(false, 'هذا الوكيل مو تحتك');
+                }
+            } elseif ($mode === 'super' || $already) {
+                if (admin_user_child_count($pdo, (int) $row['id'], $tid) < 1) {
+                    return array(false, 'الدخول بصفة وكيل فقط إذا عنده وكلاء فرعيين');
+                }
+            } else {
+                return array(false, 'غير مسموح');
             }
         } else {
             return array(false, 'ما يكدر يدخل بهالحساب');
@@ -923,6 +1125,12 @@ function impersonate_start($pdo, $targetUserId)
             $_SESSION['admin_real_display_name'] = $me['display_name'];
         }
         set_admin_session_from_row($row);
+        if (function_exists('app_session_refresh_cookie')) {
+            app_session_refresh_cookie();
+        }
+        if (function_exists('app_session_close')) {
+            app_session_close();
+        }
         $label = $role === 'admin' ? 'مستخدم النظام' : 'الوكيل';
         return array(true, 'تم الدخول بصفة ' . $label . ' ' . $row['display_name']);
     } catch (Exception $e) {

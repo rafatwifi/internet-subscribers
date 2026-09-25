@@ -18,7 +18,6 @@ function platform_admin_dashboard_stats($pdo, $config)
         'sales' => 0.0,
         'received' => 0.0,
         'debt' => 0.0,
-        'companies' => array(),
     );
     try {
         $out['users_total'] = (int) $pdo->query(
@@ -53,32 +52,6 @@ function platform_admin_dashboard_stats($pdo, $config)
         $out['sales'] = isset($plat['sold_amount']) ? (float) $plat['sold_amount'] : 0.0;
         $out['received'] = isset($plat['received']) ? (float) $plat['received'] : 0.0;
         $out['debt'] = isset($plat['remaining']) ? (float) $plat['remaining'] : 0.0;
-    }
-    // بنك/بنق لكل شركة كتالوج
-    $cos = array();
-    if (function_exists('platform_companies_list')) {
-        $cos = platform_companies_list($pdo);
-    } elseif (function_exists('tenants_sas_company_catalog')) {
-        $cos = tenants_sas_company_catalog($pdo, $config);
-    }
-    foreach ($cos as $co) {
-        $host = isset($co['sas_host']) ? trim((string) $co['sas_host']) : '';
-        $ping = null;
-        $ok = false;
-        if ($host !== '' && function_exists('system_latency_to_host')) {
-            $p = system_latency_to_host($host, 2.0);
-            if (is_array($p)) {
-                $ping = isset($p['ms']) ? $p['ms'] : null;
-                $ok = !empty($p['ok']);
-            }
-        }
-        $out['companies'][] = array(
-            'id' => isset($co['id']) ? (int) $co['id'] : 0,
-            'name' => isset($co['name']) ? (string) $co['name'] : '',
-            'host' => $host,
-            'ms' => $ping,
-            'ok' => $ok,
-        );
     }
     return $out;
 }

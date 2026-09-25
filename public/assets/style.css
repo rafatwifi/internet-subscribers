@@ -236,6 +236,23 @@ body.ltr .main-top-tools .header-search { order: 3; margin: 0; max-width: 300px;
   gap: 2px;
 }
 .top-admin-dropdown[hidden] { display: none !important; }
+.top-login-as-box {
+  padding: 8px 8px 6px;
+  border-bottom: 1px solid #e2e8f0;
+  margin-bottom: 4px;
+  min-width: 240px;
+}
+.top-login-as-label {
+  font-size: 12px;
+  font-weight: 800;
+  color: #0369a1;
+  margin-bottom: 6px;
+}
+.top-login-as-box input[type="search"] {
+  width: 100%;
+  margin: 0 0 6px;
+}
+.top-login-as-box .login-as-results { max-height: 180px; margin: 0; }
 .top-as-agent {
   font-size: 11px;
   font-weight: 800;

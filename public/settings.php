@@ -47,12 +47,13 @@ if ($tab === 'templates') {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'sas') {
     $tab = 'sas';
 }
-if (!in_array($tab, array('general', 'whatsapp', 'rental', 'users', 'plans', 'sas', 'saas', 'schedule', 'sensitive', 'update'), true)) {
+if (!in_array($tab, array('general', 'whatsapp', 'rental', 'users', 'plans', 'sas', 'saas', 'schedule', 'sensitive', 'update', 'maintenance'), true)) {
     $tab = 'general';
 }
 
 $isAgentWaOnly = ($tab === 'whatsapp' && function_exists('is_agent_user') && is_agent_user());
 $agencyTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+$isPlatformAdmin = function_exists('is_super_admin_user') && is_super_admin_user();
 // وكالة: تبويب ربط الساس مسموح بدون صلاحية settings كاملة
 $isAgencySasOnly = ($tab === 'sas' && $agencyTid > 1);
 
@@ -62,11 +63,13 @@ if ($tab === 'users') {
     redirect('plans.php');
 } elseif ($tab === 'schedule') {
     redirect('schedule.php');
-} elseif ($tab === 'sensitive') {
-    require_perm('clear_data');
-} elseif ($tab === 'update') {
-    require_perm('settings');
-} elseif ($tab === 'saas') {
+} elseif ($tab === 'sensitive' || $tab === 'update') {
+    require_perm($tab === 'sensitive' ? 'clear_data' : 'settings');
+    if (!function_exists('is_super_admin_user') || !is_super_admin_user()) {
+        flash('error', $lang === 'en' ? 'Platform admin only' : 'للمدير العام فقط');
+        redirect('settings.php?tab=sas');
+    }
+} elseif ($tab === 'saas' || $tab === 'maintenance') {
     require_perm('settings');
     if (!function_exists('is_super_admin_user') || !is_super_admin_user()) {
         flash('error', $lang === 'en' ? 'Super admin only' : 'للمدير العام فقط');
@@ -82,7 +85,16 @@ if ($tab === 'users') {
     require_perm('settings');
 }
 
+if (!$isPlatformAdmin && ($tab === 'general' || $tab === 'users')) {
+    redirect('settings.php?tab=sas');
+}
+
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'sys_status') {
+    if (!$isPlatformAdmin) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(array('ok' => false));
+        exit;
+    }
     header('Content-Type: application/json; charset=utf-8');
     if (isset($_GET['refresh']) && $_GET['refresh'] === '1') {
         $_SESSION['sas_rp_at'] = 0;
@@ -133,6 +145,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     $section = post('section', 'general');
+    if (!$isPlatformAdmin && in_array($section, array('general', 'login_bg', 'whatsapp', 'add_user', 'save_user', 'delete_user'), true)) {
+        flash('error', $lang === 'en' ? 'Platform admin only' : 'للمدير العام فقط');
+        redirect('settings.php?tab=sas');
+    }
     $data = array();
     $skipSettingsSave = false;
 
@@ -157,12 +173,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         flash($ok ? 'success' : 'error', $msg);
         redirect('settings.php?tab=sensitive');
     } elseif ($section === 'maintenance') {
-        require_perm('users');
+        require_perm('settings');
+        if (!function_exists('is_super_admin_user') || !is_super_admin_user()) {
+            flash('error', $lang === 'en' ? 'Super admin only' : 'للمدير العام فقط');
+            redirect('settings.php');
+        }
         $data = array(
             'maint_block_activate' => post('maint_block_activate') === '1',
             'maint_block_give_test' => post('maint_block_give_test') === '1',
         );
-        $tab = 'users';
+        $tab = 'maintenance';
     } elseif ($section === 'app_update_upload') {
         require_perm('settings');
         $skipSettingsSave = true;
@@ -237,6 +257,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($section === 'add_user') {
         require_perm('users');
         $addRole = normalize_admin_role(post('role', 'staff'));
+        if ($addRole === 'agent' || $addRole === 'group_manager') {
+            flash('error', $lang === 'en' ? 'SAS agents are added from Agents' : 'وكلاء الساس يضافون من صفحة الوكلاء');
+            redirect('settings.php?tab=users');
+        }
         if (!(function_exists('is_super_admin_user') && is_super_admin_user()) && $addRole === 'admin') {
             flash('error', $lang === 'en' ? 'Only the admin can create an admin' : 'إنشاء أدمن للمدير العام فقط');
             redirect('settings.php?tab=users');
@@ -287,6 +311,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             flash('error', $lang === 'en' ? 'User not found' : 'المستخدم مو موجود');
             redirect('settings.php?tab=users');
         }
+        if ($role === 'agent' || $role === 'group_manager') {
+            flash('error', $lang === 'en' ? 'SAS agents are managed from Agents' : 'وكلاء الساس من صفحة الوكلاء');
+            redirect('settings.php?tab=users');
+        }
         if (!(function_exists('is_super_admin_user') && is_super_admin_user()) && $role === 'admin') {
             flash('error', $lang === 'en' ? 'Only the admin can assign the admin role' : 'صلاحية الأدمن يعدّلها الأدمن فقط');
             redirect('settings.php?tab=users');
@@ -331,15 +359,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             flash('error', $lang === 'en' ? 'Not allowed' : 'ما عندك صلاحية على هذا المستخدم');
             redirect('settings.php?tab=users');
         }
-        $dest = (string) post('data_dest', '');
-        if (function_exists('user_hold_apply_delete')) {
-            list($okDel, $msgDel) = user_hold_apply_delete($pdo, $uid, $me ? $me['id'] : 0, $dest);
+        $targetDel = get_admin_user($pdo, $uid);
+        $delRole = $targetDel ? normalize_admin_role(isset($targetDel['role']) ? $targetDel['role'] : '') : '';
+        if ($delRole === 'agent' || $delRole === 'group_manager') {
+            flash('error', $lang === 'en' ? 'Delete SAS agents from the Agents page' : 'حذف وكيل الساس من صفحة الوكلاء');
+            redirect('settings.php?tab=users');
+        }
+        $subN = 0;
+        try {
+            $subSt = $pdo->prepare('SELECT COUNT(*) FROM subscribers WHERE agent_user_id = :a');
+            $subSt->execute(array(':a' => $uid));
+            $subN = (int) $subSt->fetchColumn();
+        } catch (Exception $e) {
+            $subN = 0;
+        }
+        if ($subN > 0 && function_exists('user_hold_apply_delete')) {
+            list($okDel, $msgDel) = user_hold_apply_delete($pdo, $uid, $me ? $me['id'] : 0, 'owner');
             if ($okDel) {
-                activity_log($pdo, null, 'system', $uid, 'user_delete', 'حذف مستخدم', $dest);
+                activity_log($pdo, null, 'system', $uid, 'user_delete', 'حذف مستخدم', 'owner');
             }
             flash($okDel ? 'success' : 'error', $msgDel);
         } else {
-            flash('error', 'تعذر حذف المستخدم');
+            $resDel = delete_admin_user($pdo, $uid, $me ? (int) $me['id'] : 0);
+            if ($resDel === 'ok') {
+                activity_log($pdo, null, 'system', $uid, 'user_delete', 'حذف مستخدم', '');
+                flash('success', $lang === 'en' ? 'User deleted' : 'تم حذف المستخدم');
+            } else {
+                flash('error', $lang === 'en' ? 'Could not delete' : 'تعذر حذف المستخدم');
+            }
         }
         redirect('settings.php?tab=users');
     }
@@ -671,15 +718,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
             $fieldsAcc['sas_password'] = $passKeep !== '' ? $passKeep : $pass;
+            list($okT, $msgT) = tenant_test_sas_connection(
+                $fieldsAcc['sas_host'],
+                $fieldsAcc['sas_username'],
+                $fieldsAcc['sas_password']
+            );
+            if (!$okT) {
+                flash('error', ($lang === 'en' ? 'Not added. Login failed: ' : 'ما انضاف. فشل الدخول: ') . $msgT);
+                redirect('settings.php?tab=sas');
+            }
             list($okS, $msgS, $newId) = tenant_sas_account_save($pdo, $tidSas, $fieldsAcc, $editId);
             if ($okS) {
-                list($okT, $msgT) = tenant_test_sas_connection(
-                    $fieldsAcc['sas_host'],
-                    $fieldsAcc['sas_username'],
-                    $fieldsAcc['sas_password']
-                );
                 if (function_exists('sas_mark_connection')) {
                     sas_mark_connection($pdo, $config, $okT, $msgT, $tidSas);
+                }
+                $accIdMark = (int) $newId > 0 ? (int) $newId : $editId;
+                if ($accIdMark > 0) {
+                    try {
+                        if ($okT) {
+                            $pdo->prepare('UPDATE tenant_sas_accounts SET last_ok_at = NOW(), last_error = NULL WHERE id = :id AND tenant_id = :t')
+                                ->execute(array(':id' => $accIdMark, ':t' => $tidSas));
+                        } else {
+                            $pdo->prepare('UPDATE tenant_sas_accounts SET last_ok_at = NULL, last_error = :e WHERE id = :id AND tenant_id = :t')
+                                ->execute(array(
+                                    ':e' => function_exists('mb_substr') ? mb_substr((string) $msgT, 0, 250, 'UTF-8') : substr((string) $msgT, 0, 250),
+                                    ':id' => $accIdMark,
+                                    ':t' => $tidSas,
+                                ));
+                        }
+                    } catch (Exception $eMark) {
+                    }
                 }
                 if ($accAction === 'test' || post('sas_test') === '1') {
                     flash($okT ? 'success' : 'error', $msgT);
@@ -911,18 +979,7 @@ render_header(t('settings'), $activeNav);
 render_settings_tabs($tab);
 ?>
 
-<?php if ($tab === 'users'): ?>
-<div class="panel panel-compact">
-    <h2><?php echo e($lang === 'en' ? 'Roles' : 'الصلاحيات'); ?></h2>
-    <div class="role-help">
-        <div><strong><?php echo e(admin_role_label('admin', $lang)); ?></strong> — <?php echo e(admin_role_hint('admin', $lang)); ?></div>
-        <div><strong><?php echo e(admin_role_label('manager', $lang)); ?></strong> — <?php echo e(admin_role_hint('manager', $lang)); ?></div>
-        <div><strong><?php echo e(admin_role_label('staff', $lang)); ?></strong> — <?php echo e(admin_role_hint('staff', $lang)); ?></div>
-        <div><strong><?php echo e(admin_role_label('agent', $lang)); ?></strong> — <?php echo e(admin_role_hint('agent', $lang)); ?></div>
-    </div>
-</div>
-
-<?php if (function_exists('is_super_admin_user') && is_super_admin_user()): ?>
+<?php if ($tab === 'maintenance' && function_exists('is_super_admin_user') && is_super_admin_user()): ?>
 <div class="panel panel-compact">
     <h2><?php echo e($lang === 'en' ? 'System maintenance' : 'صيانة النظام'); ?></h2>
     <p class="meta" style="margin-top:-4px">
@@ -948,9 +1005,50 @@ render_settings_tabs($tab);
 </div>
 <?php endif; ?>
 
+<?php if ($tab === 'users'):
+    $roleQ = trim((string) (isset($_GET['q']) ? $_GET['q'] : ''));
+    $roleUsers = array();
+    $rolesPlatform = function_exists('is_super_admin_user') && is_super_admin_user();
+    foreach ($adminUsers as $u) {
+        $urole = normalize_admin_role(isset($u['role']) ? $u['role'] : 'staff');
+        $uTid = isset($u['tenant_id']) ? (int) $u['tenant_id'] : 1;
+        if ($urole === 'agent' || $urole === 'group_manager') {
+            continue;
+        }
+        if ($rolesPlatform && $uTid > 1) {
+            continue;
+        }
+        if (!$rolesPlatform && $urole === 'admin' && $uTid > 1) {
+            continue;
+        }
+        if ($roleQ !== '') {
+            $bits = array(
+                isset($u['username']) ? $u['username'] : '',
+                isset($u['display_name']) ? $u['display_name'] : '',
+                $urole,
+                admin_role_label($urole, $lang),
+            );
+            $hay = function_exists('mb_strtolower') ? mb_strtolower(implode(' ', $bits), 'UTF-8') : strtolower(implode(' ', $bits));
+            $needle = function_exists('mb_strtolower') ? mb_strtolower($roleQ, 'UTF-8') : strtolower($roleQ);
+            $hit = function_exists('mb_strpos') ? (mb_strpos($hay, $needle, 0, 'UTF-8') !== false) : (strpos($hay, $needle) !== false);
+            if (!$hit) {
+                continue;
+            }
+        }
+        $roleUsers[] = $u;
+    }
+?>
 <div class="panel panel-compact">
-    <h2><?php echo e($lang === 'en' ? 'Add user' : 'إضافة مستخدم'); ?></h2>
-    <form method="post">
+    <div class="roles-head">
+        <h2><?php echo e($lang === 'en' ? 'Roles' : 'الأدوار'); ?></h2>
+        <button class="btn" type="button" id="roleAddToggle"><?php echo e($lang === 'en' ? 'Add user' : 'إضافة مستخدم'); ?></button>
+    </div>
+    <form method="get" class="roles-search">
+        <input type="hidden" name="tab" value="users">
+        <input type="search" name="q" value="<?php echo e($roleQ); ?>" placeholder="<?php echo e($lang === 'en' ? 'Search username, name, or role…' : 'بحث بالاسم أو الدخول أو الصلاحية…'); ?>" autocomplete="off">
+        <button class="btn" type="submit"><?php echo e($lang === 'en' ? 'Search' : 'بحث'); ?></button>
+    </form>
+    <form method="post" id="roleAddBox" hidden>
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="section" value="add_user">
         <div class="form-grid cols-4">
@@ -970,21 +1068,9 @@ render_settings_tabs($tab);
                 <label><?php echo e($lang === 'en' ? 'Role' : 'الصلاحية'); ?></label>
                 <select name="role" id="addUserRole">
                     <?php foreach (admin_roles() as $rOpt): ?>
+                        <?php if ($rOpt === 'agent' || $rOpt === 'group_manager') { continue; } ?>
                         <?php if ($rOpt === 'admin' && !(function_exists('is_super_admin_user') && is_super_admin_user())) { continue; } ?>
                         <option value="<?php echo e($rOpt); ?>"><?php echo e(admin_role_label($rOpt, $lang)); ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-            <div>
-                <label><?php echo e($lang === 'en' ? 'Return saved usernames' : 'إرجاع يوزرات محفوظة'); ?></label>
-                <select name="restore_hold_id">
-                    <option value="0"><?php echo e($lang === 'en' ? '— none —' : '— بدون —'); ?></option>
-                    <?php
-                    $userHolds = function_exists('user_hold_open_list') ? user_hold_open_list($pdo) : array();
-                    foreach ($userHolds as $hold):
-                        $holdN = substr_count((string) $hold['subscriber_ids'], ',') + ((string) $hold['subscriber_ids'] === '' ? 0 : 1);
-                        ?>
-                        <option value="<?php echo (int) $hold['id']; ?>"><?php echo e($hold['username'] . ' (' . $holdN . ')'); ?></option>
                     <?php endforeach; ?>
                 </select>
             </div>
@@ -1002,97 +1088,72 @@ render_settings_tabs($tab);
             <button class="btn" type="submit"><?php echo e($lang === 'en' ? 'Add' : 'إضافة'); ?></button>
         </div>
     </form>
-    <script>
-    (function () {
-      var roleSel = document.getElementById('addUserRole');
-      var wrap = document.getElementById('addLinkedAgentWrap');
-      if (!roleSel || !wrap) return;
-      function sync() { wrap.style.display = roleSel.value === 'accountant' ? '' : 'none'; }
-      roleSel.addEventListener('change', sync);
-      sync();
-    })();
-    </script>
-</div>
-
-<div class="panel panel-compact">
-    <h2><?php echo e($lang === 'en' ? 'Users' : 'المستخدمين'); ?></h2>
-    <p class="meta" style="margin-top:-4px">
-        <?php echo e($lang === 'en'
-            ? 'Each change is logged with who did it. Password change for yourself is in Profile.'
-            : 'كل تغيير يظهر باللوك. تغيير رمزك من صفحة بروفايلي.'); ?>
-        —
-        <a href="profile.php"><?php echo e($lang === 'en' ? 'Open my profile' : 'افتح بروفايلي'); ?></a>
-    </p>
     <div class="table-wrap">
-        <table class="table-compact users-table">
+        <table class="table-compact roles-table">
             <thead>
             <tr>
+                <th>#</th>
                 <th><?php echo e($lang === 'en' ? 'Username' : 'اسم الدخول'); ?></th>
-                <th><?php echo e($lang === 'en' ? 'Name / Role / Password' : 'الاسم / الصلاحية / الرمز'); ?></th>
+                <th><?php echo e($lang === 'en' ? 'Name' : 'الاسم'); ?></th>
+                <th><?php echo e($lang === 'en' ? 'Role' : 'الصلاحية'); ?></th>
+                <th><?php echo e($lang === 'en' ? 'New password' : 'رمز جديد'); ?></th>
                 <th></th>
             </tr>
             </thead>
             <tbody>
-            <?php if (!$adminUsers): ?>
-                <tr><td colspan="3"><?php echo e($lang === 'en' ? 'No users' : 'ماكو مستخدمين'); ?></td></tr>
+            <?php if (!$roleUsers): ?>
+                <tr><td colspan="6" class="msg-empty"><?php echo e($roleQ !== '' ? ($lang === 'en' ? 'No matches' : 'ماكو نتيجة') : ($lang === 'en' ? 'No users' : 'ماكو أشخاص')); ?></td></tr>
             <?php endif; ?>
-            <?php foreach ($adminUsers as $u):
+            <?php $roleNo = 0; foreach ($roleUsers as $u):
+                $roleNo++;
                 $urole = normalize_admin_role(isset($u['role']) ? $u['role'] : 'staff');
                 $ulinked = isset($u['linked_agent_id']) ? (int) $u['linked_agent_id'] : 0;
                 ?>
                 <tr>
+                    <td><?php echo (int) $roleNo; ?></td>
                     <td>
-                        <strong><?php echo e($u['username']); ?></strong>
+                        <strong class="ltr"><?php echo e($u['username']); ?></strong>
                         <?php if ($me && (int) $me['id'] === (int) $u['id']): ?>
                             <span class="badge active"><?php echo e($lang === 'en' ? 'You' : 'أنت'); ?></span>
                         <?php endif; ?>
-                        <div class="meta"><?php echo e(admin_role_label($urole, $lang)); ?></div>
                     </td>
                     <td>
-                        <form method="post" class="user-edit-form">
+                        <input form="roleForm<?php echo (int) $u['id']; ?>" name="display_name" value="<?php echo e($u['display_name']); ?>" required placeholder="<?php echo e($lang === 'en' ? 'Name' : 'الاسم'); ?>">
+                    </td>
+                    <td>
+                        <select form="roleForm<?php echo (int) $u['id']; ?>" name="role" class="user-role-select">
+                            <?php foreach (admin_roles() as $rOpt): ?>
+                                <?php if ($rOpt === 'agent' || $rOpt === 'group_manager') { continue; } ?>
+                                <?php if ($rOpt === 'admin' && $urole !== 'admin' && !(function_exists('is_super_admin_user') && is_super_admin_user())) { continue; } ?>
+                                <option value="<?php echo e($rOpt); ?>" <?php echo $urole === $rOpt ? 'selected' : ''; ?>><?php echo e(admin_role_label($rOpt, $lang)); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                        <select form="roleForm<?php echo (int) $u['id']; ?>" name="linked_agent_id" class="user-linked-agent" style="<?php echo $urole === 'accountant' ? '' : 'display:none'; ?>">
+                            <option value="0"><?php echo e($lang === 'en' ? 'Agent…' : 'وكيل…'); ?></option>
+                            <?php foreach ($settingsAgents as $sag):
+                                $sid = (int) $sag['id'];
+                                ?>
+                                <option value="<?php echo $sid; ?>"<?php echo $ulinked === $sid ? ' selected' : ''; ?>><?php echo e($sag['display_name']); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </td>
+                    <td>
+                        <input form="roleForm<?php echo (int) $u['id']; ?>" type="password" name="new_password" placeholder="<?php echo e($lang === 'en' ? 'Optional' : 'اختياري'); ?>" minlength="4">
+                    </td>
+                    <td class="roles-acts">
+                        <form method="post" id="roleForm<?php echo (int) $u['id']; ?>" class="user-edit-form inline-form">
                             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                             <input type="hidden" name="section" value="save_user">
                             <input type="hidden" name="user_id" value="<?php echo (int) $u['id']; ?>">
-                            <div class="inline-form-row">
-                                <input name="display_name" value="<?php echo e($u['display_name']); ?>" required style="max-width:140px" placeholder="<?php echo e($lang === 'en' ? 'Name' : 'الاسم'); ?>">
-                                <select name="role" class="user-role-select" style="max-width:120px">
-                                    <?php foreach (admin_roles() as $rOpt): ?>
-                                        <?php if ($rOpt === 'admin' && $urole !== 'admin' && !(function_exists('is_super_admin_user') && is_super_admin_user())) { continue; } ?>
-                                        <option value="<?php echo e($rOpt); ?>" <?php echo $urole === $rOpt ? 'selected' : ''; ?>><?php echo e(admin_role_label($rOpt, $lang)); ?></option>
-                                    <?php endforeach; ?>
-                                </select>
-                                <select name="linked_agent_id" class="user-linked-agent" style="max-width:130px;<?php echo $urole === 'accountant' ? '' : 'display:none'; ?>">
-                                    <option value="0"><?php echo e($lang === 'en' ? 'Agent…' : 'وكيل…'); ?></option>
-                                    <?php foreach ($settingsAgents as $sag):
-                                        $sid = (int) $sag['id'];
-                                        ?>
-                                        <option value="<?php echo $sid; ?>"<?php echo $ulinked === $sid ? ' selected' : ''; ?>><?php echo e($sag['display_name']); ?></option>
-                                    <?php endforeach; ?>
-                                </select>
-                                <input type="password" name="new_password" placeholder="<?php echo e($lang === 'en' ? 'New pass (optional)' : 'رمز جديد (اختياري)'); ?>" style="max-width:140px" minlength="4">
-                                <button class="btn secondary sm" type="submit"><?php echo e(t('save')); ?></button>
-                            </div>
+                            <button class="btn secondary sm" type="submit"><?php echo e(t('save')); ?></button>
                         </form>
-                    </td>
-                    <td>
                         <?php if (!$me || (int) $me['id'] !== (int) $u['id']): ?>
-                            <form method="post" onsubmit="return confirm(<?php echo json_encode($lang === 'en' ? 'Delete this user and move their subscribers?' : 'حذف المستخدم ونقل مشتركيه؟'); ?>);">
-                                <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
-                                <input type="hidden" name="section" value="delete_user">
-                                <input type="hidden" name="user_id" value="<?php echo (int) $u['id']; ?>">
-                                <select name="data_dest" required style="max-width:180px">
-                                    <option value=""><?php echo e($lang === 'en' ? 'Where does the data go?' : 'وين تروح البيانات؟'); ?></option>
-                                    <option value="owner"><?php echo e($lang === 'en' ? 'To the agency admin' : 'إلى مدير الوكالة'); ?></option>
-                                    <?php foreach ($settingsAgents as $sag):
-                                        if ((int) $sag['id'] === (int) $u['id']) { continue; } ?>
-                                        <option value="agent:<?php echo (int) $sag['id']; ?>"><?php echo e(($lang === 'en' ? 'To ' : 'إلى ') . $sag['display_name']); ?></option>
-                                    <?php endforeach; ?>
-                                    <option value="hold"><?php echo e($lang === 'en' ? 'Keep until a new user' : 'تبقى محفوظة حتى مستخدم جديد'); ?></option>
-                                </select>
-                                <button class="btn danger sm" type="submit"><?php echo e($lang === 'en' ? 'Delete' : 'حذف'); ?></button>
-                            </form>
-                        <?php else: ?>
-                            —
+                        <form method="post" class="inline-form" onsubmit="return confirm(<?php echo json_encode($lang === 'en' ? 'Delete this user?' : 'حذف هذا الشخص؟'); ?>);">
+                            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                            <input type="hidden" name="section" value="delete_user">
+                            <input type="hidden" name="user_id" value="<?php echo (int) $u['id']; ?>">
+                            <button class="btn danger sm" type="submit"><?php echo e($lang === 'en' ? 'Delete' : 'حذف'); ?></button>
+                        </form>
                         <?php endif; ?>
                     </td>
                 </tr>
@@ -1100,18 +1161,46 @@ render_settings_tabs($tab);
             </tbody>
         </table>
     </div>
-    <script>
-    (function () {
-      document.querySelectorAll('.user-edit-form').forEach(function (form) {
-        var roleSel = form.querySelector('.user-role-select');
-        var linkedSel = form.querySelector('.user-linked-agent');
-        if (!roleSel || !linkedSel) return;
-        function sync() { linkedSel.style.display = roleSel.value === 'accountant' ? '' : 'none'; }
-        roleSel.addEventListener('change', sync);
-      });
-    })();
-    </script>
 </div>
+<style>
+.roles-head { display:flex; align-items:center; justify-content:flex-end; direction:ltr; gap:12px; margin:0 0 12px; flex-wrap:wrap; }
+.roles-head h2 { margin:0; }
+.roles-search { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:0 0 14px; }
+.roles-search input[type="search"] { flex:1; min-width:220px; max-width:420px; }
+#roleAddBox { margin:0 0 16px; }
+.roles-table td { vertical-align:middle; }
+.roles-table input, .roles-table select { width:100%; max-width:180px; }
+.roles-acts { display:flex; gap:6px; align-items:center; white-space:nowrap; }
+</style>
+<script>
+(function () {
+  var btn = document.getElementById('roleAddToggle');
+  var box = document.getElementById('roleAddBox');
+  if (btn && box) {
+    btn.addEventListener('click', function () {
+      box.hidden = !box.hidden;
+      if (!box.hidden) {
+        var first = box.querySelector('input[name="username"]');
+        if (first) first.focus();
+      }
+    });
+  }
+  var roleSel = document.getElementById('addUserRole');
+  var wrap = document.getElementById('addLinkedAgentWrap');
+  if (roleSel && wrap) {
+    function syncAdd() { wrap.style.display = roleSel.value === 'accountant' ? '' : 'none'; }
+    roleSel.addEventListener('change', syncAdd);
+    syncAdd();
+  }
+  document.querySelectorAll('.user-role-select').forEach(function (sel) {
+    var formId = sel.getAttribute('form') || '';
+    var linked = formId ? document.querySelector('select.user-linked-agent[form="' + formId + '"]') : null;
+    if (!linked) return;
+    function sync() { linked.style.display = sel.value === 'accountant' ? '' : 'none'; }
+    sel.addEventListener('change', sync);
+  });
+})();
+</script>
 <?php endif; ?>
 
 <?php if ($tab === 'general'): ?>
@@ -1622,7 +1711,7 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
 </style>
 
 <div class="wa-layout">
-  <?php if (!$isAgentWaOnly): ?>
+  <?php if ($isPlatformAdmin): ?>
   <div class="wa-card">
     <h2><?php echo e(t('settings_whatsapp')); ?></h2>
     <p class="wa-lead"><?php echo e($lang === 'en'
@@ -1910,13 +1999,7 @@ if ($sasTenantIdUi > 1) {
 ?>
 <div class="panel">
     <h2><?php echo e($sasTitle); ?></h2>
-    <?php if ($sasTenantIdUi > 1): ?>
-    <p style="color:#6b7a88;font-weight:600;margin-top:0">
-        <?php echo e($isEn
-            ? 'Choose the company (host fills automatically), then enter YOUR agency SAS username and password. System login ≠ SAS login.'
-            : 'اختار الشركة (الهوست يجي تلقائي)، بعدها اكتب يوزر وباسورد وكالة الساس مالصفحتك. دخول النظام ≠ دخول الساس.'); ?>
-    </p>
-    <?php else: ?>
+    <?php if ($sasTenantIdUi <= 1): ?>
     <p style="color:#6b7a88;font-weight:600;margin-top:0">
         <?php echo e($isEn
             ? 'Enter your SAS reseller login. Activation here creates/activates the subscriber on SAS.'
@@ -1946,19 +2029,33 @@ if ($sasTenantIdUi > 1) {
           background:#dcfce7; color:#166534; font-weight:800; border-radius:999px; padding:4px 10px; font-size:13px;
         }
         .sas-logged-off { background:#f1f5f9; color:#64748b; font-weight:700; border-radius:999px; padding:4px 10px; font-size:13px; }
+        .sas-logged-bad { background:#fee2e2; color:#991b1b; font-weight:800; border-radius:999px; padding:4px 10px; font-size:13px; }
         </style>
         <?php if (!$sasAccountsList): ?>
         <p class="meta"><?php echo e($isEn ? 'No reseller yet. Add one below.' : 'ماكو ريسيلر بعد. أضف واحد من الزر.'); ?></p>
         <?php else: ?>
         <div class="sas-acc-list">
             <?php foreach ($sasAccountsList as $acc):
-                $logged = !empty($acc['sas_enabled']) && trim((string) $acc['sas_username']) !== '' && trim((string) $acc['sas_password']) !== '';
+                $logged = !empty($acc['last_ok_at']) && trim((string) (isset($acc['last_error']) ? $acc['last_error'] : '')) === '';
+                $loginFail = trim((string) (isset($acc['last_error']) ? $acc['last_error'] : '')) !== '';
                 $accName = trim((string) $acc['label']) !== '' ? $acc['label'] : $acc['sas_username'];
                 ?>
             <div class="sas-acc-card">
                 <div>
                     <div class="sas-acc-name"><?php echo e($accName); ?></div>
                     <div class="sas-acc-meta ltr"><?php echo e($acc['sas_username']); ?> · <?php echo e($acc['sas_host']); ?></div>
+                    <?php
+                    $accBank = '—';
+                    $accHost = preg_replace('#^https?://#i', '', rtrim(trim((string) $acc['sas_host']), '/'));
+                    if ($accHost !== '' && function_exists('system_latency_to_host')) {
+                        $latAcc = system_latency_to_host($accHost);
+                        $msAcc = isset($latAcc['ms']) ? $latAcc['ms'] : null;
+                        if ($msAcc !== null && $msAcc !== '') {
+                            $accBank = number_format((float) $msAcc, 0) . ' ms';
+                        }
+                    }
+                    ?>
+                    <div class="sas-acc-meta"><?php echo e($isEn ? 'Bank' : 'البنك'); ?>: <span class="ltr"><?php echo e($accBank); ?></span></div>
                 </div>
                 <div class="sas-acc-actions">
                     <?php if ($logged): ?>
@@ -1970,8 +2067,10 @@ if ($sasTenantIdUi > 1) {
                         <input type="hidden" name="account_id" value="<?php echo (int) $acc['id']; ?>">
                         <button class="btn ghost sm" type="submit"><?php echo e($isEn ? 'Log out' : 'تسجيل خروج'); ?></button>
                     </form>
+                    <?php elseif ($loginFail): ?>
+                    <span class="sas-logged-bad" title="<?php echo e($acc['last_error']); ?>"><?php echo e($isEn ? 'Login failed' : 'فشل الدخول'); ?></span>
                     <?php else: ?>
-                    <span class="sas-logged-off"><?php echo e($isEn ? 'Logged out' : 'تم تسجيل الخروج'); ?></span>
+                    <span class="sas-logged-off"><?php echo e($isEn ? 'Not connected' : 'غير متصل'); ?></span>
                     <?php endif; ?>
                     <form method="post" class="inline-form" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Delete this reseller?' : 'حذف هذا الريسيلر؟'); ?>);">
                         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
@@ -1986,7 +2085,6 @@ if ($sasTenantIdUi > 1) {
         </div>
         <?php endif; ?>
 
-        <button class="btn" type="button" id="sasAddToggle" <?php echo !$sasCompanyCatalog ? 'disabled' : ''; ?>><?php echo e($isEn ? 'Add reseller' : 'إضافة ريسيلر'); ?></button>
         <?php if (!$sasCompanyCatalog): ?>
         <div class="alert alert-error" style="margin:10px 0">
             <?php echo e($isEn
@@ -1994,6 +2092,9 @@ if ($sasTenantIdUi > 1) {
                 : 'ماكو شركات عليها هوست ساس بعد. اطلب من أدمن المنصة يضيف شركة مع الهوست.'); ?>
         </div>
         <?php endif; ?>
+        <div class="sys-head" style="display:flex;justify-content:flex-end;direction:ltr;margin:8px 0 12px">
+            <button class="btn" type="button" id="sasAddToggle"><?php echo e($isEn ? 'Add host' : 'إضافة هوست'); ?></button>
+        </div>
         <form method="post" id="sasAddBox" hidden style="margin-top:14px">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="section" value="sas">
@@ -2034,22 +2135,42 @@ if ($sasTenantIdUi > 1) {
         <input type="hidden" name="sas_on_failure" value="warn">
         <input type="hidden" name="sas_default_password" value="1234">
         <div class="actions" style="margin-top:12px">
-            <button class="btn" type="submit"><?php echo e($isEn ? 'Save' : 'حفظ'); ?></button>
+            <button class="btn" type="submit" id="sasAddSubmit"><?php echo e($isEn ? 'Save' : 'حفظ'); ?></button>
         </div>
         </form>
+        <div id="sasWait" hidden>
+            <div class="sas-wait-card">
+                <div class="sas-spin"></div>
+                <div style="margin-top:10px;font-weight:800"><?php echo e($isEn ? 'Signing in to SAS…' : 'جاري تسجيل الدخول للساس…'); ?></div>
+            </div>
+        </div>
+        <style>
+        #sasWait[hidden] { display:none !important; }
+        #sasWait { position:fixed; inset:0; background:rgba(15,23,42,.35); z-index:80; display:flex; align-items:center; justify-content:center; }
+        .sas-wait-card { background:#fff; border-radius:18px; padding:22px 28px; text-align:center; box-shadow:0 12px 40px rgba(15,23,42,.18); }
+        .sas-spin { width:42px; height:42px; margin:0 auto; border-radius:50%; border:4px solid #e2e8f0; border-top-color:#0f766e; animation:sasSpin .8s linear infinite; }
+        @keyframes sasSpin { to { transform:rotate(360deg); } }
+        </style>
         <script>
         (function () {
+          var addBtn = document.getElementById('sasAddToggle');
+          var addBox = document.getElementById('sasAddBox');
+          if (addBtn && addBox) {
+            addBtn.addEventListener('click', function () {
+              addBox.hidden = !addBox.hidden;
+            });
+          }
+          if (addBox) {
+            addBox.addEventListener('submit', function () {
+              var wait = document.getElementById('sasWait');
+              var btn = document.getElementById('sasAddSubmit');
+              if (wait) { wait.hidden = false; }
+              if (btn) btn.disabled = true;
+            });
+          }
           var sel = document.getElementById('sasCompanyPick');
           var host = document.getElementById('sasHostAuto');
           var lab = document.getElementById('sasAccLabel');
-          var box = document.getElementById('sasAddBox');
-          var btn = document.getElementById('sasAddToggle');
-          if (btn && box) {
-            btn.addEventListener('click', function () {
-              box.hidden = !box.hidden;
-              if (!box.hidden && sel) sel.focus();
-            });
-          }
           if (!sel || !host) return;
           sel.addEventListener('change', function () {
             var opt = sel.options[sel.selectedIndex];

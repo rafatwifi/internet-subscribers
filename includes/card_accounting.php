@@ -509,6 +509,9 @@ function ensure_agent_card_prices_table($pdo)
                 KEY idx_price_agent (agent_user_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
         );
+        if (function_exists('tenants_ensure_column')) {
+            tenants_ensure_column($pdo, 'agent_card_prices', 'retail_price', 'DECIMAL(12,2) NOT NULL DEFAULT 0');
+        }
     } catch (Exception $e) {
     }
 }
@@ -544,7 +547,7 @@ function agent_card_prices_list($pdo, $agentUserId)
     return $st->fetchAll();
 }
 
-function agent_card_price_save($pdo, $agentUserId, $profileId, $profileName, $wholesale, $agentPrice)
+function agent_card_price_save($pdo, $agentUserId, $profileId, $profileName, $wholesale, $agentPrice, $retailPrice = null)
 {
     ensure_agent_card_prices_table($pdo);
     $agentUserId = (int) $agentUserId;
@@ -562,13 +565,18 @@ function agent_card_price_save($pdo, $agentUserId, $profileId, $profileName, $wh
         }
     } catch (Exception $e) {
     }
+    if ($retailPrice === null) {
+        $oldRetail = agent_card_price_get($pdo, $agentUserId, $profileId, $profileName);
+        $retailPrice = $oldRetail && isset($oldRetail['retail_price']) ? (float) $oldRetail['retail_price'] : (float) $agentPrice;
+    }
     $pdo->prepare(
         'INSERT INTO agent_card_prices
-            (tenant_id, agent_user_id, profile_id, profile_name, wholesale_price, agent_price, updated_at)
-         VALUES (:tid, :a, :p, :n, :w, :ap, NOW())
+            (tenant_id, agent_user_id, profile_id, profile_name, wholesale_price, agent_price, retail_price, updated_at)
+         VALUES (:tid, :a, :p, :n, :w, :ap, :rp, NOW())
          ON DUPLICATE KEY UPDATE
             wholesale_price = VALUES(wholesale_price),
             agent_price = VALUES(agent_price),
+            retail_price = VALUES(retail_price),
             updated_at = NOW()'
     )->execute(array(
         ':tid' => $tenantId,
@@ -577,6 +585,7 @@ function agent_card_price_save($pdo, $agentUserId, $profileId, $profileName, $wh
         ':n' => $profileName,
         ':w' => (float) $wholesale,
         ':ap' => (float) $agentPrice,
+        ':rp' => (float) $retailPrice,
     ));
     return true;
 }

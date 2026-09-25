@@ -222,6 +222,7 @@ render_settings_tabs('plans');
             <p style="color:#6b7a88;margin:4px 0 0;font-weight:600"><?php echo e(t('drag_hint')); ?></p>
         </div>
         <div class="actions" style="margin:0;gap:8px;align-items:center">
+            <a class="btn secondary sm" href="agent_prices.php"><?php echo e($lang === 'en' ? 'Price table' : 'جدول الأسعار'); ?></a>
             <form method="post" style="margin:0">
                 <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                 <input type="hidden" name="action" value="import_sas">

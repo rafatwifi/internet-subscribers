@@ -34,6 +34,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $settings,
             post('email', '')
         );
+        $restorePick = (string) post('restore_agency_id', '0');
+        if ($ok && $restorePick === 'file' && !empty($_FILES['agency_pack']['tmp_name']) && function_exists('platform_agents_pack_import')) {
+            $find = $pdo->prepare('SELECT tenant_id FROM admin_users WHERE username = :u ORDER BY id DESC LIMIT 1');
+            $find->execute(array(':u' => $loginName));
+            $newTid = (int) $find->fetchColumn();
+            if ($newTid > 1) {
+                list($okI, $msgI) = platform_agents_pack_import($pdo, $_FILES['agency_pack']['tmp_name'], $newTid);
+                $msg = $okI
+                    ? ($isEn ? 'Agent added and file imported' : 'تمت إضافة الوكيل وتحميل ملف بياناته')
+                    : $msgI;
+                $ok = $okI;
+            }
+        } elseif ($ok && function_exists('saas_attach_parked_agency')) {
+            $oldTid = (int) $restorePick;
+            if ($oldTid > 1) {
+                $find = $pdo->prepare('SELECT tenant_id FROM admin_users WHERE username = :u ORDER BY id DESC LIMIT 1');
+                $find->execute(array(':u' => $loginName));
+                $newTid = (int) $find->fetchColumn();
+                if ($newTid > 1) {
+                    saas_attach_parked_agency($pdo, $newTid, $oldTid);
+                    $msg = $isEn ? 'Agent added and saved data attached' : 'تمت إضافة الوكيل وربط بياناته المحفوظة';
+                }
+            }
+        }
         flash($ok ? 'success' : 'error', $msg);
     } elseif ($action === 'update') {
         $loginName = trim((string) post('username', ''));
@@ -49,7 +73,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         );
         flash($ok ? 'success' : 'error', $msg);
     } elseif ($action === 'delete') {
-        list($ok, $msg) = saas_admin_delete_user($pdo, $tid);
+        $dest = (string) post('data_dest', '');
+        list($ok, $msg) = saas_admin_delete_user($pdo, $tid, $dest);
         flash($ok ? 'success' : 'error', $msg);
     } elseif ($action === 'approve') {
         list($ok, $msg) = saas_approve_tenant($pdo, $tid, $settings);
@@ -62,6 +87,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ? 'success' : 'error', $isEn ? 'Extended' : 'تم التمديد');
     }
     redirect('saas_agents.php');
+}
+
+if (isset($_GET['export_agent']) && function_exists('platform_agents_pack_zip')) {
+    $exportTid = (int) $_GET['export_agent'];
+    if ($exportTid <= 1) {
+        flash('error', $isEn ? 'Cannot export' : 'ما ينزل الملف');
+        redirect('saas_agents.php');
+    }
+    list($expOk, $expPath, $expMsg) = platform_agents_pack_zip($pdo, $exportTid);
+    if (!$expOk || !is_file($expPath)) {
+        flash('error', $expMsg !== '' ? $expMsg : ($isEn ? 'Export failed' : 'فشل تحميل النسخة'));
+        redirect('saas_agents.php');
+    }
+    header('Content-Type: application/zip');
+    header('Content-Disposition: attachment; filename="agent-data-' . $exportTid . '.zip"');
+    readfile($expPath);
+    @unlink($expPath);
+    exit;
 }
 
 $rows = array();
@@ -80,19 +123,23 @@ try {
     }));
 }
 
-$plat = function_exists('platform_card_summary') ? platform_card_summary($pdo) : array();
-$hasWifi = false;
-try {
-    $hasWifi = (bool) $pdo->query(
-        "SELECT id FROM admin_users WHERE username IN ('wifi@office','wifi.office','wifioffice') LIMIT 1"
-    )->fetchColumn();
-} catch (Exception $e) {
+$allRows = $rows;
+$view = isset($_GET['view']) ? (string) $_GET['view'] : '';
+if (!in_array($view, array('pending', 'active', 'expired'), true)) {
+    $view = '';
 }
+$q = trim((string) (isset($_GET['q']) ? $_GET['q'] : ''));
+$statusLabel = array(
+    'pending' => $isEn ? 'Pending' : 'بانتظار',
+    'active' => $isEn ? 'Active' : 'نشط',
+    'expired' => $isEn ? 'Expired' : 'منتهي',
+    'suspended' => $isEn ? 'Suspended' : 'معلّق',
+);
 
 $editId = isset($_GET['edit']) ? (int) $_GET['edit'] : 0;
 $editRow = null;
 if ($editId > 1) {
-    foreach ($rows as $r) {
+    foreach ($allRows as $r) {
         if ((int) $r['id'] === $editId) {
             $editRow = $r;
             break;
@@ -100,11 +147,59 @@ if ($editId > 1) {
     }
 }
 
-render_header($isEn ? 'System users' : 'مستخدمي النظام', 'saas_agents');
+if ($view !== '') {
+    $filtered = array();
+    foreach ($rows as $r) {
+        $stRow = isset($r['status']) ? (string) $r['status'] : 'active';
+        if ($stRow === $view) {
+            $filtered[] = $r;
+        }
+    }
+    $rows = $filtered;
+}
+if ($q !== '') {
+    $needle = function_exists('mb_strtolower') ? mb_strtolower($q, 'UTF-8') : strtolower($q);
+    $filtered = array();
+    foreach ($rows as $r) {
+        $stRow = isset($r['status']) ? (string) $r['status'] : '';
+        $bits = array(isset($statusLabel[$stRow]) ? $statusLabel[$stRow] : '');
+        foreach ($r as $val) {
+            if (is_scalar($val) && $val !== null && $val !== '') {
+                $bits[] = $val;
+            }
+        }
+        $hay = function_exists('mb_strtolower') ? mb_strtolower(implode(' ', $bits), 'UTF-8') : strtolower(implode(' ', $bits));
+        $hit = function_exists('mb_strpos') ? (mb_strpos($hay, $needle, 0, 'UTF-8') !== false) : (strpos($hay, $needle) !== false);
+        if ($hit) {
+            $filtered[] = $r;
+        }
+    }
+    $rows = $filtered;
+}
+
+render_header($isEn ? 'Agents' : 'وكلاء', 'saas_agents');
+$viewLabel = array(
+    'pending' => $isEn ? 'Registration requests' : 'طلبات التسجيل',
+    'active' => $isEn ? 'Active' : 'الفعالين',
+    'expired' => $isEn ? 'Expired' : 'المنتهين',
+);
 ?>
 <div class="panel">
-    <h2><?php echo e($editRow ? ($isEn ? 'Edit system user' : 'تعديل مستخدم النظام') : ($isEn ? 'Add system user' : 'إضافة مستخدم نظام')); ?></h2>
-    <form method="post">
+    <div class="sys-head">
+        <h2><?php echo e($view !== '' && isset($viewLabel[$view]) ? $viewLabel[$view] : ($isEn ? 'Subscribers' : 'المشتركين')); ?></h2>
+        <button class="btn" type="button" id="sysUserToggle"><?php echo e($editRow ? ($isEn ? 'Edit system user' : 'تعديل مستخدم النظام') : ($isEn ? 'Add system user' : 'إضافة مستخدم نظام')); ?></button>
+    </div>
+    <form method="get" class="sys-search">
+        <?php if ($view !== ''): ?>
+            <input type="hidden" name="view" value="<?php echo e($view); ?>">
+        <?php endif; ?>
+        <input type="search" name="q" value="<?php echo e($q); ?>" placeholder="<?php echo e($isEn ? 'Search username, name, phone, email, status…' : 'بحث باليوزر أو الاسم أو الهاتف أو الإيميل أو الحالة…'); ?>" autocomplete="off">
+        <button class="btn" type="submit"><?php echo e($isEn ? 'Search' : 'بحث'); ?></button>
+        <?php if ($q !== '' || $view !== ''): ?>
+            <a class="btn ghost" href="saas_agents.php"><?php echo e($isEn ? 'Show all' : 'عرض الكل'); ?></a>
+        <?php endif; ?>
+    </form>
+    <form method="post" id="sysUserBox" enctype="multipart/form-data" <?php echo $editRow ? '' : 'hidden'; ?>>
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="action" value="<?php echo $editRow ? 'update' : 'create'; ?>">
         <?php if ($editRow): ?>
@@ -113,11 +208,11 @@ render_header($isEn ? 'System users' : 'مستخدمي النظام', 'saas_agen
         <div class="form-grid cols-2">
             <div>
                 <label><?php echo e($isEn ? 'Username' : 'اسم المستخدم'); ?></label>
-                <input class="ltr" name="username" required pattern="[A-Za-z0-9._@\-]{2,40}" value="<?php echo e($editRow && isset($editRow['owner_username']) ? $editRow['owner_username'] : ''); ?>" placeholder="wifi@faris">
+                <input class="ltr" name="username" required pattern="[A-Za-z0-9._@\-]{2,40}" value="<?php echo e($editRow && isset($editRow['owner_username']) ? $editRow['owner_username'] : ''); ?>" autocomplete="off">
             </div>
             <div>
                 <label><?php echo e($isEn ? 'Owner name' : 'اسم المالك'); ?></label>
-                <input name="display_name" value="<?php echo e($editRow && isset($editRow['owner_name']) ? $editRow['owner_name'] : ''); ?>" placeholder="<?php echo e($isEn ? 'Owner' : 'فارس البواب'); ?>">
+                <input name="display_name" value="<?php echo e($editRow && isset($editRow['owner_name']) ? $editRow['owner_name'] : ''); ?>" autocomplete="off">
             </div>
             <div>
                 <label><?php echo e($editRow ? ($isEn ? 'New password (optional)' : 'باسورد جديد (اختياري)') : ($isEn ? 'Password' : 'الباسورد')); ?></label>
@@ -131,6 +226,31 @@ render_header($isEn ? 'System users' : 'مستخدمي النظام', 'saas_agen
                 <label><?php echo e($isEn ? 'Email' : 'الإيميل'); ?></label>
                 <input class="ltr" type="email" name="email" value="<?php echo e($editRow && !empty($editRow['contact_email']) ? $editRow['contact_email'] : ''); ?>" placeholder="name@example.com">
             </div>
+            <?php if (!$editRow):
+                $parkedAgencies = function_exists('saas_parked_agencies') ? saas_parked_agencies($pdo) : array();
+                ?>
+            <div>
+                <label><?php echo e($isEn ? 'Saved data' : 'البيانات المحفوظة'); ?></label>
+                <select name="restore_agency_id" id="restoreAgencyPick">
+                    <option value="0"><?php echo e($isEn ? '— none —' : '— بدون —'); ?></option>
+                    <option value="file"><?php echo e($isEn ? 'Upload agent data file' : 'تحميل بيانات الوكيل'); ?></option>
+                    <?php foreach ($parkedAgencies as $park):
+                        $parkLabel = $park['username'];
+                        if (!empty($park['display_name']) && $park['display_name'] !== $park['username']) {
+                            $parkLabel .= ' — ' . $park['display_name'];
+                        }
+                        $parkLabel .= ' (' . (int) $park['subscribers'] . ($isEn ? ' subscribers' : ' مشترك');
+                        if ((int) $park['cache'] > 0) {
+                            $parkLabel .= ' · ' . (int) $park['cache'] . ($isEn ? ' cache' : ' كاش');
+                        }
+                        $parkLabel .= ')';
+                        ?>
+                        <option value="<?php echo (int) $park['old_tenant_id']; ?>"><?php echo e($parkLabel); ?></option>
+                    <?php endforeach; ?>
+                </select>
+                <input type="file" name="agency_pack" id="agencyPackFile" accept=".zip,application/zip" hidden style="margin-top:8px">
+            </div>
+            <?php endif; ?>
         </div>
         <div class="actions">
             <button class="btn" type="submit"><?php echo e($editRow ? ($isEn ? 'Save' : 'حفظ التعديل') : ($isEn ? 'Add' : 'إضافة')); ?></button>
@@ -139,61 +259,6 @@ render_header($isEn ? 'System users' : 'مستخدمي النظام', 'saas_agen
             <?php endif; ?>
         </div>
     </form>
-</div>
-<div class="panel">
-    <h2><?php echo e($isEn ? 'Platform overview' : 'ملخص المنصة'); ?></h2>
-    <p class="meta"><?php echo e($isEn
-        ? 'System login is separate from SAS. Your office subscribers should live under wifi@office — not company #1.'
-        : 'دخول النظام غير دخول الساس. مشتركو مكتبك المفروض تحت wifi@office — مو الشركة 1.'); ?></p>
-    <div class="form-grid cols-2" style="margin:12px 0;gap:10px">
-        <div class="panel" style="padding:10px;margin:0">
-            <div class="meta"><?php echo e($isEn ? 'Agencies' : 'الوكالات'); ?></div>
-            <strong style="font-size:20px"><?php echo (int) (isset($plat['agencies']) ? $plat['agencies'] : 0); ?></strong>
-            <span class="meta"> (<?php echo e($isEn ? 'active' : 'نشط'); ?>: <?php echo (int) (isset($plat['agencies_active']) ? $plat['agencies_active'] : 0); ?>)</span>
-        </div>
-        <div class="panel" style="padding:10px;margin:0">
-            <div class="meta"><?php echo e($isEn ? 'Stock available' : 'كروت متوفرة'); ?></div>
-            <strong style="font-size:20px"><?php echo (int) (isset($plat['available_cards']) ? $plat['available_cards'] : 0); ?></strong>
-        </div>
-        <div class="panel" style="padding:10px;margin:0">
-            <div class="meta"><?php echo e($isEn ? 'Transferred to agents' : 'محوّل للوكلاء'); ?></div>
-            <strong style="font-size:20px"><?php echo (int) (isset($plat['transfer_qty']) ? $plat['transfer_qty'] : 0); ?></strong>
-        </div>
-        <div class="panel" style="padding:10px;margin:0">
-            <div class="meta"><?php echo e($isEn ? 'Capital (wholesale)' : 'رأس المال'); ?></div>
-            <strong style="font-size:20px"><?php echo e(number_format((float) (isset($plat['wholesale_amount']) ? $plat['wholesale_amount'] : 0), 0)); ?></strong>
-        </div>
-        <div class="panel" style="padding:10px;margin:0">
-            <div class="meta"><?php echo e($isEn ? 'Sold (agent price)' : 'المباع'); ?></div>
-            <strong style="font-size:20px"><?php echo e(number_format((float) (isset($plat['sold_amount']) ? $plat['sold_amount'] : 0), 0)); ?></strong>
-        </div>
-        <div class="panel" style="padding:10px;margin:0">
-            <div class="meta"><?php echo e($isEn ? 'Received' : 'المستلم'); ?></div>
-            <strong style="font-size:20px"><?php echo e(number_format((float) (isset($plat['received']) ? $plat['received'] : 0), 0)); ?></strong>
-        </div>
-        <div class="panel" style="padding:10px;margin:0">
-            <div class="meta"><?php echo e($isEn ? 'Debt remaining' : 'الدين المتبقي'); ?></div>
-            <strong style="font-size:20px"><?php echo e(number_format((float) (isset($plat['remaining']) ? $plat['remaining'] : 0), 0)); ?></strong>
-        </div>
-        <div class="panel" style="padding:10px;margin:0">
-            <div class="meta"><?php echo e($isEn ? 'Profit' : 'الربح'); ?></div>
-            <strong style="font-size:20px"><?php echo e(number_format((float) (isset($plat['profit']) ? $plat['profit'] : 0), 0)); ?></strong>
-        </div>
-    </div>
-    <div class="actions" style="margin-bottom:16px;flex-wrap:wrap;gap:8px">
-        <?php if (!$hasWifi): ?>
-            <a class="btn" href="migrate_owner_agency.php"><?php echo e($isEn ? 'Create wifi@office & move my data' : 'إنشاء wifi@office ونقل بياناتي'); ?></a>
-        <?php else: ?>
-            <span class="meta"><?php echo e($isEn ? 'wifi@office exists — manage it like any agency below.' : 'wifi@office موجود — أدِره مثل باقي الوكالات تحت.'); ?></span>
-        <?php endif; ?>
-        <a class="btn ghost" href="settings.php?tab=saas"><?php echo e($isEn ? 'SaaS / ZainCash' : 'الاستضافة / ZainCash'); ?></a>
-    </div>
-</div>
-<div class="panel">
-    <h2><?php echo e($isEn ? 'System users (agencies)' : 'مستخدمي النظام (الوكالات)'); ?></h2>
-    <p class="meta"><?php echo e($isEn
-        ? 'Approve pending agents to start their trial. Each agency binds its own SAS (not system login).'
-        : 'وافق على الطلبات لبدء التجريبي. كل وكالة تربط ساسها بنفسها (مو دخول النظام).'); ?></p>
     <div class="table-wrap">
         <table class="table-compact">
             <thead>
@@ -208,24 +273,23 @@ render_header($isEn ? 'System users' : 'مستخدمي النظام', 'saas_agen
             </thead>
             <tbody>
             <?php if (!$rows): ?>
-                <tr><td colspan="6" class="msg-empty"><?php echo e($isEn ? 'No registrations yet' : 'ماكو تسجيلات بعد'); ?></td></tr>
+                <tr><td colspan="6" class="msg-empty"><?php echo e($q !== '' ? ($isEn ? 'No matches' : 'ماكو نتيجة') : ($isEn ? 'No registrations yet' : 'ماكو تسجيلات بعد')); ?></td></tr>
             <?php endif; ?>
-            <?php foreach ($rows as $r):
+            <?php $rowNo = 0; foreach ($rows as $r):
+                $rowNo++;
                 $tid = (int) $r['id'];
                 $st = isset($r['status']) ? $r['status'] : 'active';
                 ?>
                 <tr>
-                    <td><?php echo $tid; ?></td>
+                    <td><?php echo (int) $rowNo; ?></td>
                     <td><?php echo e(!empty($r['owner_username']) ? $r['owner_username'] : $r['name']); ?><?php if (!empty($r['contact_phone'])): ?><br><small class="meta ltr"><?php echo e($r['contact_phone']); ?></small><?php endif; ?></td>
-                    <td><?php echo e(isset($r['owner_name']) ? $r['owner_name'] : '—'); ?>
-                        <?php if (!empty($r['owner_username'])): ?><br><small class="meta ltr"><?php echo e($r['owner_username']); ?></small><?php endif; ?>
-                    </td>
-                    <td><strong><?php echo e($st); ?></strong></td>
+                    <td><?php echo e(isset($r['owner_name']) && $r['owner_name'] !== '' ? $r['owner_name'] : '—'); ?><?php if (!empty($r['contact_email'])): ?><br><small class="meta ltr"><?php echo e($r['contact_email']); ?></small><?php endif; ?></td>
+                    <td><span class="sys-st st-<?php echo e($st); ?>"><?php echo e(isset($statusLabel[$st]) ? $statusLabel[$st] : $st); ?></span></td>
                     <td class="meta" style="font-size:12px">
                         <?php echo e($isEn ? 'Trial' : 'تجريبي'); ?>: <?php echo e(!empty($r['trial_ends_at']) ? $r['trial_ends_at'] : '—'); ?><br>
                         <?php echo e($isEn ? 'Until' : 'حتى'); ?>: <?php echo e(!empty($r['subscription_expires_at']) ? $r['subscription_expires_at'] : '—'); ?>
                     </td>
-                    <td class="actions" style="gap:6px;flex-wrap:wrap">
+                    <td class="ag-actions">
                         <?php if ($st === 'pending'): ?>
                             <form method="post" class="inline-form">
                                 <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
@@ -240,11 +304,11 @@ render_header($isEn ? 'System users' : 'مستخدمي النظام', 'saas_agen
                                 <button class="btn ghost sm" type="submit"><?php echo e($isEn ? 'Reject' : 'رفض'); ?></button>
                             </form>
                         <?php else: ?>
-                            <form method="post" class="inline-form" style="display:flex;gap:4px;align-items:center">
+                            <form method="post" class="inline-form ag-extend">
                                 <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                                 <input type="hidden" name="action" value="extend">
                                 <input type="hidden" name="tenant_id" value="<?php echo $tid; ?>">
-                                <input type="number" name="days" value="30" min="1" style="width:70px">
+                                <input type="number" name="days" value="30" min="1">
                                 <button class="btn sm" type="submit"><?php echo e($isEn ? 'Extend' : 'تمديد'); ?></button>
                             </form>
                             <?php if ($st !== 'suspended'): ?>
@@ -273,15 +337,33 @@ render_header($isEn ? 'System users' : 'مستخدمي النظام', 'saas_agen
                             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                             <input type="hidden" name="action" value="start">
                             <input type="hidden" name="user_id" value="<?php echo $loginUid; ?>">
-                            <button class="btn sm" type="submit"><?php echo e($isEn ? 'Login as user' : 'دخول بصفة المستخدم'); ?></button>
+                            <button class="btn sm" type="submit"><?php echo e($isEn ? 'Login as user' : 'دخول'); ?></button>
                         </form>
                         <?php endif; ?>
                         <a class="btn secondary sm" href="saas_agents.php?edit=<?php echo $tid; ?>"><?php echo e($isEn ? 'Edit' : 'تعديل'); ?></a>
-                        <form method="post" class="inline-form" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Delete this user and their agency data?' : 'حذف هذا المستخدم وبيانات وكالته؟'); ?>);">
+                        <button class="btn danger sm js-del-open" type="button" data-del="<?php echo $tid; ?>"><?php echo e($isEn ? 'Delete' : 'حذف'); ?></button>
+                    </td>
+                </tr>
+                <tr class="del-row" id="delRow<?php echo $tid; ?>" hidden>
+                    <td colspan="6">
+                        <form method="post" class="js-agency-del ag-del-form">
                             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                             <input type="hidden" name="action" value="delete">
                             <input type="hidden" name="tenant_id" value="<?php echo $tid; ?>">
-                            <button class="btn danger sm" type="submit"><?php echo e($isEn ? 'Delete' : 'حذف'); ?></button>
+                            <label><?php echo e($isEn ? 'Where does the data go?' : 'وين تروح البيانات؟'); ?></label>
+                            <select name="data_dest" required>
+                                <option value=""><?php echo e($isEn ? 'Choose' : 'اختار'); ?></option>
+                                <option value="download"><?php echo e($isEn ? 'Download a copy of the data' : 'تحميل نسخة من البيانات'); ?></option>
+                                <?php foreach ($allRows as $otherAg):
+                                    if ((int) $otherAg['id'] === $tid) { continue; }
+                                    $otherName = !empty($otherAg['owner_username']) ? $otherAg['owner_username'] : $otherAg['name'];
+                                    ?>
+                                    <option value="tenant:<?php echo (int) $otherAg['id']; ?>"><?php echo e(($isEn ? 'To ' : 'إلى ') . $otherName); ?></option>
+                                <?php endforeach; ?>
+                                <option value="hold"><?php echo e($isEn ? 'Keep until a new agency' : 'تبقى محفوظة حتى وكالة جديدة'); ?></option>
+                            </select>
+                            <button class="btn danger sm js-del-confirm" type="submit" disabled><?php echo e($isEn ? 'Confirm delete' : 'تأكيد الحذف'); ?></button>
+                            <button class="btn ghost sm js-del-close" type="button"><?php echo e($isEn ? 'Cancel' : 'إلغاء'); ?></button>
                         </form>
                     </td>
                 </tr>
@@ -289,7 +371,129 @@ render_header($isEn ? 'System users' : 'مستخدمي النظام', 'saas_agen
             </tbody>
         </table>
     </div>
-    <p class="meta"><a href="settings.php?tab=saas"><?php echo e($isEn ? 'SaaS / ZainCash settings' : 'إعدادات الاستضافة / ZainCash'); ?></a>
-        · <a href="migrate_owner_agency.php"><?php echo e($isEn ? 'Office migration' : 'ترحيل المكتب'); ?></a></p>
 </div>
+<style>
+.sys-head { display:flex; align-items:center; justify-content:flex-end; direction:ltr; gap:12px; margin:0 0 12px; flex-wrap:wrap; }
+.sys-head h2 { margin:0; }
+#sysUserBox { margin:0 0 14px; }
+.sys-search { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:0 0 14px; }
+.sys-search input[type="search"] { flex:1; min-width:220px; max-width:480px; }
+.sys-st { display:inline-block; padding:3px 10px; border-radius:999px; font-size:12px; font-weight:800; }
+.st-active { background:#dcfce7; color:#166534; }
+.st-pending { background:#fef9c3; color:#854d0e; }
+.st-expired { background:#fee2e2; color:#991b1b; }
+.st-suspended { background:#f1f5f9; color:#475569; }
+.ag-actions { display:flex; flex-wrap:wrap; gap:6px; align-items:center; justify-content:flex-end; }
+.ag-extend { display:inline-flex; gap:4px; align-items:center; }
+.ag-extend input[type="number"] { width:64px; height:32px; }
+.del-row[hidden] { display:none !important; }
+.del-row td { background:#f8fafc; }
+.ag-del-form { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.ag-del-form select { min-width:240px; max-width:360px; }
+.table-compact td { vertical-align:middle; }
+</style>
+<script>
+(function () {
+  var btn = document.getElementById('sysUserToggle');
+  var box = document.getElementById('sysUserBox');
+  if (btn && box) {
+  btn.addEventListener('click', function () {
+    box.hidden = !box.hidden;
+    if (!box.hidden) {
+      var first = box.querySelector('input[name="username"]');
+      if (first) first.focus();
+    }
+  });
+  }
+  var pick = document.getElementById('restoreAgencyPick');
+  var pack = document.getElementById('agencyPackFile');
+  if (pick && pack) {
+    pick.addEventListener('change', function () {
+      var on = pick.value === 'file';
+      pack.hidden = !on;
+      pack.required = on;
+    });
+  }
+  function closeDels(exceptId) {
+    var rows = document.querySelectorAll('.del-row');
+    for (var i = 0; i < rows.length; i++) {
+      if (exceptId && rows[i].id === exceptId) continue;
+      rows[i].hidden = true;
+    }
+  }
+  var opens = document.querySelectorAll('.js-del-open');
+  for (var o = 0; o < opens.length; o++) {
+    opens[o].addEventListener('click', function () {
+      var id = 'delRow' + this.getAttribute('data-del');
+      var row = document.getElementById(id);
+      if (!row) return;
+      var open = row.hidden;
+      closeDels(open ? id : '');
+      row.hidden = !open;
+    });
+  }
+  var closers = document.querySelectorAll('.js-del-close');
+  for (var c = 0; c < closers.length; c++) {
+    closers[c].addEventListener('click', function () {
+      var row = this.closest ? this.closest('tr') : null;
+      if (row) row.hidden = true;
+    });
+  }
+  var forms = document.querySelectorAll('.js-agency-del');
+  for (var i = 0; i < forms.length; i++) {
+    (function (form) {
+      var sel = form.querySelector('[name="data_dest"]');
+      var go = form.querySelector('.js-del-confirm');
+      var tidEl = form.querySelector('[name="tenant_id"]');
+      function arm(on) {
+        if (go) go.disabled = !on;
+      }
+      if (sel) {
+        sel.addEventListener('change', function () {
+          form.removeAttribute('data-ready');
+          if (!sel.value) {
+            arm(false);
+            return;
+          }
+          if (sel.value !== 'download') {
+            arm(true);
+            return;
+          }
+          arm(false);
+          var tid = tidEl ? tidEl.value : '0';
+          fetch('saas_agents.php?export_agent=' + encodeURIComponent(tid), { credentials: 'same-origin' })
+            .then(function (r) {
+              if (!r.ok) throw new Error('fail');
+              return r.blob();
+            })
+            .then(function (blob) {
+              var a = document.createElement('a');
+              a.href = URL.createObjectURL(blob);
+              a.download = 'agent-data-' + tid + '.zip';
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+              form.setAttribute('data-ready', '1');
+              arm(true);
+            })
+            .catch(function () {
+              arm(false);
+              alert(<?php echo json_encode($isEn ? 'Download failed. The agent was not deleted.' : 'ما انحمل الملف، وما انحذف الوكيل'); ?>);
+            });
+        });
+      }
+      form.addEventListener('submit', function (e) {
+        if (!sel || !sel.value || (go && go.disabled)) {
+          e.preventDefault();
+          return;
+        }
+        if (sel.value === 'download' && form.getAttribute('data-ready') !== '1') {
+          e.preventDefault();
+          return;
+        }
+      });
+    })(forms[i]);
+  }
+})();
+</script>
 <?php render_footer(); ?>

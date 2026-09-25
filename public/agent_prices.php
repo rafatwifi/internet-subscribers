@@ -8,10 +8,12 @@ $isEn = ($lang === 'en');
 $me = current_admin();
 $meId = $me ? (int) $me['id'] : 0;
 $isAgent = function_exists('is_agent_user') && is_agent_user();
-$canManageAll = user_can('users') || (user_can('cards') && !$isAgent);
-
-if (!$canManageAll && !$isAgent && !user_can('cards')) {
-    require_perm('cards');
+$isGm = function_exists('is_group_manager_user') && is_group_manager_user();
+$isPriceAdmin = function_exists('is_admin_user') && is_admin_user()
+    && !(function_exists('is_accountant_user') && is_accountant_user());
+if (!$isPriceAdmin && !$isAgent && !$isGm) {
+    flash('error', $isEn ? 'Not allowed' : 'التسعير للأدمن، والتعديل على سعر المواطن للوكيل ومدير الوكلاء');
+    redirect('index.php');
 }
 
 ensure_agent_card_prices_table($pdo);
@@ -22,6 +24,37 @@ $agents = array_values(array_filter($agents, function ($a) use ($tid) {
     $at = isset($a['tenant_id']) ? (int) $a['tenant_id'] : 1;
     return $at === $tid;
 }));
+try {
+    $gmSt = $pdo->prepare(
+        'SELECT id, username, display_name, role, is_active, tenant_id
+         FROM admin_users WHERE role = "group_manager" AND tenant_id = :t AND is_active = 1'
+    );
+    $gmSt->execute(array(':t' => $tid));
+    $seenP = array();
+    foreach ($agents as $a0) {
+        $seenP[(int) $a0['id']] = true;
+    }
+    foreach ($gmSt->fetchAll() as $gm0) {
+        if (empty($seenP[(int) $gm0['id']])) {
+            $agents[] = $gm0;
+        }
+    }
+} catch (Exception $e) {
+}
+usort($agents, function ($a, $b) {
+    $an = isset($a['display_name']) ? (string) $a['display_name'] : '';
+    $bn = isset($b['display_name']) ? (string) $b['display_name'] : '';
+    return strcasecmp($an, $bn);
+});
+if (!$isPriceAdmin) {
+    $allowIds = array($meId);
+    if ($isGm && function_exists('group_manager_team_ids')) {
+        $allowIds = group_manager_team_ids($pdo);
+    }
+    $agents = array_values(array_filter($agents, function ($a) use ($allowIds) {
+        return in_array((int) $a['id'], $allowIds, true);
+    }));
+}
 
 // الوكيل: أسعاره + الوكلاء تحت شركته (نفس الـ tenant) للتسعير عليهم
 $myPrices = ($meId > 0 && function_exists('agent_card_prices_list'))
@@ -77,7 +110,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         flash('error', $isEn ? 'Not allowed' : 'غير مسموح');
         redirect('agent_prices.php');
     }
-    if ($action === 'clear') {
+    if ($action === 'clear' && $isPriceAdmin) {
         $pdo->prepare('DELETE FROM agent_card_prices WHERE agent_user_id = :a AND tenant_id = :t')
             ->execute(array(':a' => $agentId, ':t' => $tid));
         flash('success', $isEn ? 'Prices cleared' : 'تم التصفير');
@@ -95,33 +128,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 continue;
             }
             $profileId = isset($row['profile_id']) ? (int) $row['profile_id'] : 0;
-            $w = isset($row['wholesale_price']) ? (float) $row['wholesale_price'] : 0;
-            $ap = isset($row['agent_price']) ? (float) $row['agent_price'] : 0;
-            $key = strtolower($profileName);
-            $floor = isset($myFloor[$key]) ? (float) $myFloor[$key] : 0;
-            $hasKids = function_exists('admin_user_child_count') && admin_user_child_count($pdo, $meId, $tid) > 0;
-            if ($agentId === $meId) {
-                $old = function_exists('agent_card_price_get') ? agent_card_price_get($pdo, $meId, $profileId, $profileName) : null;
-                $locked = $old ? (float) $old['wholesale_price'] : 0;
-                if ($floor <= 0 && $locked > 0) {
-                    $floor = $locked;
-                }
-                if ($floor > 0 && $w < $floor) {
-                    $w = $floor;
-                }
-                if (!$hasKids && $floor > 0) {
-                    $w = $floor;
-                }
+            $postedW = isset($row['wholesale_price']) ? (float) $row['wholesale_price'] : 0;
+            $postedA = isset($row['agent_price']) ? (float) $row['agent_price'] : 0;
+            $postedR = isset($row['retail_price']) ? (float) $row['retail_price'] : 0;
+            $old = function_exists('agent_card_price_get') ? agent_card_price_get($pdo, $agentId, $profileId, $profileName) : null;
+            if ($isPriceAdmin) {
+                $w = $postedW;
+                $ap = $postedA;
+                $rp = $postedR;
             } else {
-                if ($floor > 0 && $w < $floor) {
-                    $w = $floor;
+                $teamOk = ($agentId === $meId);
+                if ($isGm && function_exists('group_manager_team_ids')) {
+                    $teamOk = in_array($agentId, group_manager_team_ids($pdo), true);
                 }
-                $child = function_exists('agent_card_price_get') ? agent_card_price_get($pdo, $agentId, $profileId, $profileName) : null;
-                if ($child) {
-                    $ap = (float) $child['agent_price'];
+                if (!$teamOk) {
+                    continue;
                 }
+                $w = $old ? (float) $old['wholesale_price'] : $postedW;
+                $ap = $old ? (float) $old['agent_price'] : $postedA;
+                $rp = $postedR;
             }
-            if (agent_card_price_save($pdo, $agentId, $profileId, $profileName, $w, $ap)) {
+            if (agent_card_price_save($pdo, $agentId, $profileId, $profileName, $w, $ap, $rp)) {
                 $n++;
             }
         }
@@ -155,7 +182,9 @@ if (!$profiles) {
     }
 }
 
-render_header($isEn ? 'Card prices' : 'تسعير الكروت', 'agent_prices');
+render_header($isEn ? 'Package prices' : 'تسعير الباقات', 'agent_prices');
+require_once __DIR__ . '/../includes/settings_tabs.php';
+render_settings_tabs('prices');
 ?>
 <div class="panel">
     <h2><?php echo e($isEn ? 'Card pricing' : 'تسعير الكروت'); ?></h2>
@@ -200,8 +229,9 @@ render_header($isEn ? 'Card prices' : 'تسعير الكروت', 'agent_prices')
                 <thead>
                 <tr>
                     <th><?php echo e($isEn ? 'Package' : 'الفئة'); ?></th>
-                    <th><?php echo e($isEn ? 'Price on agent (IQD)' : 'السعر عليه (د.ع)'); ?></th>
-                    <th><?php echo e($isEn ? 'Subscriber sell price (IQD)' : 'سعر البيع للمشترك (د.ع)'); ?></th>
+                    <th><?php echo e($isEn ? 'Wholesale' : 'سعر الجملة'); ?></th>
+                    <th><?php echo e($isEn ? 'Agent sale' : 'سعر البيع للوكيل'); ?></th>
+                    <th><?php echo e($isEn ? 'Citizen sale' : 'سعر البيع للمواطن'); ?></th>
                 </tr>
                 </thead>
                 <tbody>
@@ -209,10 +239,15 @@ render_header($isEn ? 'Card prices' : 'تسعير الكروت', 'agent_prices')
                     $nm = isset($line['name']) ? (string) $line['name'] : '';
                     $key = strtolower(trim($nm));
                     $have = isset($byName[$key]) ? $byName[$key] : null;
-                    $orig = $have ? (float) $have['wholesale_price'] : 0;
-                    $sell = $have ? (float) $have['agent_price'] : 0;
-                    $floorShow = ($aid !== $meId && isset($myFloor[$key])) ? (float) $myFloor[$key] : 0;
-                    $lockWholesale = ($aid === $meId && $orig > 0);
+                    $sasPrice = isset($line['price']) ? (float) $line['price'] : 0;
+                    $orig = ($have && (float) $have['wholesale_price'] > 0) ? (float) $have['wholesale_price'] : $sasPrice;
+                    $sell = ($have && (float) $have['agent_price'] > 0) ? (float) $have['agent_price'] : $sasPrice;
+                    $retail = ($have && isset($have['retail_price']) && (float) $have['retail_price'] > 0) ? (float) $have['retail_price'] : $sasPrice;
+                    $lockAdmin = !$isPriceAdmin;
+                    $canRetail = $isPriceAdmin || $aid === $meId;
+                    if ($isGm && function_exists('group_manager_team_ids')) {
+                        $canRetail = $canRetail || in_array($aid, group_manager_team_ids($pdo), true);
+                    }
                     ?>
                     <tr>
                         <td>
@@ -220,8 +255,9 @@ render_header($isEn ? 'Card prices' : 'تسعير الكروت', 'agent_prices')
                             <input type="hidden" name="rows[<?php echo (int) $i; ?>][profile_name]" value="<?php echo e($nm); ?>">
                             <input type="hidden" name="rows[<?php echo (int) $i; ?>][profile_id]" value="<?php echo (int) (isset($line['id']) ? $line['id'] : 0); ?>">
                         </td>
-                        <td><input class="ltr" type="number" min="<?php echo $floorShow > 0 ? (int) $floorShow : 0; ?>" step="1" name="rows[<?php echo (int) $i; ?>][wholesale_price]" value="<?php echo (int) $orig; ?>" style="max-width:140px" <?php echo $lockWholesale ? 'readonly' : ''; ?>></td>
-                        <td><input class="ltr" type="number" min="0" step="1" name="rows[<?php echo (int) $i; ?>][agent_price]" value="<?php echo (int) $sell; ?>" style="max-width:140px" <?php echo ($aid !== $meId) ? 'readonly' : ''; ?>></td>
+                        <td><input class="ltr" type="number" min="0" step="1" name="rows[<?php echo (int) $i; ?>][wholesale_price]" value="<?php echo (int) $orig; ?>" style="max-width:140px" <?php echo $lockAdmin ? 'readonly' : ''; ?>></td>
+                        <td><input class="ltr" type="number" min="0" step="1" name="rows[<?php echo (int) $i; ?>][agent_price]" value="<?php echo (int) $sell; ?>" style="max-width:140px" <?php echo $lockAdmin ? 'readonly' : ''; ?>></td>
+                        <td><input class="ltr" type="number" min="0" step="1" name="rows[<?php echo (int) $i; ?>][retail_price]" value="<?php echo (int) $retail; ?>" style="max-width:140px" <?php echo $canRetail ? '' : 'readonly'; ?>></td>
                     </tr>
                 <?php endforeach; ?>
                 </tbody>
@@ -231,12 +267,14 @@ render_header($isEn ? 'Card prices' : 'تسعير الكروت', 'agent_prices')
             <button class="btn" type="submit"><?php echo e($isEn ? 'Save' : 'حفظ'); ?></button>
         </div>
     </form>
+    <?php if ($isPriceAdmin): ?>
     <form method="post" style="margin-top:8px" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Clear this agent prices?' : 'تصفير أسعار هذا الوكيل؟'); ?>);">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="action" value="clear">
         <input type="hidden" name="agent_id" value="<?php echo $aid; ?>">
         <button class="btn ghost" type="submit"><?php echo e($isEn ? 'Reset' : 'تصفير'); ?></button>
     </form>
+    <?php endif; ?>
     <?php endif; ?>
 </div>
 <?php endforeach; ?>

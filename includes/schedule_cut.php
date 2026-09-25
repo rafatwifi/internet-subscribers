@@ -41,6 +41,27 @@ function schedule_cut_message($row, $config)
  * قائمة المدينين للجدول الدوري (عرض الصفحة).
  * يرجع array('rows' => [...], 'error' => '')
  */
+function schedule_viewer_scope_sql($alias)
+{
+    if (empty($_SESSION['admin_logged_in'])) {
+        return '';
+    }
+    if (function_exists('is_super_admin_user') && is_super_admin_user()) {
+        return '';
+    }
+    if (function_exists('subscriber_agent_scope_sql')) {
+        return subscriber_agent_scope_sql($alias);
+    }
+    if (!function_exists('current_tenant_id')) {
+        return '';
+    }
+    $a = preg_replace('/[^a-zA-Z0-9_]/', '', (string) $alias);
+    if ($a === '') {
+        $a = 's';
+    }
+    return ' AND ' . $a . '.tenant_id = ' . (int) current_tenant_id();
+}
+
 function schedule_debtors_list($pdo, $config, $limit = 500)
 {
     $out = array('rows' => array(), 'error' => '');
@@ -68,13 +89,14 @@ function schedule_debtors_list($pdo, $config, $limit = 500)
                    SUM(i.amount) AS debt_total
             FROM subscribers s
             INNER JOIN invoices i ON i.subscriber_id = s.id AND i.status = 'unpaid'
-            LEFT JOIN sas_users_cache c ON (
+            LEFT JOIN sas_users_cache c ON c.tenant_id = s.tenant_id AND (
                 c.local_subscriber_id = s.id
                 OR (
                   s.sas_username IS NOT NULL AND TRIM(s.sas_username) <> ''
                   AND LOWER(TRIM(c.username)) = LOWER(TRIM(s.sas_username))
                 )
             )
+            WHERE 1=1" . schedule_viewer_scope_sql('s') . "
             GROUP BY s.id, s.name, s.phone, s.grace_days, s.sas_username
             HAVING SUM(i.amount) > 0
             ORDER BY oldest_due ASC
@@ -89,6 +111,7 @@ function schedule_debtors_list($pdo, $config, $limit = 500)
                             MIN(i.due_date) AS oldest_due, SUM(i.amount) AS debt_total
                      FROM subscribers s
                      INNER JOIN invoices i ON i.subscriber_id = s.id AND i.status = 'unpaid'
+                     WHERE 1=1" . schedule_viewer_scope_sql('s') . "
                      GROUP BY s.id, s.name, s.phone, s.grace_days, s.sas_username
                      HAVING SUM(i.amount) > 0
                      ORDER BY oldest_due ASC
@@ -204,11 +227,11 @@ function run_schedule_debt_cuts($pdo, $config, $limit = 80)
                    GROUP_CONCAT(DISTINCT i.month_label ORDER BY i.month_label SEPARATOR ', ') AS months
             FROM subscribers s
             INNER JOIN invoices i ON i.subscriber_id = s.id AND i.status = 'unpaid'
-            LEFT JOIN sas_users_cache c ON (
+            LEFT JOIN sas_users_cache c ON c.tenant_id = s.tenant_id AND (
                 c.local_subscriber_id = s.id
                 OR (s.sas_username IS NOT NULL AND s.sas_username <> '' AND {$userEq})
             )
-            WHERE (
+            WHERE 1=1" . schedule_viewer_scope_sql('s') . " AND (
                 (s.sas_username IS NOT NULL AND TRIM(s.sas_username) <> '')
                 OR c.username IS NOT NULL
             )

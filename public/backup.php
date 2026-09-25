@@ -5,6 +5,10 @@ require_once __DIR__ . '/../includes/layout.php';
 require_once __DIR__ . '/../includes/settings_tabs.php';
 require_login();
 require_perm('backup');
+if (!function_exists('is_super_admin_user') || !is_super_admin_user()) {
+    flash('error', 'النسخ الاحتياطي للمنصة فقط');
+    redirect('settings.php?tab=sas');
+}
 
 function backup_tables()
 {

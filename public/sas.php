@@ -828,6 +828,9 @@ if ($sasReady && !$isLiveReq && $q !== '' && strlen($q) >= 2 && function_exists(
 
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'refresh_now') {
     header('Content-Type: application/json; charset=utf-8');
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
     if (function_exists('set_time_limit')) {
         @set_time_limit(40);
     }
@@ -843,13 +846,29 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'refresh_now') {
         exit;
     }
     $qNow = isset($_GET['q']) ? trim((string) $_GET['q']) : '';
+    $usersRaw = isset($_GET['users']) ? (string) $_GET['users'] : '';
+    $wantUsers = array();
+    if ($usersRaw !== '') {
+        foreach (explode(',', $usersRaw) as $part) {
+            $part = trim($part);
+            if ($part !== '') {
+                $wantUsers[] = $part;
+            }
+        }
+    }
     $n = 0;
     try {
+        $outsideFile = __DIR__ . '/../includes/sas_outside_sync.php';
+        if (is_file($outsideFile)) {
+            require_once $outsideFile;
+        }
         // أول شيء: أونلاين + IP من الساس (مصدر الحقيقة للـ IP)
         if (function_exists('sas_refresh_online_flags')) {
             sas_refresh_online_flags($pdo, $config);
         }
-        if ($qNow !== '' && function_exists('sas_cache_pull_search')) {
+        if ($wantUsers && function_exists('sas_outside_refresh_users')) {
+            $n = sas_outside_refresh_users($pdo, $config, $wantUsers);
+        } elseif ($qNow !== '' && function_exists('sas_cache_pull_search')) {
             $n = sas_cache_pull_search($pdo, $config, $qNow);
         } else {
             $apiNow = function_exists('sas_page_connector') ? sas_page_connector($config) : null;
@@ -2638,10 +2657,37 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
             }
             $baseStr = count($baseQs) ? '&' . implode('&', $baseQs) : '';
             $extraQs = $baseStr;
-            for ($p = 1; $p <= $totalPages; $p++):
+            $window = 9;
+            $winStart = (int) (floor(($page - 1) / $window) * $window) + 1;
+            if ($winStart < 1) {
+                $winStart = 1;
+            }
+            $winEnd = $winStart + $window - 1;
+            if ($winEnd > $totalPages) {
+                $winEnd = $totalPages;
+            }
+            $prevPage = $winStart - $window;
+            if ($prevPage < 1) {
+                $prevPage = 1;
+            }
+            $nextPage = $winEnd + 1;
+            if ($nextPage > $totalPages) {
+                $nextPage = $totalPages;
+            }
             ?>
+            <?php if ($winStart > 1): ?>
+                <a class="btn ghost sm" href="?page=<?php echo $prevPage . $baseStr; ?>" aria-label="prev">&gt;&gt;</a>
+            <?php else: ?>
+                <span class="btn ghost sm" style="opacity:.35;pointer-events:none" aria-hidden="true">&gt;&gt;</span>
+            <?php endif; ?>
+            <?php for ($p = $winStart; $p <= $winEnd; $p++): ?>
                 <a class="btn <?php echo $p === $page ? '' : 'ghost'; ?> sm" href="?page=<?php echo $p . $baseStr; ?>"><?php echo $p; ?></a>
             <?php endfor; ?>
+            <?php if ($winEnd < $totalPages): ?>
+                <a class="btn ghost sm" href="?page=<?php echo $nextPage . $baseStr; ?>" aria-label="next">&lt;&lt;</a>
+            <?php else: ?>
+                <span class="btn ghost sm" style="opacity:.35;pointer-events:none" aria-hidden="true">&lt;&lt;</span>
+            <?php endif; ?>
             <?php if (!$showAll): ?>
                 <a class="btn ghost sm" href="?per_page=all<?php echo $extraQs; ?>"><?php echo e(t('show_all')); ?></a>
             <?php else: ?>
@@ -4838,14 +4884,50 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
       }
     });
   }
+  function visibleUserNames(expiredFirst) {
+    var yellow = [];
+    var rest = [];
+    var rows = document.querySelectorAll('#subsTable tbody tr[data-id]');
+    Array.prototype.forEach.call(rows, function (tr) {
+      var id = (tr.getAttribute('data-id') || '').trim();
+      if (!id) return;
+      if (tr.classList.contains('row-status-expired')) yellow.push(id);
+      else rest.push(id);
+    });
+    var list = expiredFirst ? yellow.concat(rest) : rest.concat(yellow);
+    return list.slice(0, 25).join(',');
+  }
+  var outsideBusy = false;
+  function pullOutsideExpire() {
+    if (!sasReadyJs || outsideBusy || tableIsBusy()) return;
+    var names = visibleUserNames(true);
+    if (!names) return;
+    var yellowOnly = [];
+    document.querySelectorAll('#subsTable tbody tr.row-status-expired[data-id]').forEach(function (tr) {
+      var id = (tr.getAttribute('data-id') || '').trim();
+      if (id) yellowOnly.push(id);
+    });
+    if (!yellowOnly.length) return;
+    outsideBusy = true;
+    fetch('sas.php?ajax=refresh_now&users=' + encodeURIComponent(yellowOnly.slice(0, 25).join(',')), { credentials: 'same-origin' })
+      .then(parseSyncRes)
+      .then(function (d) {
+        outsideBusy = false;
+        if (d && d.ok) refreshTableLive();
+      })
+      .catch(function () { outsideBusy = false; });
+  }
+  setInterval(pullOutsideExpire, 8000);
+  setTimeout(pullOutsideExpire, 1500);
   function runQuickRefresh() {
     if (!sasReadyJs) {
       showAppToast(<?php echo json_encode($lang === 'en' ? 'SAS not linked yet' : 'الساس غير مربوط بعد'); ?>, 'error');
       return Promise.resolve({ ok: false });
     }
     var q = filter ? filter.value.trim() : '';
+    var names = visibleUserNames(true);
     showSyncNote(<?php echo json_encode($lang === 'en' ? 'Refreshing from SAS…' : 'جاري التحديث من الساس…'); ?>);
-    return fetch('sas.php?ajax=refresh_now&q=' + encodeURIComponent(q), { credentials: 'same-origin' })
+    return fetch('sas.php?ajax=refresh_now&q=' + encodeURIComponent(q) + '&users=' + encodeURIComponent(names), { credentials: 'same-origin' })
       .then(parseSyncRes)
       .then(function (d) {
         if (d && d.ok) {

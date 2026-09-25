@@ -22,6 +22,21 @@ function apply_invoice_payment($pdo, $config, $invoiceId, $payAmount, $sendWhats
     $invoiceId = (int) $invoiceId;
     $payAmount = (float) $payAmount;
 
+    try {
+        $colC = $pdo->query("SHOW COLUMNS FROM invoices LIKE 'collected_by'")->fetch();
+        if (!$colC) {
+            $pdo->exec('ALTER TABLE invoices ADD COLUMN collected_by INT UNSIGNED NULL DEFAULT NULL');
+        }
+    } catch (Exception $eCol) {
+    }
+    $collectorId = 0;
+    if (function_exists('current_admin')) {
+        $collector = current_admin();
+        if ($collector && !empty($collector['id'])) {
+            $collectorId = (int) $collector['id'];
+        }
+    }
+
     $stmt = $pdo->prepare(
         'SELECT i.*, s.name, s.phone, sub.cost_price AS sub_cost
          FROM invoices i
@@ -60,12 +75,13 @@ function apply_invoice_payment($pdo, $config, $invoiceId, $payAmount, $sendWhats
         if ($isFull) {
             $upd = $pdo->prepare(
                 'UPDATE invoices
-                 SET status = "paid", paid_at = NOW(), cost_price = :cost, profit = :profit
+                 SET status = "paid", paid_at = NOW(), cost_price = :cost, profit = :profit, collected_by = :by
                  WHERE id = :id'
             );
             $upd->execute(array(
                 ':cost' => $paidCost,
                 ':profit' => $paidProfit,
+                ':by' => $collectorId > 0 ? $collectorId : null,
                 ':id' => $invoiceId,
             ));
             $remainingInvoice = 0;
@@ -78,9 +94,9 @@ function apply_invoice_payment($pdo, $config, $invoiceId, $payAmount, $sendWhats
 
             $ins = $pdo->prepare(
                 'INSERT INTO invoices
-                    (subscription_id, subscriber_id, month_label, amount, cost_price, profit, due_date, status, paid_at, notes)
+                    (subscription_id, subscriber_id, month_label, amount, cost_price, profit, due_date, status, paid_at, notes, collected_by)
                  VALUES
-                    (:subscription_id, :subscriber_id, :month_label, :amount, :cost_price, :profit, :due_date, "paid", NOW(), :notes)'
+                    (:subscription_id, :subscriber_id, :month_label, :amount, :cost_price, :profit, :due_date, "paid", NOW(), :notes, :by)'
             );
             $notePaid = 'تسديد جزئي من فاتورة #' . $invoiceId;
             if (!empty($row['notes'])) {
@@ -95,6 +111,7 @@ function apply_invoice_payment($pdo, $config, $invoiceId, $payAmount, $sendWhats
                 ':profit' => $paidProfit,
                 ':due_date' => $row['due_date'],
                 ':notes' => $notePaid,
+                ':by' => $collectorId > 0 ? $collectorId : null,
             ));
 
             $upd = $pdo->prepare(

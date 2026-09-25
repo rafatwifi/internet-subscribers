@@ -247,6 +247,21 @@ function fetch_activity_filtered($pdo, $limit, $q, $scope)
     if ($scope === 'system') {
         $where .= " AND (a.subscriber_id IS NULL OR a.entity_type IN ('system','tenant','user','saas','backup','auth'))";
     }
+    $logPlatform = function_exists('is_super_admin_user') && is_super_admin_user();
+    if (!$logPlatform && function_exists('current_tenant_id')) {
+        $logTid = (int) current_tenant_id();
+        $where .= ' AND (s.tenant_id = ' . $logTid
+            . ' OR a.actor_user_id IN (SELECT id FROM admin_users WHERE tenant_id = ' . $logTid . '))';
+        if (function_exists('is_agent_user') && is_agent_user() && function_exists('current_admin')) {
+            $logMe = current_admin();
+            $logId = $logMe ? (int) $logMe['id'] : 0;
+            if ($logId > 0) {
+                $where .= ' AND (a.actor_user_id = ' . $logId
+                    . ' OR a.actor_user_id IN (SELECT id FROM admin_users WHERE reports_to_user_id = ' . $logId . ' AND tenant_id = ' . $logTid . ')'
+                    . ' OR s.agent_user_id = ' . $logId . ')';
+            }
+        }
+    }
     $q = trim((string) $q);
     if ($q !== '') {
         $where .= ' AND (a.summary LIKE :q OR a.details LIKE :q OR a.actor_name LIKE :q OR a.action LIKE :q OR s.name LIKE :q)';

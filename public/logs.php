@@ -4,9 +4,16 @@ require_once __DIR__ . '/../includes/bootstrap.php';
 require_once __DIR__ . '/../includes/layout.php';
 require_login();
 require_perm('logs');
+if (function_exists('is_accountant_user') && is_accountant_user()) {
+    flash('error', $lang === 'en' ? 'No permission' : 'المحاسب ما عنده لوك');
+    redirect('index.php');
+}
 
 $q = isset($_GET['q']) ? trim((string) $_GET['q']) : '';
 $scope = isset($_GET['scope']) ? (string) $_GET['scope'] : '';
+if ($scope === 'system' && (!function_exists('is_super_admin_user') || !is_super_admin_user())) {
+    redirect('logs.php');
+}
 if ($scope === 'system' && function_exists('fetch_system_activity')) {
     $rows = fetch_system_activity($pdo, 400, $q);
 } else {

@@ -42,6 +42,8 @@ function ensure_tenant_sas_accounts_schema($pdo)
     if (function_exists('tenants_ensure_column')) {
         try {
             tenants_ensure_column($pdo, 'sas_users_cache', 'sas_account_id', 'INT UNSIGNED NULL DEFAULT NULL');
+            tenants_ensure_column($pdo, 'tenant_sas_accounts', 'last_ok_at', 'DATETIME NULL DEFAULT NULL');
+            tenants_ensure_column($pdo, 'tenant_sas_accounts', 'last_error', 'VARCHAR(255) NULL DEFAULT NULL');
         } catch (Exception $e) {
         }
     }
@@ -96,10 +98,91 @@ function ensure_tenant_sas_accounts_schema($pdo)
     }
 }
 
+function tenant_sas_account_key($host, $user)
+{
+    $host = strtolower(preg_replace('#^https?://#i', '', rtrim(trim((string) $host), '/')));
+    $user = strtolower(trim((string) $user));
+    if ($host === '' || $user === '') {
+        return '';
+    }
+    return $user . "\n" . $host;
+}
+
+/** نفس اليوزر والهوست = حساب واحد. يحذف النسخ الزائدة ويبقي الافتراضي أو آخر دخول ناجح. */
+function tenant_sas_accounts_dedupe($pdo, $tenantId)
+{
+    $tenantId = (int) $tenantId;
+    if ($tenantId <= 0 || !$pdo) {
+        return;
+    }
+    try {
+        $st = $pdo->prepare(
+            'SELECT id, sas_host, sas_username, is_default, last_ok_at
+             FROM tenant_sas_accounts WHERE tenant_id = :t ORDER BY id ASC'
+        );
+        $st->execute(array(':t' => $tenantId));
+        $rows = $st->fetchAll();
+    } catch (Exception $e) {
+        return;
+    }
+    if (!is_array($rows) || count($rows) < 2) {
+        return;
+    }
+    $groups = array();
+    foreach ($rows as $r) {
+        $key = tenant_sas_account_key(isset($r['sas_host']) ? $r['sas_host'] : '', isset($r['sas_username']) ? $r['sas_username'] : '');
+        if ($key === '') {
+            continue;
+        }
+        if (!isset($groups[$key])) {
+            $groups[$key] = array();
+        }
+        $groups[$key][] = $r;
+    }
+    foreach ($groups as $list) {
+        if (count($list) < 2) {
+            continue;
+        }
+        $keep = $list[0];
+        foreach ($list as $r) {
+            $rDef = !empty($r['is_default']);
+            $kDef = !empty($keep['is_default']);
+            $rOk = !empty($r['last_ok_at']);
+            $kOk = !empty($keep['last_ok_at']);
+            $better = false;
+            if ($rDef && !$kDef) {
+                $better = true;
+            } elseif ($rDef === $kDef && $rOk && !$kOk) {
+                $better = true;
+            } elseif ($rDef === $kDef && $rOk === $kOk && (int) $r['id'] < (int) $keep['id']) {
+                $better = true;
+            }
+            if ($better) {
+                $keep = $r;
+            }
+        }
+        $drop = array();
+        foreach ($list as $r) {
+            if ((int) $r['id'] !== (int) $keep['id']) {
+                $drop[] = (int) $r['id'];
+            }
+        }
+        if (!$drop) {
+            continue;
+        }
+        $in = implode(',', $drop);
+        try {
+            $pdo->exec('DELETE FROM tenant_sas_accounts WHERE tenant_id = ' . $tenantId . ' AND id IN (' . $in . ')');
+        } catch (Exception $e) {
+        }
+    }
+}
+
 function tenant_sas_accounts_list($pdo, $tenantId)
 {
     ensure_tenant_sas_accounts_schema($pdo);
     $tenantId = max(1, (int) $tenantId);
+    tenant_sas_accounts_dedupe($pdo, $tenantId);
     try {
         $st = $pdo->prepare(
             'SELECT * FROM tenant_sas_accounts WHERE tenant_id = :t ORDER BY is_default DESC, id ASC'
@@ -321,6 +404,16 @@ function tenant_sas_account_save($pdo, $tenantId, $fields, $accountId = 0)
             $list = tenant_sas_accounts_list($pdo, $tenantId);
             if (!$list) {
                 $makeDefault = true;
+            }
+            $wantKey = tenant_sas_account_key($host, $user);
+            foreach ($list as $ex) {
+                $exKey = tenant_sas_account_key(
+                    isset($ex['sas_host']) ? $ex['sas_host'] : '',
+                    isset($ex['sas_username']) ? $ex['sas_username'] : ''
+                );
+                if ($wantKey !== '' && $exKey === $wantKey) {
+                    return tenant_sas_account_save($pdo, $tenantId, $fields, (int) $ex['id']);
+                }
             }
             $pdo->prepare(
                 'INSERT INTO tenant_sas_accounts

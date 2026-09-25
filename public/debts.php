@@ -397,9 +397,28 @@ try {
     }
 } catch (Exception $e) {
 }
-$subscribers = $pdo->query(
-    'SELECT id, name, phone, rental_enabled, rental_device_id FROM subscribers s WHERE 1=1' . $debtScope . ' ORDER BY name'
-)->fetchAll();
+$subscribers = array();
+try {
+    $subscribers = $pdo->query(
+        'SELECT s.id, s.name, s.phone, s.sas_username, s.rental_enabled, s.rental_device_id
+         FROM subscribers s WHERE 1=1' . $debtScope . ' ORDER BY s.name'
+    )->fetchAll();
+} catch (Exception $e) {
+    $subscribers = array();
+}
+if (!$subscribers && function_exists('current_tenant_id') && !is_agent_user() && !is_accountant_user() && !is_group_manager_user()) {
+    $pickTid = (int) current_tenant_id();
+    try {
+        $subscribers = $pdo->query(
+            'SELECT s.id, s.name, s.phone, s.sas_username, s.rental_enabled, s.rental_device_id
+             FROM subscribers s
+             INNER JOIN sas_users_cache c ON c.local_subscriber_id = s.id AND c.tenant_id = ' . $pickTid . '
+             GROUP BY s.id, s.name, s.phone, s.sas_username, s.rental_enabled, s.rental_device_id
+             ORDER BY s.name'
+        )->fetchAll();
+    } catch (Exception $e) {
+    }
+}
 $settingsDebt = settings_load();
 $rentFeeGlobal = (float) rental_fee_amount($settingsDebt);
 $subPriceMap = array();
@@ -568,17 +587,33 @@ render_header(t('debts'), 'debts');
         <div class="form-grid">
             <div>
                 <label><?php echo e(t('subscribers')); ?></label>
-                <select name="subscriber_id" id="debtSubSelect" required>
-                    <option value="">...</option>
+                <input type="search" id="debtSubSearch" placeholder="<?php echo e($lang === 'en' ? 'Search subscriber…' : 'ابحث عن مشترك…'); ?>" autocomplete="off">
+                <input type="hidden" name="subscriber_id" id="debtSubId" value="<?php echo $filterSubscriberId > 0 ? (int) $filterSubscriberId : ''; ?>" required>
+                <div id="debtSubList" style="max-height:220px;overflow:auto;margin-top:6px;border:1px solid #e2e8f0;border-radius:12px;background:#fff">
+                    <?php if (!$subscribers): ?>
+                        <div class="meta" style="padding:10px"><?php echo e($lang === 'en' ? 'No subscribers' : 'ماكو مشتركين'); ?></div>
+                    <?php endif; ?>
                     <?php foreach ($subscribers as $s): ?>
-                        <?php $sid = (int) $s['id']; $sHasRent = !empty($s['rental_enabled']) && !empty($s['rental_device_id']); ?>
-                        <option value="<?php echo $sid; ?>"
+                        <?php
+                        $sid = (int) $s['id'];
+                        $sHasRent = !empty($s['rental_enabled']) && !empty($s['rental_device_id']);
+                        $sUser = isset($s['sas_username']) ? trim((string) $s['sas_username']) : '';
+                        $sLabel = trim((string) $s['name']);
+                        if ($sLabel === '') {
+                            $sLabel = $sUser !== '' ? $sUser : ('#' . $sid);
+                        }
+                        ?>
+                        <button type="button" class="debt-sub-pick" data-id="<?php echo $sid; ?>"
                             data-rent="<?php echo $sHasRent ? '1' : '0'; ?>"
                             data-subprice="<?php echo (float) (isset($subPriceMap[$sid]) ? $subPriceMap[$sid] : 0); ?>"
                             data-rentfee="<?php echo (float) $rentFeeGlobal; ?>"
-                            <?php echo $filterSubscriberId === $sid ? 'selected' : ''; ?>><?php echo e($s['name']); ?></option>
+                            data-hay="<?php echo e(strtolower($sLabel . ' ' . $sUser . ' ' . (isset($s['phone']) ? $s['phone'] : ''))); ?>"
+                            style="display:block;width:100%;text-align:inherit;border:0;border-bottom:1px solid #f1f5f9;background:#fff;padding:8px 10px;cursor:pointer;font:inherit">
+                            <strong><?php echo e($sLabel); ?></strong>
+                            <?php if ($sUser !== ''): ?><span class="meta ltr"><?php echo e($sUser); ?></span><?php endif; ?>
+                        </button>
                     <?php endforeach; ?>
-                </select>
+                </div>
             </div>
             <div>
                 <label><?php echo e($lang === 'en' ? 'Debt type' : 'نوع الدين'); ?></label>
@@ -815,12 +850,42 @@ render_header(t('debts'), 'debts');
   var kind = document.getElementById('debtKind');
   var monthInput = document.getElementById('monthLabelInput');
   var monthField = document.getElementById('monthField');
-  var subSelect = document.getElementById('debtSubSelect');
+  var subId = document.getElementById('debtSubId');
+  var subSearch = document.getElementById('debtSubSearch');
+  var subList = document.getElementById('debtSubList');
+  var picked = null;
   var rentOpt = document.getElementById('debtKindMonthRent');
   var amountInput = document.getElementById('debtAmountInput');
   function selectedSubOpt() {
-    if (!subSelect) return null;
-    return subSelect.options[subSelect.selectedIndex] || null;
+    return picked;
+  }
+  if (subList) {
+    var picks = subList.querySelectorAll('.debt-sub-pick');
+    for (var pi = 0; pi < picks.length; pi++) {
+      if (subId && picks[pi].getAttribute('data-id') === subId.value) {
+        picked = picks[pi];
+        picks[pi].style.background = '#ecfdf5';
+      }
+      picks[pi].addEventListener('click', function () {
+        picked = this;
+        if (subId) subId.value = this.getAttribute('data-id') || '';
+        if (subSearch) subSearch.value = (this.querySelector('strong') ? this.querySelector('strong').textContent : '');
+        for (var j = 0; j < picks.length; j++) picks[j].style.background = '#fff';
+        this.style.background = '#ecfdf5';
+        syncRentOption();
+        syncKind();
+      });
+    }
+  }
+  if (subSearch && subList) {
+    subSearch.addEventListener('input', function () {
+      var q = (subSearch.value || '').toLowerCase();
+      var rows = subList.querySelectorAll('.debt-sub-pick');
+      for (var i = 0; i < rows.length; i++) {
+        var hay = (rows[i].getAttribute('data-hay') || '').toLowerCase();
+        rows[i].style.display = (!q || hay.indexOf(q) !== -1) ? 'block' : 'none';
+      }
+    });
   }
   function syncRentOption() {
     var opt = selectedSubOpt();
@@ -1046,8 +1111,10 @@ render_header(t('debts'), 'debts');
       hideMenu();
       if (op === 'add') {
         var box = document.getElementById('addDebtBox');
-        var sel = document.getElementById('debtSubSelect');
-        if (sel && ctx.sub) sel.value = String(ctx.sub);
+        var hid = document.getElementById('debtSubId');
+        if (hid && ctx.sub) hid.value = String(ctx.sub);
+        var want = document.querySelector('.debt-sub-pick[data-id="' + String(ctx.sub) + '"]');
+        if (want) want.click();
         if (box) {
           box.classList.remove('hidden');
           try { box.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (err) {}

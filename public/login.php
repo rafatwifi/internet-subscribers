@@ -110,10 +110,11 @@ $brandSrc = ($brandIconUrl !== '') ? $brandIconUrl : 'assets/favicon.svg?v=2';
             margin: 0 0 8px;
         }
         .login-brand img {
-            width: 42px;
-            height: 42px;
-            border-radius: 12px;
-            flex: 0 0 42px;
+            width: 84px;
+            height: 84px;
+            border-radius: 18px;
+            flex: 0 0 84px;
+            object-fit: contain;
             background: #1b2a38;
         }
         .login-card h1 {

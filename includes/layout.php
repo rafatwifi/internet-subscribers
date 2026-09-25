@@ -48,7 +48,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
     <noscript><link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet"></noscript>
-    <link rel="stylesheet" href="assets/style.css?v=ui11">
+    <link rel="stylesheet" href="assets/style.css?v=ui12">
     <style>
         <?php if ($bgMode === 'image' && $bgUrl !== ''): ?>
         body.app-bg-image {
@@ -214,7 +214,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <?php /* —— قائمة أدمن المنصة فقط —— */ ?>
             <a class="<?php echo $active === 'dashboard' ? 'active' : ''; ?>" href="index.php"><?php echo e(t('dashboard')); ?></a>
             <a class="<?php echo $active === 'companies' ? 'active' : ''; ?>" href="companies.php"><?php echo e($isEn ? 'Companies' : 'الشركات'); ?></a>
-            <a class="<?php echo $active === 'saas_agents' ? 'active' : ''; ?>" href="saas_agents.php"><?php echo e($isEn ? 'System users' : 'مستخدمي النظام'); ?></a>
+            <a class="<?php echo $active === 'saas_agents' ? 'active' : ''; ?>" href="saas_agents.php"><?php echo e($isEn ? 'Agents' : 'وكلاء'); ?></a>
             <?php if ($can('subscribers')): ?>
             <a class="<?php echo $active === 'import_export' ? 'active' : ''; ?>" href="import_export.php"><?php echo e($isEn ? 'Import & Export' : 'استيراد وتصدير'); ?></a>
             <?php endif; ?>
@@ -257,9 +257,6 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <?php if ($can('agents') || (function_exists('is_agent_user') && is_agent_user()) || (function_exists('is_group_manager_user') && is_group_manager_user())): ?>
             <a class="<?php echo $active === 'accountants' ? 'active' : ''; ?>" href="agents.php?view=accountant"><?php echo e($isEn ? 'Accountant' : 'المحاسب'); ?></a>
             <?php endif; ?>
-            <?php if ($can('cards') || $can('agents') || (function_exists('is_agent_user') && is_agent_user())): ?>
-            <a class="<?php echo $active === 'prices' || $active === 'agent_prices' ? 'active' : ''; ?>" href="agent_prices.php"><?php echo e($isEn ? 'Card prices' : 'تسعير الكروت'); ?></a>
-            <?php endif; ?>
             <?php if ($can('rentals')): ?>
             <a class="<?php echo $active === 'rentals' ? 'active' : ''; ?>" href="rentals.php"><?php echo e($isEn ? 'Rentals' : 'الإيجار'); ?></a>
             <?php endif; ?>
@@ -286,7 +283,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <a class="<?php echo $active === 'logs' ? 'active' : ''; ?>" href="logs.php"><?php echo e($isEn ? 'Log' : 'اللوك'); ?></a>
             <?php endif; ?>
             <?php if ($can('settings') || $can('users') || $can('plans') || $can('backup')): ?>
-            <a class="<?php echo $settingsActive && $active !== 'schedule' ? 'active' : ''; ?>" href="settings.php"><?php echo e(t('settings')); ?></a>
+            <a class="<?php echo $settingsActive && $active !== 'schedule' ? 'active' : ''; ?>" href="settings.php?tab=sas"><?php echo e(t('settings')); ?></a>
             <?php endif; ?>
             <a class="<?php echo $active === 'company' ? 'active' : ''; ?>" href="company.php"><?php echo e($isEn ? 'Company' : 'عن الشركة'); ?></a>
             <?php
@@ -327,8 +324,17 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
                 $pendingUpd = function_exists('app_update_pending') ? app_update_pending(isset($settings) ? $settings : null) : null;
                 $isImpersonating = function_exists('is_impersonating') && is_impersonating();
                 $canLoginAs = function_exists('is_super_admin_user') && is_super_admin_user() && !$isImpersonating;
+                $loginAsMode = (!$isImpersonating && isset($pdo) && function_exists('impersonate_actor_mode')) ? impersonate_actor_mode($pdo) : '';
+                $canLoginAsChild = ($loginAsMode === 'agency' || $loginAsMode === 'parent');
+                if (!$canLoginAsChild && !$isImpersonating && !$canLoginAs) {
+                    $tidMenu = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+                    $isLeafAgent = function_exists('is_agent_user') && is_agent_user();
+                    if ($tidMenu > 1 && !$isLeafAgent && function_exists('user_can') && user_can('agents')) {
+                        $canLoginAsChild = true;
+                    }
+                }
                 ?>
-                <?php if ($pendingUpd && !$isImpersonating && function_exists('user_can') && user_can('settings')): ?>
+                <?php if ($pendingUpd && !$isImpersonating && function_exists('is_super_admin_user') && is_super_admin_user() && function_exists('user_can') && user_can('settings')): ?>
                     <a class="top-update-pill" href="settings.php?tab=update" title="<?php echo e($isEn ? 'System update available' : 'تحديث نظام متاح'); ?>">
                         <?php echo e($isEn ? 'Update' : 'تحديث'); ?>
                     </a>
@@ -371,6 +377,18 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
                             <?php endif; ?>
                         </button>
                         <div class="top-admin-dropdown" id="topAdminDropdown" hidden>
+                            <?php if ($canLoginAsChild): ?>
+                                <div class="top-login-as-box">
+                                    <div class="top-login-as-label"><?php echo e($isEn ? 'Login as' : 'تسجيل الدخول بـ'); ?></div>
+                                    <input type="search" id="loginAsQ" data-kind="child" autocomplete="off" placeholder="<?php echo e($isEn ? 'Agent name…' : 'اسم الوكيل…'); ?>">
+                                    <div id="loginAsResults" class="login-as-results"></div>
+                                    <form method="post" action="impersonate.php" id="loginAsForm" hidden>
+                                        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                                        <input type="hidden" name="action" value="start">
+                                        <input type="hidden" name="user_id" id="loginAsUserId" value="">
+                                    </form>
+                                </div>
+                            <?php endif; ?>
                             <a href="profile.php"><?php echo e($isEn ? 'My profile' : 'البروفايل الشخصي'); ?></a>
                             <?php if ($canLoginAs): ?>
                                 <button type="button" id="topLoginAsBtn"><?php echo e($isEn ? 'Login as system user…' : 'الدخول بصفة مستخدم نظام…'); ?></button>
@@ -449,6 +467,10 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <?php endif; ?>
 <?php
     // بعد رسم الهيدر: حرّر قفل الجلسة لطلبات GET حتى لا يتوقف التنقّل على أجاكس خلفي
+    // احفظ رمز الحماية قبل الإغلاق، وإلا تعديل الاسم يطلع «طلب غير صالح»
+    if (function_exists('csrf_token')) {
+        csrf_token();
+    }
     if (
         (!isset($_SERVER['REQUEST_METHOD']) || strtoupper((string) $_SERVER['REQUEST_METHOD']) === 'GET')
         && empty($GLOBALS['app_keep_session'])
@@ -739,9 +761,22 @@ body.nav-pending .nav-progress { display: block; }
       b.className = 'login-as-item';
       b.textContent = a.label || a.display_name || a.username;
       b.addEventListener('click', function () {
-        if (!form || !uid) return;
-        uid.value = String(a.id);
-        form.submit();
+        var csrfEl = form ? form.querySelector('input[name="csrf"]') : null;
+        var body = new FormData();
+        body.append('csrf', csrfEl ? csrfEl.value : '');
+        body.append('action', 'start');
+        body.append('user_id', String(a.id));
+        body.append('ajax', '1');
+        fetch('impersonate.php', { method: 'POST', body: body, credentials: 'same-origin' })
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            if (!d || !d.ok) {
+              alert((d && d.message) ? d.message : 'ما صار الدخول');
+              return;
+            }
+            window.location.href = (d && d.redirect) ? d.redirect : 'sas.php';
+          })
+          .catch(function () { alert('ما صار الدخول'); });
       });
       results.appendChild(b);
     });
@@ -757,7 +792,8 @@ body.nav-pending .nav-progress { display: block; }
           return;
         }
         var xhr = new XMLHttpRequest();
-        xhr.open('GET', 'impersonate.php?action=search&ajax=1&kind=system&q=' + encodeURIComponent(q), true);
+        var kind = qInput.getAttribute('data-kind') || 'system';
+        xhr.open('GET', 'impersonate.php?action=search&ajax=1&kind=' + encodeURIComponent(kind) + '&q=' + encodeURIComponent(q), true);
         xhr.onload = function () {
           var data = null;
           try { data = JSON.parse(xhr.responseText); } catch (e) {}

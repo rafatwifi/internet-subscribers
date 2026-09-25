@@ -31,6 +31,18 @@ function user_hold_open_list($pdo)
     return $rows ? $rows : array();
 }
 
+function user_hold_principal_id($pdo)
+{
+    try {
+        $id = (int) $pdo->query(
+            'SELECT id FROM admin_users WHERE role = "admin" AND tenant_id <= 1 AND is_active = 1 ORDER BY id ASC LIMIT 1'
+        )->fetchColumn();
+        return $id;
+    } catch (Exception $e) {
+        return 0;
+    }
+}
+
 function user_hold_owner_id($pdo, $tenantId, $exceptId)
 {
     $st = $pdo->prepare(
@@ -72,10 +84,15 @@ function user_hold_apply_delete($pdo, $userId, $currentId, $dest)
         if ($target <= 0) {
             $target = $currentId;
         }
-    } elseif ($dest === 'owner') {
-        $target = user_hold_owner_id($pdo, $tid, $userId);
+    } elseif ($dest === 'owner' || $dest === 'download') {
+        $target = $currentId > 0 && $currentId !== $userId ? $currentId : 0;
         if ($target <= 0) {
-            return array(false, 'ماكو مدير ثاني حتى أنقل له البيانات');
+            return array(false, 'ماكو حساب مسجّل حتى أنقل له البيانات');
+        }
+    } elseif ($dest === 'principal') {
+        $target = user_hold_principal_id($pdo);
+        if ($target <= 0 || $target === $userId) {
+            return array(false, 'ماكو أدمن رئيسي للبوابة');
         }
     } elseif (strpos((string) $dest, 'agent:') === 0) {
         $target = (int) substr($dest, 6);
@@ -91,8 +108,30 @@ function user_hold_apply_delete($pdo, $userId, $currentId, $dest)
         return array(false, 'حدد وين تروح بيانات المشتركين');
     }
     if ($ids && $target > 0) {
-        $pdo->prepare('UPDATE subscribers SET agent_user_id = :to WHERE tenant_id = :t AND agent_user_id = :from')
-            ->execute(array(':to' => $target, ':t' => $tid, ':from' => $userId));
+        $principalTid = 1;
+        if ($dest === 'principal') {
+            try {
+                $pt = $pdo->prepare('SELECT tenant_id FROM admin_users WHERE id = :id LIMIT 1');
+                $pt->execute(array(':id' => $target));
+                $got = (int) $pt->fetchColumn();
+                if ($got > 0) {
+                    $principalTid = $got;
+                }
+            } catch (Exception $e) {
+            }
+            $pdo->prepare('UPDATE subscribers SET agent_user_id = :to, tenant_id = :nt WHERE tenant_id = :t AND agent_user_id = :from')
+                ->execute(array(':to' => $target, ':nt' => $principalTid, ':t' => $tid, ':from' => $userId));
+            try {
+                $idList = implode(',', array_map('intval', $ids));
+                if ($idList !== '') {
+                    $pdo->exec('UPDATE sas_users_cache SET tenant_id = ' . (int) $principalTid . ' WHERE local_subscriber_id IN (' . $idList . ')');
+                }
+            } catch (Exception $e) {
+            }
+        } else {
+            $pdo->prepare('UPDATE subscribers SET agent_user_id = :to WHERE tenant_id = :t AND agent_user_id = :from')
+                ->execute(array(':to' => $target, ':t' => $tid, ':from' => $userId));
+        }
     }
     if ($hold) {
         $pdo->prepare(

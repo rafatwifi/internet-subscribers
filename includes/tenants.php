@@ -1168,22 +1168,54 @@ function saas_admin_update_user($pdo, $tenantId, $agencyName, $username, $displa
  * حذف وكالة ومستخدمي دخولها وبياناتها
  * @return array(bool, string)
  */
-function saas_admin_delete_user($pdo, $tenantId)
+function saas_admin_delete_user($pdo, $tenantId, $dest = '')
 {
     $tenantId = (int) $tenantId;
+    $dest = (string) $dest;
     if ($tenantId <= 1) {
         return array(false, 'لا يمكن حذف شركة المنصة');
     }
+    if ($dest === '') {
+        return array(false, 'حدد وين تروح بيانات الوكالة');
+    }
+    $moveTo = 0;
+    if (strpos($dest, 'tenant:') === 0) {
+        $moveTo = (int) substr($dest, 7);
+        if ($moveTo <= 1 || $moveTo === $tenantId) {
+            return array(false, 'اختر وكالة غيرها');
+        }
+        $chk = $pdo->prepare('SELECT id FROM tenants WHERE id = :id AND id > 1 LIMIT 1');
+        $chk->execute(array(':id' => $moveTo));
+        if (!(int) $chk->fetchColumn()) {
+            return array(false, 'الوكالة مو موجودة');
+        }
+    } elseif ($dest !== 'hold' && $dest !== 'download') {
+        return array(false, 'حدد وين تروح بيانات الوكالة');
+    }
     try {
         $pdo->beginTransaction();
-        $ids = $pdo->prepare('SELECT id FROM subscribers WHERE tenant_id = :t');
-        $ids->execute(array(':t' => $tenantId));
-        $subIds = $ids->fetchAll(PDO::FETCH_COLUMN);
-        if ($subIds) {
-            $in = implode(',', array_map('intval', $subIds));
-            $pdo->exec('DELETE FROM invoices WHERE subscriber_id IN (' . $in . ')');
-            $pdo->exec('DELETE FROM subscriptions WHERE subscriber_id IN (' . $in . ')');
-            $pdo->exec('DELETE FROM subscribers WHERE tenant_id = ' . $tenantId);
+        if ($moveTo > 0) {
+            saas_attach_parked_agency($pdo, $moveTo, $tenantId);
+        } elseif ($dest === 'hold') {
+            saas_agency_hold_save($pdo, $tenantId);
+        } elseif ($dest === 'download') {
+            $pdo->prepare(
+                'DELETE i FROM invoices i INNER JOIN subscribers s ON s.id = i.subscriber_id WHERE s.tenant_id = :t'
+            )->execute(array(':t' => $tenantId));
+            $pdo->prepare(
+                'DELETE sub FROM subscriptions sub INNER JOIN subscribers s ON s.id = sub.subscriber_id WHERE s.tenant_id = :t'
+            )->execute(array(':t' => $tenantId));
+            $pdo->prepare('DELETE FROM subscribers WHERE tenant_id = :t')->execute(array(':t' => $tenantId));
+            try {
+                $pdo->prepare('DELETE FROM sas_users_cache WHERE tenant_id = :t')->execute(array(':t' => $tenantId));
+            } catch (Exception $eCache) {
+            }
+        }
+        if ($dest === 'hold') {
+            $pdo->prepare('DELETE FROM admin_users WHERE tenant_id = :t')->execute(array(':t' => $tenantId));
+            $pdo->prepare('DELETE FROM tenants WHERE id = :id AND id > 1')->execute(array(':id' => $tenantId));
+            $pdo->commit();
+            return array(true, 'تم حذف الوكالة والبيانات محفوظة حتى تختارها عند إضافة وكيل');
         }
         foreach (array('tenant_sas_accounts', 'agent_card_prices', 'agent_card_stock', 'agent_card_transfers', 'agent_card_payments') as $table) {
             try {
@@ -1202,6 +1234,130 @@ function saas_admin_delete_user($pdo, $tenantId)
         }
         return array(false, 'تعذر الحذف');
     }
+}
+
+function saas_agency_hold_ensure($pdo)
+{
+    $pdo->exec(
+        'CREATE TABLE IF NOT EXISTS agency_data_holds (
+            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            old_tenant_id INT UNSIGNED NOT NULL,
+            username VARCHAR(80) NOT NULL DEFAULT "",
+            display_name VARCHAR(120) NOT NULL DEFAULT "",
+            restored_tenant_id INT UNSIGNED NULL DEFAULT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            KEY idx_adh_old (old_tenant_id),
+            KEY idx_adh_open (restored_tenant_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+    );
+}
+
+function saas_agency_hold_save($pdo, $tenantId)
+{
+    saas_agency_hold_ensure($pdo);
+    $tenantId = (int) $tenantId;
+    if ($tenantId <= 1) {
+        return;
+    }
+    $st = $pdo->prepare(
+        'SELECT t.name, u.username, u.display_name
+         FROM tenants t
+         LEFT JOIN admin_users u ON u.id = t.owner_user_id
+         WHERE t.id = :id LIMIT 1'
+    );
+    $st->execute(array(':id' => $tenantId));
+    $row = $st->fetch(PDO::FETCH_ASSOC);
+    $username = $row && !empty($row['username']) ? (string) $row['username'] : ($row ? (string) $row['name'] : '');
+    $display = $row && !empty($row['display_name']) ? (string) $row['display_name'] : $username;
+    $open = $pdo->prepare(
+        'SELECT id FROM agency_data_holds WHERE old_tenant_id = :t AND restored_tenant_id IS NULL LIMIT 1'
+    );
+    $open->execute(array(':t' => $tenantId));
+    if ($open->fetchColumn()) {
+        $pdo->prepare(
+            'UPDATE agency_data_holds SET username = :u, display_name = :d WHERE old_tenant_id = :t AND restored_tenant_id IS NULL'
+        )->execute(array(':u' => $username, ':d' => $display, ':t' => $tenantId));
+        return;
+    }
+    $pdo->prepare(
+        'INSERT INTO agency_data_holds (old_tenant_id, username, display_name) VALUES (:t, :u, :d)'
+    )->execute(array(':t' => $tenantId, ':u' => $username, ':d' => $display));
+}
+
+function saas_parked_agencies($pdo)
+{
+    saas_agency_hold_ensure($pdo);
+    $named = array();
+    $st = $pdo->query(
+        'SELECT old_tenant_id, username, display_name FROM agency_data_holds WHERE restored_tenant_id IS NULL ORDER BY id DESC'
+    );
+    foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $row) {
+        $oid = (int) $row['old_tenant_id'];
+        $named[$oid] = $row;
+    }
+    $out = array();
+    foreach (array_keys($named) as $oid) {
+        $subs = 0;
+        $cache = 0;
+        try {
+            $c = $pdo->prepare('SELECT COUNT(*) FROM subscribers WHERE tenant_id = :t');
+            $c->execute(array(':t' => $oid));
+            $subs = (int) $c->fetchColumn();
+        } catch (Exception $e) {
+        }
+        try {
+            $c = $pdo->prepare('SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = :t');
+            $c->execute(array(':t' => $oid));
+            $cache = (int) $c->fetchColumn();
+        } catch (Exception $e) {
+        }
+        $username = isset($named[$oid]['username']) ? (string) $named[$oid]['username'] : '';
+        $display = isset($named[$oid]['display_name']) ? (string) $named[$oid]['display_name'] : '';
+        if ($username === '' && $display === '') {
+            continue;
+        }
+        $out[] = array(
+            'old_tenant_id' => $oid,
+            'username' => $username,
+            'display_name' => $display,
+            'subscribers' => $subs,
+            'cache' => $cache,
+        );
+    }
+    return $out;
+}
+
+function saas_attach_parked_agency($pdo, $newTenantId, $oldTenantId)
+{
+    $newTenantId = (int) $newTenantId;
+    $oldTenantId = (int) $oldTenantId;
+    if ($newTenantId <= 1 || $oldTenantId <= 1 || $newTenantId === $oldTenantId) {
+        return false;
+    }
+    $tables = array(
+        'subscribers',
+        'sas_users_cache',
+        'tenant_sas_accounts',
+        'agent_card_prices',
+        'agent_card_stock',
+        'agent_card_transfers',
+        'agent_card_payments',
+    );
+    foreach ($tables as $table) {
+        try {
+            $pdo->prepare('UPDATE `' . $table . '` SET tenant_id = :to WHERE tenant_id = :from')
+                ->execute(array(':to' => $newTenantId, ':from' => $oldTenantId));
+        } catch (Exception $e) {
+        }
+    }
+    try {
+        saas_agency_hold_ensure($pdo);
+        $pdo->prepare(
+            'UPDATE agency_data_holds SET restored_tenant_id = :n WHERE old_tenant_id = :o AND restored_tenant_id IS NULL'
+        )->execute(array(':n' => $newTenantId, ':o' => $oldTenantId));
+    } catch (Exception $e) {
+    }
+    return true;
 }
 
 function saas_mark_expired_tenants($pdo)

@@ -93,7 +93,18 @@ $sql = 'SELECT s.*,
  ORDER BY is_rent_active ASC, s.name ASC';
 $stmt = $pdo->prepare($sql);
 $stmt->execute($params);
-$rows = $stmt->fetchAll();
+$rows = array();
+$seenRent = array();
+foreach ($stmt->fetchAll() as $rentRow) {
+    $rid = isset($rentRow['id']) ? (int) $rentRow['id'] : 0;
+    if ($rid > 0 && isset($seenRent[$rid])) {
+        continue;
+    }
+    if ($rid > 0) {
+        $seenRent[$rid] = true;
+    }
+    $rows[] = $rentRow;
+}
 $settingsRental = settings_load();
 $fee = rental_fee_amount($settingsRental);
 $totalRent = count($rows);
@@ -197,7 +208,7 @@ render_header($lang === 'en' ? 'Rentals' : 'الإيجار', 'rentals');
     <div class="rental-print-head">
         <div>
             <h2><?php echo e($lang === 'en' ? 'Rental towers' : 'أبراج الإيجار'); ?>
-                <span style="font-weight:800;margin-right:8px"><?php echo (int) $totalRent; ?>\<?php echo (int) $activeRent; ?></span>
+                <span style="font-weight:800;margin-right:8px"><?php echo (int) $activeRent; ?>\<?php echo (int) $totalRent; ?></span>
             </h2>
             <p class="meta" style="margin-top:-4px;font-weight:600">
                 <?php echo e($lang === 'en'

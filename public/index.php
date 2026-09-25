@@ -258,25 +258,51 @@ $activatedMonth = (int) $pdo->query(
 )->fetchColumn();
 // رأس المال = الربح + الديون
 $capitalMonth = $profitMonth + $totalDebt;
-// نفس منطق صفحة الإيجار: اشتراك محلي نشط أو صلاحية SAS سارية
-$rentalJoin = ' FROM subscribers s
-     LEFT JOIN sas_users_cache c ON c.local_subscriber_id = s.id
-     LEFT JOIN sas_users_cache cu ON CONVERT(cu.username USING utf8mb4) COLLATE utf8mb4_unicode_ci
-        = CONVERT(s.sas_username USING utf8mb4) COLLATE utf8mb4_unicode_ci
+// نفس مشتركي جدول الإيجار، بدون تكرار صفوف الساس
+$tidRent = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+$rentalFrom = ' FROM subscribers s
      WHERE (s.rental_enabled = 1 OR s.rental_enabled = "1")
        AND s.rental_device_id IS NOT NULL
-       AND TRIM(s.rental_device_id) <> ""' . $agentScope;
-$rentalActiveSql = '(EXISTS (
-         SELECT 1 FROM subscriptions sub
-         WHERE sub.subscriber_id = s.id AND sub.status = "active" AND sub.end_date >= CURDATE()
-       ) OR (COALESCE(c.enabled, cu.enabled) = 1
-            AND COALESCE(c.expire_at, cu.expire_at) IS NOT NULL
-            AND COALESCE(c.expire_at, cu.expire_at) >= NOW()))';
-$rentalTotalCount = (int) $pdo->query('SELECT COUNT(*)' . $rentalJoin)->fetchColumn();
+       AND TRIM(s.rental_device_id) <> ""
+       AND (
+         s.tenant_id = ' . $tidRent . '
+         OR EXISTS (
+            SELECT 1 FROM sas_users_cache c2
+            WHERE c2.tenant_id = ' . $tidRent . '
+              AND (
+                c2.local_subscriber_id = s.id
+                OR (
+                    s.sas_username IS NOT NULL AND s.sas_username <> ""
+                    AND CONVERT(c2.username USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                        = CONVERT(s.sas_username USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                )
+              )
+         )
+       )' . $agentScope;
+$rentalTotalCount = (int) $pdo->query('SELECT COUNT(DISTINCT s.id)' . $rentalFrom)->fetchColumn();
 $rentalActiveCount = (int) $pdo->query(
-    'SELECT COUNT(*)' . $rentalJoin . ' AND ' . $rentalActiveSql
+    'SELECT COUNT(DISTINCT s.id)' . $rentalFrom . ' AND (
+        EXISTS (
+            SELECT 1 FROM subscriptions sub
+            WHERE sub.subscriber_id = s.id AND sub.status = "active" AND sub.end_date >= CURDATE()
+        )
+        OR EXISTS (
+            SELECT 1 FROM sas_users_cache c
+            WHERE c.tenant_id = ' . $tidRent . '
+              AND c.enabled = 1
+              AND c.expire_at IS NOT NULL
+              AND c.expire_at >= NOW()
+              AND (
+                c.local_subscriber_id = s.id
+                OR (
+                    s.sas_username IS NOT NULL AND s.sas_username <> ""
+                    AND CONVERT(c.username USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                        = CONVERT(s.sas_username USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                )
+              )
+        )
+    )'
 )->fetchColumn();
-$rentalInactiveCount = max(0, $rentalTotalCount - $rentalActiveCount);
 
 // حالة الاشتراكات (مشتركين)
 $activeOnlineCount = (int) $pdo->query(
@@ -370,6 +396,19 @@ if ($sasReadyDash) {
     if (isset($_SESSION['sas_latency_ms']) && $_SESSION['sas_latency_ms'] !== null && $_SESSION['sas_latency_ms'] !== '') {
         $sasBalanceDisp = number_format((float) $_SESSION['sas_latency_ms'], 0) . ' ms';
     }
+} else {
+    $offTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($offTid > 1) {
+    try {
+        $sasCounts['total'] = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = ' . $offTid)->fetchColumn();
+        $sasCounts['online'] = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = ' . $offTid . ' AND is_online = 1')->fetchColumn();
+        $sasCounts['active'] = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = ' . $offTid . ' AND enabled = 1 AND expire_at IS NOT NULL AND expire_at >= NOW()')->fetchColumn();
+        $sasCounts['expired'] = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = ' . $offTid . ' AND enabled = 1 AND expire_at IS NOT NULL AND expire_at < NOW()')->fetchColumn();
+        $sasCounts['soon'] = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = ' . $offTid . ' AND enabled = 1 AND expire_at > NOW() AND expire_at <= DATE_ADD(NOW(), INTERVAL 3 DAY)')->fetchColumn();
+        $sasCounts['today'] = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = ' . $offTid . ' AND enabled = 1 AND DATE(expire_at) = CURDATE()')->fetchColumn();
+    } catch (Exception $e) {
+    }
+    }
 }
 
 if (!function_exists('dash_sas_box')) {
@@ -407,13 +446,11 @@ $dashSasReady = function_exists('sas_is_ready') && sas_is_ready($config);
 $isPlatformDash = function_exists('is_super_admin_user') && is_super_admin_user();
 if ($dashTid > 1 && !$dashSasReady):
 ?>
-<div class="alert alert-error" style="margin:12px 14px;font-weight:700">
+<a class="alert alert-error" href="settings.php?tab=sas" style="display:block;margin:12px 14px;font-weight:700;text-decoration:none">
     <?php echo e($isEn
-        ? 'No SAS reseller linked yet — add your account to see subscribers.'
-        : 'ما مربوط حساب ريسيلر ساس بعد — أضف حسابك حتى تطلع المشتركين.'); ?>
-    —
-    <a href="settings.php?tab=sas"><?php echo e($isEn ? 'Add SAS account' : 'إضافة حساب ساس'); ?></a>
-</div>
+        ? 'Offline data. SAS is not linked — tap here to connect it, then sync.'
+        : 'البيانات أوفلاين. الساس مو مربوط — اضغط هنا لربط الحساب ثم المزامنة.'); ?>
+</a>
 <?php
 endif;
 
@@ -457,18 +494,16 @@ if ($isPlatformDash && function_exists('platform_admin_dashboard_stats')):
 .sas-box.tone-lime { --c1: #a3e635; --c2: #4d7c0f; }
 .sas-box.tone-purple { --c1: #fb923c; --c2: #c2410c; }
 .sas-box.tone-aqua { --c1: #22d3ee; --c2: #0e7490; }
-.plat-ping-table { width:100%; border-collapse:collapse; font-size:13px; }
-.plat-ping-table th, .plat-ping-table td { padding:8px 10px; border-bottom:1px solid #e2e8f0; text-align:start; }
 </style>
 <div class="sas-dash" style="padding:12px 14px">
     <h2 style="font-size:16px;margin:0 0 12px"><?php echo e($isEn ? 'Platform overview' : 'لوحة المنصة'); ?></h2>
     <div class="sas-boxes">
     <?php
     $en = $isEn;
-    dash_sas_box('saas_agents.php', 'tone-blue', $en ? 'System users' : 'مستخدمي النظام', $en ? 'Agencies' : 'الوكالات', (string) (int) $pad['users_total'], '👥');
-    dash_sas_box('saas_agents.php', 'tone-green', $en ? 'Active' : 'الفعالين', '', (string) (int) $pad['users_active'], '✓');
-    dash_sas_box('saas_agents.php', 'tone-red', $en ? 'Expired' : 'منتهية الاشتراك', '', (string) (int) $pad['users_expired'], '⏱');
-    dash_sas_box('saas_agents.php', 'tone-yellow', $en ? 'Trial' : 'تجريبيين', $en ? 'Pending: ' . (int) $pad['users_pending'] : ('بانتظار: ' . (int) $pad['users_pending']), (string) (int) $pad['users_trial'], '🧪');
+    dash_sas_box('saas_agents.php', 'tone-blue', $en ? 'Users' : 'عدد المستخدمين', '', (string) (int) $pad['users_total'], '👥');
+    dash_sas_box('saas_agents.php?view=pending', 'tone-yellow', $en ? 'Registration requests' : 'طلبات التسجيل', '', (string) (int) $pad['users_pending'], '✉');
+    dash_sas_box('saas_agents.php?view=active', 'tone-green', $en ? 'Active' : 'الفعالين', '', (string) (int) $pad['users_active'], '✓');
+    dash_sas_box('saas_agents.php?view=expired', 'tone-red', $en ? 'Expired' : 'المنتهين', '', (string) (int) $pad['users_expired'], '⏱');
     dash_sas_box('settings.php', 'tone-navy', $en ? 'System version' : 'إصدار النظام', '', 'v' . (string) $pad['version'], '📦');
     dash_sas_box('settings.php', 'tone-lime', $en ? 'Google bank' : 'البنك على كوكل', $pad['google_ok'] ? ($en ? 'OK' : 'شغال') : ($en ? 'Down' : 'توقف'), $fmtMs($pad['google_ms']), '🌐');
     dash_sas_box('index.php', 'tone-teal', $en ? 'Date & time' : 'الوقت والتاريخ', '', (string) $pad['datetime'], '🕒');
@@ -476,34 +511,6 @@ if ($isPlatformDash && function_exists('platform_admin_dashboard_stats')):
     dash_sas_box('saas_agents.php', 'tone-aqua', $en ? 'Received' : 'المستلم', '', money_format_iqd($pad['received'], $config['currency']), '💵');
     dash_sas_box('saas_agents.php', 'tone-red', $en ? 'Debt' : 'الدين', '', money_format_iqd($pad['debt'], $config['currency']), '📄');
     ?>
-    </div>
-    <div class="panel" style="padding:12px 14px;margin:0">
-        <h3 style="margin:0 0 10px;font-size:15px"><?php echo e($isEn ? 'Reseller ping per company' : 'البنك على الريسيلر لكل شركة'); ?></h3>
-        <?php if (empty($pad['companies'])): ?>
-            <p class="meta"><?php echo e($isEn ? 'Add companies (name + host) first.' : 'أضف شركات (اسم + هوست) أولاً من صفحة الشركات.'); ?>
-                — <a href="companies.php"><?php echo e($isEn ? 'Companies' : 'الشركات'); ?></a></p>
-        <?php else: ?>
-        <table class="plat-ping-table">
-            <thead>
-            <tr>
-                <th><?php echo e($isEn ? 'Company' : 'الشركة'); ?></th>
-                <th><?php echo e($isEn ? 'Host' : 'الهوست'); ?></th>
-                <th><?php echo e($isEn ? 'Ping' : 'البنك'); ?></th>
-                <th><?php echo e($isEn ? 'Status' : 'الحالة'); ?></th>
-            </tr>
-            </thead>
-            <tbody>
-            <?php foreach ($pad['companies'] as $co): ?>
-                <tr>
-                    <td><?php echo e($co['name']); ?></td>
-                    <td class="ltr"><?php echo e($co['host']); ?></td>
-                    <td class="ltr"><?php echo e($fmtMs($co['ms'])); ?></td>
-                    <td><?php echo !empty($co['ok']) ? e($isEn ? 'OK' : 'شغال') : e($isEn ? 'Fail' : 'فشل'); ?></td>
-                </tr>
-            <?php endforeach; ?>
-            </tbody>
-        </table>
-        <?php endif; ?>
     </div>
 </div>
 <?php
@@ -744,7 +751,7 @@ dash_sas_box('reports.php', 'tone-green', $en ? 'Profit' : 'الربح', '', mon
 dash_sas_box('reports.php', 'tone-teal', $en ? 'Capital' : 'رأس المال', $en ? 'Profit + debts' : 'الربح + الديون', money_format_iqd($capitalMonth, $config['currency']), '🏦');
 dash_sas_box('subscriptions.php', 'tone-purple', $en ? 'Sales' : 'المبيعات', '', money_format_iqd($salesMonth, $config['currency']), '🧾');
 dash_sas_box('subscriptions.php', 'tone-aqua', $en ? 'Activations' : 'تفعيلات الشهر', '', (string) (int) $activatedMonth, '⚡');
-dash_sas_box('rentals.php', 'tone-navy', $en ? 'Rental towers' : 'أبراج الإيجار', $en ? 'Total \\ active' : 'الكل \\ النشط', ((int) $rentalTotalCount) . '\\' . (int) $rentalActiveCount, '📡');
+dash_sas_box('rentals.php', 'tone-navy', $en ? 'Rental towers' : 'أبراج الإيجار', $en ? 'Active of total' : 'فعال من أصل الكل', ((int) $rentalActiveCount) . '\\' . (int) $rentalTotalCount, '📡');
 if ($sasReadyDash) {
     $cardTotal = 0;
     $cardParts = array();

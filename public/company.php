@@ -15,8 +15,12 @@ if (!$row) {
     redirect('index.php');
 }
 
-$canEdit = function_exists('user_can') && (user_can('settings') || user_can('users'))
-    && !(function_exists('is_agent_user') && is_agent_user());
+$isPortalStaff = function_exists('is_super_admin_user') && is_super_admin_user();
+$isAgentView = !$isPortalStaff;
+$canEdit = $isPortalStaff && function_exists('user_can') && (user_can('settings') || user_can('users'));
+if ($isAgentView) {
+    $tid = 1;
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canEdit) {
     if (!verify_csrf(post('csrf'))) {
@@ -61,7 +65,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canEdit) {
     redirect('company.php');
 }
 
-$row = tenant_row($pdo, $tid);
+$row = function_exists('tenant_row') ? tenant_row($pdo, $tid) : null;
+if (!$row || !is_array($row)) {
+    $row = array('name' => '', 'company_logo' => '', 'company_about' => '', 'contact_phone' => '', 'company_email' => '', 'company_address' => '', 'company_map_url' => '');
+}
+if ($isAgentView && trim((string) $row['name']) === '' && !empty($config['site_name'])) {
+    $row['name'] = (string) $config['site_name'];
+}
 $logoUrl = !empty($row['company_logo']) ? (string) $row['company_logo'] : '';
 if ($logoUrl === '' && function_exists('brand_icon_url') && $tid <= 1) {
     $logoUrl = brand_icon_url($settings);
@@ -91,6 +101,75 @@ render_header($isEn ? 'Company' : 'عن الشركة', 'company');
 }
 </style>
 
+<?php if ($isAgentView): ?>
+<style>
+.portal-co {
+  position: relative;
+  overflow: hidden;
+  border-radius: 22px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 18px 40px rgba(15, 23, 42, .08);
+}
+.portal-co-band {
+  height: 148px;
+  background:
+    radial-gradient(circle at 12% 20%, rgba(255,255,255,.35), transparent 42%),
+    linear-gradient(120deg, #0f766e 0%, #155e75 48%, #1e3a5f 100%);
+}
+.portal-co-body { padding: 0 28px 28px; margin-top: -52px; }
+.portal-co-logo {
+  width: 104px; height: 104px; border-radius: 26px; object-fit: cover;
+  background: #fff; border: 4px solid #fff;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, .18);
+}
+.portal-co-logo.ph {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 36px; font-weight: 800; color: #0f766e;
+}
+.portal-co h2 { margin: 14px 0 6px; font-size: 1.7rem; color: #0f172a; }
+.portal-co .kicker { margin: 0; color: #0f766e; font-weight: 800; font-size: 13px; letter-spacing: .04em; }
+.portal-co-about {
+  margin: 14px 0 0; line-height: 1.85; color: #334155; white-space: pre-wrap; font-size: 15px;
+}
+.portal-co-pills { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+.portal-co-pills a, .portal-co-pills span {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 12px; border-radius: 999px;
+  background: #f0fdfa; color: #115e59; text-decoration: none; font-weight: 700; font-size: 13px;
+  border: 1px solid #99f6e4;
+}
+</style>
+<div class="portal-co">
+    <div class="portal-co-band"></div>
+    <div class="portal-co-body">
+        <?php if ($logoUrl !== ''): ?>
+            <img class="portal-co-logo" src="<?php echo e($logoUrl); ?>" alt="">
+        <?php else: ?>
+            <div class="portal-co-logo ph"><?php echo e(function_exists('mb_substr') ? mb_substr(isset($row['name']) ? $row['name'] : '?', 0, 1, 'UTF-8') : substr(isset($row['name']) ? $row['name'] : '?', 0, 1)); ?></div>
+        <?php endif; ?>
+        <p class="kicker"><?php echo e($isEn ? 'The portal' : 'البوابة'); ?></p>
+        <h2><?php echo e(isset($row['name']) ? $row['name'] : ''); ?></h2>
+        <?php if (!empty($row['company_about'])): ?>
+            <p class="portal-co-about"><?php echo e($row['company_about']); ?></p>
+        <?php endif; ?>
+        <div class="portal-co-pills">
+            <?php if (!empty($row['contact_phone'])): ?>
+                <span class="ltr"><?php echo e($row['contact_phone']); ?></span>
+            <?php endif; ?>
+            <?php if (!empty($row['company_email'])): ?>
+                <span class="ltr"><?php echo e($row['company_email']); ?></span>
+            <?php endif; ?>
+            <?php if (!empty($row['company_address'])): ?>
+                <span><?php echo e($row['company_address']); ?></span>
+            <?php endif; ?>
+            <?php if (!empty($row['company_map_url'])): ?>
+                <a class="ltr" target="_blank" rel="noopener" href="<?php echo e($row['company_map_url']); ?>"><?php echo e($isEn ? 'Map' : 'الخريطة'); ?></a>
+            <?php endif; ?>
+        </div>
+    </div>
+</div>
+<?php else: ?>
 <div class="panel">
     <div class="company-hero">
         <?php if ($logoUrl !== ''): ?>
@@ -125,6 +204,7 @@ render_header($isEn ? 'Company' : 'عن الشركة', 'company');
         <p class="meta"><?php echo e($isEn ? 'No company profile yet.' : 'ماكو نبذة عن الشركة بعد.'); ?></p>
     <?php endif; ?>
 </div>
+<?php endif; ?>
 
 <?php if ($canEdit): ?>
 <div class="panel">

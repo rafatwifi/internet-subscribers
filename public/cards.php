@@ -11,7 +11,7 @@ ensure_card_accounting_tables($pdo);
 $isEn = ($lang === 'en');
 $me = current_admin();
 $meId = $me ? (int) $me['id'] : 0;
-$canTransfer = (user_can('cards') || user_can('card_accounting')) && !(function_exists('is_agent_user') && is_agent_user());
+$canTransfer = function_exists('is_accountant_user') && is_accountant_user();
 $sasReady = function_exists('sas_is_ready') && sas_is_ready($config);
 $agents = list_agent_users($pdo, true);
 $tidCards = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
@@ -19,6 +19,24 @@ $agents = array_values(array_filter($agents, function ($a) use ($tidCards) {
     $at = isset($a['tenant_id']) ? (int) $a['tenant_id'] : 1;
     return $at === $tidCards;
 }));
+try {
+    $gmCards = $pdo->prepare(
+        'SELECT id, username, display_name, role, is_active, tenant_id
+         FROM admin_users WHERE role = "group_manager" AND tenant_id = :t AND is_active = 1
+         ORDER BY display_name ASC'
+    );
+    $gmCards->execute(array(':t' => $tidCards));
+    $haveAg = array();
+    foreach ($agents as $ag0) {
+        $haveAg[(int) $ag0['id']] = true;
+    }
+    foreach ($gmCards->fetchAll() as $gm0) {
+        if (empty($haveAg[(int) $gm0['id']])) {
+            $agents[] = $gm0;
+        }
+    }
+} catch (Exception $e) {
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
     if (!verify_csrf(post('csrf'))) {
@@ -32,30 +50,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
         $profileId = (int) post('profile_id', '0');
         $profileName = trim((string) post('profile_name', ''));
         $qty = (int) post('qty', '0');
-        $wholesale = (float) post('wholesale_price', '0');
-        $agentPrice = (float) post('agent_price', '0');
         $note = trim((string) post('note', ''));
-
-        if (is_accountant_user()) {
-            $linked = accountant_linked_agent_id();
-            if ($linked > 0) {
-                if ($toAgentId <= 0) {
-                    $toAgentId = $linked;
-                }
-            }
-        }
-
-        // أسعار من كتالوج الوكيل إن تُركت 0
-        if (($wholesale <= 0 || $agentPrice <= 0) && function_exists('agent_card_price_get') && $toAgentId > 0) {
+        $wholesale = 0;
+        $agentPrice = 0;
+        if (function_exists('agent_card_price_get') && $toAgentId > 0 && $profileName !== '') {
             $pr = agent_card_price_get($pdo, $toAgentId, $profileId, $profileName);
             if ($pr) {
-                if ($wholesale <= 0) {
-                    $wholesale = (float) $pr['wholesale_price'];
-                }
-                if ($agentPrice <= 0) {
-                    $agentPrice = (float) $pr['agent_price'];
-                }
+                $wholesale = (float) $pr['wholesale_price'];
+                $agentPrice = (float) $pr['agent_price'];
             }
+        }
+        if ($wholesale <= 0 && $agentPrice <= 0) {
+            flash('error', $isEn ? 'Set this agent package price first' : 'لازم الأدمن يسعّر هالفئة لهذا الوكيل أولاً');
+            redirect('cards.php#card-transfer');
         }
 
         list($ok, $code) = transfer_cards(
@@ -598,72 +605,79 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
     <?php if ($canTransfer): ?>
     <div class="xfer-panel" id="card-transfer">
         <h2><?php echo e($isEn ? 'Card transfer' : 'تحويل كروت'); ?></h2>
-        <?php if (user_can('users') || user_can('cards')): ?>
-            <p class="meta" style="margin:0 0 10px">
-                <a href="agent_prices.php"><?php echo e($isEn ? 'Manage agent card prices' : 'إدارة تسعير كروت الوكيل'); ?></a>
-                — <?php echo e($isEn ? 'prices auto-fill when you pick agent + package' : 'الأسعار تتعبّى تلقائياً عند اختيار الوكيل والباقة'); ?>
-            </p>
-        <?php endif; ?>
+        <p class="meta" style="margin:0 0 10px"><?php echo e($isEn
+            ? 'Amount is taken from the agent price set by the admin.'
+            : 'المبلغ ينحسب من تسعيرة الوكيل اللي حاطها الأدمن.'); ?></p>
+        <?php
+        $fromId = $meId;
+        $fromLabel = $me && !empty($me['display_name']) ? (string) $me['display_name'] : ($me ? (string) $me['username'] : '');
+        if ($tidCards > 1) {
+            try {
+                $ownSt = $pdo->prepare('SELECT t.owner_user_id, t.name, u.display_name, u.username
+                    FROM tenants t LEFT JOIN admin_users u ON u.id = t.owner_user_id WHERE t.id = :id LIMIT 1');
+                $ownSt->execute(array(':id' => $tidCards));
+                $ownRow = $ownSt->fetch();
+                if ($ownRow && (int) $ownRow['owner_user_id'] > 0) {
+                    $fromId = (int) $ownRow['owner_user_id'];
+                    $fromLabel = trim((string) $ownRow['display_name']) !== '' ? $ownRow['display_name'] : (string) $ownRow['username'];
+                } elseif ($ownRow && trim((string) $ownRow['name']) !== '') {
+                    $fromLabel = (string) $ownRow['name'];
+                }
+            } catch (Exception $e) {
+            }
+        }
+        $toAgents = $agents;
+        usort($toAgents, function ($a, $b) {
+            $an = isset($a['display_name']) ? (string) $a['display_name'] : '';
+            $bn = isset($b['display_name']) ? (string) $b['display_name'] : '';
+            return strcasecmp($an, $bn);
+        });
+        ?>
         <form method="post" id="cardXferForm">
             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
             <input type="hidden" name="action" value="transfer">
+            <input type="hidden" name="from_agent_id" value="<?php echo (int) $fromId; ?>">
             <div class="xfer-grid">
                 <div>
-                    <label><?php echo e($isEn ? 'From agent' : 'من وكيل'); ?></label>
-                    <select name="from_agent_id">
-                        <option value="0"><?php echo e($isEn ? '— warehouse / none —' : '— مخزن / بدون —'); ?></option>
-                        <?php foreach ($agents as $ag): ?>
-                            <option value="<?php echo (int) $ag['id']; ?>"><?php echo e($ag['display_name']); ?></option>
-                        <?php endforeach; ?>
-                    </select>
+                    <label><?php echo e($isEn ? 'From' : 'من'); ?></label>
+                    <input value="<?php echo e($fromLabel); ?>" readonly>
                 </div>
                 <div>
-                    <label><?php echo e($isEn ? 'To agent' : 'إلى وكيل'); ?><?php echo is_accountant_user() && $scopeAgentId ? ' *' : ''; ?></label>
-                    <select name="to_agent_id"<?php echo is_accountant_user() && $scopeAgentId ? ' required' : ''; ?>>
-                        <?php if (!is_accountant_user() || !$scopeAgentId): ?>
-                            <option value="0"><?php echo e($isEn ? '— select —' : '— اختر —'); ?></option>
-                        <?php endif; ?>
-                        <?php foreach ($agents as $ag):
+                    <label><?php echo e($isEn ? 'To agent' : 'إلى'); ?></label>
+                    <select name="to_agent_id" required>
+                        <option value=""><?php echo e($isEn ? '— select —' : '— اختر الوكيل —'); ?></option>
+                        <?php foreach ($toAgents as $ag):
                             $aid = (int) $ag['id'];
-                            if (is_accountant_user() && $scopeAgentId && $aid !== $scopeAgentId) {
+                            if ($aid === (int) $fromId) {
                                 continue;
                             }
+                            $opt = trim((string) $ag['display_name']) !== '' ? $ag['display_name'] : $ag['username'];
                             ?>
-                            <option value="<?php echo $aid; ?>"<?php echo ($scopeAgentId === $aid) ? ' selected' : ''; ?>>
-                                <?php echo e($ag['display_name']); ?>
-                            </option>
+                            <option value="<?php echo $aid; ?>"><?php echo e($opt); ?></option>
                         <?php endforeach; ?>
                     </select>
                 </div>
                 <div>
-                    <label><?php echo e($isEn ? 'Package / category' : 'الفئة / الباقة'); ?></label>
-                    <input name="profile_name" list="cardProfileList" required placeholder="<?php echo e($isEn ? 'Package name' : 'اسم الفئة'); ?>">
-                    <datalist id="cardProfileList">
+                    <label><?php echo e($isEn ? 'Card type' : 'نوع الكارت'); ?></label>
+                    <select name="profile_name" id="xferProfileName" required>
+                        <option value=""><?php echo e($isEn ? '— select —' : '— اختر —'); ?></option>
                         <?php foreach ($groups as $g0):
                             $gn = isset($g0['name']) ? (string) $g0['name'] : '';
                             if ($gn === '') { continue; }
                             $gpid = isset($g0['profile_id']) ? (int) $g0['profile_id'] : 0;
                             ?>
-                            <option value="<?php echo e($gn); ?>" data-pid="<?php echo $gpid; ?>"></option>
+                            <option value="<?php echo e($gn); ?>" data-pid="<?php echo $gpid; ?>"><?php echo e($gn); ?></option>
                         <?php endforeach; ?>
-                    </datalist>
+                    </select>
                     <input type="hidden" name="profile_id" id="xferProfileId" value="0">
                 </div>
                 <div>
-                    <label><?php echo e($isEn ? 'Quantity' : 'الكمية'); ?></label>
+                    <label><?php echo e($isEn ? 'Quantity' : 'العدد'); ?></label>
                     <input name="qty" type="number" min="1" step="1" required value="1">
                 </div>
-                <div>
-                    <label><?php echo e($isEn ? 'Wholesale price' : 'سعر الجملة'); ?></label>
-                    <input name="wholesale_price" type="number" min="0" step="0.01" value="0">
-                </div>
-                <div>
-                    <label><?php echo e($isEn ? 'Agent price' : 'سعر الوكيل'); ?></label>
-                    <input name="agent_price" type="number" min="0" step="0.01" value="0">
-                </div>
                 <div style="grid-column: 1 / -1">
-                    <label><?php echo e($isEn ? 'Note (optional)' : 'ملاحظة (اختياري)'); ?></label>
-                    <input name="note" maxlength="255" placeholder="<?php echo e($isEn ? 'Transfer note…' : 'ملاحظة التحويل…'); ?>">
+                    <label><?php echo e($isEn ? 'Note' : 'ملاحظات'); ?></label>
+                    <input name="note" maxlength="255" placeholder="<?php echo e($isEn ? 'Note…' : 'ملاحظات…'); ?>">
                 </div>
             </div>
             <div class="actions" style="margin-top:12px">
@@ -1077,54 +1091,13 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
   // مزامنة خلفية بعد الرسم الفوري من الكاش
   setTimeout(function () { sync(false); }, 200);
 
-  var profileInput = document.querySelector('input[name="profile_name"]');
+  var profileInput = document.getElementById('xferProfileName');
   var profileIdInput = document.getElementById('xferProfileId');
-  var profileList = document.getElementById('cardProfileList');
-  var toAgentSel = document.querySelector('select[name="to_agent_id"]');
-  var wholesaleInput = document.querySelector('input[name="wholesale_price"]');
-  var agentPriceInput = document.querySelector('input[name="agent_price"]');
 
-  function fillAgentPrices() {
-    if (!toAgentSel || !wholesaleInput || !agentPriceInput) return;
-    var aid = parseInt(toAgentSel.value || '0', 10) || 0;
-    var pname = profileInput ? (profileInput.value || '') : '';
-    var pid = profileIdInput ? (profileIdInput.value || '0') : '0';
-    if (aid <= 0 || pname === '') return;
-    var url = 'cards.php?ajax=agent_price&agent=' + encodeURIComponent(aid)
-      + '&profile_id=' + encodeURIComponent(pid)
-      + '&profile_name=' + encodeURIComponent(pname);
-    fetch(url, { credentials: 'same-origin' })
-      .then(function (r) { return r.json(); })
-      .then(function (d) {
-        if (!d || !d.ok) return;
-        if (parseFloat(wholesaleInput.value || '0') <= 0) {
-          wholesaleInput.value = d.wholesale_price;
-        }
-        if (parseFloat(agentPriceInput.value || '0') <= 0) {
-          agentPriceInput.value = d.agent_price;
-        }
-      }).catch(function () {});
-  }
-
-  if (profileInput && profileIdInput && profileList) {
+  if (profileInput && profileIdInput) {
     profileInput.addEventListener('change', function () {
-      var val = profileInput.value || '';
-      profileIdInput.value = '0';
-      var opts = profileList.querySelectorAll('option');
-      for (var i = 0; i < opts.length; i++) {
-        if (opts[i].value === val) {
-          profileIdInput.value = opts[i].getAttribute('data-pid') || '0';
-          break;
-        }
-      }
-      fillAgentPrices();
-    });
-  }
-  if (toAgentSel) {
-    toAgentSel.addEventListener('change', function () {
-      if (wholesaleInput) wholesaleInput.value = '0';
-      if (agentPriceInput) agentPriceInput.value = '0';
-      fillAgentPrices();
+      var opt = profileInput.options[profileInput.selectedIndex];
+      profileIdInput.value = opt ? (opt.getAttribute('data-pid') || '0') : '0';
     });
   }
 })();
