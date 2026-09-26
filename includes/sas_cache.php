@@ -783,24 +783,28 @@ function sas_refresh_online_flags($pdo, $config)
     }
     try {
         // امسح حالة الاتصال والـ IP ثم عبّ من قائمة الأونلاين الحقيقية
-        $pdo->exec('UPDATE sas_users_cache SET is_online = 0, framed_ip = NULL');
+        $tidOnline = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        if ($tidOnline <= 0) {
+            $tidOnline = 1;
+        }
+        $pdo->exec('UPDATE sas_users_cache SET is_online = 0, framed_ip = NULL WHERE tenant_id = ' . $tidOnline);
         if ($names) {
             $stExact = $pdo->prepare(
                 'UPDATE sas_users_cache SET is_online = 1, last_online = NOW(), framed_ip = :ip
-                 WHERE LOWER(username) = :u'
+                 WHERE tenant_id = ' . $tidOnline . ' AND LOWER(username) = :u'
             );
             $stBase = $pdo->prepare(
                 'UPDATE sas_users_cache SET is_online = 1, last_online = NOW(), framed_ip = :ip
-                 WHERE LOWER(username) = :u1
-                    OR LOWER(SUBSTRING_INDEX(username, "@", 1)) = :u2'
+                 WHERE tenant_id = ' . $tidOnline . ' AND (LOWER(username) = :u1
+                    OR LOWER(SUBSTRING_INDEX(username, "@", 1)) = :u2)'
             );
             $stTrafExact = $pdo->prepare(
-                'UPDATE sas_users_cache SET daily_traffic = :t WHERE LOWER(username) = :u'
+                'UPDATE sas_users_cache SET daily_traffic = :t WHERE tenant_id = ' . $tidOnline . ' AND LOWER(username) = :u'
             );
             $stTrafBase = $pdo->prepare(
                 'UPDATE sas_users_cache SET daily_traffic = :t
-                 WHERE LOWER(username) = :u1
-                    OR LOWER(SUBSTRING_INDEX(username, "@", 1)) = :u2'
+                 WHERE tenant_id = ' . $tidOnline . ' AND (LOWER(username) = :u1
+                    OR LOWER(SUBSTRING_INDEX(username, "@", 1)) = :u2)'
             );
             foreach ($names as $key => $u) {
                 $ipVal = isset($ipMap[$key]) ? $ipMap[$key] : null;
@@ -1141,8 +1145,6 @@ function sas_cache_ensure_local($pdo, $config, $cacheRow)
             $pdo->prepare('UPDATE sas_users_cache SET local_subscriber_id = :lid WHERE username = :u AND tenant_id = :t')
                 ->execute(array(':lid' => $id, ':u' => $username, ':t' => $tidLink));
         } catch (Exception $e) {
-            $pdo->prepare('UPDATE sas_users_cache SET local_subscriber_id = :lid WHERE username = :u')
-                ->execute(array(':lid' => $id, ':u' => $username));
         }
         // إذا المحلي وهمي والكاش فيه رقم حقيقي — حدّث المحلي
         $localPhone = isset($local['phone']) ? (string) $local['phone'] : '';
@@ -2245,16 +2247,6 @@ function sas_cache_fill_from_subscribers($pdo)
                 ));
             $ok = true;
         } catch (Exception $e) {
-            try {
-                $pdo->prepare('UPDATE sas_users_cache SET local_subscriber_id = :lid, display_name = :n WHERE username = :u')
-                    ->execute(array(
-                        ':lid' => (int) $s['id'],
-                        ':n' => (string) $s['name'],
-                        ':u' => $user,
-                    ));
-                $ok = true;
-            } catch (Exception $e2) {
-            }
         }
         if ($ok) {
             $n++;
@@ -2341,16 +2333,6 @@ function sas_relink_ledger_rows($pdo)
             }
             $n++;
         } catch (Exception $e) {
-            try {
-                $pdo->prepare('UPDATE sas_users_cache SET local_subscriber_id = :lid, display_name = :n WHERE username = :u')
-                    ->execute(array(
-                        ':lid' => (int) $s['id'],
-                        ':n' => (string) $s['name'],
-                        ':u' => $u,
-                    ));
-                $n++;
-            } catch (Exception $e2) {
-            }
         }
     }
     return $n;
@@ -3334,8 +3316,12 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
         }
         if ($renamedOk) {
             try {
-                $pdo->prepare('UPDATE sas_users_cache SET username = :n WHERE username = :o')
-                    ->execute(array(':n' => $newUser, ':o' => $username));
+                $tidRename = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+                if ($tidRename <= 0) {
+                    $tidRename = 1;
+                }
+                $pdo->prepare('UPDATE sas_users_cache SET username = :n WHERE username = :o AND tenant_id = :t')
+                    ->execute(array(':n' => $newUser, ':o' => $username, ':t' => $tidRename));
             } catch (Exception $e) {
                 return array(false, 'تم الحفظ بالساس لكن تعذر تحديث اليوزرنيم بالكاش: ' . $e->getMessage(), array('username' => $newUser));
             }
@@ -3675,6 +3661,11 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
         $ex = $pdo->prepare('SELECT 1 FROM sas_users_cache WHERE tenant_id = :t AND username = :u LIMIT 1');
         $ex->execute(array(':t' => $tenantId, ':u' => $username));
         $exists = (bool) $ex->fetchColumn();
+        if (!$exists && function_exists('sas_cache_skip_owned_elsewhere')
+            && sas_cache_skip_owned_elsewhere($pdo, $tenantId, $username, isset($params[':parent_name']) ? $params[':parent_name'] : '')
+        ) {
+            return false;
+        }
         if ($exists) {
             // تحديث صف هذه الشركة فقط — لا تلمس tenant آخر حتى لو PK قديم على username فقط
             $accSet = ($accountId > 0) ? ', sas_account_id = :sas_account_id' : '';
@@ -3838,7 +3829,12 @@ function sas_cache_patch($pdo, $username, $fields)
         return;
     }
     $cols[] = 'synced_at = NOW()';
-    $pdo->prepare('UPDATE sas_users_cache SET ' . implode(', ', $cols) . ' WHERE username = :u')
+    $tidPatch = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tidPatch <= 0) {
+        $tidPatch = 1;
+    }
+    $params[':t'] = $tidPatch;
+    $pdo->prepare('UPDATE sas_users_cache SET ' . implode(', ', $cols) . ' WHERE username = :u AND tenant_id = :t')
         ->execute($params);
 }
 

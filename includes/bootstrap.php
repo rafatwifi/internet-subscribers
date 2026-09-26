@@ -277,6 +277,10 @@ $sasCacheFile = __DIR__ . '/sas_cache.php';
 if (is_file($sasCacheFile)) {
     require_once $sasCacheFile;
 }
+$sasOwnFile = __DIR__ . '/sas_ownership.php';
+if (is_file($sasOwnFile)) {
+    require_once $sasOwnFile;
+}
 if (function_exists('ensure_tenants_schema')) {
     try {
         ensure_tenants_schema($pdo, $config);
@@ -434,16 +438,22 @@ try {
         );
         $stRole->execute(array(':id' => (int) $_SESSION['admin_user_id']));
         $liveUser = $stRole->fetch();
-        if ($liveUser && (int) $liveUser['is_active'] === 1) {
+        if ($liveUser && (int) $liveUser['is_active'] === 1 && empty($_SESSION['admin_sas_shadow'])) {
             $_SESSION['admin_role'] = normalize_admin_role(isset($liveUser['role']) ? $liveUser['role'] : 'staff');
             $_SESSION['admin_display_name'] = $liveUser['display_name'];
             $_SESSION['admin_username'] = $liveUser['username'];
             $_SESSION['admin_sas_manager_id'] = isset($liveUser['sas_manager_id']) ? (int) $liveUser['sas_manager_id'] : 0;
             $_SESSION['admin_wa_local_url'] = isset($liveUser['wa_local_url']) ? (string) $liveUser['wa_local_url'] : '';
             $_SESSION['admin_wa_local_key'] = isset($liveUser['wa_local_key']) ? (string) $liveUser['wa_local_key'] : '';
-        } elseif ($liveUser && (int) $liveUser['is_active'] !== 1) {
+        } elseif ($liveUser && (int) $liveUser['is_active'] !== 1
+            && empty($_SESSION['admin_real_user_id'])
+            && empty($_SESSION['admin_sas_shadow'])
+        ) {
             $_SESSION = array();
         }
+    }
+    if (function_exists('impersonate_shadow_restore')) {
+        impersonate_shadow_restore();
     }
 } catch (Exception $e) {
 } catch (Throwable $e) {

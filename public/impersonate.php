@@ -106,6 +106,11 @@ if ($action === 'search') {
                     }
                 }
             }
+            if ($kind === 'child' && function_exists('portal_unlicensed_managers')) {
+                foreach (portal_unlicensed_managers($pdo, $q) as $sasMgr) {
+                    $rows[] = $sasMgr;
+                }
+            }
         } catch (Exception $e) {
             $rows = array();
         }
@@ -143,11 +148,14 @@ if ($action === 'search') {
                 continue;
             }
         }
+        $sasPick = isset($r['sas_id']) ? (int) $r['sas_id'] : 0;
         $list[] = array(
-            'id' => (int) $r['id'],
+            'id' => $sasPick > 0 ? (0 - $sasPick) : (int) $r['id'],
+            'sas_id' => $sasPick,
             'username' => (string) $r['username'],
             'display_name' => (string) $r['display_name'],
-            'label' => trim($r['display_name'] . ' (' . $r['username'] . ')'),
+            'label' => trim($r['display_name'] . ' (' . $r['username'] . ')')
+                . (!empty($r['sas_id']) ? ($lang === 'en' ? ' · not licensed' : ' · غير مرخّص') : ''),
         );
     }
     impersonate_json(true, 'ok', array('agents' => $list));
@@ -179,7 +187,18 @@ if ($action === 'stop') {
 
 if ($action === 'start') {
     $tid = (int) post('user_id', '0');
-    list($ok, $msg) = impersonate_start($pdo, $tid);
+    $sasId = (int) post('sas_id', '0');
+    if ($tid < 0) {
+        if ($sasId <= 0) {
+            $sasId = 0 - $tid;
+        }
+        $tid = 0;
+    }
+    if ($tid <= 0 && $sasId > 0 && function_exists('impersonate_start_sas')) {
+        list($ok, $msg) = impersonate_start_sas($pdo, $sasId);
+    } else {
+        list($ok, $msg) = impersonate_start($pdo, $tid);
+    }
     $dest = 'sas.php';
     if ($ok && function_exists('is_super_admin_user') && is_super_admin_user()) {
         $dest = 'index.php';

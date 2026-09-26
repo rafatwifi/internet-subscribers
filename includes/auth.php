@@ -599,6 +599,13 @@ function ensure_admin_users_table($pdo, $config = null)
         } catch (Exception $e) {
         }
         try {
+            $col = $pdo->query("SHOW COLUMNS FROM admin_users LIKE 'allow_login_as'")->fetch();
+            if (!$col) {
+                $pdo->exec('ALTER TABLE admin_users ADD COLUMN allow_login_as TINYINT(1) NOT NULL DEFAULT 1');
+            }
+        } catch (Exception $e) {
+        }
+        try {
             $col = $pdo->query("SHOW COLUMNS FROM admin_users LIKE 'reports_to_user_id'")->fetch();
             if (!$col) {
                 $pdo->exec('ALTER TABLE admin_users ADD COLUMN reports_to_user_id INT UNSIGNED NULL DEFAULT NULL');
@@ -1024,6 +1031,380 @@ function portal_agencies_under_current($pdo, $q = '')
     return $out;
 }
 
+function admin_allow_login_as($pdo, $userId = 0)
+{
+    $userId = (int) $userId;
+    if ($userId <= 0) {
+        $me = current_admin();
+        $userId = $me ? (int) $me['id'] : 0;
+    }
+    if ($userId <= 0 || !$pdo) {
+        return false;
+    }
+    try {
+        $st = $pdo->prepare('SELECT allow_login_as FROM admin_users WHERE id = :id LIMIT 1');
+        $st->execute(array(':id' => $userId));
+        $v = $st->fetchColumn();
+        if ($v === false) {
+            return false;
+        }
+        return (int) $v === 1;
+    } catch (Exception $e) {
+        return true;
+    }
+}
+
+function portal_sas_manager_under_me($pdo, $sasId, $tenantId)
+{
+    $sasId = (int) $sasId;
+    $tenantId = (int) $tenantId;
+    if ($sasId <= 0 || $tenantId <= 1 || !$pdo) {
+        return false;
+    }
+    $me = current_admin();
+    if (!$me) {
+        return false;
+    }
+    $myMid = isset($me['sas_manager_id']) ? (int) $me['sas_manager_id'] : 0;
+    if ($myMid > 0 && $myMid === $sasId) {
+        return false;
+    }
+    if (is_admin_user()) {
+        return true;
+    }
+    $roots = array();
+    if (is_group_manager_user() && function_exists('group_manager_sas_parent_ids')) {
+        $roots = group_manager_sas_parent_ids($pdo);
+    }
+    if ($myMid > 0) {
+        $roots[] = $myMid;
+    }
+    $roots = array_values(array_unique(array_map('intval', $roots)));
+    if (!$roots) {
+        return false;
+    }
+    $cur = $sasId;
+    for ($i = 0; $i < 8; $i++) {
+        if (in_array($cur, $roots, true)) {
+            return true;
+        }
+        try {
+            $st = $pdo->prepare(
+                'SELECT parent_id FROM sas_users_cache WHERE tenant_id = :t AND sas_user_id = :id LIMIT 1'
+            );
+            $st->execute(array(':t' => $tenantId, ':id' => $cur));
+            $pid = (int) $st->fetchColumn();
+        } catch (Exception $e) {
+            return false;
+        }
+        if ($pid <= 0) {
+            return false;
+        }
+        if (in_array($pid, $roots, true)) {
+            return true;
+        }
+        $cur = $pid;
+    }
+    return false;
+}
+
+/** وكيل ساس تحت الحساب الحالي، مو مضاف كمستخدم بالبوابة */
+function portal_unlicensed_managers($pdo, $q = '')
+{
+    $me = current_admin();
+    $tid = $me && isset($me['tenant_id']) ? (int) $me['tenant_id'] : 1;
+    if ($tid <= 1 || !$pdo || !$me) {
+        return array();
+    }
+    if (!admin_allow_login_as($pdo, (int) $me['id'])) {
+        return array();
+    }
+    $q = trim((string) $q);
+    if ($q === '') {
+        return array();
+    }
+    $like = '%' . $q . '%';
+    try {
+        $st = $pdo->prepare(
+            'SELECT parent_id, MAX(parent_name) AS parent_name
+             FROM sas_users_cache
+             WHERE tenant_id = :t AND parent_id > 0 AND parent_name LIKE :q
+             GROUP BY parent_id
+             ORDER BY MAX(parent_name) ASC
+             LIMIT 30'
+        );
+        $st->execute(array(':t' => $tid, ':q' => $like));
+        $rows = $st->fetchAll();
+    } catch (Exception $e) {
+        return array();
+    }
+    $linked = array();
+    $licensedNames = array();
+    try {
+        $ls = $pdo->prepare(
+            'SELECT sas_manager_id, username, display_name FROM admin_users
+             WHERE sas_manager_id IS NOT NULL AND sas_manager_id > 0'
+        );
+        $ls->execute();
+        foreach ($ls->fetchAll() as $lr) {
+            $mid = (int) $lr['sas_manager_id'];
+            if ($mid > 0) {
+                $linked[$mid] = true;
+            }
+            $un = strtolower(trim((string) $lr['username']));
+            $dn = strtolower(trim((string) $lr['display_name']));
+            if ($un !== '') {
+                $licensedNames[$un] = true;
+            }
+            if ($dn !== '') {
+                $licensedNames[$dn] = true;
+            }
+        }
+    } catch (Exception $e) {
+    }
+    try {
+        foreach ($pdo->query('SELECT username FROM admin_users')->fetchAll() as $ur) {
+            $un = strtolower(trim((string) (isset($ur['username']) ? $ur['username'] : '')));
+            if ($un !== '') {
+                $licensedNames[$un] = true;
+            }
+        }
+    } catch (Exception $e) {
+    }
+    try {
+        foreach ($pdo->query('SELECT sas_username, name FROM tenants WHERE id > 1')->fetchAll() as $tr) {
+            $su = strtolower(trim((string) (isset($tr['sas_username']) ? $tr['sas_username'] : '')));
+            $nm = strtolower(trim((string) (isset($tr['name']) ? $tr['name'] : '')));
+            if ($su !== '') {
+                $licensedNames[$su] = true;
+            }
+            if ($nm !== '') {
+                $licensedNames[$nm] = true;
+            }
+        }
+    } catch (Exception $e) {
+    }
+    $out = array();
+    foreach ($rows as $r) {
+        $sid = (int) $r['parent_id'];
+        $name = trim((string) $r['parent_name']);
+        if ($sid <= 0 || $name === '' || isset($linked[$sid])) {
+            continue;
+        }
+        if (isset($licensedNames[strtolower($name)])) {
+            continue;
+        }
+        if (!portal_sas_manager_under_me($pdo, $sid, $tid)) {
+            continue;
+        }
+        $out[] = array(
+            'id' => 0,
+            'sas_id' => $sid,
+            'username' => $name,
+            'display_name' => $name,
+            'role' => 'sas',
+            'tenant_id' => $tid,
+        );
+        if (count($out) >= 20) {
+            break;
+        }
+    }
+    return $out;
+}
+
+function impersonate_shadow_cookie_write($val, $exp)
+{
+    $secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off');
+    if (defined('PHP_VERSION_ID') && PHP_VERSION_ID >= 70300) {
+        setcookie('app_shadow', (string) $val, array(
+            'expires' => (int) $exp,
+            'path' => '/',
+            'secure' => $secure,
+            'httponly' => true,
+            'samesite' => 'Lax',
+        ));
+    } else {
+        setcookie('app_shadow', (string) $val, (int) $exp, '/', '', $secure, true);
+    }
+    if ((string) $val === '') {
+        unset($_COOKIE['app_shadow']);
+    } else {
+        $_COOKIE['app_shadow'] = (string) $val;
+    }
+}
+
+function impersonate_shadow_cookie_clear()
+{
+    impersonate_shadow_cookie_write('', time() - 3600);
+}
+
+function impersonate_shadow_cookie_set($sasId, $name, $realId, $realName)
+{
+    $sasId = (int) $sasId;
+    $realId = (int) $realId;
+    $name = str_replace(array('|', "\n", "\r"), '', (string) $name);
+    $realName = str_replace(array('|', "\n", "\r"), '', (string) $realName);
+    if ($sasId <= 0 || $realId <= 0 || $name === '') {
+        return;
+    }
+    $exp = time() + 86400;
+    $secret = function_exists('app_remember_secret') ? app_remember_secret() : 'shadow';
+    $sig = hash_hmac('sha256', $sasId . '|' . $realId . '|' . $name . '|' . $realName . '|' . $exp, $secret);
+    $val = $sasId . '|' . $realId . '|' . rawurlencode($name) . '|' . rawurlencode($realName) . '|' . $exp . '|' . $sig;
+    impersonate_shadow_cookie_write($val, $exp);
+}
+
+function impersonate_shadow_restore()
+{
+    if (empty($_COOKIE['app_shadow']) || !is_string($_COOKIE['app_shadow'])) {
+        return;
+    }
+    if (empty($_SESSION['admin_logged_in'])) {
+        return;
+    }
+    $parts = explode('|', (string) $_COOKIE['app_shadow']);
+    if (count($parts) !== 6) {
+        impersonate_shadow_cookie_clear();
+        return;
+    }
+    $sasId = (int) $parts[0];
+    $realId = (int) $parts[1];
+    $name = rawurldecode($parts[2]);
+    $realName = rawurldecode($parts[3]);
+    $exp = (int) $parts[4];
+    $sig = $parts[5];
+    if ($exp < time() || $sasId <= 0 || $realId <= 0 || $name === '') {
+        impersonate_shadow_cookie_clear();
+        return;
+    }
+    $secret = function_exists('app_remember_secret') ? app_remember_secret() : 'shadow';
+    $expect = hash_hmac('sha256', $sasId . '|' . $realId . '|' . $name . '|' . $realName . '|' . $exp, $secret);
+    if (!hash_equals($expect, $sig)) {
+        impersonate_shadow_cookie_clear();
+        return;
+    }
+    $sid = isset($_SESSION['admin_user_id']) ? (int) $_SESSION['admin_user_id'] : 0;
+    if ($sid !== $realId) {
+        return;
+    }
+    if (session_status() !== PHP_SESSION_ACTIVE && function_exists('app_session_start')) {
+        app_session_start();
+    }
+    $_SESSION['admin_sas_shadow'] = 1;
+    $_SESSION['admin_real_user_id'] = $realId;
+    if ($realName !== '' && empty($_SESSION['admin_real_username'])) {
+        $_SESSION['admin_real_username'] = $realName;
+        $_SESSION['admin_real_display_name'] = $realName;
+    }
+    $_SESSION['admin_role'] = 'agent';
+    $_SESSION['admin_sas_manager_id'] = $sasId;
+    $_SESSION['admin_username'] = $name;
+    $_SESSION['admin_display_name'] = $name;
+}
+
+function impersonate_session_writable()
+{
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        return;
+    }
+    if (function_exists('app_session_start')) {
+        app_session_start();
+    } elseif (session_status() === PHP_SESSION_NONE) {
+        @session_start();
+    }
+}
+
+function impersonate_start_sas($pdo, $sasId)
+{
+    $sasId = (int) $sasId;
+    if ($sasId <= 0) {
+        return array(false, 'الوكيل غير محدد');
+    }
+    if (is_impersonating()) {
+        return array(false, 'ارجع لحسابك أولاً');
+    }
+    $mode = impersonate_actor_mode($pdo);
+    if ($mode !== 'agency' && $mode !== 'parent') {
+        return array(false, 'غير مسموح');
+    }
+    $me = current_admin();
+    if (!$me || !admin_allow_login_as($pdo, (int) $me['id'])) {
+        return array(false, 'الدخول بـ موقف لهذا الحساب');
+    }
+    $tid = isset($me['tenant_id']) ? (int) $me['tenant_id'] : 1;
+    if ($tid <= 1) {
+        return array(false, 'غير مسموح');
+    }
+    try {
+        $st = $pdo->prepare(
+            'SELECT parent_name FROM sas_users_cache
+             WHERE tenant_id = :t AND parent_id = :id AND parent_name IS NOT NULL AND parent_name <> ""
+             LIMIT 1'
+        );
+        $st->execute(array(':t' => $tid, ':id' => $sasId));
+        $name = trim((string) $st->fetchColumn());
+    } catch (Exception $e) {
+        return array(false, 'تعذر التحقق');
+    }
+    if ($name === '') {
+        return array(false, 'الوكيل مو ضمن حسابك');
+    }
+    try {
+        $tn = $pdo->prepare('SELECT id FROM tenants WHERE id > 1 AND LOWER(sas_username) = :u LIMIT 1');
+        $tn->execute(array(':u' => strtolower($name)));
+        if ((int) $tn->fetchColumn() > 0) {
+            $own = $pdo->prepare(
+                'SELECT id FROM admin_users WHERE LOWER(username) = :u AND tenant_id <> :t AND role = "admin" LIMIT 1'
+            );
+            $own->execute(array(':u' => strtolower($name), ':t' => $tid));
+            $ownId = (int) $own->fetchColumn();
+            if ($ownId > 0 && $ownId !== (int) $me['id']) {
+                $sw = impersonate_start($pdo, $ownId);
+                if (!empty($sw[0])) {
+                    return $sw;
+                }
+            }
+        }
+    } catch (Exception $e) {
+    }
+    $linkedId = 0;
+    try {
+        $ls = $pdo->prepare(
+            'SELECT id FROM admin_users WHERE sas_manager_id = :m AND tenant_id = :t LIMIT 1'
+        );
+        $ls->execute(array(':m' => $sasId, ':t' => $tid));
+        $linkedId = (int) $ls->fetchColumn();
+    } catch (Exception $e) {
+        $linkedId = 0;
+    }
+    if ($linkedId > 0 && $linkedId !== (int) $me['id']) {
+        $sw = impersonate_start($pdo, $linkedId);
+        if (!empty($sw[0])) {
+            return $sw;
+        }
+    }
+    if (!portal_sas_manager_under_me($pdo, $sasId, $tid)) {
+        return array(false, 'هذا الوكيل مو تحتك');
+    }
+    impersonate_session_writable();
+    $_SESSION['admin_real_user_id'] = (int) $me['id'];
+    $_SESSION['admin_real_username'] = $me['username'];
+    $_SESSION['admin_real_display_name'] = $me['display_name'];
+    $_SESSION['admin_sas_shadow'] = 1;
+    $_SESSION['admin_role'] = 'agent';
+    $_SESSION['admin_sas_manager_id'] = $sasId;
+    $_SESSION['admin_username'] = $name;
+    $_SESSION['admin_display_name'] = $name;
+    impersonate_shadow_cookie_set($sasId, $name, (int) $me['id'], (string) $me['username']);
+    if (function_exists('app_session_refresh_cookie')) {
+        app_session_refresh_cookie();
+    }
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
+    return array(true, 'تم الدخول بصفة الوكيل ' . $name);
+}
+
 function impersonate_actor_mode($pdo)
 {
     if (is_impersonating()) {
@@ -1031,6 +1412,9 @@ function impersonate_actor_mode($pdo)
     }
     if (function_exists('is_super_admin_user') && is_super_admin_user()) {
         return 'super';
+    }
+    if (!admin_allow_login_as($pdo)) {
+        return '';
     }
     $me = current_admin();
     if (!$me) {
@@ -1041,16 +1425,52 @@ function impersonate_actor_mode($pdo)
     if ($tid <= 1 || $id <= 0) {
         return '';
     }
-    if (is_admin_user() || is_group_manager_user()) {
+    if (is_admin_user()) {
         return 'agency';
+    }
+    if (is_group_manager_user()) {
+        $gmid = isset($me['sas_manager_id']) ? (int) $me['sas_manager_id'] : 0;
+        if (admin_user_child_count($pdo, $id, $tid) > 0 || portal_user_has_agent_downline($pdo, $tid, $gmid)) {
+            return 'agency';
+        }
+        return '';
     }
     if (function_exists('user_can') && user_can('agents') && !is_agent_user() && !is_accountant_user()) {
         return 'agency';
+    }
+    if (is_agent_user()) {
+        $mid = isset($me['sas_manager_id']) ? (int) $me['sas_manager_id'] : 0;
+        if (portal_user_has_agent_downline($pdo, $tid, $mid) || admin_user_child_count($pdo, $id, $tid) > 0) {
+            return 'parent';
+        }
+        return '';
     }
     if (admin_user_child_count($pdo, $id, $tid) > 0) {
         return 'parent';
     }
     return '';
+}
+
+function portal_user_has_agent_downline($pdo, $tenantId, $sasManagerId)
+{
+    $tenantId = (int) $tenantId;
+    $sasManagerId = (int) $sasManagerId;
+    if ($tenantId <= 1 || $sasManagerId <= 0 || !$pdo) {
+        return false;
+    }
+    try {
+        $st = $pdo->prepare(
+            'SELECT COUNT(DISTINCT c.parent_id) FROM sas_users_cache c
+             INNER JOIN sas_users_cache mgr
+               ON mgr.tenant_id = c.tenant_id AND mgr.sas_user_id = c.parent_id
+             WHERE c.tenant_id = :t AND c.parent_id > 0 AND c.parent_id <> :m
+               AND mgr.parent_id = :m2'
+        );
+        $st->execute(array(':t' => $tenantId, ':m' => $sasManagerId, ':m2' => $sasManagerId));
+        return ((int) $st->fetchColumn()) > 0;
+    } catch (Exception $e) {
+        return false;
+    }
 }
 
 function admin_user_child_count($pdo, $userId, $tenantId)
@@ -1196,8 +1616,10 @@ function impersonate_stop($pdo)
         unset(
             $_SESSION['admin_real_user_id'],
             $_SESSION['admin_real_username'],
-            $_SESSION['admin_real_display_name']
+            $_SESSION['admin_real_display_name'],
+            $_SESSION['admin_sas_shadow']
         );
+        impersonate_shadow_cookie_clear();
         if ($row) {
             set_admin_session_from_row($row);
             return array(true, 'رجعت لحسابك');
@@ -1545,6 +1967,9 @@ function count_active_admins($pdo)
 function logout()
 {
     $_SESSION = array();
+    if (function_exists('impersonate_shadow_cookie_clear')) {
+        impersonate_shadow_cookie_clear();
+    }
     if (function_exists('app_remember_clear')) {
         app_remember_clear();
     }

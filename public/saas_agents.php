@@ -85,6 +85,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $days = max(1, (int) post('days', '30'));
         flash(saas_extend_subscription($pdo, $tid, $days, post('plan_code', 'manual'))
             ? 'success' : 'error', $isEn ? 'Extended' : 'تم التمديد');
+    } elseif ($action === 'allow_login_as') {
+        $uid = (int) post('user_id', '0');
+        $allowAs = post('allow_login_as') === '1' ? 1 : 0;
+        $okAs = false;
+        if ($tid > 1 && $uid > 0) {
+            try {
+                $stAs = $pdo->prepare(
+                    'UPDATE admin_users SET allow_login_as = :a
+                     WHERE id = :id AND tenant_id = :t AND role = "admin"'
+                );
+                $stAs->execute(array(':a' => $allowAs, ':id' => $uid, ':t' => $tid));
+                $okAs = $stAs->rowCount() > 0;
+            } catch (Exception $e) {
+                $okAs = false;
+            }
+        }
+        flash($okAs ? 'success' : 'error', $okAs ? ($isEn ? 'Saved' : 'تم الحفظ') : ($isEn ? 'Could not save' : 'ما انحفظ'));
     }
     redirect('saas_agents.php');
 }
@@ -110,7 +127,8 @@ if (isset($_GET['export_agent']) && function_exists('platform_agents_pack_zip'))
 $rows = array();
 try {
     $rows = $pdo->query(
-        'SELECT t.*, u.username AS owner_username, u.display_name AS owner_name, u.is_active AS owner_active
+        'SELECT t.*, u.username AS owner_username, u.display_name AS owner_name, u.is_active AS owner_active,
+                u.allow_login_as AS owner_allow_login_as
          FROM tenants t
          LEFT JOIN admin_users u ON u.id = t.owner_user_id
          WHERE t.id > 1
@@ -267,13 +285,14 @@ $viewLabel = array(
                 <th><?php echo e($isEn ? 'Username' : 'اسم المستخدم'); ?></th>
                 <th><?php echo e($isEn ? 'Owner' : 'المالك'); ?></th>
                 <th><?php echo e($isEn ? 'Status' : 'الحالة'); ?></th>
+                <th class="ag-as-col" title="<?php echo e($isEn ? 'Allow login-as' : 'السماح بالدخول بـ'); ?>"><?php echo e($isEn ? 'Login-as' : 'دخول بـ'); ?></th>
                 <th><?php echo e($isEn ? 'Trial / Sub' : 'تجريبي / اشتراك'); ?></th>
                 <th></th>
             </tr>
             </thead>
             <tbody>
             <?php if (!$rows): ?>
-                <tr><td colspan="6" class="msg-empty"><?php echo e($q !== '' ? ($isEn ? 'No matches' : 'ماكو نتيجة') : ($isEn ? 'No registrations yet' : 'ماكو تسجيلات بعد')); ?></td></tr>
+                <tr><td colspan="7" class="msg-empty"><?php echo e($q !== '' ? ($isEn ? 'No matches' : 'ماكو نتيجة') : ($isEn ? 'No registrations yet' : 'ماكو تسجيلات بعد')); ?></td></tr>
             <?php endif; ?>
             <?php $rowNo = 0; foreach ($rows as $r):
                 $rowNo++;
@@ -285,6 +304,42 @@ $viewLabel = array(
                     <td><?php echo e(!empty($r['owner_username']) ? $r['owner_username'] : $r['name']); ?><?php if (!empty($r['contact_phone'])): ?><br><small class="meta ltr"><?php echo e($r['contact_phone']); ?></small><?php endif; ?></td>
                     <td><?php echo e(isset($r['owner_name']) && $r['owner_name'] !== '' ? $r['owner_name'] : '—'); ?><?php if (!empty($r['contact_email'])): ?><br><small class="meta ltr"><?php echo e($r['contact_email']); ?></small><?php endif; ?></td>
                     <td><span class="sys-st st-<?php echo e($st); ?>"><?php echo e(isset($statusLabel[$st]) ? $statusLabel[$st] : $st); ?></span></td>
+                    <td class="ag-as-col">
+                        <?php
+                        $asUid = !empty($r['owner_user_id']) ? (int) $r['owner_user_id'] : 0;
+                        $asOn = !isset($r['owner_allow_login_as']) || (int) $r['owner_allow_login_as'] === 1;
+                        if ($asUid <= 0) {
+                            try {
+                                $asSt = $pdo->prepare(
+                                    'SELECT id, allow_login_as FROM admin_users
+                                     WHERE tenant_id = :t AND role = "admin"
+                                     ORDER BY id ASC LIMIT 1'
+                                );
+                                $asSt->execute(array(':t' => $tid));
+                                $asRow = $asSt->fetch();
+                                if ($asRow) {
+                                    $asUid = (int) $asRow['id'];
+                                    $asOn = !isset($asRow['allow_login_as']) || (int) $asRow['allow_login_as'] === 1;
+                                }
+                            } catch (Exception $e) {
+                                $asUid = 0;
+                            }
+                        }
+                        if ($asUid > 0):
+                        ?>
+                        <form method="post" class="ag-as-form">
+                            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                            <input type="hidden" name="action" value="allow_login_as">
+                            <input type="hidden" name="tenant_id" value="<?php echo $tid; ?>">
+                            <input type="hidden" name="user_id" value="<?php echo $asUid; ?>">
+                            <input type="hidden" name="allow_login_as" value="0">
+                            <label class="ag-as" title="<?php echo e($isEn ? 'Allow login-as' : 'السماح بالدخول بـ'); ?>">
+                                <input type="checkbox" name="allow_login_as" value="1" <?php echo $asOn ? 'checked' : ''; ?> onchange="this.form.submit()">
+                                <i></i>
+                            </label>
+                        </form>
+                        <?php endif; ?>
+                    </td>
                     <td class="meta" style="font-size:12px">
                         <?php echo e($isEn ? 'Trial' : 'تجريبي'); ?>: <?php echo e(!empty($r['trial_ends_at']) ? $r['trial_ends_at'] : '—'); ?><br>
                         <?php echo e($isEn ? 'Until' : 'حتى'); ?>: <?php echo e(!empty($r['subscription_expires_at']) ? $r['subscription_expires_at'] : '—'); ?>
@@ -345,7 +400,7 @@ $viewLabel = array(
                     </td>
                 </tr>
                 <tr class="del-row" id="delRow<?php echo $tid; ?>" hidden>
-                    <td colspan="6">
+                    <td colspan="7">
                         <form method="post" class="js-agency-del ag-del-form">
                             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                             <input type="hidden" name="action" value="delete">
@@ -386,6 +441,15 @@ $viewLabel = array(
 .ag-actions { display:flex; flex-wrap:wrap; gap:6px; align-items:center; justify-content:flex-end; }
 .ag-extend { display:inline-flex; gap:4px; align-items:center; }
 .ag-extend input[type="number"] { width:64px; height:32px; }
+.ag-as-col { width:52px; text-align:center; padding-left:4px; padding-right:4px; }
+.ag-as-form { margin:0; display:inline-flex; }
+.ag-as { position:relative; display:inline-flex; margin:0; cursor:pointer; }
+.ag-as input { position:absolute; opacity:0; width:1px; height:1px; }
+.ag-as i { width:30px; height:16px; border-radius:999px; background:#cbd5e1; display:inline-block; position:relative; }
+.ag-as i::after { content:""; position:absolute; top:2px; right:2px; width:12px; height:12px; border-radius:50%; background:#fff; transition:right .15s; }
+.ag-as input:checked + i { background:#16a34a; }
+.ag-as input:checked + i::after { right:16px; }
+.ag-as input:focus + i { box-shadow:0 0 0 2px rgba(22,163,74,.25); }
 .del-row[hidden] { display:none !important; }
 .del-row td { background:#f8fafc; }
 .ag-del-form { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }

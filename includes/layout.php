@@ -326,13 +326,6 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
                 $canLoginAs = function_exists('is_super_admin_user') && is_super_admin_user() && !$isImpersonating;
                 $loginAsMode = (!$isImpersonating && isset($pdo) && function_exists('impersonate_actor_mode')) ? impersonate_actor_mode($pdo) : '';
                 $canLoginAsChild = ($loginAsMode === 'agency' || $loginAsMode === 'parent');
-                if (!$canLoginAsChild && !$isImpersonating && !$canLoginAs) {
-                    $tidMenu = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
-                    $isLeafAgent = function_exists('is_agent_user') && is_agent_user();
-                    if ($tidMenu > 1 && !$isLeafAgent && function_exists('user_can') && user_can('agents')) {
-                        $canLoginAsChild = true;
-                    }
-                }
                 ?>
                 <?php if ($pendingUpd && !$isImpersonating && function_exists('is_super_admin_user') && is_super_admin_user() && function_exists('user_can') && user_can('settings')): ?>
                     <a class="top-update-pill" href="settings.php?tab=update" title="<?php echo e($isEn ? 'System update available' : 'تحديث نظام متاح'); ?>">
@@ -765,7 +758,8 @@ body.nav-pending .nav-progress { display: block; }
         var body = new FormData();
         body.append('csrf', csrfEl ? csrfEl.value : '');
         body.append('action', 'start');
-        body.append('user_id', String(a.id));
+        body.append('user_id', String(a.id || 0));
+        body.append('sas_id', String(a.sas_id || 0));
         body.append('ajax', '1');
         fetch('impersonate.php', { method: 'POST', body: body, credentials: 'same-origin' })
           .then(function (r) { return r.json(); })

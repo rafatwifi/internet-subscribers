@@ -42,6 +42,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     $action = post('action');
 
+    if ($action === 'allow_login_as') {
+        if (!function_exists('is_admin_user') || !is_admin_user()) {
+            flash('error', $isEn ? 'Portal admin only' : 'أدمن البوابة فقط');
+            redirect('agents.php');
+        }
+        $uid = (int) post('user_id', '0');
+        $row = get_admin_user($pdo, $uid);
+        $rowTid = $row && isset($row['tenant_id']) ? (int) $row['tenant_id'] : 0;
+        $myTidNow = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        $rowRole = $row ? normalize_admin_role($row['role']) : '';
+        $childAgency = ($rowRole === 'admin' && $rowTid > 1 && $rowTid !== $myTidNow);
+        if ($childAgency && function_exists('portal_agencies_under_current')) {
+            $under = false;
+            foreach (portal_agencies_under_current($pdo, '') as $sib) {
+                if ((int) $sib['id'] === $uid) {
+                    $under = true;
+                    break;
+                }
+            }
+            if (!$under) {
+                $childAgency = false;
+            }
+        }
+        if (!$row || $uid === $meId || (!$childAgency && ($rowTid !== $myTidNow || !in_array($rowRole, array('agent', 'group_manager'), true)))) {
+            flash('error', $isEn ? 'Agent not found' : 'الوكيل غير موجود');
+            redirect('agents.php');
+        }
+        $allowAs = post('allow_login_as') === '1' ? 1 : 0;
+        try {
+            $pdo->prepare(
+                'UPDATE admin_users SET allow_login_as = :a WHERE id = :id AND tenant_id = :t'
+            )->execute(array(':a' => $allowAs, ':id' => $uid, ':t' => $rowTid));
+        } catch (Exception $e) {
+            flash('error', $isEn ? 'Could not save' : 'ما انحفظ');
+        }
+        redirect('agents.php');
+    }
+
     if ($action === 'create') {
         $username = trim((string) post('username', ''));
         $display = trim((string) post('display_name', ''));
@@ -81,7 +119,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $display = trim((string) post('display_name', ''));
         $active = post('is_active') === '1' ? 1 : 0;
         $row = get_admin_user($pdo, $uid);
-        if (!$row || normalize_admin_role($row['role']) !== 'agent') {
+        $rowTid = $row && isset($row['tenant_id']) ? (int) $row['tenant_id'] : 0;
+        $myTidNow = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        if (!$row || normalize_admin_role($row['role']) !== 'agent' || $rowTid !== $myTidNow) {
             flash('error', $isEn ? 'Agent not found' : 'الوكيل غير موجود');
             redirect('agents.php');
         }
@@ -90,8 +130,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ->execute(array(':a' => $active, ':id' => $uid));
         $sasMid = (int) post('sas_manager_id', '0');
         try {
-            $pdo->prepare('UPDATE admin_users SET sas_manager_id = :m WHERE id = :id AND role = "agent"')
-                ->execute(array(':m' => $sasMid > 0 ? $sasMid : null, ':id' => $uid));
+            $pdo->prepare('UPDATE admin_users SET sas_manager_id = :m WHERE id = :id AND role = "agent" AND tenant_id = :t')
+                ->execute(array(
+                    ':m' => $sasMid > 0 ? $sasMid : null,
+                    ':id' => $uid,
+                    ':t' => function_exists('current_tenant_id') ? (int) current_tenant_id() : 1,
+                ));
         } catch (Exception $e) {
         }
         $phone = trim((string) post('phone', ''));
@@ -708,19 +752,44 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
             <th><?php echo e($isEn ? 'Name' : 'الاسم'); ?></th>
             <th><?php echo e($isEn ? 'Subscribers' : 'المشتركين'); ?></th>
             <th><?php echo e($isEn ? 'Status' : 'الحالة'); ?></th>
+            <?php if (function_exists('is_admin_user') && is_admin_user()): ?>
+            <th class="ag-as-col" title="<?php echo e($isEn ? 'Allow login-as' : 'السماح بالدخول بـ'); ?>"><?php echo e($isEn ? 'Login-as' : 'دخول بـ'); ?></th>
+            <?php endif; ?>
             <th></th>
         </tr>
         </thead>
         <tbody>
         <?php if (!$agentShown): ?>
-            <tr><td colspan="6" class="msg-empty"><?php echo e($agentQ !== '' ? ($isEn ? 'No matches' : 'ماكو نتيجة') : ($isEn ? 'No agents yet.' : 'ماكو وكلاء بعد.')); ?></td></tr>
+            <tr><td colspan="<?php echo (function_exists('is_admin_user') && is_admin_user()) ? 7 : 6; ?>" class="msg-empty"><?php echo e($agentQ !== '' ? ($isEn ? 'No matches' : 'ماكو نتيجة') : ($isEn ? 'No agents yet.' : 'ماكو وكلاء بعد.')); ?></td></tr>
         <?php endif; ?>
-        <?php $agNo = 0; foreach ($agentShown as $a):
+        <?php
+        $allowMap = array();
+        try {
+            $afAll = $pdo->prepare('SELECT id, allow_login_as FROM admin_users WHERE role IN ("agent","group_manager","admin")');
+            $afAll->execute();
+            foreach ($afAll->fetchAll() as $ar) {
+                $allowMap[(int) $ar['id']] = ((int) $ar['allow_login_as'] === 1);
+            }
+        } catch (Exception $e) {
+            $allowMap = array();
+        }
+        $agNo = 0; foreach ($agentShown as $a):
             $agNo++;
             $aid = (int) $a['id'];
             $curSas = isset($a['sas_manager_id']) ? (int) $a['sas_manager_id'] : 0;
             $active = (int) $a['is_active'] === 1;
             $isPortal = ($aid === $meId) || isset($portalNames[strtolower((string) $a['username'])]);
+            $rowRole = normalize_admin_role(isset($a['role']) ? $a['role'] : '');
+            $rowTid = isset($a['tenant_id']) ? (int) $a['tenant_id'] : 0;
+            $myTidView = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+            $canSetAs = function_exists('is_admin_user') && is_admin_user()
+                && $aid !== $meId
+                && (
+                    ($rowTid === $myTidView && in_array($rowRole, array('agent', 'group_manager'), true))
+                    || ($rowRole === 'admin' && $rowTid > 1 && $rowTid !== $myTidView)
+                );
+            $rowAllow = !isset($allowMap[$aid]) || !empty($allowMap[$aid]);
+            $span = (function_exists('is_admin_user') && is_admin_user()) ? 7 : 6;
             ?>
         <tr>
             <td><?php echo (int) $agNo; ?></td>
@@ -728,6 +797,22 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
             <td><?php echo e($a['display_name']); ?></td>
             <td><?php echo isset($counts[$aid]) ? (int) $counts[$aid] : 0; ?></td>
             <td><span class="<?php echo $active ? 'sas-logged' : 'sas-logged-off'; ?>"><?php echo e($active ? ($isEn ? 'Active' : 'فعال') : ($isEn ? 'Off' : 'موقوف')); ?></span></td>
+            <?php if (function_exists('is_admin_user') && is_admin_user()): ?>
+            <td class="ag-as-col">
+                <?php if ($canSetAs): ?>
+                <form method="post" class="ag-as-form">
+                    <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                    <input type="hidden" name="action" value="allow_login_as">
+                    <input type="hidden" name="user_id" value="<?php echo $aid; ?>">
+                    <input type="hidden" name="allow_login_as" value="0">
+                    <label class="ag-as" title="<?php echo e($isEn ? 'Allow login-as' : 'السماح بالدخول بـ'); ?>">
+                        <input type="checkbox" name="allow_login_as" value="1" <?php echo $rowAllow ? 'checked' : ''; ?> onchange="this.form.submit()">
+                        <i></i>
+                    </label>
+                </form>
+                <?php endif; ?>
+            </td>
+            <?php endif; ?>
             <td class="ag-actions">
                 <?php if (!empty($childCounts[$aid]) && $active && function_exists('is_admin_user') && is_admin_user() && !$isPortal): ?>
                 <form method="post" action="impersonate.php" class="inline-form">
@@ -744,7 +829,7 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
             </td>
         </tr>
         <tr class="del-row" id="delRow<?php echo $aid; ?>" hidden>
-            <td colspan="6">
+            <td colspan="<?php echo (int) $span; ?>">
                 <form method="post" class="ag-del-form">
                     <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                     <input type="hidden" name="action" value="delete">
@@ -778,7 +863,7 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
             </td>
         </tr>
         <tr class="edit-row" id="editRow<?php echo $aid; ?>" hidden>
-            <td colspan="6">
+            <td colspan="<?php echo (int) $span; ?>">
             <form method="post" id="agentEdit<?php echo $aid; ?>" class="ag-del-form">
                 <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                 <input type="hidden" name="action" value="update">
@@ -1079,6 +1164,15 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
     .sys-search { display:flex; gap:8px; margin:0 0 14px; }
     .sys-search input[type="search"] { max-width:320px; }
     .ag-actions { display:flex; gap:6px; align-items:center; justify-content:flex-end; flex-wrap:wrap; }
+    .ag-as-col { width:52px; text-align:center; padding-left:4px; padding-right:4px; }
+    .ag-as-form { margin:0; display:inline-flex; }
+    .ag-as { position:relative; display:inline-flex; margin:0; cursor:pointer; }
+    .ag-as input { position:absolute; opacity:0; width:1px; height:1px; }
+    .ag-as i { width:30px; height:16px; border-radius:999px; background:#cbd5e1; display:inline-block; position:relative; }
+    .ag-as i::after { content:""; position:absolute; top:2px; right:2px; width:12px; height:12px; border-radius:50%; background:#fff; transition:right .15s; }
+    .ag-as input:checked + i { background:#16a34a; }
+    .ag-as input:checked + i::after { right:16px; }
+    .ag-as input:focus + i { box-shadow:0 0 0 2px rgba(22,163,74,.25); }
     .ag-del-form { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
     .ag-del-form select { min-width:240px; max-width:360px; }
     .del-row td, .edit-row td { background:#f8fafc; }
