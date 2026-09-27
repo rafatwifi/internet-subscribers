@@ -252,7 +252,13 @@ function fetch_activity_filtered($pdo, $limit, $q, $scope)
         $logTid = (int) current_tenant_id();
         $where .= ' AND (s.tenant_id = ' . $logTid
             . ' OR a.actor_user_id IN (SELECT id FROM admin_users WHERE tenant_id = ' . $logTid . '))';
-        if (function_exists('is_agent_user') && is_agent_user() && function_exists('current_admin')) {
+        if (function_exists('is_accountant_user') && is_accountant_user() && function_exists('current_admin')) {
+            $logMe = current_admin();
+            $logId = $logMe ? (int) $logMe['id'] : 0;
+            if ($logId > 0) {
+                $where .= ' AND a.actor_user_id = ' . $logId;
+            }
+        } elseif (function_exists('is_agent_user') && is_agent_user() && function_exists('current_admin')) {
             $logMe = current_admin();
             $logId = $logMe ? (int) $logMe['id'] : 0;
             if ($logId > 0) {

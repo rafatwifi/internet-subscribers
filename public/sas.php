@@ -1889,6 +1889,42 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   color: #0369a1;
   opacity: .95;
 }
+#sasActCardsLoad {
+  display: none;
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 70;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: rgba(248, 250, 252, 0.42);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  border-radius: inherit;
+  pointer-events: auto;
+}
+#sasActCardsLoad[hidden] { display: none !important; }
+#sasActModal.is-cards-loading #sasActCardsLoad {
+  display: flex;
+}
+#sasActCardsLoad .sas-act-cards-spin {
+  width: 46px;
+  height: 46px;
+  border: 4px solid rgba(15, 23, 42, 0.14);
+  border-top-color: #0f172a;
+  border-radius: 50%;
+  animation: sasActSpin .7s linear infinite;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+}
+#sasActCardsLoad .sas-act-cards-txt {
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 800;
+}
 #sasActLock {
   display: none !important;
   position: absolute;
@@ -2999,6 +3035,10 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
         </div>
         <div class="sas-act-foot" style="display:flex;flex-direction:column;align-items:stretch;width:100%;margin:0;padding:10px 0 12px;box-sizing:border-box;border-top:0;background:transparent">
             <button type="button" class="btn sas-act-main-btn" id="sasActSubmit" style="display:flex;align-items:center;justify-content:center;width:100%;min-width:100%;max-width:none;height:68px;min-height:68px;margin:0;padding:0 16px;border:0;border-radius:14px;background:#0f172a;color:#fff;font-weight:800;font-size:20px;box-sizing:border-box"><?php echo e($lang === 'en' ? 'Activate' : 'تفعيل'); ?></button>
+        </div>
+        <div class="sas-act-cards-load" id="sasActCardsLoad" hidden aria-hidden="true">
+            <div class="sas-act-cards-spin"></div>
+            <div class="sas-act-cards-txt"><?php echo e($lang === 'en' ? 'Updating cards…' : 'جاري تحديث الكروت'); ?></div>
         </div>
         <div class="sas-act-lock hidden" id="sasActLock" aria-hidden="true">
             <div class="sas-act-lock-spin"></div>
@@ -4440,19 +4480,36 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
       runActivateNow();
     });
     var actRefresh = document.getElementById('sasActRefresh');
+    function setCardsLoad(on) {
+      var modal = document.getElementById('sasActModal');
+      var layer = document.getElementById('sasActCardsLoad');
+      on = !!on;
+      if (modal) modal.classList.toggle('is-cards-loading', on);
+      if (layer) {
+        if (on) {
+          layer.removeAttribute('hidden');
+          layer.setAttribute('aria-hidden', 'false');
+        } else {
+          layer.setAttribute('hidden', 'hidden');
+          layer.setAttribute('aria-hidden', 'true');
+        }
+      }
+      if (actRefresh) actRefresh.disabled = on;
+    }
     if (actRefresh) {
       actRefresh.addEventListener('click', function () {
-        if (!actUser) return;
-        var hint = document.getElementById('sasActCardHint');
-        if (hint) {
-          hint.textContent = <?php echo json_encode($lang === 'en' ? 'Refreshing…' : 'جاري التحديث…'); ?>;
-        }
+        if (!actUser || actRefresh.disabled) return;
+        setCardsLoad(true);
         softRefreshCards(true).then(function () {
           return loadProfiles();
         }).then(function (ps) {
           fillSelect(document.getElementById('sasActProfile'), ps, actUser.profileId);
           refreshActCardsIfOpen();
-        }).catch(function () { refreshActCardsIfOpen(); });
+          setCardsLoad(false);
+        }).catch(function () {
+          refreshActCardsIfOpen();
+          setCardsLoad(false);
+        });
       });
     }
   }

@@ -321,7 +321,7 @@ function card_agent_remaining_balance($pdo, $agentUserId)
     return (float) $incoming['sale_total'] - $paid;
 }
 
-function list_recent_card_transfers($pdo, $limit = 30, $agentUserId = null)
+function list_recent_card_transfers($pdo, $limit = 30, $agentUserId = null, $createdBy = null)
 {
     ensure_card_accounting_tables($pdo);
     $limit = max(1, min(200, (int) $limit));
@@ -334,15 +334,32 @@ function list_recent_card_transfers($pdo, $limit = 30, $agentUserId = null)
             JOIN admin_users ta ON ta.id = t.to_agent_id
             LEFT JOIN admin_users cb ON cb.id = t.created_by';
     $params = array();
+    $where = array();
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+    if ($tid > 0) {
+        $where[] = 't.tenant_id = :tid';
+        $params[':tid'] = $tid;
+    }
     if ($agentUserId !== null && (int) $agentUserId > 0) {
-        $sql .= ' WHERE t.to_agent_id = :a OR t.from_agent_id = :a2';
+        $where[] = '(t.to_agent_id = :a OR t.from_agent_id = :a2)';
         $params[':a'] = (int) $agentUserId;
         $params[':a2'] = (int) $agentUserId;
     }
+    if ($createdBy !== null && (int) $createdBy > 0) {
+        $where[] = 't.created_by = :by';
+        $params[':by'] = (int) $createdBy;
+    }
+    if ($where) {
+        $sql .= ' WHERE ' . implode(' AND ', $where);
+    }
     $sql .= ' ORDER BY t.created_at DESC, t.id DESC LIMIT ' . $limit;
-    $st = $pdo->prepare($sql);
-    $st->execute($params);
-    return $st->fetchAll();
+    try {
+        $st = $pdo->prepare($sql);
+        $st->execute($params);
+        return $st->fetchAll();
+    } catch (Exception $e) {
+        return array();
+    }
 }
 
 function list_recent_card_payments($pdo, $agentUserId, $limit = 20)
@@ -453,7 +470,7 @@ function list_accountant_users($pdo, $activeOnly = true)
         if (function_exists('current_tenant_id')) {
             $tenantSql = ' AND tenant_id = ' . (int) current_tenant_id();
         }
-        $sql = 'SELECT id, username, display_name, role, is_active, linked_agent_id, created_at, tenant_id, can_activate
+        $sql = 'SELECT id, username, display_name, role, is_active, linked_agent_id, created_at, tenant_id, can_activate, can_transfer_cards, can_price_cards
                 FROM admin_users WHERE role = "accountant"' . $tenantSql;
         if ($activeOnly) {
             $sql .= ' AND is_active = 1';

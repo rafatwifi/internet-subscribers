@@ -251,7 +251,9 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
                     $navChildAgents = admin_user_child_count($pdo, (int) $navMe['id'], $navTidEarly);
                 }
             }
-            if ($can('agents') && $navChildAgents > 0): ?>
+            $accSeesAgents = function_exists('is_accountant_user') && is_accountant_user()
+                && function_exists('user_boss_has_downline') && user_boss_has_downline(isset($pdo) ? $pdo : null);
+            if (($can('agents') && $navChildAgents > 0) || $accSeesAgents): ?>
             <a class="<?php echo $active === 'agents' ? 'active' : ''; ?>" href="agents.php"><?php echo e($isEn ? 'Agents' : 'الوكلاء'); ?></a>
             <?php endif; ?>
             <?php if ($can('agents') || (function_exists('is_agent_user') && is_agent_user()) || (function_exists('is_group_manager_user') && is_group_manager_user())): ?>

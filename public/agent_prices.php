@@ -9,9 +9,11 @@ $me = current_admin();
 $meId = $me ? (int) $me['id'] : 0;
 $isAgent = function_exists('is_agent_user') && is_agent_user();
 $isGm = function_exists('is_group_manager_user') && is_group_manager_user();
+$isAccPrice = function_exists('is_accountant_user') && is_accountant_user()
+    && function_exists('user_may_price_cards') && user_may_price_cards($pdo);
 $isPriceAdmin = function_exists('is_admin_user') && is_admin_user()
     && !(function_exists('is_accountant_user') && is_accountant_user());
-if (!$isPriceAdmin && !$isAgent && !$isGm) {
+if (!$isPriceAdmin && !$isAgent && !$isGm && !$isAccPrice) {
     flash('error', $isEn ? 'Not allowed' : 'التسعير للأدمن، والتعديل على سعر المواطن للوكيل ومدير الوكلاء');
     redirect('index.php');
 }
@@ -46,7 +48,7 @@ usort($agents, function ($a, $b) {
     $bn = isset($b['display_name']) ? (string) $b['display_name'] : '';
     return strcasecmp($an, $bn);
 });
-if (!$isPriceAdmin) {
+if (!$isPriceAdmin && !$isAccPrice) {
     $allowIds = array($meId);
     if ($isGm && function_exists('group_manager_team_ids')) {
         $allowIds = group_manager_team_ids($pdo);
@@ -54,6 +56,20 @@ if (!$isPriceAdmin) {
     $agents = array_values(array_filter($agents, function ($a) use ($allowIds) {
         return in_array((int) $a['id'], $allowIds, true);
     }));
+}
+if ($isAccPrice && function_exists('accountant_tree_ids')) {
+    $treePrice = accountant_tree_ids($pdo);
+    $bossId = function_exists('accountant_linked_agent_id') ? accountant_linked_agent_id() : 0;
+    $agents = array_values(array_filter($agents, function ($a) use ($treePrice, $bossId) {
+        $id = (int) $a['id'];
+        return $id !== $bossId && in_array($id, $treePrice, true);
+    }));
+    $only = isset($_GET['agent']) ? (int) $_GET['agent'] : 0;
+    if ($only > 0) {
+        $agents = array_values(array_filter($agents, function ($a) use ($only) {
+            return (int) $a['id'] === $only;
+        }));
+    }
 }
 
 // الوكيل: أسعاره + الوكلاء تحت شركته (نفس الـ tenant) للتسعير عليهم
@@ -132,9 +148,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $postedA = isset($row['agent_price']) ? (float) $row['agent_price'] : 0;
             $postedR = isset($row['retail_price']) ? (float) $row['retail_price'] : 0;
             $old = function_exists('agent_card_price_get') ? agent_card_price_get($pdo, $agentId, $profileId, $profileName) : null;
-            if ($isPriceAdmin) {
+            if ($isPriceAdmin || $isAccPrice) {
                 $w = $postedW;
-                $ap = $postedA;
+                $ap = $isAccPrice ? $postedW : $postedA;
                 $rp = $postedR;
             } else {
                 $teamOk = ($agentId === $meId);
@@ -151,6 +167,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if (agent_card_price_save($pdo, $agentId, $profileId, $profileName, $w, $ap, $rp)) {
                 $n++;
             }
+        }
+        if ($n > 0 && function_exists('activity_log')) {
+            activity_log($pdo, 0, 'card_price', $agentId, 'card_price', 'تسعير خدمات وكيل', '');
         }
         flash('success', ($isEn ? 'Saved ' : 'تم حفظ ') . $n);
         redirect('agent_prices.php');
@@ -228,10 +247,15 @@ render_settings_tabs('prices');
             <table class="table-compact">
                 <thead>
                 <tr>
-                    <th><?php echo e($isEn ? 'Package' : 'الفئة'); ?></th>
+                    <th><?php echo e($isEn ? 'Package' : 'الباقة'); ?></th>
+                    <?php if ($isAccPrice): ?>
+                    <th><?php echo e($isEn ? 'Cost' : 'سعر التكلفة'); ?></th>
+                    <th><?php echo e($isEn ? 'Subscriber price' : 'سعر بيع المشترك'); ?></th>
+                    <?php else: ?>
                     <th><?php echo e($isEn ? 'Wholesale' : 'سعر الجملة'); ?></th>
                     <th><?php echo e($isEn ? 'Agent sale' : 'سعر البيع للوكيل'); ?></th>
                     <th><?php echo e($isEn ? 'Citizen sale' : 'سعر البيع للمواطن'); ?></th>
+                    <?php endif; ?>
                 </tr>
                 </thead>
                 <tbody>
@@ -243,8 +267,8 @@ render_settings_tabs('prices');
                     $orig = ($have && (float) $have['wholesale_price'] > 0) ? (float) $have['wholesale_price'] : $sasPrice;
                     $sell = ($have && (float) $have['agent_price'] > 0) ? (float) $have['agent_price'] : $sasPrice;
                     $retail = ($have && isset($have['retail_price']) && (float) $have['retail_price'] > 0) ? (float) $have['retail_price'] : $sasPrice;
-                    $lockAdmin = !$isPriceAdmin;
-                    $canRetail = $isPriceAdmin || $aid === $meId;
+                    $lockAdmin = !$isPriceAdmin && !$isAccPrice;
+                    $canRetail = $isPriceAdmin || $isAccPrice || $aid === $meId;
                     if ($isGm && function_exists('group_manager_team_ids')) {
                         $canRetail = $canRetail || in_array($aid, group_manager_team_ids($pdo), true);
                     }
@@ -256,7 +280,9 @@ render_settings_tabs('prices');
                             <input type="hidden" name="rows[<?php echo (int) $i; ?>][profile_id]" value="<?php echo (int) (isset($line['id']) ? $line['id'] : 0); ?>">
                         </td>
                         <td><input class="ltr" type="number" min="0" step="1" name="rows[<?php echo (int) $i; ?>][wholesale_price]" value="<?php echo (int) $orig; ?>" style="max-width:140px" <?php echo $lockAdmin ? 'readonly' : ''; ?>></td>
+                        <?php if (!$isAccPrice): ?>
                         <td><input class="ltr" type="number" min="0" step="1" name="rows[<?php echo (int) $i; ?>][agent_price]" value="<?php echo (int) $sell; ?>" style="max-width:140px" <?php echo $lockAdmin ? 'readonly' : ''; ?>></td>
+                        <?php endif; ?>
                         <td><input class="ltr" type="number" min="0" step="1" name="rows[<?php echo (int) $i; ?>][retail_price]" value="<?php echo (int) $retail; ?>" style="max-width:140px" <?php echo $canRetail ? '' : 'readonly'; ?>></td>
                     </tr>
                 <?php endforeach; ?>

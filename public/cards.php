@@ -13,7 +13,7 @@ $me = current_admin();
 $meId = $me ? (int) $me['id'] : 0;
 $accLevel = (function_exists('is_accountant_user') && is_accountant_user() && function_exists('accountant_scope_level'))
     ? accountant_scope_level($pdo) : '';
-$canTransfer = ($accLevel === 'admin' || $accLevel === 'group_manager');
+$canTransfer = function_exists('user_may_transfer_cards') && user_may_transfer_cards($pdo);
 $sasReady = function_exists('sas_is_ready') && sas_is_ready($config);
 $agents = list_agent_users($pdo, true);
 $tidCards = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
@@ -47,11 +47,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
     }
     $action = post('action');
     if ($action === 'transfer') {
-        $bossPost = function_exists('accountant_boss_row') ? accountant_boss_row($pdo) : null;
-        $fromAgentId = $bossPost ? (int) $bossPost['id'] : (int) post('from_agent_id', '0');
+        $fromAgentId = function_exists('user_card_source_id') ? (int) user_card_source_id($pdo) : (int) post('from_agent_id', '0');
         $toAgentId = (int) post('to_agent_id', '0');
         $treePost = function_exists('accountant_tree_ids') ? accountant_tree_ids($pdo) : array();
-        if ($toAgentId <= 0 || !in_array($toAgentId, $treePost, true) || $toAgentId === $fromAgentId) {
+        $toRow = function_exists('get_admin_user') ? get_admin_user($pdo, $toAgentId) : null;
+        $toRole = $toRow ? normalize_admin_role($toRow['role']) : '';
+        $toTid = $toRow && isset($toRow['tenant_id']) ? (int) $toRow['tenant_id'] : 0;
+        $myTidPost = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        $okTo = $toRow && $toAgentId !== $fromAgentId && $toTid === $myTidPost
+            && in_array($toRole, array('agent', 'group_manager'), true);
+        if (function_exists('is_accountant_user') && is_accountant_user()) {
+            $okTo = $okTo && in_array($toAgentId, $treePost, true);
+        } elseif (function_exists('is_group_manager_user') && is_group_manager_user() && function_exists('group_manager_team_ids')) {
+            $okTo = $okTo && in_array($toAgentId, group_manager_team_ids($pdo), true);
+        }
+        if (!$okTo) {
             flash('error', $isEn ? 'Select an agent under you' : 'اختر وكيلاً من الشجرة اللي تحتك');
             redirect('cards.php#card-transfer');
         }
@@ -86,6 +96,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
             $meId
         );
         if ($ok) {
+            if (function_exists('activity_log')) {
+                $toName = $toRow && !empty($toRow['display_name']) ? $toRow['display_name'] : ('#' . $toAgentId);
+                activity_log(
+                    $pdo,
+                    0,
+                    'card_transfer',
+                    $toAgentId,
+                    'card_transfer',
+                    'تحويل ' . (int) $qty . ' — ' . $profileName . ' إلى ' . $toName,
+                    $note
+                );
+            }
             flash('success', $isEn ? 'Transfer recorded' : 'تم تسجيل التحويل');
         } else {
             flash('error', card_transfer_error_message($code, $lang));
@@ -103,7 +125,8 @@ if (function_exists('is_agent_user') && is_agent_user()) {
         $scopeAgentId = $linked;
     }
 }
-$recentTransfers = list_recent_card_transfers($pdo, 25, $scopeAgentId);
+$xferActor = (function_exists('is_accountant_user') && is_accountant_user()) ? $meId : null;
+$recentTransfers = list_recent_card_transfers($pdo, 40, null, $xferActor);
 $agentStockPanel = null;
 if ($scopeAgentId > 0 && function_exists('card_agent_dashboard')) {
     $agentStockPanel = card_agent_dashboard($pdo, $scopeAgentId);
@@ -482,6 +505,37 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 </div>
 <?php endif; ?>
 <style>
+.cards-page .cards-wids {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin: 0 0 16px;
+  width: 100%;
+}
+@media (max-width: 1100px) { .cards-page .cards-wids { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .cards-page .cards-wids { grid-template-columns: 1fr; gap: 11px; } }
+.cards-page .sas-box {
+  --c1: #0f766e; --c2: #115e59; --ink: #ffffff;
+  position: relative; overflow: hidden; display: flex; flex-direction: column; justify-content: space-between;
+  color: var(--ink); text-decoration: none; border: 0; border-radius: 2px 20px 2px 16px;
+  min-height: 112px; padding: 16px 16px 14px 18px; width: 100%; text-align: inherit; font: inherit;
+  cursor: pointer;
+  background: linear-gradient(145deg, var(--c1) 0%, var(--c2) 100%);
+  box-shadow: 6px 7px 0 rgba(15, 23, 42, 0.12);
+}
+.cards-page .sas-box-title { font-size: 13px; font-weight: 800; opacity: .95; }
+.cards-page .sas-box-sub { font-size: 11px; font-weight: 600; opacity: .8; margin-top: 2px; }
+.cards-page .sas-box-val { font-size: 28px; font-weight: 800; margin-top: 10px; }
+.cards-page .sas-box.tone-blue { --c1: #38bdf8; --c2: #0369a1; }
+.cards-page .sas-box.tone-green { --c1: #4ade80; --c2: #15803d; }
+.cards-page .sas-box.tone-red { --c1: #fb7185; --c2: #be123c; }
+.cards-page .sas-box.tone-yellow { --c1: #fbbf24; --c2: #b45309; }
+.cards-page .sas-box.tone-teal { --c1: #2dd4bf; --c2: #0f766e; }
+.cards-page .sas-box.tone-navy { --c1: #64748b; --c2: #1e293b; }
+.cards-page .sas-box.tone-lime { --c1: #a3e635; --c2: #4d7c0f; }
+.cards-page .sas-box.tone-purple { --c1: #fb923c; --c2: #c2410c; }
+.cards-page .sas-box.tone-aqua { --c1: #22d3ee; --c2: #0e7490; }
+.cards-page .sas-box.is-on { outline: 3px solid #0f172a; outline-offset: 2px; }
 .cards-page .cards-summary {
   display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px;
 }
@@ -617,23 +671,32 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
             ? 'Amount is taken from the agent price set by the admin.'
             : 'المبلغ ينحسب من تسعيرة الوكيل اللي حاطها الأدمن.'); ?></p>
         <?php
-        $boss = function_exists('accountant_boss_row') ? accountant_boss_row($pdo) : null;
-        $fromId = $boss ? (int) $boss['id'] : $meId;
-        $fromLabel = $boss
-            ? (trim((string) $boss['display_name']) !== '' ? $boss['display_name'] : (string) $boss['username'])
+        $fromId = function_exists('user_card_source_id') ? (int) user_card_source_id($pdo) : $meId;
+        $fromRow = ($fromId > 0 && function_exists('get_admin_user')) ? get_admin_user($pdo, $fromId) : null;
+        if (!$fromRow && function_exists('accountant_boss_row')) {
+            $fromRow = accountant_boss_row($pdo);
+        }
+        $fromLabel = $fromRow
+            ? (trim((string) $fromRow['display_name']) !== '' ? $fromRow['display_name'] : (string) $fromRow['username'])
             : ($me && !empty($me['display_name']) ? (string) $me['display_name'] : '');
-        $treeIds = function_exists('accountant_tree_ids') ? accountant_tree_ids($pdo) : array();
+        $treeIds = (function_exists('is_accountant_user') && is_accountant_user() && function_exists('accountant_tree_ids'))
+            ? accountant_tree_ids($pdo) : array();
+        $gmTeam = (function_exists('is_group_manager_user') && is_group_manager_user() && function_exists('group_manager_team_ids'))
+            ? group_manager_team_ids($pdo) : array();
         $toAgents = array();
         foreach ($agents as $ag) {
             $aid = (int) $ag['id'];
-            if ($aid === $fromId || ($treeIds && !in_array($aid, $treeIds, true))) {
+            if ($aid === $fromId || $aid === $meId) {
                 continue;
             }
-            $roleAg = isset($ag['role']) ? $ag['role'] : 'agent';
-            if ($accLevel === 'admin' && $roleAg !== 'group_manager') {
+            if ($treeIds && !in_array($aid, $treeIds, true)) {
                 continue;
             }
-            if ($accLevel === 'group_manager' && $roleAg !== 'agent') {
+            if ($gmTeam && !in_array($aid, $gmTeam, true)) {
+                continue;
+            }
+            $roleAg = isset($ag['role']) ? normalize_admin_role($ag['role']) : 'agent';
+            if (!in_array($roleAg, array('agent', 'group_manager'), true)) {
                 continue;
             }
             $toAgents[] = $ag;
@@ -709,6 +772,7 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
                     <th><?php echo e($isEn ? 'Qty' : 'كم'); ?></th>
                     <th><?php echo e($isEn ? 'Profit' : 'ربح'); ?></th>
                     <th><?php echo e($isEn ? 'Note' : 'ملاحظة'); ?></th>
+                    <th><?php echo e($isEn ? 'By' : 'بواسطة'); ?></th>
                 </tr>
                 </thead>
                 <tbody>
@@ -724,6 +788,7 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
                         <td><?php echo (int) $tr['qty']; ?></td>
                         <td><?php echo e(money_format_iqd($profit, $config['currency'])); ?></td>
                         <td><?php echo e(isset($tr['note']) ? $tr['note'] : ''); ?></td>
+                        <td><?php echo e(isset($tr['created_by_name']) ? $tr['created_by_name'] : ''); ?></td>
                     </tr>
                 <?php endforeach; ?>
                 </tbody>
@@ -749,6 +814,23 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
     <?php elseif (!$groups): ?>
         <p style="font-weight:700;color:#64748b" id="cardsEmpty"><?php echo e($isEn ? 'Loading…' : 'جاري التحميل…'); ?></p>
     <?php else: ?>
+        <div class="cards-wids" id="cardsWids">
+            <?php
+            $cardTones = array('tone-blue', 'tone-green', 'tone-red', 'tone-yellow', 'tone-teal', 'tone-navy', 'tone-lime', 'tone-purple', 'tone-aqua');
+            foreach ($groups as $wi => $wg):
+                $wName = isset($wg['name']) ? (string) $wg['name'] : '';
+                $wUnused = isset($wg['unused']) ? (int) $wg['unused'] : 0;
+                $wUsed = isset($wg['used']) ? (int) $wg['used'] : 0;
+                $wTotal = isset($wg['total']) ? (int) $wg['total'] : 0;
+                $wTone = $cardTones[$wi % count($cardTones)];
+                ?>
+            <button type="button" class="sas-box <?php echo e($wTone); ?>" data-wid="<?php echo (int) $wi; ?>" data-total="<?php echo $wTotal; ?>" data-used="<?php echo $wUsed; ?>" data-unused="<?php echo $wUnused; ?>">
+                <span class="sas-box-title"><?php echo e($wName !== '' ? $wName : '—'); ?></span>
+                <span class="sas-box-sub"><?php echo e($isEn ? 'Available' : 'متوفر'); ?></span>
+                <span class="sas-box-val"><?php echo $wUnused; ?></span>
+            </button>
+            <?php endforeach; ?>
+        </div>
         <div class="cards-summary" id="cardsSummary">
             <span class="sum-pill"><?php echo e($isEn ? 'Categories' : 'فئات'); ?>: <span data-sum="cats"><?php echo count($groups); ?></span></span>
             <span class="sum-pill"><?php echo e($isEn ? 'Total' : 'الكل'); ?>: <span data-sum="total"><?php echo (int) $sumTotal; ?></span></span>
@@ -782,7 +864,7 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
             }
             $openFirst = ($gi === 0 && $unused > 0);
             ?>
-            <div class="cat-block<?php echo $openFirst ? ' is-open' : ''; ?>" data-cat data-has-free="<?php echo $unused > 0 ? '1' : '0'; ?>">
+            <div class="cat-block<?php echo $openFirst ? ' is-open' : ''; ?>" data-cat data-wid="<?php echo (int) $gi; ?>" data-has-free="<?php echo $unused > 0 ? '1' : '0'; ?>">
                 <button type="button" class="cat-head" data-toggle-cat>
                     <h3>
                         <span class="cat-chevron">›</span>
@@ -892,11 +974,21 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
       return;
     }
     var html = '';
+    var tones = ['tone-blue','tone-green','tone-red','tone-yellow','tone-teal','tone-navy','tone-lime','tone-purple','tone-aqua'];
+    html += '<div class="cards-wids" id="cardsWids">';
+    groups.forEach(function (g, wi) {
+      var tone = tones[wi % tones.length];
+      html += '<button type="button" class="sas-box ' + tone + '" data-wid="' + wi + '" data-total="' + (g.total || 0) + '" data-used="' + (g.used || 0) + '" data-unused="' + (g.unused || 0) + '">';
+      html += '<span class="sas-box-title">' + esc(g.name || '—') + '</span>';
+      html += '<span class="sas-box-sub">' + (isEn ? 'Available' : 'متوفر') + '</span>';
+      html += '<span class="sas-box-val">' + (g.unused || 0) + '</span></button>';
+    });
+    html += '</div>';
     html += '<div class="cards-summary" id="cardsSummary">';
-    html += '<span class="sum-pill">' + (isEn ? 'Categories' : 'فئات') + ': ' + groups.length + '</span>';
-    html += '<span class="sum-pill">' + (isEn ? 'Total' : 'الكل') + ': ' + sumTotal + '</span>';
-    html += '<span class="sum-pill ok">' + (isEn ? 'Unused' : 'شاغر') + ': ' + sumUnused + '</span>';
-    html += '<span class="sum-pill bad">' + (isEn ? 'Used' : 'مستخدم') + ': ' + sumUsed + '</span>';
+    html += '<span class="sum-pill">' + (isEn ? 'Categories' : 'فئات') + ': <span data-sum="cats">' + groups.length + '</span></span>';
+    html += '<span class="sum-pill">' + (isEn ? 'Total' : 'الكل') + ': <span data-sum="total">' + sumTotal + '</span></span>';
+    html += '<span class="sum-pill ok">' + (isEn ? 'Unused' : 'شاغر') + ': <span data-sum="unused">' + sumUnused + '</span></span>';
+    html += '<span class="sum-pill bad">' + (isEn ? 'Used' : 'مستخدم') + ': <span data-sum="used">' + sumUsed + '</span></span>';
     html += '</div>';
     html += '<input type="search" id="cardsSearch" class="cards-search" placeholder="' + (isEn ? 'Search…' : 'بحث…') + '">';
     html += '<div class="filter-row" id="cardsFilter">';
@@ -910,7 +1002,7 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
       var free = [], used = [];
       (g.cards || []).forEach(function (c) { (c.used ? used : free).push(c); });
       var open = (gi === 0 && (g.unused || 0) > 0) ? ' is-open' : '';
-      html += '<div class="cat-block' + open + '" data-cat data-has-free="' + ((g.unused || 0) > 0 ? '1' : '0') + '">';
+      html += '<div class="cat-block' + open + '" data-cat data-wid="' + gi + '" data-has-free="' + ((g.unused || 0) > 0 ? '1' : '0') + '">';
       html += '<button type="button" class="cat-head" data-toggle-cat><h3><span class="cat-chevron">›</span> ' + esc(g.name || '—') + '</h3>';
       html += '<div class="cat-meta"><span class="pill">' + (g.total || 0) + '</span>';
       html += '<span class="pill ok">' + (isEn ? 'Free' : 'شاغر') + ' ' + (g.unused || 0) + '</span>';
@@ -1034,6 +1126,52 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
         } catch (err) {}
       });
     });
+    var wids = document.getElementById('cardsWids');
+    if (wids) {
+      wids.addEventListener('click', function (e) {
+        var b = e.target.closest ? e.target.closest('[data-wid]') : null;
+        if (!b || !wids.contains(b)) return;
+        var id = b.getAttribute('data-wid');
+        var already = b.classList.contains('is-on');
+        wids.querySelectorAll('[data-wid]').forEach(function (x) { x.classList.remove('is-on'); });
+        var sum = document.getElementById('cardsSummary');
+        function setSum(k, v) {
+          if (!sum) return;
+          var el = sum.querySelector('[data-sum="' + k + '"]');
+          if (el) el.textContent = String(v);
+        }
+        function totalsFromWids() {
+          var t = 0, u = 0, n = 0, c = 0;
+          wids.querySelectorAll('[data-wid]').forEach(function (x) {
+            c++;
+            t += parseInt(x.getAttribute('data-total'), 10) || 0;
+            u += parseInt(x.getAttribute('data-used'), 10) || 0;
+            n += parseInt(x.getAttribute('data-unused'), 10) || 0;
+          });
+          setSum('cats', c);
+          setSum('total', t);
+          setSum('used', u);
+          setSum('unused', n);
+        }
+        if (already) {
+          list.querySelectorAll('[data-cat]').forEach(function (el) { el.style.display = ''; });
+          totalsFromWids();
+          return;
+        }
+        b.classList.add('is-on');
+        list.querySelectorAll('[data-cat]').forEach(function (el) {
+          var on = el.getAttribute('data-wid') === id;
+          el.style.display = on ? '' : 'none';
+          if (on) el.classList.add('is-open');
+        });
+        setSum('cats', '1');
+        setSum('total', b.getAttribute('data-total') || '0');
+        setSum('used', b.getAttribute('data-used') || '0');
+        setSum('unused', b.getAttribute('data-unused') || '0');
+        var target = list.querySelector('[data-cat][data-wid="' + id + '"]');
+        if (target && target.scrollIntoView) target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      });
+    }
     var filter = document.getElementById('cardsFilter');
     if (filter) {
       filter.addEventListener('click', function (e) {
@@ -1051,6 +1189,27 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
         }
         filter.querySelectorAll('button[data-f="all"],button[data-f="free"]').forEach(function (x) { x.classList.remove('is-on'); });
         b.classList.add('is-on');
+        var widsNow = document.getElementById('cardsWids');
+        if (f === 'all' && widsNow) {
+          widsNow.querySelectorAll('[data-wid]').forEach(function (x) { x.classList.remove('is-on'); });
+          var sum = document.getElementById('cardsSummary');
+          var t = 0, u = 0, n = 0, c = 0;
+          widsNow.querySelectorAll('[data-wid]').forEach(function (x) {
+            c++;
+            t += parseInt(x.getAttribute('data-total'), 10) || 0;
+            u += parseInt(x.getAttribute('data-used'), 10) || 0;
+            n += parseInt(x.getAttribute('data-unused'), 10) || 0;
+          });
+          function put(k, v) {
+            if (!sum) return;
+            var el = sum.querySelector('[data-sum="' + k + '"]');
+            if (el) el.textContent = String(v);
+          }
+          put('cats', c);
+          put('total', t);
+          put('used', u);
+          put('unused', n);
+        }
         list.querySelectorAll('[data-cat]').forEach(function (el) {
           if (f === 'free') el.style.display = el.getAttribute('data-has-free') === '1' ? '' : 'none';
           else el.style.display = '';

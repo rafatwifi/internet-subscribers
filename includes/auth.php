@@ -254,6 +254,109 @@ function accountant_scope_level($pdo)
     return 'agent';
 }
 
+function user_card_source_id($pdo)
+{
+    if (function_exists('is_accountant_user') && is_accountant_user()) {
+        return accountant_linked_agent_id();
+    }
+    $me = current_admin();
+    return $me ? (int) $me['id'] : 0;
+}
+
+function user_boss_has_downline($pdo)
+{
+    if (!function_exists('is_accountant_user') || !is_accountant_user()) {
+        return false;
+    }
+    $lv = accountant_scope_level($pdo);
+    return $lv === 'admin' || $lv === 'group_manager';
+}
+
+function user_may_transfer_cards($pdo)
+{
+    if (function_exists('is_super_admin_user') && is_super_admin_user()) {
+        return false;
+    }
+    if (function_exists('is_accountant_user') && is_accountant_user()) {
+        if (!user_boss_has_downline($pdo)) {
+            return false;
+        }
+        $u = current_admin();
+        return $u && current_admin_card_flag($pdo, 'can_transfer_cards');
+    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if (function_exists('is_admin_user') && is_admin_user()) {
+        return $tid > 1;
+    }
+    if (function_exists('is_group_manager_user') && is_group_manager_user()) {
+        $me = current_admin();
+        $id = $me ? (int) $me['id'] : 0;
+        return $id > 0 && function_exists('admin_user_child_count') && admin_user_child_count($pdo, $id, $tid) > 0;
+    }
+    return false;
+}
+
+function user_may_price_cards($pdo)
+{
+    if (function_exists('is_super_admin_user') && is_super_admin_user()) {
+        return false;
+    }
+    if (function_exists('is_accountant_user') && is_accountant_user()) {
+        if (!user_boss_has_downline($pdo)) {
+            return false;
+        }
+        $u = current_admin();
+        return $u && current_admin_card_flag($pdo, 'can_price_cards');
+    }
+    if (function_exists('is_admin_user') && is_admin_user()) {
+        $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        return $tid > 1;
+    }
+    return function_exists('is_group_manager_user') && is_group_manager_user();
+}
+
+function creator_can_grant_card_tools($pdo)
+{
+    $me = current_admin();
+    $id = $me ? (int) $me['id'] : 0;
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($id <= 0 || $tid <= 1) {
+        return false;
+    }
+    if (function_exists('is_admin_user') && is_admin_user() && function_exists('agency_has_downline')) {
+        return agency_has_downline($pdo, $tid, $id);
+    }
+    if (function_exists('admin_user_child_count') && admin_user_child_count($pdo, $id, $tid) > 0) {
+        return true;
+    }
+    return false;
+}
+
+function current_admin_card_flag($pdo, $key)
+{
+    if ($key !== 'can_transfer_cards' && $key !== 'can_price_cards') {
+        return false;
+    }
+    $sess = 'admin_' . $key;
+    if (isset($_SESSION[$sess])) {
+        return !empty($_SESSION[$sess]);
+    }
+    $u = current_admin();
+    $id = $u ? (int) $u['id'] : 0;
+    if ($id <= 0 || !$pdo) {
+        return false;
+    }
+    try {
+        $st = $pdo->prepare('SELECT `' . $key . '` FROM admin_users WHERE id = :id LIMIT 1');
+        $st->execute(array(':id' => $id));
+        $v = (int) $st->fetchColumn() === 1 ? 1 : 0;
+        $_SESSION[$sess] = $v;
+        return $v === 1;
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
 /** من الحساب المرتبط ونزولاً بكل الشجرة */
 function accountant_tree_ids($pdo)
 {
@@ -492,6 +595,21 @@ function user_can($perm, $role = null)
         $u = current_admin();
         $role = $u && isset($u['role']) ? $u['role'] : 'staff';
     }
+    if ($role === 'accountant' && $perm !== 'dashboard') {
+        global $pdo;
+        $forced = function_exists('accountant_widget_perms') ? accountant_widget_perms(isset($pdo) ? $pdo : null) : null;
+        if (is_array($forced)) {
+            if ($perm === 'activate') {
+                $uAct = current_admin();
+                return $uAct && !empty($uAct['can_activate']);
+            }
+            if ($perm === 'card_accounting') {
+                $lv = function_exists('accountant_scope_level') ? accountant_scope_level(isset($pdo) ? $pdo : null) : '';
+                return $lv === 'admin' || $lv === 'group_manager';
+            }
+            return in_array($perm, $forced, true);
+        }
+    }
     $perms = role_permissions($role);
     if (in_array($perm, $perms, true)) {
         return true;
@@ -511,6 +629,254 @@ function user_can($perm, $role = null)
         }
     }
     return false;
+}
+
+function accountant_widget_catalog()
+{
+    return array(
+        'subscribers' => array('ar' => 'المشتركين', 'en' => 'Subscribers', 'tone' => 'tone-blue', 'perm' => 'subscribers', 'nav' => 'sas'),
+        'active' => array('ar' => 'فعال', 'en' => 'Active', 'tone' => 'tone-green', 'perm' => 'subscribers', 'nav' => ''),
+        'online' => array('ar' => 'متصل حاليا', 'en' => 'Online', 'tone' => 'tone-aqua', 'perm' => 'subscribers', 'nav' => ''),
+        'expired' => array('ar' => 'منتهي', 'en' => 'Expired', 'tone' => 'tone-red', 'perm' => 'subscribers', 'nav' => ''),
+        'soon' => array('ar' => 'على وشك الانتهاء', 'en' => 'About to expire', 'tone' => 'tone-yellow', 'perm' => 'subscribers', 'nav' => ''),
+        'today' => array('ar' => 'ينتهي اليوم', 'en' => 'Expiring today', 'tone' => 'tone-teal', 'perm' => 'subscribers', 'nav' => ''),
+        'agents' => array('ar' => 'الوكلاء', 'en' => 'Agents', 'tone' => 'tone-purple', 'perm' => 'agents', 'nav' => 'agents'),
+        'cards' => array('ar' => 'الكروت', 'en' => 'Cards', 'tone' => 'tone-navy', 'perm' => 'cards', 'nav' => 'cards'),
+        'stock' => array('ar' => 'المخزون الشاغر', 'en' => 'Remaining stock', 'tone' => 'tone-navy', 'perm' => '', 'nav' => ''),
+        'xfers' => array('ar' => 'التحويلات', 'en' => 'Transfers', 'tone' => 'tone-purple', 'perm' => '', 'nav' => ''),
+        'card_profit' => array('ar' => 'ربح الكروت', 'en' => 'Card profit', 'tone' => 'tone-green', 'perm' => '', 'nav' => ''),
+        'card_paid' => array('ar' => 'دفعات الكروت', 'en' => 'Card payments', 'tone' => 'tone-teal', 'perm' => '', 'nav' => ''),
+        'card_due' => array('ar' => 'المتبقي', 'en' => 'Remaining', 'tone' => 'tone-red', 'perm' => '', 'nav' => ''),
+        'collected' => array('ar' => 'المقبوض', 'en' => 'Collected', 'tone' => 'tone-yellow', 'perm' => 'reports', 'nav' => ''),
+        'debts' => array('ar' => 'الديون', 'en' => 'Debts', 'tone' => 'tone-red', 'perm' => 'debts', 'nav' => 'debts'),
+        'profit' => array('ar' => 'الربح', 'en' => 'Profit', 'tone' => 'tone-lime', 'perm' => 'reports', 'nav' => ''),
+        'capital' => array('ar' => 'رأس المال', 'en' => 'Capital', 'tone' => 'tone-teal', 'perm' => '', 'nav' => ''),
+        'sales' => array('ar' => 'المبيعات', 'en' => 'Sales', 'tone' => 'tone-purple', 'perm' => 'subscriptions', 'nav' => ''),
+        'activations' => array('ar' => 'التفعيلات', 'en' => 'Activations', 'tone' => 'tone-yellow', 'perm' => 'subscriptions', 'nav' => 'subscriptions'),
+        'rentals' => array('ar' => 'الإيجار', 'en' => 'Rentals', 'tone' => 'tone-teal', 'perm' => 'rentals', 'nav' => 'rentals'),
+        'points' => array('ar' => 'نقاط تشجيعية', 'en' => 'Reward points', 'tone' => 'tone-lime', 'perm' => '', 'nav' => ''),
+        'latency' => array('ar' => 'بنك الساس', 'en' => 'SAS latency', 'tone' => 'tone-navy', 'perm' => '', 'nav' => ''),
+        'reports' => array('ar' => 'التقارير', 'en' => 'Reports', 'tone' => 'tone-green', 'perm' => 'reports', 'nav' => 'reports'),
+        'messages' => array('ar' => 'الرسائل', 'en' => 'Messages', 'tone' => 'tone-aqua', 'perm' => 'messages', 'nav' => 'messages'),
+    );
+}
+
+function accountant_pkg_id($name)
+{
+    return 'pkg:' . rawurlencode(trim((string) $name));
+}
+
+function accountant_card_package_widgets()
+{
+    $groups = array();
+    if (function_exists('sas_dash_cards_preferred_persisted')) {
+        $p = sas_dash_cards_preferred_persisted();
+        if ($p && !empty($p['groups']) && is_array($p['groups'])) {
+            $groups = $p['groups'];
+        }
+    }
+    $tones = array('tone-blue', 'tone-green', 'tone-red', 'tone-yellow', 'tone-teal', 'tone-navy', 'tone-lime', 'tone-purple', 'tone-aqua');
+    $out = array();
+    $i = 0;
+    foreach ($groups as $g) {
+        $name = isset($g['name']) ? trim((string) $g['name']) : '';
+        if ($name === '') {
+            continue;
+        }
+        $id = accountant_pkg_id($name);
+        if (isset($out[$id])) {
+            continue;
+        }
+        $out[$id] = array(
+            'ar' => $name,
+            'en' => $name,
+            'tone' => $tones[$i % count($tones)],
+            'perm' => '',
+            'nav' => '',
+        );
+        $i++;
+    }
+    return $out;
+}
+
+function accountant_widget_catalog_full()
+{
+    $base = accountant_widget_catalog();
+    $pkgs = accountant_card_package_widgets();
+    $out = array();
+    foreach ($base as $id => $meta) {
+        $out[$id] = $meta;
+        if ($id === 'cards') {
+            foreach ($pkgs as $pid => $pm) {
+                $out[$pid] = $pm;
+            }
+        }
+    }
+    return $out;
+}
+
+function accountant_widget_id_ok($id)
+{
+    $id = (string) $id;
+    if (isset(accountant_widget_catalog()[$id])) {
+        return true;
+    }
+    return strpos($id, 'pkg:') === 0 && strlen($id) > 4;
+}
+
+function &accountant_widgets_rev_store()
+{
+    static $rev = array();
+    return $rev;
+}
+
+function accountant_widgets_saved($pdo, $userId = 0)
+{
+    static $mem = array();
+    if ($userId <= 0) {
+        $u = function_exists('current_admin') ? current_admin() : null;
+        $userId = $u ? (int) $u['id'] : 0;
+    }
+    if ($userId <= 0) {
+        return null;
+    }
+    if (array_key_exists($userId, $mem)) {
+        return $mem[$userId];
+    }
+    $mem[$userId] = null;
+    if (!$pdo) {
+        return null;
+    }
+    try {
+        $st = $pdo->prepare('SELECT ui_prefs FROM admin_users WHERE id = :id LIMIT 1');
+        $st->execute(array(':id' => $userId));
+        $raw = $st->fetchColumn();
+        if (!is_string($raw) || $raw === '') {
+            return null;
+        }
+        $data = json_decode($raw, true);
+        if (!is_array($data) || empty($data['acc_widgets_set'])) {
+            return null;
+        }
+        $ids = isset($data['acc_widgets']) && is_array($data['acc_widgets']) ? $data['acc_widgets'] : array();
+        $clean = array();
+        foreach ($ids as $id) {
+            $id = (string) $id;
+            if (accountant_widget_id_ok($id) && !in_array($id, $clean, true)) {
+                $clean[] = $id;
+            }
+        }
+        $revStore = &accountant_widgets_rev_store();
+        $revStore[$userId] = isset($data['acc_widgets_v']) ? (int) $data['acc_widgets_v'] : 1;
+        $mem[$userId] = $clean;
+        return $clean;
+    } catch (Exception $e) {
+        return null;
+    }
+}
+
+function accountant_widgets_save($pdo, $userId, $ids)
+{
+    $userId = (int) $userId;
+    if ($userId <= 0 || !$pdo || !is_array($ids)) {
+        return false;
+    }
+    $clean = array();
+    foreach ($ids as $id) {
+        $id = (string) $id;
+        if (accountant_widget_id_ok($id) && !in_array($id, $clean, true)) {
+            $clean[] = $id;
+        }
+    }
+    try {
+        $st = $pdo->prepare('SELECT ui_prefs, role FROM admin_users WHERE id = :id LIMIT 1');
+        $st->execute(array(':id' => $userId));
+        $row = $st->fetch();
+        if (!$row || normalize_admin_role($row['role']) !== 'accountant') {
+            return false;
+        }
+        $data = array();
+        if (!empty($row['ui_prefs'])) {
+            $decoded = json_decode((string) $row['ui_prefs'], true);
+            if (is_array($decoded)) {
+                $data = $decoded;
+            }
+        }
+        $data['acc_widgets_set'] = 1;
+        $data['acc_widgets_v'] = 2;
+        $data['acc_widgets'] = $clean;
+        $revStore = &accountant_widgets_rev_store();
+        $revStore[$userId] = 2;
+        $json = json_encode($data);
+        if ($json === false) {
+            return false;
+        }
+        $up = $pdo->prepare('UPDATE admin_users SET ui_prefs = :p, updated_at = NOW() WHERE id = :id AND role = "accountant"');
+        $up->execute(array(':p' => $json, ':id' => $userId));
+        return true;
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+function accountant_widgets_revision($pdo, $userId = 0)
+{
+    if ($userId <= 0) {
+        $u = function_exists('current_admin') ? current_admin() : null;
+        $userId = $u ? (int) $u['id'] : 0;
+    }
+    accountant_widgets_saved($pdo, $userId);
+    $store = &accountant_widgets_rev_store();
+    return isset($store[$userId]) ? (int) $store[$userId] : 0;
+}
+
+function accountant_widgets_effective($pdo, $userId = 0)
+{
+    $saved = accountant_widgets_saved($pdo, $userId);
+    if (!is_array($saved)) {
+        return null;
+    }
+    if (accountant_widgets_revision($pdo, $userId) >= 2) {
+        return $saved;
+    }
+    $extra = array('stock', 'xfers', 'card_profit', 'card_paid', 'card_due');
+    if (in_array('profit', $saved, true)) {
+        $extra[] = 'capital';
+    }
+    if (in_array('activations', $saved, true)) {
+        $extra[] = 'sales';
+    }
+    if (in_array('cards', $saved, true)) {
+        foreach (array_keys(accountant_card_package_widgets()) as $pid) {
+            $extra[] = $pid;
+        }
+    }
+    foreach ($extra as $id) {
+        if (!in_array($id, $saved, true)) {
+            $saved[] = $id;
+        }
+    }
+    return $saved;
+}
+
+function accountant_widget_perms($pdo)
+{
+    $ids = accountant_widgets_saved($pdo);
+    if (!is_array($ids)) {
+        return null;
+    }
+    $cat = accountant_widget_catalog();
+    $perms = array('dashboard');
+    foreach ($ids as $id) {
+        if (!isset($cat[$id]['perm'])) {
+            continue;
+        }
+        $p = (string) $cat[$id]['perm'];
+        if ($p !== '' && !in_array($p, $perms, true)) {
+            $perms[] = $p;
+        }
+    }
+    return $perms;
 }
 
 function require_perm($perm)
@@ -595,6 +961,14 @@ function ensure_admin_users_table($pdo, $config = null)
             $col = $pdo->query("SHOW COLUMNS FROM admin_users LIKE 'can_activate'")->fetch();
             if (!$col) {
                 $pdo->exec('ALTER TABLE admin_users ADD COLUMN can_activate TINYINT(1) NOT NULL DEFAULT 0');
+            }
+            $col = $pdo->query("SHOW COLUMNS FROM admin_users LIKE 'can_transfer_cards'")->fetch();
+            if (!$col) {
+                $pdo->exec('ALTER TABLE admin_users ADD COLUMN can_transfer_cards TINYINT(1) NOT NULL DEFAULT 0');
+            }
+            $col = $pdo->query("SHOW COLUMNS FROM admin_users LIKE 'can_price_cards'")->fetch();
+            if (!$col) {
+                $pdo->exec('ALTER TABLE admin_users ADD COLUMN can_price_cards TINYINT(1) NOT NULL DEFAULT 0');
             }
         } catch (Exception $e) {
         }
@@ -716,6 +1090,8 @@ function current_admin()
         'wa_local_key' => isset($_SESSION['admin_wa_local_key']) ? (string) $_SESSION['admin_wa_local_key'] : '',
         'linked_agent_id' => isset($_SESSION['admin_linked_agent_id']) ? (int) $_SESSION['admin_linked_agent_id'] : 0,
         'can_activate' => !empty($_SESSION['admin_can_activate']) ? 1 : 0,
+        'can_transfer_cards' => !empty($_SESSION['admin_can_transfer_cards']) ? 1 : 0,
+        'can_price_cards' => !empty($_SESSION['admin_can_price_cards']) ? 1 : 0,
         'tenant_id' => isset($_SESSION['admin_tenant_id']) ? max(1, (int) $_SESSION['admin_tenant_id']) : 1,
     );
 }
@@ -883,6 +1259,8 @@ function set_admin_session_from_row($row)
     $_SESSION['admin_wa_local_key'] = isset($row['wa_local_key']) ? (string) $row['wa_local_key'] : '';
     $_SESSION['admin_linked_agent_id'] = isset($row['linked_agent_id']) ? (int) $row['linked_agent_id'] : 0;
     $_SESSION['admin_can_activate'] = !empty($row['can_activate']) ? 1 : 0;
+    $_SESSION['admin_can_transfer_cards'] = !empty($row['can_transfer_cards']) ? 1 : 0;
+    $_SESSION['admin_can_price_cards'] = !empty($row['can_price_cards']) ? 1 : 0;
     $_SESSION['admin_tenant_id'] = isset($row['tenant_id']) ? max(1, (int) $row['tenant_id']) : 1;
     unset($_SESSION['ui_prefs']);
 }

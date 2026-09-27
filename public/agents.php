@@ -2,7 +2,12 @@
 
 require_once __DIR__ . '/../includes/bootstrap.php';
 require_once __DIR__ . '/../includes/layout.php';
-require_perm('agents');
+require_login();
+$accAgentsOk = function_exists('is_accountant_user') && is_accountant_user()
+    && function_exists('user_boss_has_downline') && user_boss_has_downline($pdo);
+if (!$accAgentsOk) {
+    require_perm('agents');
+}
 ensure_subscriber_agent_column($pdo);
 ensure_admin_users_table($pdo);
 
@@ -40,7 +45,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         flash('error', $isEn ? 'View only' : 'عرض فقط — ما عندك صلاحية التعديل');
         redirect('agents.php');
     }
+    if (function_exists('is_accountant_user') && is_accountant_user()) {
+        flash('error', $isEn ? 'View only' : 'عرض فقط');
+        redirect('agents.php');
+    }
     $action = post('action');
+
+    if ($action === 'save_acc_widgets') {
+        $uid = (int) post('user_id', '0');
+        $row = get_admin_user($pdo, $uid);
+        $rowTid = $row && isset($row['tenant_id']) ? (int) $row['tenant_id'] : 0;
+        $myTidNow = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        $canSetWid = (function_exists('is_admin_user') && is_admin_user())
+            || (function_exists('is_group_manager_user') && is_group_manager_user());
+        $raw = trim((string) post('widgets', ''));
+        $ids = $raw === '' ? array() : explode(',', $raw);
+        if (!$canSetWid || !$row || normalize_admin_role($row['role']) !== 'accountant' || $rowTid !== $myTidNow || !function_exists('accountant_widgets_save') || !accountant_widgets_save($pdo, $uid, $ids)) {
+            flash('error', $isEn ? 'Could not save' : 'ما انحفظ');
+        } else {
+            flash('success', $isEn ? 'Saved' : 'تم الحفظ');
+        }
+        redirect('agents.php?view=accountant');
+    }
 
     if ($action === 'allow_login_as') {
         if (!function_exists('is_admin_user') || !is_admin_user()) {
@@ -208,9 +234,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         $linked = (int) $meId;
         $canAct = post('can_activate') === '1' ? 1 : 0;
+        $canXfer = (function_exists('creator_can_grant_card_tools') && creator_can_grant_card_tools($pdo) && post('can_transfer_cards') === '1') ? 1 : 0;
+        $canPrice = (function_exists('creator_can_grant_card_tools') && creator_can_grant_card_tools($pdo) && post('can_price_cards') === '1') ? 1 : 0;
         update_admin_user_meta($pdo, $uid, $display !== '' ? $display : $row['display_name'], 'accountant', $linked);
-        $pdo->prepare('UPDATE admin_users SET is_active = :a, can_activate = :c, updated_at = NOW() WHERE id = :id AND role = "accountant"')
-            ->execute(array(':a' => $active, ':c' => $canAct, ':id' => $uid));
+        $pdo->prepare('UPDATE admin_users SET is_active = :a, can_activate = :c, can_transfer_cards = :x, can_price_cards = :p, updated_at = NOW() WHERE id = :id AND role = "accountant"')
+            ->execute(array(':a' => $active, ':c' => $canAct, ':x' => $canXfer, ':p' => $canPrice, ':id' => $uid));
         $newPass = (string) post('password', '');
         if (strlen($newPass) >= 4) {
             change_user_password($pdo, $uid, $newPass);
@@ -277,8 +305,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             try {
                 $newId = (int) $pdo->query('SELECT id FROM admin_users WHERE username = ' . $pdo->quote($username) . ' LIMIT 1')->fetchColumn();
                 if ($newId > 0) {
-                    $pdo->prepare('UPDATE admin_users SET can_activate = :c, linked_agent_id = :l WHERE id = :id')
-                        ->execute(array(':c' => $canAct, ':l' => $linked, ':id' => $newId));
+                    $canXfer = (function_exists('creator_can_grant_card_tools') && creator_can_grant_card_tools($pdo) && post('can_transfer_cards') === '1') ? 1 : 0;
+                    $canPrice = (function_exists('creator_can_grant_card_tools') && creator_can_grant_card_tools($pdo) && post('can_price_cards') === '1') ? 1 : 0;
+                    $pdo->prepare('UPDATE admin_users SET can_activate = :c, can_transfer_cards = :x, can_price_cards = :p, linked_agent_id = :l WHERE id = :id')
+                        ->execute(array(':c' => $canAct, ':x' => $canXfer, ':p' => $canPrice, ':l' => $linked, ':id' => $newId));
                 }
             } catch (Exception $e) {
             }
@@ -653,6 +683,54 @@ $accOnly = (isset($_GET['view']) && $_GET['view'] === 'accountant');
 $childAgents = function_exists('admin_user_child_count')
     ? admin_user_child_count($pdo, $meId, function_exists('current_tenant_id') ? (int) current_tenant_id() : 1)
     : 0;
+if (function_exists('is_accountant_user') && is_accountant_user()) {
+    $tree = function_exists('accountant_tree_ids') ? accountant_tree_ids($pdo) : array();
+    $rootBoss = function_exists('accountant_linked_agent_id') ? accountant_linked_agent_id() : 0;
+    $mineAgents = array();
+    foreach ($agents as $ag) {
+        $aid = (int) $ag['id'];
+        if ($aid === $rootBoss || !in_array($aid, $tree, true)) {
+            continue;
+        }
+        $mineAgents[] = $ag;
+    }
+    $pick = isset($_GET['pick']) ? (int) $_GET['pick'] : 0;
+    $mayPrice = function_exists('user_may_price_cards') && user_may_price_cards($pdo);
+    render_header($isEn ? 'Agents' : 'الوكلاء', 'agents');
+    echo '<div class="panel"><h2 style="margin:0 0 12px">' . e($isEn ? 'Agents' : 'الوكلاء') . '</h2>';
+    if ($mayPrice && $pick > 0) {
+        echo '<p class="actions" style="margin:0 0 12px"><a class="btn" href="agent_prices.php?agent=' . (int) $pick . '">' . e($isEn ? 'Price services' : 'تسعير الخدمات') . '</a></p>';
+    }
+    echo '<div class="table-wrap"><table class="table-compact"><thead><tr>';
+    echo '<th>' . e($isEn ? 'Agent' : 'الوكيل') . '</th>';
+    echo '<th>' . e($isEn ? 'Owed' : 'مطلوب فلوس') . '</th>';
+    echo '<th>' . e($isEn ? 'Free cards' : 'كروت شاغرة') . '</th>';
+    echo '</tr></thead><tbody>';
+    if (!$mineAgents) {
+        echo '<tr><td colspan="3">' . e($isEn ? 'No agents' : 'ماكو وكلاء') . '</td></tr>';
+    }
+    foreach ($mineAgents as $ag) {
+        $aid = (int) $ag['id'];
+        $nm = trim((string) $ag['display_name']) !== '' ? $ag['display_name'] : $ag['username'];
+        $owed = function_exists('card_agent_remaining_balance') ? card_agent_remaining_balance($pdo, $aid) : 0;
+        $stockBits = array();
+        if (function_exists('card_agent_stock_summary')) {
+            $stk = card_agent_stock_summary($pdo, $aid);
+            if (!empty($stk['rows'])) {
+                foreach ($stk['rows'] as $sr) {
+                    $stockBits[] = (isset($sr['profile_name']) ? $sr['profile_name'] : '') . ' ' . (int) $sr['qty'];
+                }
+            }
+        }
+        $on = ($pick === $aid) ? ' style="background:#ecfeff"' : '';
+        echo '<tr' . $on . '><td><a href="agents.php?pick=' . $aid . '">' . e($nm) . '</a></td>';
+        echo '<td>' . e(function_exists('money_format_iqd') ? money_format_iqd($owed, isset($config['currency']) ? $config['currency'] : '') : (string) $owed) . '</td>';
+        echo '<td>' . e($stockBits ? implode(' · ', $stockBits) : ($isEn ? 'None' : 'ماكو')) . '</td></tr>';
+    }
+    echo '</tbody></table></div></div>';
+    render_footer();
+    return;
+}
 if ($childAgents <= 0 && empty($agents)) {
     $accOnly = true;
 }
@@ -1087,6 +1165,24 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
                     <span><?php echo e($isEn ? 'Allow activation' : 'السماح بالتفعيل'); ?></span>
                 </label>
             </div>
+            <?php if (function_exists('creator_can_grant_card_tools') && creator_can_grant_card_tools($pdo)): ?>
+            <div>
+                <label><?php echo e($isEn ? 'Card transfer' : 'تحويل الكروت'); ?></label>
+                <label class="toggle" style="display:flex;align-items:center;gap:8px;margin-top:8px">
+                    <input type="checkbox" name="can_transfer_cards" value="1">
+                    <span class="toggle-ui"></span>
+                    <span><?php echo e($isEn ? 'Allow transfer' : 'يقدر يحوّل كروت'); ?></span>
+                </label>
+            </div>
+            <div>
+                <label><?php echo e($isEn ? 'Pricing' : 'تسعير الخدمات'); ?></label>
+                <label class="toggle" style="display:flex;align-items:center;gap:8px;margin-top:8px">
+                    <input type="checkbox" name="can_price_cards" value="1">
+                    <span class="toggle-ui"></span>
+                    <span><?php echo e($isEn ? 'Allow pricing' : 'يقدر يسعّر'); ?></span>
+                </label>
+            </div>
+            <?php endif; ?>
             <div class="actions" style="align-items:end">
                 <button class="btn" type="submit"><?php echo e($isEn ? 'Add' : 'إضافة'); ?></button>
             </div>
@@ -1122,6 +1218,19 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
                         <input form="accForm<?php echo $acid; ?>" type="checkbox" name="can_activate" value="1" <?php echo $canAct ? 'checked' : ''; ?>>
                         <span class="toggle-ui" aria-hidden="true"></span>
                     </label>
+                    <?php if (function_exists('creator_can_grant_card_tools') && creator_can_grant_card_tools($pdo)):
+                        $canXferRow = !empty($ac['can_transfer_cards']);
+                        $canPriceRow = !empty($ac['can_price_cards']);
+                        ?>
+                    <label class="toggle" style="margin:6px 0 0" title="<?php echo e($isEn ? 'Card transfer' : 'تحويل الكروت'); ?>">
+                        <input form="accForm<?php echo $acid; ?>" type="checkbox" name="can_transfer_cards" value="1" <?php echo $canXferRow ? 'checked' : ''; ?>>
+                        <span class="toggle-ui" aria-hidden="true"></span>
+                    </label>
+                    <label class="toggle" style="margin:6px 0 0" title="<?php echo e($isEn ? 'Pricing' : 'تسعير'); ?>">
+                        <input form="accForm<?php echo $acid; ?>" type="checkbox" name="can_price_cards" value="1" <?php echo $canPriceRow ? 'checked' : ''; ?>>
+                        <span class="toggle-ui" aria-hidden="true"></span>
+                    </label>
+                    <?php endif; ?>
                 </td>
                 <td>
                     <?php
@@ -1150,6 +1259,77 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
                         <button class="btn ghost sm" type="submit"><?php echo e($isEn ? 'Save cash' : 'حفظ المستلم'); ?></button>
                     </form>
                     <?php endif; ?>
+                    <button class="btn ghost sm" type="button" data-acc-wid-open="<?php echo $acid; ?>" style="margin-top:4px"><?php echo e($isEn ? 'Customize dashboard' : 'تخصيص الداشبورد'); ?></button>
+                </td>
+            </tr>
+            <?php
+            $widCat = function_exists('accountant_widget_catalog_full') ? accountant_widget_catalog_full() : (function_exists('accountant_widget_catalog') ? accountant_widget_catalog() : array());
+            $widEff = function_exists('accountant_widgets_effective') ? accountant_widgets_effective($pdo, $acid) : null;
+            $widMine = is_array($widEff) ? $widEff : array_keys($widCat);
+            $widPool = array();
+            foreach ($widCat as $wid => $meta) {
+                if (!in_array($wid, $widMine, true)) {
+                    $widPool[] = $wid;
+                }
+            }
+            ?>
+            <tr class="acc-wid-row" id="accWid<?php echo $acid; ?>" hidden>
+                <td colspan="7">
+                    <form method="post" class="acc-wid-form">
+                        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                        <input type="hidden" name="action" value="save_acc_widgets">
+                        <input type="hidden" name="user_id" value="<?php echo $acid; ?>">
+                        <input type="hidden" name="widgets" value="<?php echo e(implode(',', $widMine)); ?>">
+                        <div class="acc-board">
+                            <div>
+                                <div class="acc-board-h"><?php echo e($isEn ? 'Available' : 'المتوفرة'); ?></div>
+                                <div class="acc-col" data-col="pool">
+                                    <?php foreach ($widPool as $wid):
+                                        if (!isset($widCat[$wid])) { continue; }
+                                        $meta = $widCat[$wid];
+                                        $lab = $isEn ? $meta['en'] : $meta['ar'];
+                                        ?>
+                                    <div class="acc-chip" draggable="true" data-wid="<?php echo e($wid); ?>">
+                                        <span class="acc-ord"></span>
+                                        <span class="acc-lab"><?php echo e($lab); ?></span>
+                                        <span class="acc-move">
+                                            <button type="button" class="acc-up" draggable="false" title="<?php echo e($isEn ? 'Up' : 'أعلى'); ?>">↑</button>
+                                            <button type="button" class="acc-dn" draggable="false" title="<?php echo e($isEn ? 'Down' : 'أسفل'); ?>">↓</button>
+                                        </span>
+                                    </div>
+                                    <?php endforeach; ?>
+                                </div>
+                            </div>
+                            <div>
+                                <div class="acc-board-h"><?php echo e($isEn ? 'On the dashboard — order' : 'تظهر بالداشبورد — الترتيب'); ?></div>
+                                <div class="acc-col" data-col="mine">
+                                    <?php foreach ($widMine as $wid):
+                                        if (isset($widCat[$wid])) {
+                                            $meta = $widCat[$wid];
+                                            $lab = $isEn ? $meta['en'] : $meta['ar'];
+                                        } elseif (strpos((string) $wid, 'pkg:') === 0) {
+                                            $lab = rawurldecode(substr((string) $wid, 4));
+                                        } else {
+                                            continue;
+                                        }
+                                        ?>
+                                    <div class="acc-chip" draggable="true" data-wid="<?php echo e($wid); ?>">
+                                        <span class="acc-ord"></span>
+                                        <span class="acc-lab"><?php echo e($lab); ?></span>
+                                        <span class="acc-move">
+                                            <button type="button" class="acc-up" draggable="false" title="<?php echo e($isEn ? 'Up' : 'أعلى'); ?>">↑</button>
+                                            <button type="button" class="acc-dn" draggable="false" title="<?php echo e($isEn ? 'Down' : 'أسفل'); ?>">↓</button>
+                                        </span>
+                                    </div>
+                                    <?php endforeach; ?>
+                                </div>
+                            </div>
+                        </div>
+                        <p class="meta" style="margin:8px 0"><?php echo e($isEn
+                            ? 'Drag to show or hide. In the order column, drag a row or use the arrows. Number 1 is the first box on the dashboard.'
+                            : 'اسحب للإظهار أو الإخفاء. بعمود الترتيب اسحب السطر أو استخدم الأسهم. الرقم 1 هو أول صندوق بالداشبورد.'); ?></p>
+                        <button class="btn sm" type="submit"><?php echo e($isEn ? 'Save dashboard' : 'حفظ الداش بورد'); ?></button>
+                    </form>
                 </td>
             </tr>
             <?php endforeach; ?>
@@ -1158,7 +1338,7 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
         </div>
     </div>
     <style>
-    #accAddBox[hidden], #agentAddBox[hidden], .del-row[hidden], .edit-row[hidden] { display:none !important; }
+    #accAddBox[hidden], #agentAddBox[hidden], .del-row[hidden], .edit-row[hidden], .acc-wid-row[hidden] { display:none !important; }
     .sys-head { display:flex; align-items:center; justify-content:flex-end; direction:ltr; gap:12px; margin:0 0 12px; }
     .sys-head h2 { margin:0; }
     .sys-search { display:flex; gap:8px; margin:0 0 14px; }
@@ -1172,6 +1352,21 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
     .ag-as i::after { content:""; position:absolute; top:2px; right:2px; width:12px; height:12px; border-radius:50%; background:#fff; transition:right .15s; }
     .ag-as input:checked + i { background:#16a34a; }
     .ag-as input:checked + i::after { right:16px; }
+    .acc-board { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:8px; }
+    @media (max-width:700px) { .acc-board { grid-template-columns:1fr; } }
+    .acc-board-h { font-size:12px; font-weight:800; color:#475569; margin-bottom:6px; }
+    .acc-col { min-height:88px; border:1px dashed #cbd5e1; border-radius:12px; padding:8px; background:#f8fafc; display:flex; flex-wrap:wrap; gap:8px; align-content:flex-start; }
+    .acc-col[data-col="mine"] { flex-direction:column; flex-wrap:nowrap; align-items:stretch; max-height:440px; overflow:auto; }
+    .acc-col.is-over { background:#ecfeff; border-color:#0f766e; }
+    .acc-chip { padding:8px 12px; border-radius:999px; background:#0f172a; color:#fff; font-size:13px; font-weight:800; cursor:grab; }
+    .acc-col[data-col="mine"] .acc-chip { display:flex; align-items:center; gap:8px; width:100%; border-radius:12px; }
+    .acc-ord { display:none; }
+    .acc-col[data-col="mine"] .acc-ord { display:inline-flex; align-items:center; justify-content:center; min-width:22px; height:22px; border-radius:999px; background:#fff; color:#0f172a; font-size:12px; }
+    .acc-lab { flex:1; }
+    .acc-move { display:none; }
+    .acc-col[data-col="mine"] .acc-move { display:inline-flex; gap:4px; }
+    .acc-move button { width:26px; height:26px; border:0; border-radius:8px; background:rgba(255,255,255,.16); color:#fff; font-weight:800; cursor:pointer; line-height:1; }
+    .acc-chip.is-drag { opacity:.45; }
     .ag-as input:focus + i { box-shadow:0 0 0 2px rgba(22,163,74,.25); }
     .ag-del-form { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
     .ag-del-form select { min-width:240px; max-width:360px; }
@@ -1274,6 +1469,132 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
           });
         })(delForms[d]);
       }
+      document.querySelectorAll('[data-acc-wid-open]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var row = document.getElementById('accWid' + btn.getAttribute('data-acc-wid-open'));
+          if (!row) return;
+          if (row.hasAttribute('hidden')) row.removeAttribute('hidden');
+          else row.setAttribute('hidden', 'hidden');
+        });
+      });
+      var dragChip = null;
+      function formOf(el) {
+        return el && el.closest ? el.closest('form') : null;
+      }
+      function syncWid(form) {
+        var mine = form.querySelector('[data-col="mine"]');
+        var input = form.querySelector('[name="widgets"]');
+        if (!mine || !input) return;
+        var ids = [];
+        mine.querySelectorAll('[data-wid]').forEach(function (el) { ids.push(el.getAttribute('data-wid')); });
+        input.value = ids.join(',');
+      }
+      function renumber(form) {
+        var mine = form.querySelector('[data-col="mine"]');
+        if (!mine) return;
+        var n = 0;
+        mine.querySelectorAll('.acc-chip').forEach(function (el) {
+          n += 1;
+          var ord = el.querySelector('.acc-ord');
+          if (ord) ord.textContent = String(n);
+        });
+      }
+      function placeChip(col, clientX, clientY) {
+        if (!dragChip) return;
+        var over = null;
+        var chips = col.querySelectorAll('.acc-chip');
+        var i;
+        for (i = 0; i < chips.length; i++) {
+          if (chips[i] === dragChip) continue;
+          var r = chips[i].getBoundingClientRect();
+          if (clientY >= r.top && clientY <= r.bottom && clientX >= r.left && clientX <= r.right) {
+            over = chips[i];
+            break;
+          }
+        }
+        if (over) {
+          var box = over.getBoundingClientRect();
+          var before = col.getAttribute('data-col') === 'mine'
+            ? (clientY < box.top + box.height / 2)
+            : (clientX < box.left + box.width / 2);
+          if (before) {
+            if (dragChip.nextSibling !== over) col.insertBefore(dragChip, over);
+          } else if (dragChip.previousSibling !== over) {
+            col.insertBefore(dragChip, over.nextSibling);
+          }
+          return;
+        }
+        if (col.getAttribute('data-col') !== 'mine') {
+          if (dragChip.parentNode !== col) col.appendChild(dragChip);
+          return;
+        }
+        var nearest = null;
+        var best = 1e9;
+        for (i = 0; i < chips.length; i++) {
+          if (chips[i] === dragChip) continue;
+          var mid = chips[i].getBoundingClientRect();
+          var dist = Math.abs(clientY - (mid.top + mid.height / 2));
+          if (dist < best) { best = dist; nearest = chips[i]; }
+        }
+        if (!nearest) {
+          if (dragChip.parentNode !== col) col.appendChild(dragChip);
+          return;
+        }
+        var nb = nearest.getBoundingClientRect();
+        if (clientY < nb.top + nb.height / 2) {
+          if (dragChip.nextSibling !== nearest) col.insertBefore(dragChip, nearest);
+        } else if (dragChip.previousSibling !== nearest) {
+          col.insertBefore(dragChip, nearest.nextSibling);
+        }
+      }
+      document.querySelectorAll('.acc-wid-form').forEach(function (form) { renumber(form); });
+      document.querySelectorAll('.acc-move button').forEach(function (btn) {
+        btn.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+        btn.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          var chip = btn.parentNode ? btn.parentNode.parentNode : null;
+          if (!chip || !chip.parentNode || chip.parentNode.getAttribute('data-col') !== 'mine') return;
+          var col = chip.parentNode;
+          if (btn.classList.contains('acc-up')) {
+            if (chip.previousElementSibling) col.insertBefore(chip, chip.previousElementSibling);
+          } else if (chip.nextElementSibling) {
+            col.insertBefore(chip.nextElementSibling, chip);
+          }
+          var form = formOf(col);
+          if (form) { renumber(form); syncWid(form); }
+        });
+      });
+      document.querySelectorAll('.acc-chip').forEach(function (chip) {
+        chip.addEventListener('dragstart', function () {
+          dragChip = chip;
+          chip.classList.add('is-drag');
+        });
+        chip.addEventListener('dragend', function () {
+          chip.classList.remove('is-drag');
+          var form = formOf(chip);
+          if (form) { renumber(form); syncWid(form); }
+          dragChip = null;
+        });
+      });
+      document.querySelectorAll('.acc-col').forEach(function (col) {
+        col.addEventListener('dragover', function (e) {
+          e.preventDefault();
+          col.classList.add('is-over');
+          placeChip(col, e.clientX, e.clientY);
+        });
+        col.addEventListener('dragleave', function () { col.classList.remove('is-over'); });
+        col.addEventListener('drop', function (e) {
+          e.preventDefault();
+          col.classList.remove('is-over');
+          placeChip(col, e.clientX, e.clientY);
+          var form = formOf(col);
+          if (form) { renumber(form); syncWid(form); }
+        });
+      });
+      document.querySelectorAll('.acc-wid-form').forEach(function (form) {
+        form.addEventListener('submit', function () { syncWid(form); });
+      });
     })();
     </script>
 </div>
