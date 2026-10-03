@@ -100,6 +100,9 @@ if (isset($_GET['ajax']) && ($_GET['ajax'] === 'profiles' || $_GET['ajax'] === '
     if ($_GET['ajax'] === 'managers') {
         sas_json_out(true, '', array('managers' => sas_managers_for_ui($api)));
     }
+    if (!empty($_SESSION['admin_sas_shadow']) || (function_exists('is_agent_user') && is_agent_user())) {
+        sas_json_out(true, '', array('cards' => array(), 'profile_id' => 0));
+    }
     $username = isset($_GET['username']) ? trim((string) $_GET['username']) : '';
     $profileId = isset($_GET['profile_id']) ? (int) $_GET['profile_id'] : 0;
     $profileName = isset($_GET['profile_name']) ? trim((string) $_GET['profile_name']) : '';
@@ -3233,13 +3236,15 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   var profilesCache = null;
   var cardsCacheAll = <?php
     $seedActCards = array();
-    if (function_exists('sas_unused_pins_from_inventory_cache')) {
+    $hideWarehouseCards = !empty($_SESSION['admin_sas_shadow'])
+        || (function_exists('is_agent_user') && is_agent_user());
+    if (!$hideWarehouseCards && function_exists('sas_unused_pins_from_inventory_cache')) {
         $tmpSeed = sas_unused_pins_from_inventory_cache();
         if (is_array($tmpSeed)) {
             $seedActCards = $tmpSeed;
         }
     }
-    if (!$seedActCards && !empty($_SESSION['sas_unused_ui_v6']) && is_array($_SESSION['sas_unused_ui_v6'])) {
+    if (!$hideWarehouseCards && !$seedActCards && !empty($_SESSION['sas_unused_ui_v6']) && is_array($_SESSION['sas_unused_ui_v6'])) {
         $seedActCards = $_SESSION['sas_unused_ui_v6'];
     }
     echo json_encode($seedActCards);

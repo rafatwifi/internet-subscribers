@@ -15,16 +15,23 @@ $accLevel = (function_exists('is_accountant_user') && is_accountant_user() && fu
     ? accountant_scope_level($pdo) : '';
 $canTransfer = function_exists('user_may_transfer_cards') && user_may_transfer_cards($pdo);
 $sasReady = function_exists('sas_is_ready') && sas_is_ready($config);
-$agents = list_agent_users($pdo, true);
+// وكيل البوابة أو الدخول بوكيل ساس بدون عضوية: مخزونه المحوّل فقط، مو مستودع الوكالة
+$cardsOwnStockOnly = !empty($_SESSION['admin_sas_shadow'])
+    || (function_exists('is_agent_user') && is_agent_user());
+if ($cardsOwnStockOnly) {
+    $sasReady = false;
+}
+$agents = list_agent_users($pdo, false);
 $tidCards = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
 $agents = array_values(array_filter($agents, function ($a) use ($tidCards) {
     $at = isset($a['tenant_id']) ? (int) $a['tenant_id'] : 1;
     return $at === $tidCards;
 }));
+$childAgencyIds = array();
 try {
     $gmCards = $pdo->prepare(
         'SELECT id, username, display_name, role, is_active, tenant_id
-         FROM admin_users WHERE role = "group_manager" AND tenant_id = :t AND is_active = 1
+         FROM admin_users WHERE role = "group_manager" AND tenant_id = :t
          ORDER BY display_name ASC'
     );
     $gmCards->execute(array(':t' => $tidCards));
@@ -35,9 +42,62 @@ try {
     foreach ($gmCards->fetchAll() as $gm0) {
         if (empty($haveAg[(int) $gm0['id']])) {
             $agents[] = $gm0;
+            $haveAg[(int) $gm0['id']] = true;
+        }
+    }
+    if (function_exists('portal_agencies_under_current')) {
+        foreach (portal_agencies_under_current($pdo, '') as $childAg) {
+            $cid = (int) $childAg['id'];
+            if ($cid <= 0 || !empty($haveAg[$cid])) {
+                continue;
+            }
+            $agents[] = $childAg;
+            $haveAg[$cid] = true;
+            $childAgencyIds[$cid] = true;
         }
     }
 } catch (Exception $e) {
+}
+
+$homeId = function_exists('user_card_source_id') ? (int) user_card_source_id($pdo) : $meId;
+$homeRow = ($homeId > 0 && function_exists('get_admin_user')) ? get_admin_user($pdo, $homeId) : null;
+if (!$homeRow && function_exists('accountant_boss_row')) {
+    $homeRow = accountant_boss_row($pdo);
+}
+$homeLabel = $homeRow
+    ? (trim((string) $homeRow['display_name']) !== '' ? $homeRow['display_name'] : (string) $homeRow['username'])
+    : ($me && !empty($me['display_name']) ? (string) $me['display_name'] : '');
+$treeIds = (function_exists('is_accountant_user') && is_accountant_user() && function_exists('accountant_tree_ids'))
+    ? accountant_tree_ids($pdo) : array();
+$gmTeam = (function_exists('is_group_manager_user') && is_group_manager_user() && function_exists('group_manager_team_ids'))
+    ? group_manager_team_ids($pdo) : array();
+$xferTargets = array();
+foreach ($agents as $ag) {
+    $aid = (int) $ag['id'];
+    if ($aid <= 0 || $aid === $homeId || $aid === $meId) {
+        continue;
+    }
+    if ($treeIds && !in_array($aid, $treeIds, true)) {
+        continue;
+    }
+    if ($gmTeam && !in_array($aid, $gmTeam, true)) {
+        continue;
+    }
+    $roleAg = isset($ag['role']) ? normalize_admin_role($ag['role']) : 'agent';
+    $isChildAgency = !empty($childAgencyIds[$aid]);
+    if (!$isChildAgency && !in_array($roleAg, array('agent', 'group_manager'), true)) {
+        continue;
+    }
+    $xferTargets[] = $ag;
+}
+usort($xferTargets, function ($a, $b) {
+    $an = isset($a['display_name']) ? (string) $a['display_name'] : '';
+    $bn = isset($b['display_name']) ? (string) $b['display_name'] : '';
+    return strcasecmp($an, $bn);
+});
+$xferTargetIds = array();
+foreach ($xferTargets as $ag) {
+    $xferTargetIds[(int) $ag['id']] = true;
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
@@ -47,21 +107,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
     }
     $action = post('action');
     if ($action === 'transfer') {
-        $fromAgentId = function_exists('user_card_source_id') ? (int) user_card_source_id($pdo) : (int) post('from_agent_id', '0');
-        $toAgentId = (int) post('to_agent_id', '0');
-        $treePost = function_exists('accountant_tree_ids') ? accountant_tree_ids($pdo) : array();
-        $toRow = function_exists('get_admin_user') ? get_admin_user($pdo, $toAgentId) : null;
-        $toRole = $toRow ? normalize_admin_role($toRow['role']) : '';
-        $toTid = $toRow && isset($toRow['tenant_id']) ? (int) $toRow['tenant_id'] : 0;
-        $myTidPost = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
-        $okTo = $toRow && $toAgentId !== $fromAgentId && $toTid === $myTidPost
-            && in_array($toRole, array('agent', 'group_manager'), true);
-        if (function_exists('is_accountant_user') && is_accountant_user()) {
-            $okTo = $okTo && in_array($toAgentId, $treePost, true);
-        } elseif (function_exists('is_group_manager_user') && is_group_manager_user() && function_exists('group_manager_team_ids')) {
-            $okTo = $okTo && in_array($toAgentId, group_manager_team_ids($pdo), true);
+        $fromAgentId = (int) post('from_agent_id', '0');
+        if ($fromAgentId <= 0) {
+            $fromAgentId = $homeId;
         }
-        if (!$okTo) {
+        $toAgentId = (int) post('to_agent_id', '0');
+        $fromOk = ($fromAgentId === $homeId) || !empty($xferTargetIds[$fromAgentId]);
+        if (!$fromOk) {
+            flash('error', $isEn ? 'Choose a valid source' : 'اختر مصدر تحويل صحيح');
+            redirect('cards.php#card-transfer');
+        }
+        if ($fromAgentId === $homeId) {
+            $okTo = !empty($xferTargetIds[$toAgentId]);
+        } else {
+            $okTo = ($toAgentId === $homeId);
+        }
+        $toRow = function_exists('get_admin_user') ? get_admin_user($pdo, $toAgentId) : null;
+        if ($fromAgentId !== $homeId && $toAgentId === $homeId && !$toRow && $homeRow) {
+            $toRow = $homeRow;
+        }
+        if (!$okTo || !$toRow || $toAgentId === $fromAgentId) {
             flash('error', $isEn ? 'Select an agent under you' : 'اختر وكيلاً من الشجرة اللي تحتك');
             redirect('cards.php#card-transfer');
         }
@@ -69,16 +134,50 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
         $profileName = trim((string) post('profile_name', ''));
         $qty = (int) post('qty', '0');
         $note = trim((string) post('note', ''));
+        if ($fromAgentId !== $homeId && function_exists('card_agent_stock_summary')) {
+            $haveQty = 0;
+            $fromStock = card_agent_stock_summary($pdo, $fromAgentId);
+            if (!empty($fromStock['rows'])) {
+                foreach ($fromStock['rows'] as $sr) {
+                    $sameName = (string) $sr['profile_name'] === $profileName;
+                    $samePid = $profileId > 0 && (int) $sr['profile_id'] === $profileId;
+                    if ($sameName || $samePid) {
+                        $haveQty = (int) $sr['qty'];
+                        break;
+                    }
+                }
+            }
+            if ($qty > $haveQty) {
+                flash('error', $isEn
+                    ? ('Quantity is above the available ' . $haveQty)
+                    : ('العدد أكبر من المتوفر (' . $haveQty . ')'));
+                redirect('cards.php#card-transfer');
+            }
+        }
         $wholesale = 0;
         $agentPrice = 0;
-        if (function_exists('agent_card_price_get') && $toAgentId > 0 && $profileName !== '') {
-            $pr = agent_card_price_get($pdo, $toAgentId, $profileId, $profileName);
+        $priceAgentId = ($fromAgentId === $homeId) ? $toAgentId : $fromAgentId;
+        if (function_exists('agent_card_price_get') && $priceAgentId > 0 && $profileName !== '') {
+            $pr = agent_card_price_get($pdo, $priceAgentId, $profileId, $profileName);
             if ($pr) {
                 $wholesale = (float) $pr['wholesale_price'];
                 $agentPrice = (float) $pr['agent_price'];
             }
         }
-        if ($wholesale <= 0 && $agentPrice <= 0) {
+        if ($wholesale <= 0 && $agentPrice <= 0 && $fromAgentId !== $homeId && function_exists('card_agent_stock_summary')) {
+            $fromStock = card_agent_stock_summary($pdo, $fromAgentId);
+            if (!empty($fromStock['rows'])) {
+                foreach ($fromStock['rows'] as $sr) {
+                    if ((string) $sr['profile_name'] !== $profileName && !($profileId > 0 && (int) $sr['profile_id'] === $profileId)) {
+                        continue;
+                    }
+                    $wholesale = isset($sr['wholesale_price']) ? (float) $sr['wholesale_price'] : 0;
+                    $agentPrice = isset($sr['agent_price']) ? (float) $sr['agent_price'] : 0;
+                    break;
+                }
+            }
+        }
+        if ($fromAgentId === $homeId && $wholesale <= 0 && $agentPrice <= 0) {
             flash('error', $isEn ? 'Set this agent package price first' : 'لازم الأدمن يسعّر هالفئة لهذا الوكيل أولاً');
             redirect('cards.php#card-transfer');
         }
@@ -98,13 +197,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
         if ($ok) {
             if (function_exists('activity_log')) {
                 $toName = $toRow && !empty($toRow['display_name']) ? $toRow['display_name'] : ('#' . $toAgentId);
+                $fromRowLog = ($fromAgentId === $homeId) ? $homeRow : (function_exists('get_admin_user') ? get_admin_user($pdo, $fromAgentId) : null);
+                $fromName = $fromRowLog && !empty($fromRowLog['display_name']) ? $fromRowLog['display_name'] : ('#' . $fromAgentId);
                 activity_log(
                     $pdo,
                     0,
                     'card_transfer',
                     $toAgentId,
                     'card_transfer',
-                    'تحويل ' . (int) $qty . ' — ' . $profileName . ' إلى ' . $toName,
+                    'تحويل ' . (int) $qty . ' — ' . $profileName . ' من ' . $fromName . ' إلى ' . $toName,
                     $note
                 );
             }
@@ -117,7 +218,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
 }
 
 $scopeAgentId = null;
-if (function_exists('is_agent_user') && is_agent_user()) {
+if (!empty($_SESSION['admin_sas_shadow'])) {
+    $scopeAgentId = 0;
+} elseif (function_exists('is_agent_user') && is_agent_user()) {
     $scopeAgentId = $meId;
 } elseif (is_accountant_user()) {
     $linked = accountant_linked_agent_id();
@@ -423,10 +526,6 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'agent_price') {
 $groups = array();
 $err = '';
 $fromCache = false;
-// الوكيل: مخزونه فقط — بدون مخزن الساس العام
-if (function_exists('is_agent_user') && is_agent_user()) {
-    $sasReady = false;
-}
 if ($sasReady) {
     // عرض فوري من كاش السيرفر — بدون انتظار SAS
     if (function_exists('sas_cards_inventory_load_persisted')) {
@@ -660,7 +759,12 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 .cards-page .xfer-table th, .cards-page .xfer-table td {
   border-bottom: 1px solid #e8edf4; padding: 8px 6px; text-align: inherit;
 }
-.cards-page .xfer-table th { font-size: 12px; color: #64748b; }
+.cards-page #xferQty.is-over {
+  border-color: #dc2626;
+  color: #b91c1c;
+  background: #fef2f2;
+}
+.cards-page #xferAvail.is-over { color: #b91c1c; font-weight: 800; }
 </style>
 
 <div class="cards-page">
@@ -671,63 +775,63 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
             ? 'Amount is taken from the agent price set by the admin.'
             : 'المبلغ ينحسب من تسعيرة الوكيل اللي حاطها الأدمن.'); ?></p>
         <?php
-        $fromId = function_exists('user_card_source_id') ? (int) user_card_source_id($pdo) : $meId;
-        $fromRow = ($fromId > 0 && function_exists('get_admin_user')) ? get_admin_user($pdo, $fromId) : null;
-        if (!$fromRow && function_exists('accountant_boss_row')) {
-            $fromRow = accountant_boss_row($pdo);
+        $xferStock = array();
+        $homeBag = array();
+        $homeSum = function_exists('card_agent_stock_summary') ? card_agent_stock_summary($pdo, $homeId) : array('rows' => array());
+        if (!empty($homeSum['rows'])) {
+            foreach ($homeSum['rows'] as $sr) {
+                $homeBag[(string) $sr['profile_name']] = (int) $sr['qty'];
+            }
+        } elseif (!empty($groups)) {
+            foreach ($groups as $g0) {
+                $gn = isset($g0['name']) ? (string) $g0['name'] : '';
+                if ($gn === '') {
+                    continue;
+                }
+                $homeBag[$gn] = isset($g0['unused']) ? (int) $g0['unused'] : 0;
+            }
         }
-        $fromLabel = $fromRow
-            ? (trim((string) $fromRow['display_name']) !== '' ? $fromRow['display_name'] : (string) $fromRow['username'])
-            : ($me && !empty($me['display_name']) ? (string) $me['display_name'] : '');
-        $treeIds = (function_exists('is_accountant_user') && is_accountant_user() && function_exists('accountant_tree_ids'))
-            ? accountant_tree_ids($pdo) : array();
-        $gmTeam = (function_exists('is_group_manager_user') && is_group_manager_user() && function_exists('group_manager_team_ids'))
-            ? group_manager_team_ids($pdo) : array();
-        $toAgents = array();
-        foreach ($agents as $ag) {
-            $aid = (int) $ag['id'];
-            if ($aid === $fromId || $aid === $meId) {
-                continue;
+        $xferStock[(string) $homeId] = $homeBag;
+        if (function_exists('card_agent_stock_summary')) {
+            foreach ($xferTargets as $ag) {
+                $bag = array();
+                $sum = card_agent_stock_summary($pdo, (int) $ag['id']);
+                if (!empty($sum['rows'])) {
+                    foreach ($sum['rows'] as $sr) {
+                        $bag[(string) $sr['profile_name']] = (int) $sr['qty'];
+                    }
+                }
+                $xferStock[(string) (int) $ag['id']] = $bag;
             }
-            if ($treeIds && !in_array($aid, $treeIds, true)) {
-                continue;
-            }
-            if ($gmTeam && !in_array($aid, $gmTeam, true)) {
-                continue;
-            }
-            $roleAg = isset($ag['role']) ? normalize_admin_role($ag['role']) : 'agent';
-            if (!in_array($roleAg, array('agent', 'group_manager'), true)) {
-                continue;
-            }
-            $toAgents[] = $ag;
         }
-        usort($toAgents, function ($a, $b) {
-            $an = isset($a['display_name']) ? (string) $a['display_name'] : '';
-            $bn = isset($b['display_name']) ? (string) $b['display_name'] : '';
-            return strcasecmp($an, $bn);
-        });
+        $xferOpt = function ($ag) use ($isEn) {
+            $opt = trim((string) $ag['display_name']) !== '' ? $ag['display_name'] : $ag['username'];
+            if (isset($ag['is_active']) && (int) $ag['is_active'] !== 1) {
+                $opt .= $isEn ? ' (stopped)' : ' (موقوف)';
+            }
+            return $opt;
+        };
         ?>
         <form method="post" id="cardXferForm">
             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
             <input type="hidden" name="action" value="transfer">
-            <input type="hidden" name="from_agent_id" value="<?php echo (int) $fromId; ?>">
             <div class="xfer-grid">
                 <div>
                     <label><?php echo e($isEn ? 'From' : 'من'); ?></label>
-                    <input value="<?php echo e($fromLabel); ?>" readonly>
+                    <select name="from_agent_id" id="xferFrom" required>
+                        <option value="<?php echo (int) $homeId; ?>"><?php echo e($homeLabel); ?></option>
+                        <?php foreach ($xferTargets as $ag): ?>
+                            <option value="<?php echo (int) $ag['id']; ?>"><?php echo e($xferOpt($ag)); ?></option>
+                        <?php endforeach; ?>
+                    </select>
                 </div>
                 <div>
                     <label><?php echo e($isEn ? 'To agent' : 'إلى'); ?></label>
-                    <select name="to_agent_id" required>
+                    <select name="to_agent_id" id="xferTo" required>
                         <option value=""><?php echo e($isEn ? '— select —' : '— اختر الوكيل —'); ?></option>
-                        <?php foreach ($toAgents as $ag):
-                            $aid = (int) $ag['id'];
-                            if ($aid === (int) $fromId) {
-                                continue;
-                            }
-                            $opt = trim((string) $ag['display_name']) !== '' ? $ag['display_name'] : $ag['username'];
-                            ?>
-                            <option value="<?php echo $aid; ?>"><?php echo e($opt); ?></option>
+                        <option value="<?php echo (int) $homeId; ?>" data-home="1"><?php echo e($homeLabel); ?></option>
+                        <?php foreach ($xferTargets as $ag): ?>
+                            <option value="<?php echo (int) $ag['id']; ?>" data-down="1"><?php echo e($xferOpt($ag)); ?></option>
                         <?php endforeach; ?>
                     </select>
                 </div>
@@ -747,7 +851,8 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
                 </div>
                 <div>
                     <label><?php echo e($isEn ? 'Quantity' : 'العدد'); ?></label>
-                    <input name="qty" type="number" min="1" step="1" required value="1">
+                    <input name="qty" id="xferQty" type="number" min="1" step="1" required value="1">
+                    <div class="meta" id="xferAvail" style="margin-top:4px"><?php echo e($isEn ? 'Available: —' : 'المتوفر: —'); ?></div>
                 </div>
                 <div style="grid-column: 1 / -1">
                     <label><?php echo e($isEn ? 'Note' : 'ملاحظات'); ?></label>
@@ -755,9 +860,89 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
                 </div>
             </div>
             <div class="actions" style="margin-top:12px">
-                <button class="btn" type="submit"><?php echo e($isEn ? 'Record transfer' : 'تسجيل التحويل'); ?></button>
+                <button class="btn" type="submit" id="xferSubmit"><?php echo e($isEn ? 'Record transfer' : 'تسجيل التحويل'); ?></button>
             </div>
         </form>
+        <script>
+        (function () {
+          var form = document.getElementById('cardXferForm');
+          var fromSel = document.getElementById('xferFrom');
+          var toSel = document.getElementById('xferTo');
+          var profile = document.getElementById('xferProfileName');
+          var profileId = document.getElementById('xferProfileId');
+          var qty = document.getElementById('xferQty');
+          var availEl = document.getElementById('xferAvail');
+          var homeId = <?php echo (int) $homeId; ?>;
+          var stock = <?php echo json_encode($xferStock); ?> || {};
+          var availWord = <?php echo json_encode($isEn ? 'Available: ' : 'المتوفر: '); ?>;
+          if (!form || !fromSel || !toSel || !qty) return;
+          function availNow() {
+            var name = profile ? profile.value : '';
+            if (!name) return null;
+            var bag = stock[fromSel.value] || {};
+            if (typeof bag[name] === 'undefined') return 0;
+            return parseInt(bag[name], 10) || 0;
+          }
+          function paintEnds() {
+            var pulling = String(fromSel.value) !== String(homeId);
+            var i;
+            for (i = 0; i < toSel.options.length; i++) {
+              var opt = toSel.options[i];
+              if (!opt.value) {
+                opt.hidden = pulling;
+                continue;
+              }
+              if (opt.getAttribute('data-home') === '1') {
+                opt.hidden = !pulling;
+              } else if (opt.getAttribute('data-down') === '1') {
+                opt.hidden = pulling || String(opt.value) === String(fromSel.value);
+              }
+            }
+            if (pulling) {
+              toSel.value = String(homeId);
+            } else if (toSel.value === String(homeId) || toSel.value === String(fromSel.value)) {
+              toSel.value = '';
+            }
+          }
+          function paintQty() {
+            var max = availNow();
+            if (max === null) {
+              if (availEl) {
+                availEl.textContent = availWord + '—';
+                availEl.classList.remove('is-over');
+              }
+              qty.classList.remove('is-over');
+              return true;
+            }
+            var q = parseInt(qty.value, 10) || 0;
+            var over = q > max;
+            if (availEl) {
+              availEl.textContent = availWord + String(max);
+              if (over) availEl.classList.add('is-over');
+              else availEl.classList.remove('is-over');
+            }
+            if (over) qty.classList.add('is-over');
+            else qty.classList.remove('is-over');
+            return !over;
+          }
+          fromSel.addEventListener('change', function () { paintEnds(); paintQty(); });
+          toSel.addEventListener('change', paintQty);
+          if (profile) {
+            profile.addEventListener('change', function () {
+              var opt = profile.options[profile.selectedIndex];
+              if (profileId) profileId.value = opt ? (opt.getAttribute('data-pid') || '0') : '0';
+              paintQty();
+            });
+          }
+          qty.addEventListener('input', paintQty);
+          form.addEventListener('submit', function (e) {
+            paintEnds();
+            if (!paintQty()) e.preventDefault();
+          });
+          paintEnds();
+          paintQty();
+        })();
+        </script>
 
         <?php if ($recentTransfers): ?>
         <h3 style="margin:18px 0 8px;font-size:14px"><?php echo e($isEn ? 'Recent transfers' : 'آخر التحويلات'); ?></h3>
@@ -797,6 +982,7 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
         <?php endif; ?>
     </div>
     <?php endif; ?>
+    <?php if (!$cardsOwnStockOnly): ?>
     <p class="cards-sync<?php echo $fromCache ? '' : ' is-busy'; ?>" id="cardsSync">
         <?php
         if ($err) {
@@ -946,11 +1132,13 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
         </div>
     <?php endif; ?>
     </div>
+    <?php endif; ?>
 </div>
 
 <script>
 (function () {
   var isEn = <?php echo $isEn ? 'true' : 'false'; ?>;
+  var ownStockOnly = <?php echo $cardsOwnStockOnly ? 'true' : 'false'; ?>;
   var syncEl = document.getElementById('cardsSync');
   var root = document.getElementById('cardsRoot');
 
@@ -1257,9 +1445,10 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
       });
   }
 
-  bindUi();
-  // مزامنة خلفية بعد الرسم الفوري من الكاش
-  setTimeout(function () { sync(false); }, 200);
+  if (!ownStockOnly) {
+    bindUi();
+    setTimeout(function () { sync(false); }, 200);
+  }
 
   var profileInput = document.getElementById('xferProfileName');
   var profileIdInput = document.getElementById('xferProfileId');

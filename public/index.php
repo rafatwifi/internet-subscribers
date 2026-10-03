@@ -5,6 +5,18 @@ require_once __DIR__ . '/../includes/layout.php';
 require_login();
 
 $isEn = (isset($lang) && $lang === 'en');
+// مستودع كروت الساس مال الوكالة. الوكيل والدخول بوكيل بدون عضوية ما يشوفونه.
+$viewerOwnsSasWarehouse = empty($_SESSION['admin_sas_shadow'])
+    && !(function_exists('is_agent_user') && is_agent_user());
+$viewerCardQty = 0;
+if (!$viewerOwnsSasWarehouse && empty($_SESSION['admin_sas_shadow']) && function_exists('card_agent_stock_summary')) {
+    $meCards = function_exists('current_admin') ? current_admin() : null;
+    $meCardsId = $meCards ? (int) $meCards['id'] : 0;
+    if ($meCardsId > 0) {
+        $meStock = card_agent_stock_summary($pdo, $meCardsId);
+        $viewerCardQty = isset($meStock['total_qty']) ? (int) $meStock['total_qty'] : 0;
+    }
+}
 // ويدجت محاسبة الكروت: للمحاسب فقط (مو للأدمن/الكل)
 $showCardAccountingDash = function_exists('is_accountant_user') && is_accountant_user()
     && function_exists('user_can') && user_can('card_accounting');
@@ -151,7 +163,12 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
     );
 
     // قيم الكروت المخزّنة على السيرفر تظهر فوراً (يفضّل جرد الكروت الأدق)
-    if (function_exists('sas_dash_cards_preferred_persisted')) {
+    if (!$viewerOwnsSasWarehouse) {
+        $out['cards'] = array();
+        $out['card_total'] = (int) $viewerCardQty;
+        $out['card_sub'] = $en ? 'My stock' : 'مخزوني';
+        $out['from_cache'] = false;
+    } elseif (function_exists('sas_dash_cards_preferred_persisted')) {
         $persisted = sas_dash_cards_preferred_persisted();
         if ($persisted) {
             $out['cards'] = isset($persisted['groups']) ? $persisted['groups'] : array();
@@ -215,8 +232,8 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
             $out['balance'] = number_format((float) $cachedLatMs, 0) . ' ms';
         }
 
-        $needCardsRefresh = $force;
-        if (!$needCardsRefresh) {
+        $needCardsRefresh = $viewerOwnsSasWarehouse && $force;
+        if ($viewerOwnsSasWarehouse && !$needCardsRefresh) {
             $p2 = function_exists('sas_dash_cards_preferred_persisted')
                 ? sas_dash_cards_preferred_persisted()
                 : (function_exists('sas_dash_cards_load_persisted') ? sas_dash_cards_load_persisted() : null);
@@ -408,21 +425,23 @@ if ($sasReadyDash) {
         $sasCounts = sas_dash_user_counts($pdo);
     }
     // أولاً: كاش السيرفر الأدق (جرد الكروت) — بدون انتظار SAS
-    if (function_exists('sas_dash_cards_preferred_persisted')) {
-        $persistedCards = sas_dash_cards_preferred_persisted();
-        if ($persistedCards && !empty($persistedCards['groups']) && is_array($persistedCards['groups'])) {
-            $sasCardGroups = $persistedCards['groups'];
+    if ($viewerOwnsSasWarehouse) {
+        if (function_exists('sas_dash_cards_preferred_persisted')) {
+            $persistedCards = sas_dash_cards_preferred_persisted();
+            if ($persistedCards && !empty($persistedCards['groups']) && is_array($persistedCards['groups'])) {
+                $sasCardGroups = $persistedCards['groups'];
+            }
+        } elseif (function_exists('sas_dash_cards_load_persisted')) {
+            $persistedCards = sas_dash_cards_load_persisted();
+            if ($persistedCards && !empty($persistedCards['groups']) && is_array($persistedCards['groups'])) {
+                $sasCardGroups = $persistedCards['groups'];
+            }
         }
-    } elseif (function_exists('sas_dash_cards_load_persisted')) {
-        $persistedCards = sas_dash_cards_load_persisted();
-        if ($persistedCards && !empty($persistedCards['groups']) && is_array($persistedCards['groups'])) {
-            $sasCardGroups = $persistedCards['groups'];
+        if (!$sasCardGroups && isset($_SESSION['sas_card_groups_v5']) && is_array($_SESSION['sas_card_groups_v5'])) {
+            $sasCardGroups = $_SESSION['sas_card_groups_v5'];
+        } elseif (!$sasCardGroups && isset($_SESSION['sas_card_groups_v2']) && is_array($_SESSION['sas_card_groups_v2'])) {
+            $sasCardGroups = $_SESSION['sas_card_groups_v2'];
         }
-    }
-    if (!$sasCardGroups && isset($_SESSION['sas_card_groups_v5']) && is_array($_SESSION['sas_card_groups_v5'])) {
-        $sasCardGroups = $_SESSION['sas_card_groups_v5'];
-    } elseif (!$sasCardGroups && isset($_SESSION['sas_card_groups_v2']) && is_array($_SESSION['sas_card_groups_v2'])) {
-        $sasCardGroups = $_SESSION['sas_card_groups_v2'];
     }
     if (isset($_SESSION['sas_rp_val']) && $_SESSION['sas_rp_val'] !== null) {
         $sasPointsOk = true;

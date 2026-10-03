@@ -98,14 +98,47 @@ function ensure_tenant_sas_accounts_schema($pdo)
     }
 }
 
+function tenant_sas_host_norm($host)
+{
+    $host = strtolower(trim((string) $host));
+    $host = preg_replace('#^https?://#', '', $host);
+    $host = rtrim($host, '/');
+    $slash = strpos($host, '/');
+    if ($slash !== false) {
+        $host = substr($host, 0, $slash);
+    }
+    $host = preg_replace('#:(80|443)$#', '', $host);
+    return $host;
+}
+
 function tenant_sas_account_key($host, $user)
 {
-    $host = strtolower(preg_replace('#^https?://#i', '', rtrim(trim((string) $host), '/')));
+    $host = tenant_sas_host_norm($host);
     $user = strtolower(trim((string) $user));
     if ($host === '' || $user === '') {
         return '';
     }
     return $user . "\n" . $host;
+}
+
+function tenant_sas_account_keep_better($row, $keep)
+{
+    $rowCo = !empty($row['company_id']) ? 1 : 0;
+    $keepCo = !empty($keep['company_id']) ? 1 : 0;
+    if ($rowCo !== $keepCo) {
+        return $rowCo > $keepCo;
+    }
+    $rowDef = !empty($row['is_default']) ? 1 : 0;
+    $keepDef = !empty($keep['is_default']) ? 1 : 0;
+    if ($rowDef !== $keepDef) {
+        return $rowDef > $keepDef;
+    }
+    $rowOk = isset($row['last_ok_at']) ? (string) $row['last_ok_at'] : '';
+    $keepOk = isset($keep['last_ok_at']) ? (string) $keep['last_ok_at'] : '';
+    if ($rowOk !== $keepOk) {
+        return $rowOk > $keepOk;
+    }
+    return (int) $row['id'] > (int) $keep['id'];
 }
 
 /** نفس اليوزر والهوست = حساب واحد. يحذف النسخ الزائدة ويبقي الافتراضي أو آخر دخول ناجح. */
@@ -117,7 +150,7 @@ function tenant_sas_accounts_dedupe($pdo, $tenantId)
     }
     try {
         $st = $pdo->prepare(
-            'SELECT id, sas_host, sas_username, is_default, last_ok_at
+            'SELECT id, sas_host, sas_username, is_default, last_ok_at, company_id, label
              FROM tenant_sas_accounts WHERE tenant_id = :t ORDER BY id ASC'
         );
         $st->execute(array(':t' => $tenantId));
@@ -145,19 +178,7 @@ function tenant_sas_accounts_dedupe($pdo, $tenantId)
         }
         $keep = $list[0];
         foreach ($list as $r) {
-            $rDef = !empty($r['is_default']);
-            $kDef = !empty($keep['is_default']);
-            $rOk = !empty($r['last_ok_at']);
-            $kOk = !empty($keep['last_ok_at']);
-            $better = false;
-            if ($rDef && !$kDef) {
-                $better = true;
-            } elseif ($rDef === $kDef && $rOk && !$kOk) {
-                $better = true;
-            } elseif ($rDef === $kDef && $rOk === $kOk && (int) $r['id'] < (int) $keep['id']) {
-                $better = true;
-            }
-            if ($better) {
+            if (tenant_sas_account_keep_better($r, $keep)) {
                 $keep = $r;
             }
         }
@@ -171,6 +192,27 @@ function tenant_sas_accounts_dedupe($pdo, $tenantId)
             continue;
         }
         $in = implode(',', $drop);
+        $keepId = (int) $keep['id'];
+        $normHost = tenant_sas_host_norm(isset($keep['sas_host']) ? $keep['sas_host'] : '');
+        try {
+            if ($normHost !== '') {
+                $pdo->prepare(
+                    'UPDATE tenant_sas_accounts SET sas_host = :h WHERE id = :id AND tenant_id = :t'
+                )->execute(array(
+                    ':h' => $normHost,
+                    ':id' => $keepId,
+                    ':t' => $tenantId,
+                ));
+            }
+        } catch (Exception $e) {
+        }
+        try {
+            $pdo->exec(
+                'UPDATE sas_users_cache SET sas_account_id = ' . $keepId
+                . ' WHERE tenant_id = ' . $tenantId . ' AND sas_account_id IN (' . $in . ')'
+            );
+        } catch (Exception $e) {
+        }
         try {
             $pdo->exec('DELETE FROM tenant_sas_accounts WHERE tenant_id = ' . $tenantId . ' AND id IN (' . $in . ')');
         } catch (Exception $e) {

@@ -2035,7 +2035,18 @@ if ($sasTenantIdUi > 1) {
         <p class="meta"><?php echo e($isEn ? 'No reseller yet. Add one below.' : 'ماكو ريسيلر بعد. أضف واحد من الزر.'); ?></p>
         <?php else: ?>
         <div class="sas-acc-list">
-            <?php foreach ($sasAccountsList as $acc):
+            <?php
+            $seenSasAcc = array();
+            foreach ($sasAccountsList as $acc):
+                $accKey = function_exists('tenant_sas_account_key')
+                    ? tenant_sas_account_key($acc['sas_host'], $acc['sas_username'])
+                    : '';
+                if ($accKey !== '') {
+                    if (isset($seenSasAcc[$accKey])) {
+                        continue;
+                    }
+                    $seenSasAcc[$accKey] = 1;
+                }
                 $logged = !empty($acc['last_ok_at']) && trim((string) (isset($acc['last_error']) ? $acc['last_error'] : '')) === '';
                 $loginFail = trim((string) (isset($acc['last_error']) ? $acc['last_error'] : '')) !== '';
                 $accName = trim((string) $acc['label']) !== '' ? $acc['label'] : $acc['sas_username'];

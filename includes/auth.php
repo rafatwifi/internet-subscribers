@@ -495,6 +495,30 @@ function subscriber_agent_scope_sql($alias = 's')
     if (function_exists('current_tenant_id')) {
         $tenantSql = ' AND ' . $a . '.tenant_id = ' . (int) current_tenant_id();
     }
+    // الدخول بوكيل ساس بدون عضوية: الجلسة تبقى رقم وكالة أوفس، فلازم النطاق يكون أبوه بالساس
+    if (!empty($_SESSION['admin_sas_shadow'])) {
+        $u = current_admin();
+        $mid = $u && !empty($u['sas_manager_id']) ? (int) $u['sas_manager_id'] : 0;
+        if ($mid <= 0) {
+            return ' AND 1=0';
+        }
+        $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        $nameEq = function_exists('sas_sql_username_eq')
+            ? sas_sql_username_eq($a . '.sas_username', 'shadow_c.username')
+            : ($a . '.sas_username = shadow_c.username');
+        return $tenantSql . ' AND EXISTS (
+            SELECT 1 FROM sas_users_cache shadow_c
+            WHERE shadow_c.tenant_id = ' . (int) $tid . '
+              AND shadow_c.parent_id = ' . (int) $mid . '
+              AND (
+                shadow_c.local_subscriber_id = ' . $a . '.id
+                OR (
+                    ' . $a . '.sas_username IS NOT NULL AND ' . $a . '.sas_username <> ""
+                    AND ' . $nameEq . '
+                )
+              )
+        )';
+    }
     if (is_accountant_user()) {
         global $pdo;
         $aid = accountant_linked_agent_id();
@@ -544,6 +568,31 @@ function user_can_access_subscriber($pdo, $subscriberId)
         $rowTid = isset($row['tenant_id']) ? (int) $row['tenant_id'] : 1;
         if ($rowTid !== $tid) {
             return false;
+        }
+        if (!empty($_SESSION['admin_sas_shadow'])) {
+            $mid = function_exists('current_admin_sas_manager_id') ? (int) current_admin_sas_manager_id() : 0;
+            if ($mid <= 0) {
+                return false;
+            }
+            $nameEq = function_exists('sas_sql_username_eq')
+                ? sas_sql_username_eq('s.sas_username', 'c.username')
+                : 's.sas_username = c.username';
+            $st2 = $pdo->prepare(
+                'SELECT 1 FROM subscribers s
+                 WHERE s.id = :id AND EXISTS (
+                    SELECT 1 FROM sas_users_cache c
+                    WHERE c.tenant_id = :t AND c.parent_id = :p
+                      AND (
+                        c.local_subscriber_id = s.id
+                        OR (
+                            s.sas_username IS NOT NULL AND s.sas_username <> ""
+                            AND ' . $nameEq . '
+                        )
+                      )
+                 ) LIMIT 1'
+            );
+            $st2->execute(array(':id' => $subscriberId, ':t' => $tid, ':p' => $mid));
+            return (bool) $st2->fetchColumn();
         }
         if (is_accountant_user()) {
             $aid = accountant_linked_agent_id();
@@ -1296,51 +1345,120 @@ function portal_sas_host_key($host)
     return rtrim($host, '/');
 }
 
-/** وكالات البوابة اللي تحت نفس حساب الساس الحالي (مثل wifi@office تحت وكالة wifi) */
+/** وكالة بوابة أبوها المباشر هو الحساب الحالي، مو مجرد نفس هوست الساس */
+function portal_agency_reports_to_me($pdo, $theirRow)
+{
+    $me = current_admin();
+    if (!$me || !$pdo || !is_array($theirRow)) {
+        return false;
+    }
+    $mySas = isset($me['sas_manager_id']) ? (int) $me['sas_manager_id'] : 0;
+    if ($mySas <= 0 && !empty($me['id'])) {
+        try {
+            $stMe = $pdo->prepare('SELECT sas_manager_id FROM admin_users WHERE id = :id LIMIT 1');
+            $stMe->execute(array(':id' => (int) $me['id']));
+            $mySas = (int) $stMe->fetchColumn();
+        } catch (Exception $e) {
+            $mySas = 0;
+        }
+    }
+    $myUser = isset($me['username']) ? strtolower(trim((string) $me['username'])) : '';
+    $myDisp = isset($me['display_name']) ? strtolower(trim((string) $me['display_name'])) : '';
+    $myNames = array();
+    if ($myUser !== '') {
+        $myNames[$myUser] = true;
+    }
+    if ($myDisp !== '') {
+        $myNames[$myDisp] = true;
+    }
+    $names = array();
+    $u = isset($theirRow['username']) ? trim((string) $theirRow['username']) : '';
+    $d = isset($theirRow['display_name']) ? trim((string) $theirRow['display_name']) : '';
+    if ($u !== '') {
+        $names[$u] = true;
+    }
+    if ($d !== '' && strcasecmp($d, $u) !== 0) {
+        $names[$d] = true;
+    }
+    if ($mySas <= 0 && !$myNames) {
+        return false;
+    }
+    $theirSas = isset($theirRow['sas_manager_id']) ? (int) $theirRow['sas_manager_id'] : 0;
+    if ($theirSas > 0) {
+        try {
+            $stSas = $pdo->prepare(
+                'SELECT parent_id, parent_name FROM sas_users_cache WHERE sas_user_id = :id LIMIT 20'
+            );
+            $stSas->execute(array(':id' => $theirSas));
+            foreach ($stSas->fetchAll() as $row) {
+                $pid = isset($row['parent_id']) ? (int) $row['parent_id'] : 0;
+                $pn = isset($row['parent_name']) ? strtolower(trim((string) $row['parent_name'])) : '';
+                if ($mySas > 0 && $pid === $mySas) {
+                    return true;
+                }
+                if ($pn !== '' && isset($myNames[$pn])) {
+                    return true;
+                }
+            }
+        } catch (Exception $e) {
+        }
+    }
+    if (!$names) {
+        return false;
+    }
+    $params = array();
+    $holders = array();
+    $i = 0;
+    foreach ($names as $name => $yes) {
+        $i++;
+        $key = ':n' . $i;
+        $holders[] = $key;
+        $params[$key] = $name;
+    }
+    try {
+        $st = $pdo->prepare(
+            'SELECT parent_id, parent_name FROM sas_users_cache WHERE username IN (' . implode(',', $holders) . ') LIMIT 30'
+        );
+        $st->execute($params);
+        $rows = $st->fetchAll();
+    } catch (Exception $e) {
+        return false;
+    }
+    if (!is_array($rows)) {
+        return false;
+    }
+    foreach ($rows as $row) {
+        $pid = isset($row['parent_id']) ? (int) $row['parent_id'] : 0;
+        $pn = isset($row['parent_name']) ? strtolower(trim((string) $row['parent_name'])) : '';
+        if ($mySas > 0 && $pid === $mySas) {
+            return true;
+        }
+        if ($pn !== '' && isset($myNames[$pn])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** وكالات البوابة اللي أبوها المباشر هو الحساب الحالي */
 function portal_agencies_under_current($pdo, $q = '')
 {
     $me = current_admin();
     $myTid = $me && isset($me['tenant_id']) ? (int) $me['tenant_id'] : 1;
     $myId = $me ? (int) $me['id'] : 0;
-    if ($myTid <= 1 || $myId <= 0 || !$pdo) {
+    if ($myId <= 0 || !$pdo) {
         return array();
     }
-    if (function_exists('is_super_admin_user') && is_super_admin_user()) {
-        return array();
-    }
-    $myHosts = array();
-    try {
-        $hs = $pdo->prepare('SELECT sas_host FROM tenants WHERE id = :id LIMIT 1');
-        $hs->execute(array(':id' => $myTid));
-        $k = portal_sas_host_key($hs->fetchColumn());
-        if ($k !== '') {
-            $myHosts[$k] = true;
-        }
-    } catch (Exception $e) {
-    }
-    try {
-        $ha = $pdo->prepare('SELECT sas_host FROM tenant_sas_accounts WHERE tenant_id = :id');
-        $ha->execute(array(':id' => $myTid));
-        foreach ($ha->fetchAll() as $hr) {
-            $k = portal_sas_host_key(isset($hr['sas_host']) ? $hr['sas_host'] : '');
-            if ($k !== '') {
-                $myHosts[$k] = true;
-            }
-        }
-    } catch (Exception $e) {
+    if ($myTid <= 0) {
+        $myTid = 1;
     }
     $q = trim((string) $q);
     try {
         $sql = 'SELECT u.id, u.username, u.display_name, u.role, u.is_active, u.created_at, u.updated_at,
-                       u.sas_manager_id, u.tenant_id, u.phone, t.sas_host, t.name AS tenant_name
+                       u.sas_manager_id, u.tenant_id, u.phone, t.sas_host, t.sas_username, t.owner_user_id, t.name AS tenant_name
                 FROM admin_users u
                 INNER JOIN tenants t ON t.id = u.tenant_id
-                WHERE u.role = "admin" AND u.tenant_id > 1 AND u.tenant_id <> :my AND u.id <> :uid
-                  AND (
-                    t.owner_user_id = u.id
-                    OR t.owner_user_id IS NULL
-                    OR t.owner_user_id = 0
-                  )';
+                WHERE u.role = "admin" AND u.tenant_id > 1 AND u.tenant_id <> :my AND u.id <> :uid';
         $params = array(':my' => $myTid, ':uid' => $myId);
         if ($q !== '') {
             $sql .= ' AND (u.username LIKE :q OR u.display_name LIKE :q2 OR t.name LIKE :q3)';
@@ -1349,62 +1467,40 @@ function portal_agencies_under_current($pdo, $q = '')
             $params[':q2'] = $like;
             $params[':q3'] = $like;
         }
-        $sql .= ' ORDER BY u.username ASC LIMIT 40';
+        $sql .= ' ORDER BY u.username ASC';
         $st = $pdo->prepare($sql);
         $st->execute($params);
         $rows = $st->fetchAll();
     } catch (Exception $e) {
         return array();
     }
-    $out = array();
-    $seen = array();
+    $best = array();
     foreach ($rows as $r) {
         $uid = (int) $r['id'];
-        if ($uid <= 0 || isset($seen[$uid])) {
+        $tidRow = isset($r['tenant_id']) ? (int) $r['tenant_id'] : 0;
+        if ($uid <= 0 || $tidRow <= 1) {
             continue;
         }
-        $theirHost = portal_sas_host_key(isset($r['sas_host']) ? $r['sas_host'] : '');
-        $sameHost = ($theirHost !== '' && isset($myHosts[$theirHost]));
-        if (!$sameHost && !empty($r['tenant_id'])) {
-            try {
-                $ha = $pdo->prepare('SELECT sas_host FROM tenant_sas_accounts WHERE tenant_id = :id');
-                $ha->execute(array(':id' => (int) $r['tenant_id']));
-                foreach ($ha->fetchAll() as $hr) {
-                    $k = portal_sas_host_key(isset($hr['sas_host']) ? $hr['sas_host'] : '');
-                    if ($k !== '' && isset($myHosts[$k])) {
-                        $sameHost = true;
-                        break;
-                    }
-                }
-            } catch (Exception $e) {
-                $sameHost = false;
-            }
-        }
-        $inCache = false;
-        if (!$sameHost) {
-            try {
-                $ck = $pdo->prepare(
-                    'SELECT 1 FROM sas_users_cache
-                     WHERE tenant_id = :t
-                       AND (parent_name = :u OR parent_name = :d OR parent_name = :tn)
-                     LIMIT 1'
-                );
-                $ck->execute(array(
-                    ':t' => $myTid,
-                    ':u' => (string) $r['username'],
-                    ':d' => (string) $r['display_name'],
-                    ':tn' => isset($r['tenant_name']) ? (string) $r['tenant_name'] : '',
-                ));
-                $inCache = (bool) $ck->fetchColumn();
-            } catch (Exception $e) {
-                $inCache = false;
-            }
-        }
-        if (!$sameHost && !$inCache) {
+        if (!portal_agency_reports_to_me($pdo, $r)) {
             continue;
         }
-        $seen[$uid] = true;
-        $out[] = $r;
+        $sasName = isset($r['sas_username']) ? strtolower(trim((string) $r['sas_username'])) : '';
+        $uname = isset($r['username']) ? strtolower(trim((string) $r['username'])) : '';
+        $ownerId = isset($r['owner_user_id']) ? (int) $r['owner_user_id'] : 0;
+        $score = 1;
+        if ($ownerId > 0 && $ownerId === $uid) {
+            $score = 3;
+        }
+        if ($sasName !== '' && $sasName === $uname) {
+            $score = 4;
+        }
+        if (!isset($best[$tidRow]) || $score > $best[$tidRow]['score']) {
+            $best[$tidRow] = array('score' => $score, 'row' => $r);
+        }
+    }
+    $out = array();
+    foreach ($best as $item) {
+        $out[] = $item['row'];
     }
     return $out;
 }

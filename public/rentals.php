@@ -62,6 +62,9 @@ $where .= ' AND (
           )
     )
 )';
+if (function_exists('subscriber_agent_scope_sql')) {
+    $where .= subscriber_agent_scope_sql('s');
+}
 if ($q !== '') {
     $where .= ' AND (s.name LIKE :q OR s.phone LIKE :q OR s.sas_username LIKE :q
         OR c.username LIKE :q OR c.firstname LIKE :q OR c.display_name LIKE :q
