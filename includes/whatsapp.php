@@ -1,20 +1,362 @@
 <?php
 
 /**
- * معرّف جلسة واتساب على البوابة المشتركة: default للأدمن، agent_{id} للوكيل.
+ * جلسة واتساب لهذا الحساب على البوابة المشتركة.
+ * الوكيل: agent_{id}. وكالة: u{id}. ما نرجع default إلا لمدير المنصة وهو فاتح الجلسة.
  */
-function whatsapp_session_id()
+function whatsapp_session_for_user_row($user, $pdo = null)
 {
-    if (function_exists('current_admin')) {
-        $admin = current_admin();
-        if ($admin && function_exists('is_agent_user') && is_agent_user($admin) && !empty($admin['id'])) {
-            return 'agent_' . (int) $admin['id'];
+    if (!$user || empty($user['id'])) {
+        return '';
+    }
+    $id = (int) $user['id'];
+    $role = function_exists('normalize_admin_role')
+        ? normalize_admin_role(isset($user['role']) ? $user['role'] : '')
+        : (isset($user['role']) ? (string) $user['role'] : '');
+    $tid = isset($user['tenant_id']) ? (int) $user['tenant_id'] : 1;
+    if ($role === 'agent' && empty($_SESSION['admin_sas_shadow'])) {
+        return 'agent_' . $id;
+    }
+    if ($role === 'admin' && $tid <= 1) {
+        return 'default';
+    }
+    if ($role === 'admin' || $tid <= 1) {
+        return $role === 'admin' ? ('u' . $id) : '';
+    }
+    if ($pdo && $tid > 1) {
+        try {
+            $st = $pdo->prepare(
+                'SELECT id FROM admin_users WHERE tenant_id = :t AND role = "admin" AND is_active = 1 ORDER BY id ASC LIMIT 1'
+            );
+            $st->execute(array(':t' => $tid));
+            $oid = (int) $st->fetchColumn();
+            if ($oid > 0) {
+                return 'u' . $oid;
+            }
+        } catch (Exception $e) {
         }
     }
-    return 'default';
+    return 'u' . $id;
 }
 
-function whatsapp_send($config, $phone, $message, $type = 'text')
+function whatsapp_session_id()
+{
+    if (!function_exists('current_admin')) {
+        return '';
+    }
+    $admin = current_admin();
+    if (!$admin || empty($admin['id'])) {
+        return '';
+    }
+    global $pdo;
+    if (!empty($_SESSION['admin_sas_shadow']) && !empty($_SESSION['admin_sas_manager_id']) && $pdo) {
+        $shadow = whatsapp_session_for_sas_parent($pdo, (int) $_SESSION['admin_sas_manager_id']);
+        if ($shadow !== '') {
+            return $shadow;
+        }
+    }
+    return whatsapp_session_for_user_row($admin, isset($pdo) ? $pdo : null);
+}
+
+function whatsapp_user_match_score($row)
+{
+    $role = function_exists('normalize_admin_role')
+        ? normalize_admin_role(isset($row['role']) ? $row['role'] : '')
+        : '';
+    $score = !empty($row['is_active']) ? 2 : 0;
+    if ($role === 'admin') {
+        $score += 4;
+    } elseif ($role === 'agent') {
+        $score += 2;
+    }
+    return $score;
+}
+
+function whatsapp_portal_user_for_sas($pdo, $sasId)
+{
+    static $cache = array();
+    static $ensured = false;
+    $sasId = (int) $sasId;
+    if ($sasId <= 0 || !$pdo) {
+        return null;
+    }
+    if (array_key_exists($sasId, $cache)) {
+        return $cache[$sasId];
+    }
+    if (!$ensured && function_exists('ensure_admin_users_table')) {
+        try {
+            ensure_admin_users_table($pdo);
+        } catch (Exception $e) {
+        }
+        $ensured = true;
+    }
+    $best = null;
+    $bestScore = -1;
+    $consider = function ($row) use (&$best, &$bestScore) {
+        if (!$row || empty($row['id'])) {
+            return;
+        }
+        $score = whatsapp_user_match_score($row);
+        if ($score > $bestScore) {
+            $best = $row;
+            $bestScore = $score;
+        }
+    };
+    try {
+        $st = $pdo->prepare(
+            'SELECT id, username, display_name, role, is_active, tenant_id, sas_manager_id, wa_cover_ids
+             FROM admin_users WHERE sas_manager_id = :m'
+        );
+        $st->execute(array(':m' => $sasId));
+        foreach ($st->fetchAll() as $row) {
+            $consider($row);
+        }
+    } catch (Exception $e) {
+    }
+    if ($bestScore < 5 && function_exists('portal_sas_tree_maps')) {
+        $name = '';
+        $maps = portal_sas_tree_maps($pdo);
+        if (!empty($maps['by_user']) && is_array($maps['by_user'])) {
+            foreach ($maps['by_user'] as $uname => $mid) {
+                if ((int) $mid === $sasId) {
+                    $name = strtolower(trim((string) $uname));
+                    break;
+                }
+            }
+        }
+        if ($name !== '') {
+            try {
+                $stn = $pdo->prepare(
+                    'SELECT id, username, display_name, role, is_active, tenant_id, sas_manager_id, wa_cover_ids
+                     FROM admin_users
+                     WHERE LOWER(username) = :u OR LOWER(display_name) = :d'
+                );
+                $stn->execute(array(':u' => $name, ':d' => $name));
+                foreach ($stn->fetchAll() as $row) {
+                    $consider($row);
+                }
+            } catch (Exception $e) {
+            }
+        }
+    }
+    $cache[$sasId] = $best;
+    return $best;
+}
+
+function whatsapp_cover_id_set($row)
+{
+    $raw = ($row && isset($row['wa_cover_ids'])) ? (string) $row['wa_cover_ids'] : '';
+    $out = array();
+    foreach (explode(',', $raw) as $part) {
+        $id = (int) trim($part);
+        if ($id > 0) {
+            $out[$id] = true;
+        }
+    }
+    return $out;
+}
+
+/** جلسة الإشعار لمشتركي هذا المدير: رقمه، أو رقم اللي فوقه إذا مفعّل التغطية */
+function whatsapp_session_for_sas_parent($pdo, $parentId)
+{
+    $parentId = (int) $parentId;
+    $owner = whatsapp_portal_user_for_sas($pdo, $parentId);
+    if (!$owner) {
+        return '';
+    }
+    $ownerId = (int) $owner['id'];
+    $parentOf = array();
+    if (function_exists('portal_sas_tree_maps')) {
+        $maps = portal_sas_tree_maps($pdo);
+        if (!empty($maps['parent_of']) && is_array($maps['parent_of'])) {
+            $parentOf = $maps['parent_of'];
+        }
+    }
+    $cur = $parentId;
+    for ($i = 0; $i < 8; $i++) {
+        if (!isset($parentOf[$cur])) {
+            break;
+        }
+        $up = (int) $parentOf[$cur];
+        if ($up <= 0) {
+            break;
+        }
+        $anc = whatsapp_portal_user_for_sas($pdo, $up);
+        if ($anc && $anc !== $owner) {
+            $cover = whatsapp_cover_id_set($anc);
+            if (!empty($cover[$ownerId])) {
+                $sess = whatsapp_session_for_user_row($anc, $pdo);
+                if ($sess !== '' && $sess !== 'default') {
+                    return $sess;
+                }
+            }
+        }
+        $cur = $up;
+    }
+    $own = whatsapp_session_for_user_row($owner, $pdo);
+    if ($own === 'default') {
+        return '';
+    }
+    return $own;
+}
+
+function whatsapp_session_for_subscriber($pdo, $subscriberId, $parentId = 0)
+{
+    $parentId = (int) $parentId;
+    $subscriberId = (int) $subscriberId;
+    if ($parentId <= 0 && $subscriberId > 0 && $pdo) {
+        try {
+            $st = $pdo->prepare(
+                'SELECT parent_id FROM sas_users_cache
+                 WHERE local_subscriber_id = :id AND parent_id > 0
+                 ORDER BY synced_at DESC LIMIT 1'
+            );
+            $st->execute(array(':id' => $subscriberId));
+            $parentId = (int) $st->fetchColumn();
+        } catch (Exception $e) {
+            $parentId = 0;
+        }
+    }
+    if ($parentId <= 0) {
+        return '';
+    }
+    return whatsapp_session_for_sas_parent($pdo, $parentId);
+}
+
+function whatsapp_agency_sender_session($pdo, $userRow)
+{
+    if (!$userRow) {
+        return '';
+    }
+    $tid = isset($userRow['tenant_id']) ? (int) $userRow['tenant_id'] : 0;
+    if ($pdo && $tid > 1) {
+        try {
+            $st = $pdo->prepare(
+                'SELECT id, username, display_name, role, is_active, tenant_id
+                 FROM admin_users WHERE tenant_id = :t AND role = "admin" AND is_active = 1
+                 ORDER BY id ASC LIMIT 1'
+            );
+            $st->execute(array(':t' => $tid));
+            $boss = $st->fetch();
+            if ($boss) {
+                return whatsapp_session_for_user_row($boss, $pdo);
+            }
+        } catch (Exception $e) {
+        }
+    }
+    $sess = whatsapp_session_for_user_row($userRow, $pdo);
+    return $sess === 'default' ? '' : $sess;
+}
+
+function whatsapp_cover_targets($pdo)
+{
+    $me = function_exists('current_admin') ? current_admin() : null;
+    $meId = $me ? (int) $me['id'] : 0;
+    if ($meId <= 0 || !$pdo) {
+        return array();
+    }
+    $out = array();
+    $seen = array();
+    $add = function ($row) use (&$out, &$seen, $meId) {
+        if (!is_array($row) || empty($row['id'])) {
+            return;
+        }
+        $id = (int) $row['id'];
+        if ($id <= 0 || $id === $meId || isset($seen[$id])) {
+            return;
+        }
+        $seen[$id] = true;
+        $out[] = $row;
+    };
+    $isAgent = function_exists('is_agent_user') && is_agent_user();
+    $isGm = function_exists('is_group_manager_user') && is_group_manager_user();
+    if ($isGm && function_exists('group_manager_team_ids')) {
+        $ids = group_manager_team_ids($pdo);
+        if ($ids) {
+            $in = implode(',', array_map('intval', $ids));
+            try {
+                foreach ($pdo->query(
+                    'SELECT id, username, display_name, role, is_active, tenant_id FROM admin_users WHERE id IN (' . $in . ')'
+                )->fetchAll() as $row) {
+                    $add($row);
+                }
+            } catch (Exception $e) {
+            }
+        }
+        return $out;
+    }
+    if ($isAgent) {
+        $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+        try {
+            $st = $pdo->prepare(
+                'SELECT id, username, display_name, role, is_active, tenant_id
+                 FROM admin_users WHERE reports_to_user_id = :me AND tenant_id = :t AND is_active = 1'
+            );
+            $st->execute(array(':me' => $meId, ':t' => $tid));
+            foreach ($st->fetchAll() as $row) {
+                $add($row);
+            }
+        } catch (Exception $e) {
+        }
+        return $out;
+    }
+    if (function_exists('list_agent_users')) {
+        foreach (list_agent_users($pdo, false) as $row) {
+            $add($row);
+        }
+    }
+    if (function_exists('portal_agencies_under_current')) {
+        foreach (portal_agencies_under_current($pdo, '') as $row) {
+            $add($row);
+        }
+    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+    if ($tid > 1) {
+        try {
+            $st = $pdo->prepare(
+                'SELECT id, username, display_name, role, is_active, tenant_id
+                 FROM admin_users WHERE tenant_id = :t AND role = "group_manager"'
+            );
+            $st->execute(array(':t' => $tid));
+            foreach ($st->fetchAll() as $row) {
+                $add($row);
+            }
+        } catch (Exception $e) {
+        }
+    }
+    return $out;
+}
+
+function whatsapp_cover_selected($pdo, $userId)
+{
+    $userId = (int) $userId;
+    if ($userId <= 0 || !$pdo) {
+        return array();
+    }
+    if (function_exists('ensure_admin_users_table')) {
+        try {
+            ensure_admin_users_table($pdo);
+        } catch (Exception $e) {
+        }
+    }
+    try {
+        $st = $pdo->prepare('SELECT wa_cover_ids FROM admin_users WHERE id = :id LIMIT 1');
+        $st->execute(array(':id' => $userId));
+        $raw = $st->fetchColumn();
+    } catch (Exception $e) {
+        return array();
+    }
+    $out = array();
+    foreach (explode(',', (string) $raw) as $part) {
+        $id = (int) trim($part);
+        if ($id > 0) {
+            $out[$id] = true;
+        }
+    }
+    return $out;
+}
+
+function whatsapp_send($config, $phone, $message, $type = 'text', $sessionId = null)
 {
     $wa = isset($config['whatsapp']) ? $config['whatsapp'] : array();
     $phone = normalize_phone($phone);
@@ -41,21 +383,55 @@ function whatsapp_send($config, $phone, $message, $type = 'text')
         );
     }
 
+    if ($sessionId === null) {
+        $sessionId = function_exists('whatsapp_session_id') ? whatsapp_session_id() : '';
+    }
+    $sessionId = trim((string) $sessionId);
+    if ($sessionId === '' || $sessionId === 'default') {
+        $logged = function_exists('current_admin') ? current_admin() : null;
+        $loggedId = $logged ? (int) $logged['id'] : 0;
+        $allowDefault = $sessionId === 'default' && $loggedId > 0
+            && function_exists('is_super_admin_user') && is_super_admin_user($logged);
+        if (!$allowDefault) {
+            return array(
+                'success' => false,
+                'skipped' => true,
+                'response' => 'لا توجد جلسة واتساب لهذا الوكيل',
+                'phone' => $phone,
+                'body' => $message,
+                'type' => $type,
+            );
+        }
+    }
+
     $provider = isset($wa['provider']) ? $wa['provider'] : 'meta';
     if ($provider === 'local') {
-        return whatsapp_send_local($wa, $phone, $message, $type);
+        return whatsapp_send_local($wa, $phone, $message, $type, $sessionId);
     }
 
     return whatsapp_send_meta($wa, $phone, $message, $type);
 }
 
-function whatsapp_send_local($wa, $phone, $message, $type)
+function whatsapp_send_local($wa, $phone, $message, $type, $sessionId = '')
 {
     $base = isset($wa['local_url']) ? rtrim($wa['local_url'], '/') : 'http://127.0.0.1:3001';
     $key = isset($wa['local_key']) ? (string) $wa['local_key'] : 'local-secret-change-me';
     $url = $base . '/send';
 
-    $sessionId = function_exists('whatsapp_session_id') ? whatsapp_session_id() : 'default';
+    $sessionId = trim((string) $sessionId);
+    if ($sessionId === '') {
+        $sessionId = function_exists('whatsapp_session_id') ? whatsapp_session_id() : '';
+    }
+    if ($sessionId === '') {
+        return array(
+            'success' => false,
+            'skipped' => true,
+            'response' => 'لا توجد جلسة واتساب لهذا الوكيل',
+            'phone' => $phone,
+            'body' => $message,
+            'type' => $type,
+        );
+    }
     $payload = array(
         'phone' => $phone,
         'message' => $message,
@@ -1547,7 +1923,12 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
             'from' => $startDate,
             'to' => $endDate,
         ), $config);
-        $result = whatsapp_send($config, $phone, $body, 'expiry_auto');
+        $waSession = whatsapp_session_for_subscriber($pdo, $sid, isset($crow['parent_id']) ? (int) $crow['parent_id'] : 0);
+        if ($waSession === '') {
+            $out['skipped']++;
+            continue;
+        }
+        $result = whatsapp_send($config, $phone, $body, 'expiry_auto', $waSession);
         log_message($pdo, $sid, $result);
         $doneUsers[$username] = true;
         if (!empty($result['success'])) {
@@ -1603,7 +1984,12 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
                 'from' => $row['start_date'],
                 'to' => $row['end_date'],
             ), $config);
-            $result = whatsapp_send($config, $row['phone'], $body, 'expiry_auto');
+            $waSession = whatsapp_session_for_subscriber($pdo, (int) $row['subscriber_id'], 0);
+            if ($waSession === '') {
+                $out['skipped']++;
+                continue;
+            }
+            $result = whatsapp_send($config, $row['phone'], $body, 'expiry_auto', $waSession);
             log_message($pdo, (int) $row['subscriber_id'], $result);
             if ($u !== '') {
                 $doneUsers[$u] = true;

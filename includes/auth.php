@@ -1029,6 +1029,13 @@ function ensure_admin_users_table($pdo, $config = null)
         } catch (Exception $e) {
         }
         try {
+            $col = $pdo->query("SHOW COLUMNS FROM admin_users LIKE 'wa_cover_ids'")->fetch();
+            if (!$col) {
+                $pdo->exec('ALTER TABLE admin_users ADD COLUMN wa_cover_ids TEXT NULL');
+            }
+        } catch (Exception $e) {
+        }
+        try {
             $col = $pdo->query("SHOW COLUMNS FROM admin_users LIKE 'reports_to_user_id'")->fetch();
             if (!$col) {
                 $pdo->exec('ALTER TABLE admin_users ADD COLUMN reports_to_user_id INT UNSIGNED NULL DEFAULT NULL');
@@ -1345,6 +1352,181 @@ function portal_sas_host_key($host)
     return rtrim($host, '/');
 }
 
+function portal_sas_manager_tree_file()
+{
+    return dirname(__DIR__) . '/storage/sas_manager_tree.json';
+}
+
+/** شجرة مدراء الساس: id واسم والأب. تتحدث مرة باليوم حتى ما نسأل السيرفر بكل صفحة */
+function portal_sas_manager_tree($pdo)
+{
+    static $memo = null;
+    if (is_array($memo)) {
+        return $memo;
+    }
+    $memo = array();
+    $file = portal_sas_manager_tree_file();
+    $saved = array();
+    $age = 999999;
+    if (is_file($file)) {
+        $raw = json_decode((string) @file_get_contents($file), true);
+        if (is_array($raw) && isset($raw['rows']) && is_array($raw['rows'])) {
+            $saved = $raw['rows'];
+            $age = time() - (isset($raw['at']) ? (int) $raw['at'] : 0);
+        }
+    }
+    if ($saved && $age >= 0 && $age < 86400) {
+        $memo = $saved;
+        return $memo;
+    }
+    $fresh = portal_sas_manager_tree_fetch($pdo);
+    if ($fresh) {
+        $dir = dirname($file);
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0755, true);
+        }
+        @file_put_contents($file, json_encode(array('at' => time(), 'rows' => $fresh)));
+        $memo = $fresh;
+        return $memo;
+    }
+    $memo = $saved;
+    return $memo;
+}
+
+function portal_sas_manager_tree_fetch($pdo)
+{
+    if (!$pdo || !function_exists('sas_make_connector_from_account') || !function_exists('tenant_sas_account_default')) {
+        return array();
+    }
+    if (!class_exists('SASConnector')) {
+        $cf = __DIR__ . '/sas/SASConnector.php';
+        if (is_file($cf)) {
+            require_once $cf;
+        }
+    }
+    if (!class_exists('SASConnector')) {
+        return array();
+    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+    $acc = ($tid > 0) ? tenant_sas_account_default($pdo, $tid) : null;
+    if (!$acc || empty($acc['sas_enabled'])) {
+        $acc = null;
+        try {
+            $ids = $pdo->query('SELECT id FROM tenants WHERE id > 1 ORDER BY id ASC')->fetchAll();
+            foreach ($ids as $tr) {
+                $try = tenant_sas_account_default($pdo, (int) $tr['id']);
+                if ($try && !empty($try['sas_enabled'])) {
+                    $acc = $try;
+                    break;
+                }
+            }
+        } catch (Exception $e) {
+            $acc = null;
+        }
+    }
+    if (!$acc) {
+        return array();
+    }
+    $api = sas_make_connector_from_account($acc);
+    if (!$api || !method_exists($api, 'getManagers') || !method_exists($api, 'getManagerById')) {
+        return array();
+    }
+    $raw = $api->getManagers();
+    $list = is_array($raw) ? $raw : array();
+    if (isset($list['data']) && is_array($list['data'])) {
+        $list = $list['data'];
+    }
+    $out = array();
+    $n = 0;
+    foreach ($list as $m) {
+        if (!is_array($m) || empty($m['id'])) {
+            continue;
+        }
+        $n++;
+        if ($n > 200) {
+            break;
+        }
+        $id = (int) $m['id'];
+        $one = $api->getManagerById($id);
+        $name = (is_array($one) && !empty($one['username'])) ? (string) $one['username'] : (isset($m['username']) ? (string) $m['username'] : '');
+        if ($name === '') {
+            continue;
+        }
+        $out[] = array(
+            'id' => $id,
+            'username' => $name,
+            'parent_id' => (is_array($one) && isset($one['parent_id'])) ? (int) $one['parent_id'] : 0,
+        );
+    }
+    return $out;
+}
+
+function portal_sas_tree_maps($pdo)
+{
+    static $maps = null;
+    if (is_array($maps)) {
+        return $maps;
+    }
+    $byUser = array();
+    $parentOf = array();
+    foreach (portal_sas_manager_tree($pdo) as $node) {
+        if (!is_array($node)) {
+            continue;
+        }
+        $id = isset($node['id']) ? (int) $node['id'] : 0;
+        $name = isset($node['username']) ? strtolower(trim((string) $node['username'])) : '';
+        if ($id <= 0 || $name === '') {
+            continue;
+        }
+        $byUser[$name] = $id;
+        $parentOf[$id] = isset($node['parent_id']) ? (int) $node['parent_id'] : 0;
+    }
+    $maps = array('by_user' => $byUser, 'parent_of' => $parentOf);
+    return $maps;
+}
+
+function portal_sas_id_for_names($pdo, $names, $explicitId)
+{
+    $explicitId = (int) $explicitId;
+    if ($explicitId > 0) {
+        return $explicitId;
+    }
+    $maps = portal_sas_tree_maps($pdo);
+    foreach ($names as $name) {
+        $key = strtolower(trim((string) $name));
+        if ($key !== '' && isset($maps['by_user'][$key])) {
+            return (int) $maps['by_user'][$key];
+        }
+    }
+    return 0;
+}
+
+function portal_sas_id_is_under($pdo, $childId, $rootId)
+{
+    $childId = (int) $childId;
+    $rootId = (int) $rootId;
+    if ($childId <= 0 || $rootId <= 0 || $childId === $rootId) {
+        return false;
+    }
+    $maps = portal_sas_tree_maps($pdo);
+    $parentOf = $maps['parent_of'];
+    $cur = $childId;
+    for ($i = 0; $i < 8; $i++) {
+        if (!isset($parentOf[$cur])) {
+            return false;
+        }
+        $p = (int) $parentOf[$cur];
+        if ($p <= 0) {
+            return false;
+        }
+        if ($p === $rootId) {
+            return true;
+        }
+        $cur = $p;
+    }
+    return false;
+}
+
 /** وكالة بوابة أبوها المباشر هو الحساب الحالي، مو مجرد نفس هوست الساس */
 function portal_agency_reports_to_me($pdo, $theirRow)
 {
@@ -1422,7 +1604,7 @@ function portal_agency_reports_to_me($pdo, $theirRow)
         $st->execute($params);
         $rows = $st->fetchAll();
     } catch (Exception $e) {
-        return false;
+        $rows = array();
     }
     if (!is_array($rows)) {
         return false;
@@ -1436,6 +1618,11 @@ function portal_agency_reports_to_me($pdo, $theirRow)
         if ($pn !== '' && isset($myNames[$pn])) {
             return true;
         }
+    }
+    $myResolved = portal_sas_id_for_names($pdo, array($myUser, $myDisp), $mySas);
+    $theirResolved = portal_sas_id_for_names($pdo, array($u, $d), $theirSas);
+    if (portal_sas_id_is_under($pdo, $theirResolved, $myResolved)) {
+        return true;
     }
     return false;
 }

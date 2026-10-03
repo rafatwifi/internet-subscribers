@@ -42,7 +42,14 @@ $skipped = 0;
 foreach ($rows as $row) {
     $row['_wa_case'] = 'reminder_auto';
     $msg = reminder_message($row, $config);
-    $result = whatsapp_send($config, $row['phone'], $msg, 'reminder_auto');
+    $waSession = function_exists('whatsapp_session_for_subscriber')
+        ? whatsapp_session_for_subscriber($pdo, (int) $row['subscriber_id'], 0)
+        : '';
+    if ($waSession === '') {
+        $skipped++;
+        continue;
+    }
+    $result = whatsapp_send($config, $row['phone'], $msg, 'reminder_auto', $waSession);
     log_message($pdo, (int) $row['subscriber_id'], $result);
 
     if (!empty($result['success'])) {

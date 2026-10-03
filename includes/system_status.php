@@ -246,6 +246,10 @@ function system_whatsapp_status($config)
         );
     }
     $url = $base . '/status?key=' . rawurlencode($key);
+    $waSession = function_exists('whatsapp_session_id') ? whatsapp_session_id() : '';
+    if ($waSession !== '' && $waSession !== 'default') {
+        $url .= '&session=' . rawurlencode($waSession);
+    }
     $ch = curl_init($url);
     curl_setopt_array($ch, array(
         CURLOPT_RETURNTRANSFER => true,

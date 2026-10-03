@@ -144,6 +144,23 @@ function card_stock_adjust($pdo, $agentUserId, $profileId, $profileName, $qtyDel
 /**
  * @return array(bool ok, string message, int transfer_id)
  */
+/** نفس السجل، أو وكالة بوابتها تحت الحساب الحالي بشجرة الساس */
+function card_transfer_party_allowed($pdo, $userId)
+{
+    $userId = (int) $userId;
+    if ($userId <= 0) {
+        return false;
+    }
+    if (function_exists('admin_user_same_tenant') && admin_user_same_tenant($pdo, $userId)) {
+        return true;
+    }
+    if (!function_exists('get_admin_user') || !function_exists('portal_agency_reports_to_me')) {
+        return false;
+    }
+    $row = get_admin_user($pdo, $userId);
+    return $row && portal_agency_reports_to_me($pdo, $row);
+}
+
 function transfer_cards($pdo, $fromAgentId, $toAgentId, $profileId, $profileName, $qty, $wholesalePrice, $agentPrice, $note, $createdBy)
 {
     ensure_card_accounting_tables($pdo);
@@ -170,13 +187,11 @@ function transfer_cards($pdo, $fromAgentId, $toAgentId, $profileId, $profileName
     if ($fromAgentId > 0 && $fromAgentId === $toAgentId) {
         return array(false, 'same_agent', 0);
     }
-    if (function_exists('admin_user_same_tenant')) {
-        if (!admin_user_same_tenant($pdo, $toAgentId)) {
-            return array(false, 'to_agent_required', 0);
-        }
-        if ($fromAgentId > 0 && !admin_user_same_tenant($pdo, $fromAgentId)) {
-            return array(false, 'to_agent_required', 0);
-        }
+    if (!card_transfer_party_allowed($pdo, $toAgentId)) {
+        return array(false, 'to_agent_required', 0);
+    }
+    if ($fromAgentId > 0 && !card_transfer_party_allowed($pdo, $fromAgentId)) {
+        return array(false, 'to_agent_required', 0);
     }
 
     try {
@@ -759,7 +774,16 @@ function card_agent_payment_remind($pdo, $config, $agentUserId, $lang = 'ar')
     if (!function_exists('whatsapp_send')) {
         return array(false, $isEn ? 'WhatsApp not available' : 'واتساب غير متاح');
     }
-    $result = whatsapp_send($config, $phone, $msg, 'card_debt_remind');
+    $waSession = function_exists('whatsapp_session_id') ? whatsapp_session_id() : '';
+    if ($waSession === '' || $waSession === 'default') {
+        $waSession = function_exists('whatsapp_agency_sender_session')
+            ? whatsapp_agency_sender_session($pdo, $agent)
+            : '';
+    }
+    if ($waSession === '' || $waSession === 'default') {
+        return array(false, $isEn ? 'Link this agency WhatsApp first' : 'اربط واتساب هذه الوكالة أولاً');
+    }
+    $result = whatsapp_send($config, $phone, $msg, 'card_debt_remind', $waSession);
     $ok = is_array($result) ? !empty($result['success']) : (bool) $result;
     return array($ok, $ok
         ? ($isEn ? 'Reminder sent' : 'تم إرسال التذكير')

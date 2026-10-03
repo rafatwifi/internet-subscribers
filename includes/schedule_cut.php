@@ -318,8 +318,15 @@ function run_schedule_debt_cuts($pdo, $config, $limit = 80)
             'month' => isset($row['months']) ? $row['months'] : '',
         );
         $body = schedule_cut_message($msgRow, $config);
+        $waSession = function_exists('whatsapp_session_for_subscriber')
+            ? whatsapp_session_for_subscriber($pdo, (int) $row['subscriber_id'], 0)
+            : '';
+        if ($waSession === '') {
+            $out['wa_failed']++;
+            continue;
+        }
         $result = function_exists('whatsapp_send')
-            ? whatsapp_send($config, $phone, $body, 'schedule_cut')
+            ? whatsapp_send($config, $phone, $body, 'schedule_cut', $waSession)
             : array('success' => false);
         if (function_exists('log_message')) {
             log_message($pdo, (int) $row['subscriber_id'], $result);

@@ -618,8 +618,8 @@ body.nav-pending .nav-progress { display: block; }
   var text = bar.querySelector('.wa-conn-text');
   var isEn = document.documentElement.lang === 'en';
   var msgs = {
-    offline: isEn ? 'WhatsApp offline' : 'واتساب غير متصل',
-    needQr: isEn ? 'WhatsApp needs QR scan' : 'واتساب يحتاج مسح QR',
+    offline: isEn ? 'Please link WhatsApp' : 'يرجى ربط واتساب',
+    needQr: isEn ? 'Please link WhatsApp' : 'يرجى ربط واتساب',
     unreachable: isEn ? 'WhatsApp gateway unreachable' : 'بوابة واتساب غير متاحة'
   };
   var failStreak = 0;

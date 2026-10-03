@@ -152,7 +152,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $data = array();
     $skipSettingsSave = false;
 
-    if ($section === 'sas_test') {
+    if ($section === 'wa_cover') {
+        $skipSettingsSave = true;
+        $tab = 'whatsapp';
+        $meCover = function_exists('current_admin') ? current_admin() : null;
+        $meCoverId = $meCover ? (int) $meCover['id'] : 0;
+        if ($meCoverId <= 0) {
+            flash('error', $lang === 'en' ? 'Not allowed' : 'غير مسموح');
+            redirect('settings.php?tab=whatsapp');
+        }
+        if (function_exists('ensure_admin_users_table')) {
+            ensure_admin_users_table($pdo);
+        }
+        $allowedCover = array();
+        if (function_exists('whatsapp_cover_targets')) {
+            foreach (whatsapp_cover_targets($pdo) as $tgt) {
+                $allowedCover[(int) $tgt['id']] = true;
+            }
+        }
+        $pickedCover = (isset($_POST['wa_cover']) && is_array($_POST['wa_cover'])) ? $_POST['wa_cover'] : array();
+        $keepCover = array();
+        foreach ($pickedCover as $pid) {
+            $pid = (int) $pid;
+            if ($pid > 0 && !empty($allowedCover[$pid])) {
+                $keepCover[] = $pid;
+            }
+        }
+        try {
+            $pdo->prepare('UPDATE admin_users SET wa_cover_ids = :c WHERE id = :id')
+                ->execute(array(':c' => implode(',', $keepCover), ':id' => $meCoverId));
+            flash('success', $lang === 'en' ? 'Saved' : 'تم الحفظ');
+        } catch (Exception $e) {
+            flash('error', $lang === 'en' ? 'Could not save' : 'ما انحفظ');
+        }
+        redirect('settings.php?tab=whatsapp');
+    } elseif ($section === 'sas_test') {
         $skipSettingsSave = true;
         $tab = 'sas';
     } elseif ($section === 'system_power') {
@@ -1759,13 +1793,9 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
 
   <div class="wa-card">
     <h2><?php echo e($lang === 'en' ? 'Link WhatsApp' : 'ربط واتساب'); ?></h2>
-    <p class="wa-lead"><?php echo e($isAgentWaOnly
-        ? ($lang === 'en'
-            ? 'Your messages use your own WhatsApp session on the shared gateway. Scan QR once here.'
-            : 'رسائلك تُرسل من جلسة واتساب خاصة بك على البوابة المشتركة. امسح QR هنا مرة واحدة.')
-        : ($lang === 'en'
-            ? 'When disconnected, a QR appears here. Scan once — or disconnect to relink.'
-            : 'عند تسجيل الخروج يظهر QR هنا. امسحه مرة واحدة — أو افصل لإعادة الربط.')); ?></p>
+    <p class="wa-lead"><?php echo e($lang === 'en'
+        ? 'This link is only for the account you are in now. It does not use another agency number. Expiry messages go out from this number to your subscribers only.'
+        : 'هذا الربط لحسابك الحالي فقط، وما يستخدم رقم وكالة ثانية. إشعار الانتهاء يطلع من هذا الرقم لمشتركيك أنت.'); ?></p>
     <div id="wa-status" class="wa-status-pill warn"><span class="wa-status-dot"></span><span id="wa-status-text">...</span></div>
     <div id="wa-qr" class="wa-qr-stage">
         <img id="wa-qr-img" alt="QR" style="display:none">
@@ -1778,6 +1808,47 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
     </div>
   </div>
 </div>
+<?php
+$waCoverTargets = function_exists('whatsapp_cover_targets') ? whatsapp_cover_targets($pdo) : array();
+$waMe = function_exists('current_admin') ? current_admin() : null;
+$waMeId = $waMe ? (int) $waMe['id'] : 0;
+$waCoverOn = ($waMeId > 0 && function_exists('whatsapp_cover_selected')) ? whatsapp_cover_selected($pdo, $waMeId) : array();
+if ($waCoverTargets):
+    usort($waCoverTargets, function ($a, $b) {
+        $an = isset($a['display_name']) && trim((string) $a['display_name']) !== '' ? (string) $a['display_name'] : (string) $a['username'];
+        $bn = isset($b['display_name']) && trim((string) $b['display_name']) !== '' ? (string) $b['display_name'] : (string) $b['username'];
+        return strcasecmp($an, $bn);
+    });
+?>
+<div class="wa-card" style="margin-top:16px">
+    <h2><?php echo e($lang === 'en' ? 'Who this number covers' : 'من يشملهم هذا الرقم'); ?></h2>
+    <p class="wa-lead"><?php echo e($lang === 'en'
+        ? 'Off by default: your number messages only your own subscribers. Turn on an agent below only if this number should also message that agent’s subscribers.'
+        : 'الافتراضي مغلق: رقمك يرسل لمشتركيك فقط. فعّل وكيلاً تحت إذا تريد هذا الرقم يرسل لمشتركيه هو كمان.'); ?></p>
+    <form method="post">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="section" value="wa_cover">
+        <div style="display:flex;flex-direction:column;gap:8px;max-height:360px;overflow:auto">
+            <?php foreach ($waCoverTargets as $tgt):
+                $tidOpt = (int) $tgt['id'];
+                $tlabel = (isset($tgt['display_name']) && trim((string) $tgt['display_name']) !== '')
+                    ? (string) $tgt['display_name'] : (string) $tgt['username'];
+                if (isset($tgt['is_active']) && (int) $tgt['is_active'] !== 1) {
+                    $tlabel .= $lang === 'en' ? ' (stopped)' : ' (موقوف)';
+                }
+                ?>
+                <label style="display:flex;gap:8px;align-items:center;font-weight:700">
+                    <input type="checkbox" name="wa_cover[]" value="<?php echo $tidOpt; ?>" <?php echo !empty($waCoverOn[$tidOpt]) ? 'checked' : ''; ?>>
+                    <span><?php echo e($tlabel); ?></span>
+                </label>
+            <?php endforeach; ?>
+        </div>
+        <div class="actions" style="margin-top:12px">
+            <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
+        </div>
+    </form>
+</div>
+<?php endif; ?>
 
 <script>
 (function () {
@@ -1808,7 +1879,7 @@ var L = {
   scanNew: <?php echo json_encode($lang === 'en' ? 'New QR ready — scan once' : 'QR جديد جاهز — امسحه مرة واحدة'); ?>,
   confirmLogout: <?php echo json_encode($lang === 'en' ? 'Disconnect and show a new QR?' : 'تقطع الاتصال وتعرض QR جديد؟'); ?>,
   loggingOut: <?php echo json_encode($lang === 'en' ? 'Disconnecting… QR in ~12 seconds' : 'جاري قطع الاتصال… QR خلال ~12 ثانية'); ?>,
-  pressShow: <?php echo json_encode($lang === 'en' ? 'No QR yet. Wait a moment, then press Show QR once.' : 'ما طلع QR بعد. انتظر شوي، بعدين اضغط إظهار QR مرة واحدة.'); ?>,
+  pressShow: <?php echo json_encode($lang === 'en' ? 'Please link WhatsApp' : 'يرجى ربط واتساب'); ?>,
   rateLimit: <?php echo json_encode($lang === 'en' ? 'WhatsApp blocked linking temporarily. Wait 15–30 minutes.' : 'واتساب حظر الربط مؤقتاً. انتظر 15–30 دقيقة.'); ?>,
   certExpired: <?php echo json_encode($lang === 'en'
     ? 'TLS/cert issue on the PC (often antivirus). Gateway retries with WA_TLS_INSECURE. Wait for QR — do not spam refresh.'
