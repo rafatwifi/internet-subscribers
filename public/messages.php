@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 
 require_once __DIR__ . '/../includes/bootstrap.php';
 require_once __DIR__ . '/../includes/layout.php';
@@ -20,6 +20,10 @@ if (!in_array($filter, array('debt', 'days', 'overdue'), true)) {
 
 $logQ = isset($_GET['q']) ? trim((string) $_GET['q']) : '';
 $logType = isset($_GET['type']) ? trim((string) $_GET['type']) : '';
+$logStatus = isset($_GET['status']) ? (string) $_GET['status'] : '';
+if ($logStatus !== '0' && $logStatus !== '1') {
+    $logStatus = '';
+}
 $logPage = isset($_GET['page']) ? max(1, (int) $_GET['page']) : 1;
 $logPerPage = 40;
 
@@ -63,6 +67,28 @@ if ($previewMsg === '') {
     }
 }
 $agentScopeSql = function_exists('subscriber_agent_scope_sql') ? subscriber_agent_scope_sql('s') : '';
+
+function messages_log_back_url()
+{
+    $redir = 'messages.php?mode=log';
+    $rq = trim((string) post('q', ''));
+    if ($rq !== '') {
+        $redir .= '&q=' . rawurlencode($rq);
+    }
+    $rt = trim((string) post('type', ''));
+    if ($rt !== '') {
+        $redir .= '&type=' . rawurlencode($rt);
+    }
+    $rs = (string) post('status', '');
+    if ($rs === '0' || $rs === '1') {
+        $redir .= '&status=' . $rs;
+    }
+    $rp = (int) post('page', '1');
+    if ($rp > 1) {
+        $redir .= '&page=' . $rp;
+    }
+    return $redir;
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf(post('csrf'))) {
@@ -218,16 +244,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $logId = (int) post('log_id', '0');
         list($ok, $msg) = retry_failed_message($pdo, $config, $logId, 0);
         flash($ok ? 'success' : 'error', $msg);
-        $redir = 'messages.php?mode=log';
-        $rq = trim((string) post('q', ''));
-        if ($rq !== '') {
-            $redir .= '&q=' . rawurlencode($rq);
-        }
-        $rp = (int) post('page', '1');
-        if ($rp > 1) {
-            $redir .= '&page=' . $rp;
-        }
-        redirect($redir);
+        redirect(messages_log_back_url());
     }
 
     if ($action === 'delete_log') {
@@ -236,20 +253,50 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ? delete_failed_message_log($pdo, $logId)
             : array(false, 'غير متاح');
         flash($ok ? 'success' : 'error', $msg);
-        $redir = 'messages.php?mode=log';
-        $rq = trim((string) post('q', ''));
-        if ($rq !== '') {
-            $redir .= '&q=' . rawurlencode($rq);
+        redirect(messages_log_back_url());
+    }
+
+    if ($action === 'retry_log_bulk' || $action === 'delete_log_bulk') {
+        $picked = array();
+        foreach ($ids as $idRaw) {
+            $id = (int) $idRaw;
+            if ($id > 0 && !isset($picked[$id])) {
+                $picked[$id] = $id;
+            }
+            if (count($picked) >= 40) {
+                break;
+            }
         }
-        $rt = trim((string) post('type', ''));
-        if ($rt !== '') {
-            $redir .= '&type=' . rawurlencode($rt);
+        $okN = 0;
+        $failN = 0;
+        if (!$picked) {
+            flash('error', $lang === 'en' ? 'Select messages first.' : 'حدد رسائل أولاً.');
+            redirect(messages_log_back_url());
         }
-        $rp = (int) post('page', '1');
-        if ($rp > 1) {
-            $redir .= '&page=' . $rp;
+        foreach ($picked as $logId) {
+            if ($action === 'delete_log_bulk') {
+                list($okOne, $msgOne) = function_exists('delete_failed_message_log')
+                    ? delete_failed_message_log($pdo, $logId)
+                    : array(false, '');
+            } else {
+                list($okOne, $msgOne) = retry_failed_message($pdo, $config, $logId, 0);
+                usleep(350000);
+            }
+            if ($okOne) {
+                $okN++;
+            } else {
+                $failN++;
+            }
         }
-        redirect($redir);
+        if ($action === 'delete_log_bulk') {
+            $msg = ($lang === 'en' ? 'Deleted: ' : 'تم الحذف: ') . $okN
+                . ($lang === 'en' ? ' / Failed: ' : ' / فشل: ') . $failN;
+        } else {
+            $msg = ($lang === 'en' ? 'Resent: ' : 'تمت إعادة الإرسال: ') . $okN
+                . ($lang === 'en' ? ' / Failed: ' : ' / فشل: ') . $failN;
+        }
+        flash($failN > 0 && $okN === 0 ? 'error' : 'success', $msg);
+        redirect(messages_log_back_url());
     }
 
     if ($action === 'disable_users') {
@@ -330,6 +377,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $skipped++;
                     continue;
                 }
+                if (function_exists('whatsapp_may_message_subscriber') && !whatsapp_may_message_subscriber($pdo, $id)) {
+                    $skipped++;
+                    continue;
+                }
                 $row = array(
                     'name' => $sub['name'],
                     'phone' => $sub['phone'],
@@ -349,7 +400,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 } else {
                     $body = reminder_message($row, $config);
                 }
-                $result = whatsapp_send($config, $sub['phone'], $body, 'bulk_debt');
+                $result = whatsapp_send($config, $sub['phone'], $body, 'bulk_debt', whatsapp_session_id());
                 log_message($pdo, $id, $result);
                 if (!empty($result['success'])) {
                     $ok++;
@@ -394,6 +445,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $skipped++;
                     continue;
                 }
+                if (function_exists('whatsapp_may_message_subscriber') && !whatsapp_may_message_subscriber($pdo, $id)) {
+                    $skipped++;
+                    continue;
+                }
                 if (trim($msgTpl) !== '') {
                     $body = tpl_fill($msgTpl, array(
                         'name' => $sub['name'],
@@ -410,7 +465,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'package' => !empty($sub['active_service']) ? $sub['active_service'] : '',
                     ), $config);
                 }
-                $result = whatsapp_send($config, $sub['phone'], $body, 'bulk_overdue');
+                $result = whatsapp_send($config, $sub['phone'], $body, 'bulk_overdue', whatsapp_session_id());
                 log_message($pdo, $id, $result);
                 if (!empty($result['success'])) {
                     $ok++;
@@ -430,6 +485,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (function_exists('user_can_access_subscriber') && !user_can_access_subscriber($pdo, $id)) {
                     $skipped++;
                     $skipReasons[] = '#' . $id . ': بدون صلاحية';
+                    continue;
+                }
+                if (function_exists('whatsapp_may_message_subscriber') && !whatsapp_may_message_subscriber($pdo, $id)) {
+                    $skipped++;
+                    $skipReasons[] = '#' . $id . ': مو تابع لواتساب هذا الحساب';
                     continue;
                 }
                 $st = $pdo->prepare(
@@ -555,7 +615,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'debt_total' => (float) $row['debt_total'],
                     ), $config);
                 }
-                $result = whatsapp_send($config, $phone, $body, 'bulk_filter');
+                $result = whatsapp_send($config, $phone, $body, 'bulk_filter', whatsapp_session_id());
                 log_message($pdo, $id, $result);
                 if (!empty($result['success'])) {
                     $ok++;
@@ -614,8 +674,13 @@ $daysEmptyHint = '';
 if ($mode === 'log') {
     $where = '1=1';
     $params = array();
-    if (function_exists('subscriber_agent_scope_sql')) {
-        // سجلات بدون مشترك تظهر للأدمن فقط داخل الشركة؛ للوكيل نخفيها إن لم تطابق
+    $mineSess = function_exists('whatsapp_session_id') ? whatsapp_session_id() : '';
+    $waLogScope = ($mineSess !== '' && $mineSess !== 'default' && function_exists('whatsapp_log_scope_sql'))
+        ? whatsapp_log_scope_sql('s')
+        : '';
+    if ($waLogScope !== '') {
+        $where .= ' AND m.subscriber_id IS NOT NULL' . $waLogScope;
+    } elseif (function_exists('subscriber_agent_scope_sql')) {
         $scopeLog = subscriber_agent_scope_sql('s');
         if (is_agent_user()) {
             $where .= ' AND m.subscriber_id IS NOT NULL' . $scopeLog;
@@ -639,6 +704,20 @@ if ($mode === 'log') {
     } elseif ($logType !== '') {
         $where .= ' AND m.message_type = :ltype';
         $params[':ltype'] = $logType;
+    }
+    if ($logStatus === '1') {
+        $where .= ' AND m.success = 1';
+    } elseif ($logStatus === '0') {
+        $where .= ' AND m.success = 0 AND m.subscriber_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM message_logs mresolved
+            WHERE mresolved.subscriber_id = m.subscriber_id
+              AND mresolved.success = 1
+              AND mresolved.id > m.id
+              AND (
+                mresolved.body = m.body
+                OR REPLACE(mresolved.message_type, \'_retry\', \'\') = REPLACE(m.message_type, \'_retry\', \'\')
+              )
+        )';
     }
     $stCount = $pdo->prepare(
         "SELECT COUNT(*) FROM message_logs m
@@ -681,6 +760,14 @@ if ($mode === 'log') {
          WHERE d.debt_total > 0" . $agentScopeSql . "
          ORDER BY d.debt_total DESC, s.name ASC"
     )->fetchAll();
+    $debtKept = array();
+    foreach ($filtered as $row) {
+        if (function_exists('whatsapp_may_message_subscriber') && !whatsapp_may_message_subscriber($pdo, (int) $row['id'])) {
+            continue;
+        }
+        $debtKept[] = $row;
+    }
+    $filtered = $debtKept;
 } elseif ($mode === 'send' && $filter === 'overdue') {
     $candidates = $pdo->query(
         "SELECT s.id, s.name, s.phone,
@@ -704,6 +791,9 @@ if ($mode === 'log') {
          ORDER BY s.name ASC"
     )->fetchAll();
     foreach ($candidates as $row) {
+        if (function_exists('whatsapp_may_message_subscriber') && !whatsapp_may_message_subscriber($pdo, (int) $row['id'])) {
+            continue;
+        }
         if (empty($row['active_start'])) {
             continue;
         }
@@ -752,6 +842,10 @@ if ($mode === 'log') {
         $sid = isset($crow['sub_id']) ? (int) $crow['sub_id'] : 0;
         if ($sid <= 0 && !empty($crow['local_subscriber_id'])) {
             $sid = (int) $crow['local_subscriber_id'];
+        }
+        $parentId = isset($crow['parent_id']) ? (int) $crow['parent_id'] : 0;
+        if (function_exists('whatsapp_may_message_subscriber') && !whatsapp_may_message_subscriber($pdo, $sid, $parentId)) {
+            continue;
         }
         if ($sid <= 0 && function_exists('sas_cache_ensure_local')) {
             list($sid, $errLink) = sas_cache_ensure_local($pdo, $config, $crow);
@@ -834,6 +928,9 @@ if ($mode === 'log') {
     foreach ($candidates as $row) {
         $sid = (int) $row['subscriber_id'];
         if (isset($seenSubIds[$sid])) {
+            continue;
+        }
+        if (function_exists('whatsapp_may_message_subscriber') && !whatsapp_may_message_subscriber($pdo, $sid)) {
             continue;
         }
         $info = subscription_days_info($row['start_date'], $row['end_date']);
@@ -1285,6 +1382,18 @@ $sendFilters = array(
     </script>
 
 <?php elseif ($mode === 'log'): ?>
+    <?php
+    $logQs = '';
+    if ($logQ !== '') {
+        $logQs .= '&q=' . rawurlencode($logQ);
+    }
+    if ($logType !== '') {
+        $logQs .= '&type=' . rawurlencode($logType);
+    }
+    if ($logStatus !== '') {
+        $logQs .= '&status=' . rawurlencode($logStatus);
+    }
+    ?>
     <form method="get" class="msg-toolbar">
         <input type="hidden" name="mode" value="log">
         <input name="q" value="<?php echo e($logQ); ?>" placeholder="<?php echo e($isEnMsg ? 'Search message text, name, phone…' : 'بحث بنص الرسالة أو الاسم أو الرقم…'); ?>">
@@ -1296,16 +1405,34 @@ $sendFilters = array(
             <option value="unpaid_overdue"<?php echo $logType === 'unpaid_overdue' ? ' selected' : ''; ?>><?php echo e($isEnMsg ? 'Unpaid / delay' : 'تأخير الدين'); ?></option>
             <option value="expiry_auto"<?php echo $logType === 'expiry_auto' ? ' selected' : ''; ?>><?php echo e($isEnMsg ? 'Expiry auto' : 'قرب الانتهاء'); ?></option>
         </select>
+        <select name="status">
+            <option value=""><?php echo e($isEnMsg ? 'All statuses' : 'كل الحالات'); ?></option>
+            <option value="1"<?php echo $logStatus === '1' ? ' selected' : ''; ?>><?php echo e($isEnMsg ? 'Sent' : 'تم'); ?></option>
+            <option value="0"<?php echo $logStatus === '0' ? ' selected' : ''; ?>><?php echo e($isEnMsg ? 'Failed' : 'فشل'); ?></option>
+        </select>
         <button class="btn secondary sm" type="submit"><?php echo e($isEnMsg ? 'Search' : 'بحث'); ?></button>
-        <?php if ($logQ !== '' || $logType !== ''): ?>
+        <?php if ($logQ !== '' || $logType !== '' || $logStatus !== ''): ?>
             <a class="btn ghost sm" href="messages.php?mode=log"><?php echo e(t('show_all')); ?></a>
         <?php endif; ?>
         <span class="meta msg-count"><?php echo (int) $logTotal; ?> <?php echo e($isEnMsg ? 'messages' : 'رسالة'); ?></span>
     </form>
+    <form method="post" id="msgLogBulkForm">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="action" id="logBulkAction" value="retry_log_bulk">
+        <input type="hidden" name="q" value="<?php echo e($logQ); ?>">
+        <input type="hidden" name="type" value="<?php echo e($logType); ?>">
+        <input type="hidden" name="status" value="<?php echo e($logStatus); ?>">
+        <input type="hidden" name="page" value="<?php echo (int) $logPage; ?>">
+        <div class="msg-bulk-bar">
+            <button class="btn secondary sm" type="submit" onclick="return logBulkGo('retry_log_bulk')"><?php echo e($isEnMsg ? 'Resend selected' : 'إعادة إرسال المحدد'); ?></button>
+            <button class="btn danger sm" type="submit" onclick="return logBulkGo('delete_log_bulk')"><?php echo e($isEnMsg ? 'Delete selected' : 'حذف المحدد'); ?></button>
+            <span class="meta" id="logBulkCount">0 <?php echo e($isEnMsg ? 'selected' : 'محدد'); ?></span>
+        </div>
     <div class="table-wrap msg-table-wrap">
         <table class="table-compact log-table" id="msgLogTable">
             <thead>
             <tr>
+                <th class="sub-check-cell"><input type="checkbox" id="logCheckAll" title="<?php echo e($isEnMsg ? 'Select page' : 'تحديد الصفحة'); ?>"></th>
                 <th><?php echo e($isEnMsg ? 'When' : 'الوقت'); ?></th>
                 <th><?php echo e(t('name')); ?></th>
                 <th><?php echo e(t('phone')); ?></th>
@@ -1317,7 +1444,7 @@ $sendFilters = array(
             </thead>
             <tbody>
             <?php if (!$logRows): ?>
-                <tr><td colspan="7" class="msg-empty"><?php echo e($isEnMsg ? 'No messages yet' : 'ماكو رسائل بالسجل بعد'); ?></td></tr>
+                <tr><td colspan="8" class="msg-empty"><?php echo e($isEnMsg ? 'No messages yet' : 'ماكو رسائل بالسجل بعد'); ?></td></tr>
             <?php endif; ?>
             <?php foreach ($logRows as $row): ?>
                 <?php
@@ -1339,6 +1466,7 @@ $sendFilters = array(
                 <tr class="<?php echo e($rowCls); ?>"
                     data-log-id="<?php echo (int) $row['id']; ?>"
                     data-log-fail="<?php echo (!$ok && !$resolved) ? '1' : '0'; ?>">
+                    <td class="sub-check-cell"><input type="checkbox" class="log-check" name="ids[]" value="<?php echo (int) $row['id']; ?>"></td>
                     <td class="nowrap"><?php echo e($row['created_at']); ?></td>
                     <td>
                         <?php if (!empty($row['subscriber_id'])): ?>
@@ -1375,15 +1503,8 @@ $sendFilters = array(
                         <?php endif; ?>
                     </td>
                     <td class="acts-cell">
-                        <?php if (!$ok && !$resolved): ?>
-                            <form method="post" class="inline-form">
-                                <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
-                                <input type="hidden" name="action" value="retry_log">
-                                <input type="hidden" name="log_id" value="<?php echo (int) $row['id']; ?>">
-                                <input type="hidden" name="q" value="<?php echo e($logQ); ?>">
-                                <input type="hidden" name="page" value="<?php echo (int) $logPage; ?>">
-                                <button class="link-act" type="submit" title="<?php echo e($isEnMsg ? 'Retry' : 'إعادة إرسال'); ?>">↻</button>
-                            </form>
+                        <?php if (!empty($row['subscriber_id'])): ?>
+                            <button class="link-act" type="submit" name="log_id" value="<?php echo (int) $row['id']; ?>" onclick="document.getElementById('logBulkAction').value='retry_log'" title="<?php echo e($isEnMsg ? 'Resend' : 'إعادة إرسال'); ?>">↻</button>
                         <?php elseif ($resolved): ?>
                             <span class="msg-resolved-arrow acts-resolved" title="<?php echo e($resolvedTitle); ?>">→</span>
                         <?php endif; ?>
@@ -1393,14 +1514,15 @@ $sendFilters = array(
             </tbody>
         </table>
     </div>
+    </form>
     <?php if ($logPages > 1): ?>
         <div class="actions actions-tight" style="margin-top:10px">
             <?php if ($logPage > 1): ?>
-                <a class="btn ghost sm" href="messages.php?mode=log&page=<?php echo (int) ($logPage - 1); ?><?php echo $logQ !== '' ? '&q=' . rawurlencode($logQ) : ''; ?><?php echo $logType !== '' ? '&type=' . rawurlencode($logType) : ''; ?>">‹</a>
+                <a class="btn ghost sm" href="messages.php?mode=log&page=<?php echo (int) ($logPage - 1) . $logQs; ?>">‹</a>
             <?php endif; ?>
             <span class="meta" style="margin:0"><?php echo (int) $logPage; ?> / <?php echo (int) $logPages; ?></span>
             <?php if ($logPage < $logPages): ?>
-                <a class="btn ghost sm" href="messages.php?mode=log&page=<?php echo (int) ($logPage + 1); ?><?php echo $logQ !== '' ? '&q=' . rawurlencode($logQ) : ''; ?><?php echo $logType !== '' ? '&type=' . rawurlencode($logType) : ''; ?>">›</a>
+                <a class="btn ghost sm" href="messages.php?mode=log&page=<?php echo (int) ($logPage + 1) . $logQs; ?>">›</a>
             <?php endif; ?>
         </div>
     <?php endif; ?>
@@ -1410,6 +1532,7 @@ $sendFilters = array(
         <input type="hidden" name="log_id" id="msgLogDeleteId" value="">
         <input type="hidden" name="q" value="<?php echo e($logQ); ?>">
         <input type="hidden" name="type" value="<?php echo e($logType); ?>">
+        <input type="hidden" name="status" value="<?php echo e($logStatus); ?>">
         <input type="hidden" name="page" value="<?php echo (int) $logPage; ?>">
     </form>
     <div id="msgLogCtx" class="msg-log-ctx" hidden>
@@ -1436,7 +1559,54 @@ $sendFilters = array(
       }
       .msg-log-ctx button:hover { background: #fef2f2; }
       #msgLogTable tr.row-msg-fail { cursor: context-menu; }
+      .msg-bulk-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 10px; }
+      #msgLogTable .sub-check-cell { width: 36px; text-align: center; }
     </style>
+    <script>
+    function logBulkGo(action) {
+      var boxes = document.querySelectorAll('#msgLogBulkForm .log-check:checked');
+      if (!boxes.length) {
+        alert(<?php echo json_encode($isEnMsg ? 'Select messages first.' : 'حدد رسائل أولاً.'); ?>);
+        return false;
+      }
+      var n = boxes.length;
+      if (action === 'delete_log_bulk') {
+        if (!confirm(<?php echo json_encode($isEnMsg ? 'Delete the selected messages from the log?' : 'تحذف الرسائل المحددة من السجل؟'); ?> + ' (' + n + ')')) {
+          return false;
+        }
+      } else if (!confirm(<?php echo json_encode($isEnMsg ? 'Resend the selected messages?' : 'تعيد إرسال الرسائل المحددة؟'); ?> + ' (' + n + ')')) {
+        return false;
+      }
+      var act = document.getElementById('logBulkAction');
+      if (act) act.value = action;
+      return true;
+    }
+    (function () {
+      var all = document.getElementById('logCheckAll');
+      var countEl = document.getElementById('logBulkCount');
+      function boxes() {
+        return document.querySelectorAll('#msgLogBulkForm .log-check');
+      }
+      function paint() {
+        var n = document.querySelectorAll('#msgLogBulkForm .log-check:checked').length;
+        if (countEl) countEl.textContent = n + ' ' + <?php echo json_encode($isEnMsg ? 'selected' : 'محدد'); ?>;
+      }
+      if (all) {
+        all.addEventListener('change', function () {
+          var list = boxes();
+          for (var i = 0; i < list.length; i++) list[i].checked = all.checked;
+          paint();
+        });
+      }
+      var form = document.getElementById('msgLogBulkForm');
+      if (form) {
+        form.addEventListener('change', function (e) {
+          if (e.target && e.target.classList && e.target.classList.contains('log-check')) paint();
+        });
+      }
+      paint();
+    })();
+    </script>
     <script>
     (function () {
       var menu = document.getElementById('msgLogCtx');

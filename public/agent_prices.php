@@ -203,6 +203,32 @@ if (!$profiles) {
     } catch (Exception $e) {
     }
 }
+$planProfiles = array();
+try {
+    $planRows = $pdo->query(
+        'SELECT name, cost_price, sas_profile_id, sort_order, is_active
+         FROM service_plans ORDER BY sort_order ASC, id ASC'
+    )->fetchAll();
+    foreach ($planRows as $pl) {
+        if (isset($pl['is_active']) && (int) $pl['is_active'] !== 1) {
+            continue;
+        }
+        $pnm = trim((string) $pl['name']);
+        if ($pnm === '') {
+            continue;
+        }
+        $planProfiles[] = array(
+            'id' => isset($pl['sas_profile_id']) ? (int) $pl['sas_profile_id'] : 0,
+            'name' => $pnm,
+            'price' => isset($pl['cost_price']) ? (float) $pl['cost_price'] : 0,
+            'from_plan' => 1,
+        );
+    }
+} catch (Exception $e) {
+}
+if ($planProfiles) {
+    $profiles = $planProfiles;
+}
 $pkgFloor = $myFloor;
 foreach ($profiles as $pf) {
     $pk = strtolower(trim(isset($pf['name']) ? (string) $pf['name'] : ''));
@@ -272,6 +298,7 @@ if ($aboveId > 0 && function_exists('agent_card_prices_list')) {
     }
 }
 $mySell = array();
+$myCost = array();
 if ($homeId > 0 && function_exists('agent_card_prices_list')) {
     foreach (agent_card_prices_list($pdo, $homeId) as $hp0) {
         $hk = strtolower(trim((string) $hp0['profile_name']));
@@ -284,6 +311,59 @@ if ($homeId > 0 && function_exists('agent_card_prices_list')) {
         }
         if ($hv > 0) {
             $mySell[$hk] = $hv;
+        }
+        $cost = isset($hp0['wholesale_price']) ? (float) $hp0['wholesale_price'] : 0;
+        if ($cost <= 0) {
+            $cost = $hv;
+        }
+        if ($cost > 0) {
+            $myCost[$hk] = $cost;
+        }
+    }
+}
+$sasByName = array();
+foreach ($profiles as $pf0) {
+    $pk = strtolower(trim(isset($pf0['name']) ? (string) $pf0['name'] : ''));
+    $pp = isset($pf0['price']) ? (float) $pf0['price'] : 0;
+    if ($pk !== '' && $pp > 0) {
+        $sasByName[$pk] = $pp;
+    }
+}
+$plansAreSource = !empty($profiles[0]['from_plan']);
+$baseByName = array();
+$baseKeys = array_unique(array_merge(array_keys($sasByName), array_keys($myCost), array_keys($aboveFloor)));
+foreach ($baseKeys as $bk) {
+    $bv = 0;
+    if ($plansAreSource && isset($sasByName[$bk]) && (float) $sasByName[$bk] > 0) {
+        $bv = (float) $sasByName[$bk];
+    } elseif (isset($aboveFloor[$bk]) && (float) $aboveFloor[$bk] > 0) {
+        $bv = (float) $aboveFloor[$bk];
+    } elseif (isset($myCost[$bk]) && (float) $myCost[$bk] > 0) {
+        $bv = (float) $myCost[$bk];
+    } elseif (isset($sasByName[$bk]) && (float) $sasByName[$bk] > 0) {
+        $bv = (float) $sasByName[$bk];
+    }
+    if ($bv > 0) {
+        $baseByName[$bk] = $bv;
+    }
+}
+$pricesAdopted = count($baseByName) > 0;
+if ($pricesAdopted) {
+    $pickerAgents = array();
+    foreach ($picker as $a) {
+        if ((int) $a['id'] === $homeId) {
+            continue;
+        }
+        $pickerAgents[] = $a;
+    }
+    if ($pickerAgents) {
+        $picker = $pickerAgents;
+        $allowedPick = array();
+        foreach ($picker as $a) {
+            $allowedPick[(int) $a['id']] = true;
+        }
+        if ($agentId <= 0 || empty($allowedPick[$agentId])) {
+            $agentId = (int) $picker[0]['id'];
         }
     }
 }
@@ -301,15 +381,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     if ($agentId <= 0 || !in_array($agentId, $allowedIds, true)) {
         flash('error', $isEn ? 'Not allowed' : 'غير مسموح');
-        redirect('agent_prices.php?agent=' . (int) $homeId);
+        $backId = isset($picker[0]['id']) ? (int) $picker[0]['id'] : (int) $homeId;
+        redirect('agent_prices.php?agent=' . $backId);
     }
     $back = 'agent_prices.php?agent=' . (int) $agentId;
     if ($action === 'clear' && ($isPriceAdmin || $isAccPrice) && $agentId !== $homeId) {
         $homeSaved = function_exists('agent_card_prices_list') ? agent_card_prices_list($pdo, $homeId) : array();
-        $homeBy = array();
-        foreach ($homeSaved as $hp) {
-            $homeBy[strtolower(trim((string) $hp['profile_name']))] = $hp;
-        }
         $n = 0;
         $srcLines = $profiles;
         if (!$srcLines && $homeSaved) {
@@ -321,26 +398,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 );
             }
         }
+        $fixPid = $pdo->prepare(
+            'UPDATE agent_card_prices
+             SET wholesale_price = :c, agent_price = :c2, retail_price = :c3, updated_at = NOW()
+             WHERE agent_user_id = :a AND profile_id = :p AND profile_id > 0'
+        );
         foreach ($srcLines as $line) {
             $nm = isset($line['name']) ? trim((string) $line['name']) : '';
             if ($nm === '') {
                 continue;
             }
             $key = strtolower($nm);
-            $hp = isset($homeBy[$key]) ? $homeBy[$key] : null;
             $sasPrice = isset($line['price']) ? (float) $line['price'] : 0;
-            $w = ($hp && (float) $hp['wholesale_price'] > 0) ? (float) $hp['wholesale_price'] : $sasPrice;
-            $ap = ($hp && (float) $hp['agent_price'] > 0) ? (float) $hp['agent_price'] : $w;
-            $rp = ($hp && isset($hp['retail_price']) && (float) $hp['retail_price'] > 0) ? (float) $hp['retail_price'] : $w;
-            $pid = isset($line['id']) ? (int) $line['id'] : ($hp ? (int) $hp['profile_id'] : 0);
-            if (agent_card_price_save($pdo, $agentId, $pid, $nm, $w, $ap, $rp)) {
+            $cost = 0;
+            if (!empty($line['from_plan']) && $sasPrice > 0) {
+                $cost = $sasPrice;
+            } elseif (isset($baseByName[$key]) && (float) $baseByName[$key] > 0) {
+                $cost = (float) $baseByName[$key];
+            } elseif (isset($aboveFloor[$key]) && (float) $aboveFloor[$key] > 0) {
+                $cost = (float) $aboveFloor[$key];
+            } elseif ($sasPrice > 0) {
+                $cost = $sasPrice;
+            }
+            if ($cost <= 0) {
+                continue;
+            }
+            $pid = isset($line['id']) ? (int) $line['id'] : 0;
+            if (agent_card_price_save($pdo, $agentId, $pid, $nm, $cost, $cost, $cost)) {
                 $n++;
+            }
+            if ($pid > 0) {
+                $fixPid->execute(array(
+                    ':c' => $cost,
+                    ':c2' => $cost,
+                    ':c3' => $cost,
+                    ':a' => $agentId,
+                    ':p' => $pid,
+                ));
             }
         }
         if ($n > 0 && function_exists('activity_log')) {
-            activity_log($pdo, 0, 'card_price', $agentId, 'card_price', 'إرجاع أسعار الوكيل لسعر الوكالة', '');
+            activity_log($pdo, 0, 'card_price', $agentId, 'card_price', 'تصفير أسعار الوكيل على سعر التكلفة', '');
         }
-        flash('success', $isEn ? 'Restored to the agency price' : 'رجعت الأسعار لسعر الوكالة');
+        flash('success', $isEn ? 'Prices reset to the cost on this page' : 'تم التصفير على سعر التكلفة');
         redirect($back);
     }
     if ($action === 'save_all') {
@@ -371,17 +471,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($mine <= 0) {
                 $mine = $sasFloor;
             }
+            $knownW = 0;
+            if ($agentId !== $homeId && isset($baseByName[$floorKey]) && (float) $baseByName[$floorKey] > 0) {
+                $knownW = (float) $baseByName[$floorKey];
+            } elseif ($agentId !== $homeId && isset($homeBySave[$floorKey]) && (float) $homeBySave[$floorKey]['wholesale_price'] > 0) {
+                $knownW = (float) $homeBySave[$floorKey]['wholesale_price'];
+            } elseif ($agentId !== $homeId && $mine > 0) {
+                $knownW = $mine;
+            }
             if ($agentId === $homeId) {
                 $floorW = $above;
                 $floorA = ($postedW > $above) ? $postedW : $above;
                 $floorR = $floorA;
             } else {
-                $floorW = $mine;
-                $floorA = $mine;
-                $floorR = $mine;
+                $floorW = $knownW > 0 ? $knownW : $mine;
+                $floorA = $floorW;
+                $floorR = $floorW;
             }
-            $check = array(array($postedW, $floorW), array($postedR, $floorR));
-            if (!$isAccPrice) {
+            $check = array();
+            if ($agentId !== $homeId && isset($row['retail_price'])) {
+                $check[] = array($postedR, $floorR);
+            } elseif ($isAccPrice) {
+                $check[] = array($postedR, $floorR);
+            }
+            if ($agentId === $homeId && $knownW <= 0) {
+                $check[] = array($postedW, $floorW);
+            }
+            if (!$isAccPrice && $agentId !== $homeId) {
+                $check[] = array($postedA, $floorA);
+            } elseif (!$isAccPrice && $agentId === $homeId && isset($row['agent_price'])) {
                 $check[] = array($postedA, $floorA);
             }
             foreach ($check as $pair) {
@@ -409,12 +527,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $profileId = isset($row['profile_id']) ? (int) $row['profile_id'] : 0;
             $postedW = isset($row['wholesale_price']) ? (float) $row['wholesale_price'] : 0;
             $postedA = isset($row['agent_price']) ? (float) $row['agent_price'] : 0;
-            $postedR = isset($row['retail_price']) ? (float) $row['retail_price'] : 0;
             $old = function_exists('agent_card_price_get') ? agent_card_price_get($pdo, $agentId, $profileId, $profileName) : null;
             if ($isPriceAdmin || $isAccPrice) {
                 $w = $postedW;
                 $ap = $isAccPrice ? $postedW : $postedA;
-                $rp = $postedR;
+                $rp = null;
+                if (isset($row['retail_price'])) {
+                    $rp = (float) $row['retail_price'];
+                }
+                if ($agentId !== $homeId) {
+                    $saveKey = strtolower($profileName);
+                    $knownW = 0;
+                    if (isset($baseByName[$saveKey]) && (float) $baseByName[$saveKey] > 0) {
+                        $knownW = (float) $baseByName[$saveKey];
+                    } elseif (isset($homeBySave[$saveKey]) && (float) $homeBySave[$saveKey]['wholesale_price'] > 0) {
+                        $knownW = (float) $homeBySave[$saveKey]['wholesale_price'];
+                    } elseif (isset($mySell[$saveKey]) && (float) $mySell[$saveKey] > 0) {
+                        $knownW = (float) $mySell[$saveKey];
+                    }
+                    if ($knownW > 0) {
+                        $w = $knownW;
+                        if ($isAccPrice) {
+                            $ap = $knownW;
+                        }
+                    }
+                }
             } else {
                 $teamOk = ($agentId === $meId);
                 if ($isGm && function_exists('group_manager_team_ids')) {
@@ -425,7 +562,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 $w = $old ? (float) $old['wholesale_price'] : $postedW;
                 $ap = $old ? (float) $old['agent_price'] : $postedA;
-                $rp = $postedR;
+                $rp = null;
             }
             if (agent_card_price_save($pdo, $agentId, $profileId, $profileName, $w, $ap, $rp)) {
                 $n++;
@@ -445,18 +582,60 @@ render_header($isEn ? 'Package prices' : 'تسعير الباقات', 'agent_pri
 require_once __DIR__ . '/../includes/settings_tabs.php';
 render_settings_tabs('prices');
 ?>
-<div class="panel">
+<div class="panel agent-pick-panel" id="agentPickPanel">
     <h2><?php echo e($isEn ? 'Card pricing' : 'تسعير الكروت'); ?></h2>
     <p class="meta"><?php echo e($isEn
-        ? 'Agent sale cannot be below your price. If the one above you set a price, you and the people under you can match it or go higher. The difference is your profit on this page.'
-        : 'سعر البيع للوكيل وسعر المواطن ما ينزلون عن سعر الجملة. إذا اللي فوقك مخلي سعر، أنت واللي تحتك تحطون نفسه أو أعلى. الفرق ربح ويرجع لهالصفحة.'); ?></p>
+        ? 'The package price comes from SAS or from the one above you. You can keep it or set it higher. After it is adopted, My agency is hidden, and pricing an agent shows the package price and the agent sale.'
+        : 'سعر التكلفة يجي من الساس أو من الصفحة اللي فوق. من تسعّر وكيل: التكلفة ثابتة، وتكتب سعر الوكيل وسعر المشترك النهائي، والربح فرق التكلفة عن سعر الوكيل.'); ?></p>
     <style>
-    .price-pick { min-width:280px; direction:ltr; text-align:left; font-size:16px; font-weight:700; line-height:1.45; padding:8px 12px; }
+    .agent-pick-panel.is-pick-open { position:relative; z-index:30; overflow:visible; }
+    .agent-pick-row { display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; margin-top:12px; }
+    .agent-pick { position:relative; flex:1 1 280px; max-width:420px; min-width:0; }
+    .agent-pick label { display:block; margin-bottom:6px; font-weight:800; }
+    .agent-pick-q {
+      width:100%; box-sizing:border-box; direction:ltr; text-align:left;
+      font-size:16px; font-weight:700; line-height:1.45; padding:10px 12px;
+      border:1px solid #cbd5e1; border-radius:12px; background:#fff;
+    }
+    .agent-pick-list {
+      display:none; position:absolute; z-index:80; left:0; right:0; width:100%;
+      top:calc(100% + 6px); direction:ltr; text-align:left; box-sizing:border-box;
+      max-height:260px; overflow-x:hidden; overflow-y:auto;
+      -webkit-overflow-scrolling:touch; overscroll-behavior:contain; touch-action:pan-y;
+      border:1px solid #e2e8f0; border-radius:12px; background:#fff;
+      box-shadow:0 16px 40px rgba(15,23,42,.18);
+    }
+    .agent-pick.is-open .agent-pick-list { display:block; }
+    .agent-pick-list button {
+      display:block; width:100%; max-width:100%; box-sizing:border-box; margin:0;
+      text-align:left; direction:ltr;
+      padding:10px 12px; border:0; border-bottom:1px solid #f1f5f9;
+      background:#fff; font-size:15px; font-weight:700; cursor:pointer;
+    }
+    .agent-pick-list button.is-on { background:#dbeafe; }
+    .agent-pick-list button:hover, .agent-pick-list button:focus { background:#eff6ff; outline:none; }
+    .agent-pick-empty { padding:12px; color:#64748b; font-weight:700; text-align:left; }
     </style>
-    <form method="get" style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:10px">
-        <div>
-            <label><?php echo e($isEn ? 'Show' : 'استعراض'); ?></label>
-            <select class="price-pick" name="agent" dir="ltr" onchange="this.form.submit()">
+    <form method="get" id="agentPickForm" class="agent-pick-row">
+        <div class="agent-pick" id="agentPick">
+            <label for="agentPickQ"><?php echo e($isEn ? 'Show' : 'استعراض'); ?></label>
+            <?php
+            $pickedLabel = '';
+            foreach ($picker as $opt0) {
+                if ((int) $opt0['id'] !== $agentId) {
+                    continue;
+                }
+                $odn0 = isset($opt0['display_name']) ? trim((string) $opt0['display_name']) : '';
+                $oun0 = isset($opt0['username']) ? trim((string) $opt0['username']) : '';
+                $pickedLabel = $odn0 !== '' ? $odn0 : $oun0;
+                break;
+            }
+            ?>
+            <input type="hidden" name="agent" id="agentPickValue" value="<?php echo (int) $agentId; ?>">
+            <input type="search" class="agent-pick-q" id="agentPickQ" autocomplete="off" enterkeyhint="search"
+                   placeholder="<?php echo e($isEn ? 'Search agent' : 'ابحث عن وكيل'); ?>"
+                   value="<?php echo e($pickedLabel); ?>">
+            <div class="agent-pick-list" id="agentPickList" role="listbox">
                 <?php foreach ($picker as $opt):
                     $oid = (int) $opt['id'];
                     $odn = isset($opt['display_name']) ? trim((string) $opt['display_name']) : '';
@@ -469,12 +648,78 @@ render_settings_tabs('prices');
                         $oname .= $isEn ? ' (stopped)' : ' (موقوف)';
                     }
                     ?>
-                    <option value="<?php echo $oid; ?>" <?php echo $oid === $agentId ? 'selected' : ''; ?>><?php echo e($oname); ?></option>
+                    <button type="button" role="option" data-id="<?php echo $oid; ?>" data-label="<?php echo e($oname); ?>" <?php echo $oid === $agentId ? 'class="is-on"' : ''; ?>><?php echo e($oname); ?></button>
                 <?php endforeach; ?>
-            </select>
+                <div class="agent-pick-empty" id="agentPickEmpty" hidden><?php echo e($isEn ? 'No match' : 'ماكو نتيجة'); ?></div>
+            </div>
         </div>
         <button class="btn" type="submit"><?php echo e($isEn ? 'Open' : 'اختيار'); ?></button>
     </form>
+    <script>
+    (function () {
+      var form = document.getElementById('agentPickForm');
+      var panel = document.getElementById('agentPickPanel');
+      var box = document.getElementById('agentPick');
+      var q = document.getElementById('agentPickQ');
+      var val = document.getElementById('agentPickValue');
+      var list = document.getElementById('agentPickList');
+      var empty = document.getElementById('agentPickEmpty');
+      if (!form || !box || !q || !val || !list) return;
+      var items = list.getElementsByTagName('button');
+      var picked = '';
+      function norm(s) { return String(s || '').toLowerCase().replace(/\s+/g, ''); }
+      function openList() {
+        box.className = 'agent-pick is-open';
+        if (panel) panel.className = 'panel agent-pick-panel is-pick-open';
+        var on = null;
+        for (var i = 0; i < items.length; i++) {
+          if (items[i].className.indexOf('is-on') !== -1) on = items[i];
+        }
+        if (on) list.scrollTop = on.offsetTop > 40 ? on.offsetTop - 8 : 0;
+      }
+      function closeList() {
+        box.className = 'agent-pick';
+        if (panel) panel.className = 'panel agent-pick-panel';
+      }
+      function apply() {
+        var needle = norm(q.value);
+        if (needle === picked) needle = '';
+        var shown = 0;
+        for (var i = 0; i < items.length; i++) {
+          var label = norm(items[i].getAttribute('data-label') || items[i].textContent);
+          var ok = needle === '' || label.indexOf(needle) !== -1;
+          items[i].style.display = ok ? 'block' : 'none';
+          if (ok) shown++;
+        }
+        if (empty) empty.style.display = shown ? 'none' : 'block';
+      }
+      picked = norm(q.value);
+      q.addEventListener('focus', function () { openList(); q.select(); });
+      q.addEventListener('input', function () { openList(); apply(); });
+      q.addEventListener('keydown', function (e) {
+        var key = e.key || e.keyCode;
+        if (key === 'Escape' || key === 27) closeList();
+      });
+      document.addEventListener('click', function (e) {
+        var n = e.target;
+        while (n) {
+          if (n === box) return;
+          n = n.parentNode;
+        }
+        closeList();
+      });
+      list.addEventListener('click', function (e) {
+        var btn = e.target;
+        while (btn && btn.tagName !== 'BUTTON') btn = btn.parentNode;
+        if (!btn || !btn.getAttribute) return;
+        val.value = btn.getAttribute('data-id') || '';
+        q.value = btn.getAttribute('data-label') || btn.textContent;
+        closeList();
+        form.submit();
+      });
+      apply();
+    })();
+    </script>
 </div>
 <?php
 $ag = null;
@@ -487,8 +732,13 @@ foreach ($picker as $opt) {
 $aid = $ag ? (int) $ag['id'] : 0;
 $saved = ($aid > 0) ? agent_card_prices_list($pdo, $aid) : array();
 $byName = array();
+$byPid = array();
 foreach ($saved as $sp) {
     $byName[strtolower(trim((string) $sp['profile_name']))] = $sp;
+    $spid = isset($sp['profile_id']) ? (int) $sp['profile_id'] : 0;
+    if ($spid > 0 && !isset($byPid[$spid])) {
+        $byPid[$spid] = $sp;
+    }
 }
 $homeSavedView = ($homeId > 0) ? agent_card_prices_list($pdo, $homeId) : array();
 $homeByView = array();
@@ -514,12 +764,21 @@ $isSelf = ($aid === $homeId);
         }
         echo e($agName);
         ?>
-        <?php if (!empty($ag['username'])): ?><small class="meta ltr"><?php echo e($ag['username']); ?></small><?php endif; ?>
+        <?php if (!empty($ag['username']) && strcasecmp(trim((string) $ag['username']), trim((string) $agName)) !== 0): ?><small class="meta ltr"><?php echo e($ag['username']); ?></small><?php endif; ?>
     </h3>
+    <?php if (!$isSelf && !$isAccPrice): ?>
+        <p class="meta"><?php echo e($isEn
+            ? 'The package price is shown. Set the agent sale at that price or higher.'
+            : 'سعر التكلفة ثابت من الباقة. سعّر الوكيل والمشترك النهائي، نفسه أو أعلى. الربح = سعر الوكيل − التكلفة.'); ?></p>
+    <?php elseif (!$isSelf): ?>
+        <p class="meta"><?php echo e($isEn
+            ? 'The package price is already set. Set the cost and the subscriber price at that price or higher.'
+            : 'سعر الباقة معتمد. هنا تسعّر سعر التكلفة وسعر المشترك النهائي، نفسه أو أعلى.'); ?></p>
+    <?php endif; ?>
     <?php if (!$lines): ?>
         <p class="meta"><?php echo e($isEn ? 'No packages from SAS yet. Sync SAS then reopen this page.' : 'ماكو فئات من الساس بعد. زامن الساس ثم ارجع لهنا.'); ?></p>
     <?php else: ?>
-    <form method="post">
+    <form method="post" id="priceSaveForm">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="action" value="save_all">
         <input type="hidden" name="agent_id" value="<?php echo $aid; ?>">
@@ -530,11 +789,13 @@ $isSelf = ($aid === $homeId);
                     <th><?php echo e($isEn ? 'Package' : 'الباقة'); ?></th>
                     <?php if ($isAccPrice): ?>
                     <th><?php echo e($isEn ? 'Cost' : 'سعر التكلفة'); ?></th>
-                    <th><?php echo e($isEn ? 'Subscriber price' : 'سعر بيع المشترك'); ?></th>
+                    <th><?php echo e($isEn ? 'Subscriber price' : 'سعر المشترك النهائي'); ?></th>
+                    <?php elseif ($isSelf): ?>
+                    <th><?php echo e($isEn ? 'Cost' : 'سعر التكلفة'); ?></th>
                     <?php else: ?>
-                    <th><?php echo e($isEn ? 'Wholesale' : 'سعر الجملة'); ?></th>
-                    <th><?php echo e($isEn ? 'Agent sale' : 'سعر البيع للوكيل'); ?></th>
-                    <th><?php echo e($isEn ? 'Citizen sale' : 'سعر البيع للمواطن'); ?></th>
+                    <th><?php echo e($isEn ? 'Cost' : 'سعر التكلفة'); ?></th>
+                    <th><?php echo e($isEn ? 'Agent price' : 'سعر الوكيل'); ?></th>
+                    <th><?php echo e($isEn ? 'Final subscriber' : 'سعر المشترك النهائي'); ?></th>
                     <th><?php echo e($isEn ? 'Profit' : 'الربح'); ?></th>
                     <?php endif; ?>
                 </tr>
@@ -544,6 +805,10 @@ $isSelf = ($aid === $homeId);
                     $nm = isset($line['name']) ? (string) $line['name'] : '';
                     $key = strtolower(trim($nm));
                     $have = isset($byName[$key]) ? $byName[$key] : null;
+                    $linePid = isset($line['id']) ? (int) $line['id'] : 0;
+                    if (!$have && $linePid > 0 && isset($byPid[$linePid])) {
+                        $have = $byPid[$linePid];
+                    }
                     $hp = isset($homeByView[$key]) ? $homeByView[$key] : null;
                     $sasPrice = isset($line['price']) ? (float) $line['price'] : 0;
                     $above = isset($aboveFloor[$key]) ? (float) $aboveFloor[$key] : 0;
@@ -560,15 +825,44 @@ $isSelf = ($aid === $homeId);
                         $floorA = $mine;
                         $floorR = $mine;
                     }
+                    $knownW = 0;
+                    if (!$isSelf) {
+                        if (!empty($line['from_plan']) && $sasPrice > 0) {
+                            $knownW = $sasPrice;
+                        } elseif (isset($baseByName[$key]) && (float) $baseByName[$key] > 0) {
+                            $knownW = (float) $baseByName[$key];
+                        } elseif ($above > 0) {
+                            $knownW = $above;
+                        } elseif ($hp && isset($hp['wholesale_price']) && (float) $hp['wholesale_price'] > 0) {
+                            $knownW = (float) $hp['wholesale_price'];
+                        } elseif ($mine > 0) {
+                            $knownW = $mine;
+                        }
+                    }
                     $orig = ($have && isset($have['wholesale_price'])) ? (float) $have['wholesale_price'] : 0;
+                    if (!$isSelf && $knownW > 0) {
+                        $orig = $knownW;
+                        $floorW = $knownW;
+                        $floorA = $knownW;
+                        $floorR = $knownW;
+                    }
                     $sell = ($have && isset($have['agent_price'])) ? (float) $have['agent_price'] : 0;
                     $retail = ($have && isset($have['retail_price'])) ? (float) $have['retail_price'] : 0;
-                    $profitBase = $isSelf ? $orig : $mine;
+                    if (!$isSelf && $knownW > 0) {
+                        if ($sell <= 0) {
+                            $sell = $knownW;
+                        }
+                        if ($retail <= 0) {
+                            $retail = $knownW;
+                        }
+                    }
+                    $profitBase = $knownW > 0 ? $knownW : ($isSelf ? $orig : $mine);
                     $profitNow = $sell - $profitBase;
                     if ($profitNow < 0) {
                         $profitNow = 0;
                     }
                     $lockAdmin = !$isPriceAdmin && !$isAccPrice;
+                    $lockWholesale = $lockAdmin || (!$isSelf && $knownW > 0);
                     $canRetail = $isPriceAdmin || $isAccPrice || $aid === $meId;
                     if ($isGm && function_exists('group_manager_team_ids')) {
                         $canRetail = $canRetail || in_array($aid, group_manager_team_ids($pdo), true);
@@ -579,37 +873,50 @@ $isSelf = ($aid === $homeId);
                             <?php echo e($nm); ?>
                             <input type="hidden" name="rows[<?php echo (int) $i; ?>][profile_name]" value="<?php echo e($nm); ?>">
                             <input type="hidden" name="rows[<?php echo (int) $i; ?>][profile_id]" value="<?php echo (int) (isset($line['id']) ? $line['id'] : 0); ?>">
+                            <?php if (!$isSelf && !$isAccPrice): ?>
+                            <input type="hidden" data-col="w" name="rows[<?php echo (int) $i; ?>][wholesale_price]" value="<?php echo (int) $orig; ?>">
+                            <?php endif; ?>
                         </td>
-                        <td><input class="ltr js-price" data-col="w" type="number" min="0" step="1" data-floor="<?php echo (int) $floorW; ?>" name="rows[<?php echo (int) $i; ?>][wholesale_price]" value="<?php echo (int) $orig; ?>" style="max-width:140px" <?php echo $lockAdmin ? 'readonly' : ''; ?>></td>
-                        <?php if (!$isAccPrice): ?>
-                        <td><input class="ltr js-price" data-col="a" type="number" min="0" step="1" data-floor="<?php echo (int) $floorA; ?>" <?php echo $isSelf ? 'data-bind="1"' : ''; ?> name="rows[<?php echo (int) $i; ?>][agent_price]" value="<?php echo (int) $sell; ?>" style="max-width:140px" <?php echo $lockAdmin ? 'readonly' : ''; ?>></td>
-                        <?php endif; ?>
-                        <td><input class="ltr js-price" data-col="r" type="number" min="0" step="1" data-floor="<?php echo (int) $floorR; ?>" <?php echo $isSelf ? 'data-bind="1"' : ''; ?> name="rows[<?php echo (int) $i; ?>][retail_price]" value="<?php echo (int) $retail; ?>" style="max-width:140px" <?php echo $canRetail ? '' : 'readonly'; ?>></td>
-                        <?php if (!$isAccPrice): ?>
+                        <?php if (!$isSelf && !$isAccPrice): ?>
+                        <td><input class="ltr pkg-price" data-col="w" type="text" readonly tabindex="-1" value="<?php echo (int) $orig; ?>" style="max-width:140px"></td>
+                        <td><input class="ltr js-price" data-col="a" type="number" min="0" step="1" data-floor="<?php echo (int) $floorA; ?>" name="rows[<?php echo (int) $i; ?>][agent_price]" value="<?php echo (int) $sell; ?>" style="max-width:140px"></td>
+                        <td><input class="ltr js-price" data-col="r" type="number" min="0" step="1" data-floor="<?php echo (int) $floorR; ?>" name="rows[<?php echo (int) $i; ?>][retail_price]" value="<?php echo (int) $retail; ?>" style="max-width:140px"></td>
                         <td class="ltr js-profit" style="font-weight:800"><?php echo (int) $profitNow; ?></td>
+                        <?php else: ?>
+                        <?php if ($isSelf || $isAccPrice): ?>
+                        <td><input class="ltr js-price" data-col="w" type="number" min="0" step="1" data-floor="<?php echo (int) $floorW; ?>" name="rows[<?php echo (int) $i; ?>][wholesale_price]" value="<?php echo (int) $orig; ?>" style="max-width:140px" <?php echo ($isSelf || $lockWholesale) ? 'readonly' : ''; ?>></td>
+                        <?php endif; ?>
+                        <?php if ($isAccPrice): ?>
+                        <td><input class="ltr js-price" data-col="r" type="number" min="0" step="1" data-floor="<?php echo (int) $floorR; ?>" name="rows[<?php echo (int) $i; ?>][retail_price]" value="<?php echo (int) $retail; ?>" style="max-width:140px" <?php echo $canRetail ? '' : 'readonly'; ?>></td>
+                        <?php endif; ?>
                         <?php endif; ?>
                     </tr>
                 <?php endforeach; ?>
                 </tbody>
             </table>
         </div>
-        <div class="actions">
-            <button class="btn" type="submit"><?php echo e($isEn ? 'Save' : 'حفظ'); ?></button>
-        </div>
     </form>
     <?php if (($isPriceAdmin || $isAccPrice) && !$isSelf): ?>
-    <form method="post" style="margin-top:8px" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Restore this agent to your agency price?' : 'ترجع أسعار هذا الوكيل لسعر وكالتك؟'); ?>);">
+    <form method="post" id="priceClearForm" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Reset every price on this page to the cost shown?' : 'تصفير كل الأسعار الظاهرة هنا على سعر التكلفة؟'); ?>);">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="action" value="clear">
         <input type="hidden" name="agent_id" value="<?php echo $aid; ?>">
-        <button class="btn ghost" type="submit"><?php echo e($isEn ? 'Restore agency price' : 'إرجاع لسعر الوكالة'); ?></button>
     </form>
     <?php endif; ?>
+    <div class="price-actions-row">
+        <button class="btn" type="submit" form="priceSaveForm"><?php echo e($isEn ? 'Save' : 'حفظ'); ?></button>
+        <?php if (($isPriceAdmin || $isAccPrice) && !$isSelf): ?>
+        <button class="btn ghost" type="submit" form="priceClearForm"><?php echo e($isEn ? 'Reset to cost' : 'تصفير'); ?></button>
+        <?php endif; ?>
+    </div>
     <?php endif; ?>
 </div>
 <?php endif; ?>
 <style>
+.price-actions-row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:14px; }
+.price-actions-row .btn { min-width:120px; }
 .js-price.is-over { border-color:#dc2626 !important; color:#b91c1c !important; background:#fef2f2 !important; outline:2px solid #dc2626; }
+.js-price[readonly], .pkg-price[readonly] { background:#f3f4f6; color:#111827; }
 </style>
 <script>
 (function () {

@@ -193,6 +193,14 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
         }
     }
 
+    if (!$force) {
+        if (function_exists('app_session_close')) {
+            app_session_close();
+        }
+        echo json_encode($out);
+        exit;
+    }
+
     if (function_exists('sas_is_ready') && sas_is_ready($config)) {
         if ($force) {
             $_SESSION['sas_rp_at'] = 0;
@@ -232,21 +240,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
             $out['balance'] = number_format((float) $cachedLatMs, 0) . ' ms';
         }
 
-        $needCardsRefresh = $viewerOwnsSasWarehouse && $force;
-        if ($viewerOwnsSasWarehouse && !$needCardsRefresh) {
-            $p2 = function_exists('sas_dash_cards_preferred_persisted')
-                ? sas_dash_cards_preferred_persisted()
-                : (function_exists('sas_dash_cards_load_persisted') ? sas_dash_cards_load_persisted() : null);
-            $pat = ($p2 && isset($p2['updated_at'])) ? (int) $p2['updated_at'] : 0;
-            $hasGroups = ($p2 && !empty($p2['groups']) && is_array($p2['groups']));
-            $src = ($p2 && isset($p2['source'])) ? (string) $p2['source'] : '';
-            // إذا المخزون من inventory ودقيق، لا تعِد الجلب كل 3 دقائق بدون داعٍ
-            if ($hasGroups && $pat > 0 && (time() - $pat) < ($src === 'inventory' ? 300 : 180)) {
-                $needCardsRefresh = false;
-            } else {
-                $needCardsRefresh = true;
-            }
-        }
+        $needCardsRefresh = ($viewerOwnsSasWarehouse && $force);
 
         if ($needCardsRefresh && function_exists('sas_page_connector') && function_exists('sas_dash_card_groups')) {
             try {
@@ -920,7 +914,6 @@ if ($sasReadyDash && $showWid('cards')) {
 <?php if ($sasReadyDash): ?>
 <style>
 #dashCards.is-loading #dashCardsVal {
-  color: transparent;
   position: relative;
 }
 #dashCards.is-loading #dashCardsVal::after {
@@ -943,9 +936,9 @@ if ($sasReadyDash && $showWid('cards')) {
   function applyDash(d) {
     if (!d || !d.ok) return;
     var p = document.getElementById('dashPointsVal');
-    if (p && d.points) p.textContent = d.points;
+    if (p && d.points && d.points !== '—') p.textContent = d.points;
     var b = document.getElementById('dashBankVal');
-    if (b && d.balance) b.textContent = d.balance;
+    if (b && d.balance && d.balance !== '—') b.textContent = d.balance;
     var c = document.getElementById('dashCardsVal');
     if (c && typeof d.card_total === 'number') {
       var cur = parseInt(c.textContent, 10) || 0;
@@ -969,8 +962,8 @@ if ($sasReadyDash && $showWid('cards')) {
         if (box) box.classList.remove('is-loading');
       });
   }
-  loadDash(true, false);
-  setInterval(function () { loadDash(true, true); }, 120000);
+  loadDash(false, true);
+  setInterval(function () { loadDash(false, true); }, 180000);
 })();
 </script>
 <?php endif; ?>

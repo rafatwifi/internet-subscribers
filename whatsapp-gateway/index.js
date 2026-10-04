@@ -75,24 +75,26 @@ function copyAuthFiles(fromDir, toDir) {
   });
 }
 
+function legacySessionName() {
+  return String(process.env.WA_LEGACY_SESSION || '').trim().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40);
+}
+
 function resolveAuthDir(sessionId) {
-  if (sessionId === 'default') {
-    ensureDir(SESSIONS_DIR);
-    const sessionDir = path.join(SESSIONS_DIR, 'default');
-    ensureDir(sessionDir);
+  ensureDir(SESSIONS_DIR);
+  const sessionDir = path.join(SESSIONS_DIR, sessionId);
+  ensureDir(sessionDir);
+  const legacyName = legacySessionName();
+  const inheritLegacy = legacyName ? (sessionId === legacyName) : (sessionId === 'default');
+  if (inheritLegacy) {
     const legacyFiles = listAuthFiles(AUTH_DIR);
     const sessionFiles = listAuthFiles(sessionDir);
     if (sessionFiles.length === 0 && legacyFiles.length > 0) {
       copyAuthFiles(AUTH_DIR, sessionDir);
-      if (listAuthFiles(sessionDir).length > 0) {
-        return sessionDir;
-      }
-      return AUTH_DIR;
     }
-    return sessionDir;
   }
-  const sessionDir = path.join(SESSIONS_DIR, sessionId);
-  ensureDir(sessionDir);
+  if (sessionId === 'default' && !legacyName && listAuthFiles(sessionDir).length === 0 && listAuthFiles(AUTH_DIR).length > 0) {
+    return AUTH_DIR;
+  }
   return sessionDir;
 }
 
@@ -447,6 +449,120 @@ function createWaSession(sessionId) {
     return { success: true, message: 'Logged out. Wait ~12s for new QR...' };
   }
 
+  async function resolveRecipientJid(normalized) {
+    const pnJid = normalized + '@s.whatsapp.net';
+    let info;
+    try {
+      info = await Promise.race([
+        sock.onWhatsApp(normalized),
+        new Promise(function (_, reject) {
+          setTimeout(function () { reject(new Error('onWhatsApp timeout')); }, 8000);
+        })
+      ]);
+    } catch (e) {
+      const err = new Error('Could not verify the number on WhatsApp');
+      err.code = 'no_ack';
+      throw err;
+    }
+    if (!Array.isArray(info) || !info[0] || info[0].exists !== true) {
+      const err = new Error('Number not on WhatsApp: ' + normalized);
+      err.code = 'no_whatsapp';
+      throw err;
+    }
+    let jid = info[0].jid ? String(info[0].jid) : pnJid;
+    if (info[0].lid) {
+      let lid = String(info[0].lid);
+      if (lid.indexOf('@') === -1) lid = lid + '@lid';
+      jid = lid;
+    } else if (sock.signalRepository && sock.signalRepository.lidMapping && typeof sock.signalRepository.lidMapping.getLIDForPN === 'function') {
+      try {
+        const lid = await sock.signalRepository.lidMapping.getLIDForPN(jid);
+        if (lid) jid = String(lid);
+      } catch (e2) {}
+    }
+    return { jid: jid, pnJid: pnJid };
+  }
+
+  async function deliverConfirmed(jid, message) {
+    const seen = Object.create(null);
+    function note(id, status) {
+      if (!id || typeof status !== 'number') return;
+      if (seen[id] === undefined || status > seen[id] || status === 0) seen[id] = status;
+    }
+    function onUpdate(updates) {
+      if (!Array.isArray(updates)) return;
+      for (let i = 0; i < updates.length; i++) {
+        const u = updates[i];
+        if (!u || !u.key || !u.key.id || !u.update) continue;
+        if (typeof u.update.status === 'number') note(u.key.id, u.update.status);
+      }
+    }
+    function onReceipt(updates) {
+      if (!Array.isArray(updates)) return;
+      for (let i = 0; i < updates.length; i++) {
+        const u = updates[i];
+        if (u && u.key && u.key.id) note(u.key.id, 3);
+      }
+    }
+    sock.ev.on('messages.update', onUpdate);
+    sock.ev.on('message-receipt.update', onReceipt);
+    const detach = function () {
+      try { sock.ev.removeListener('messages.update', onUpdate); } catch (e) {}
+      try { sock.ev.removeListener('message-receipt.update', onReceipt); } catch (e) {}
+    };
+    try {
+      const result = await sock.sendMessage(jid, { text: String(message) }, { timeoutMs: 20000 });
+      const id = result && result.key && result.key.id ? String(result.key.id) : '';
+      if (!id) {
+        const err = new Error('WhatsApp did not confirm the message');
+        err.code = 'no_ack';
+        throw err;
+      }
+      const immediate = typeof result.status === 'number' ? result.status : -1;
+      if (immediate === 0 || seen[id] === 0) {
+        const err = new Error('WhatsApp rejected the message');
+        err.code = 'send_rejected';
+        throw err;
+      }
+      if (immediate >= 2 || (typeof seen[id] === 'number' && seen[id] >= 2)) {
+        result.ackStatus = immediate >= 2 ? immediate : seen[id];
+        return result;
+      }
+      const status = await new Promise(function (resolve, reject) {
+        let finished = false;
+        function done(fn, value) {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timer);
+          try { sock.ev.removeListener('messages.update', watch); } catch (e) {}
+          try { sock.ev.removeListener('message-receipt.update', watch); } catch (e) {}
+          fn(value);
+        }
+        function watch() {
+          if (seen[id] === 0) {
+            const err = new Error('WhatsApp rejected the message');
+            err.code = 'send_rejected';
+            done(reject, err);
+          } else if (typeof seen[id] === 'number' && seen[id] >= 2) {
+            done(resolve, seen[id]);
+          }
+        }
+        const timer = setTimeout(function () {
+          const err = new Error('WhatsApp did not confirm the message');
+          err.code = 'no_ack';
+          done(reject, err);
+        }, 10000);
+        sock.ev.on('messages.update', watch);
+        sock.ev.on('message-receipt.update', watch);
+        watch();
+      });
+      result.ackStatus = status;
+      return result;
+    } finally {
+      detach();
+    }
+  }
+
   async function sendText(phone, message) {
     if (!sock || !ready) throw new Error('WhatsApp not ready. Scan QR first.');
     const normalized = normalizePhone(phone);
@@ -455,28 +571,11 @@ function createWaSession(sessionId) {
       err.code = 'bad_phone';
       throw err;
     }
-    const pnJid = normalized + '@s.whatsapp.net';
-    let realJid = (knownWa[normalized] && knownWa[normalized].jid) ? knownWa[normalized].jid : pnJid;
-
-    try {
-      const info = await Promise.race([
-        sock.onWhatsApp(normalized),
-        new Promise(function (resolve) {
-          setTimeout(function () { resolve(null); }, 3000);
-        })
-      ]);
-      if (Array.isArray(info) && info[0] && info[0].exists === true && info[0].jid) {
-        realJid = info[0].jid;
-        rememberWa(normalized, realJid);
-      }
-    } catch (e) {}
-
+    const target = await resolveRecipientJid(normalized);
     await delay(SEND_DELAY_MS);
-    const sendOpts = { timeoutMs: 25000 };
-
     try {
-      const result = await sock.sendMessage(realJid, { text: String(message) }, sendOpts);
-      rememberWa(normalized, realJid);
+      const result = await deliverConfirmed(target.jid, message);
+      rememberWa(normalized, target.jid);
       return result;
     } catch (e) {
       const msg = (e && e.message) ? e.message : String(e);
@@ -485,12 +584,12 @@ function createWaSession(sessionId) {
         err.code = 'no_whatsapp';
         throw err;
       }
-      if (realJid !== pnJid) {
-        const result2 = await sock.sendMessage(pnJid, { text: String(message) }, sendOpts);
-        rememberWa(normalized, pnJid);
+      if (target.jid !== target.pnJid && (!e || e.code !== 'no_ack')) {
+        const result2 = await deliverConfirmed(target.pnJid, message);
+        rememberWa(normalized, target.pnJid);
         return result2;
       }
-      console.error('[' + sessionId + '] send fail', normalized, realJid, msg);
+      console.error('[' + sessionId + '] send fail', normalized, target.jid, msg);
       throw e;
     }
   }
@@ -632,7 +731,7 @@ app.post('/send', checkKey, attachSession, async (req, res) => {
       return res.status(400).json({ success: false, error: 'phone and message required' });
     }
     const result = await req.waSession.sendTextQueued(body.phone, body.message);
-    res.json({ success: true, session: req.waSessionId, result: slimSendResult(result) });
+    res.json({ success: true, acked: true, session: req.waSessionId, result: slimSendResult(result) });
   } catch (err) {
     const msg = (err && err.message) ? err.message : String(err);
     console.error('POST /send [' + req.waSessionId + ']', msg);

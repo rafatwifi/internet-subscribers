@@ -60,6 +60,27 @@ function wa_proxy_request($url, $method, $key, $timeout)
     return array($raw, $err, $code);
 }
 
+$waAccount = array('local_url' => $base, 'local_key' => $key);
+$ownStatus = function_exists('whatsapp_gateway_status_for_account')
+    ? whatsapp_gateway_status_for_account($waAccount, $sessionId)
+    : array('ready' => false, 'session' => '', 'status' => 'need_link');
+$echo = isset($ownStatus['session']) ? (string) $ownStatus['session'] : '';
+$ownsSession = !empty($ownStatus['session_ok'])
+    && $sessionId !== ''
+    && $echo === (string) $sessionId;
+if ($action === 'status' || !$ownsSession) {
+    echo json_encode(array(
+        'success' => true,
+        'ready' => $ownsSession && !empty($ownStatus['ready']),
+        'has_qr' => $ownsSession && !empty($ownStatus['has_qr']),
+        'phone' => ($ownsSession && !empty($ownStatus['ready']) && isset($ownStatus['phone'])) ? (string) $ownStatus['phone'] : '',
+        'session' => $ownsSession ? $sessionId : '',
+        'status' => $ownsSession && !empty($ownStatus['ready']) ? 'connected' : 'need_link',
+        'qr_data_url' => ($ownsSession && $action === 'qr' && !empty($ownStatus['qr_data_url'])) ? $ownStatus['qr_data_url'] : null,
+    ));
+    exit;
+}
+
 if ($action === 'logout') {
     $urlPost = $base . '/logout?key=' . rawurlencode($key) . $sessionQs;
     $urlGet = $urlPost;
@@ -98,6 +119,17 @@ if ($raw === false) {
 
 $decoded = json_decode($raw, true);
 if (is_array($decoded)) {
+    $echoed = isset($decoded['session']) ? (string) $decoded['session'] : '';
+    if ($echoed === '' || $echoed !== (string) $sessionId) {
+        $decoded['ready'] = false;
+        $decoded['phone'] = '';
+        $decoded['session'] = '';
+        $decoded['status'] = 'need_link';
+        $decoded['qr_data_url'] = null;
+        $decoded['has_qr'] = false;
+    } elseif (empty($decoded['ready'])) {
+        $decoded['phone'] = '';
+    }
     http_response_code($code > 0 ? $code : 200);
     echo json_encode($decoded);
     exit;

@@ -22,6 +22,8 @@ class SASConnector
     public $lastOnlineListOk = false;
 
     private $secretKey = 'abcdefghijuklmno0123456789012345';
+    private $reclaimUser = '';
+    private $reclaimPass = '';
 
     public function __construct($host, $username, $password, $portal = 'acp')
     {
@@ -535,6 +537,12 @@ class SASConnector
     public function setTimeout($seconds)
     {
         $this->timeout = max(3, (int) $seconds);
+    }
+
+    public function setReclaimAccount($username, $password)
+    {
+        $this->reclaimUser = trim((string) $username);
+        $this->reclaimPass = (string) $password;
     }
 
     public function getLoginUser()
@@ -2030,6 +2038,1034 @@ class SASConnector
             return $v;
         }
         return '';
+    }
+
+    public function loggedManagerId()
+    {
+        if (!$this->token && !$this->login()) {
+            return 0;
+        }
+        $id = $this->sasLoginManagerId(is_array($this->loginUser) ? $this->loginUser : array());
+        if ($id > 0) {
+            return $id;
+        }
+        $id = $this->sasManagerIdByUsername($this->username);
+        if ($id > 0) {
+            return $id;
+        }
+        $jwt = $this->getJwtPayload();
+        if (is_array($jwt) && isset($jwt['sub']) && is_numeric($jwt['sub']) && (int) $jwt['sub'] > 0) {
+            return (int) $jwt['sub'];
+        }
+        return 0;
+    }
+
+    private function sasManagerIdByUsername($username)
+    {
+        $username = strtolower(trim((string) $username));
+        if ($username === '') {
+            return 0;
+        }
+        $payload = array(
+            'page' => 1,
+            'count' => 20,
+            'sortBy' => 'username',
+            'direction' => 'asc',
+            'search' => $username,
+        );
+        $full = $this->decodeApiBody($this->post('index/manager', $payload, true), false);
+        $data = (is_array($full) && isset($full['data']) && is_array($full['data'])) ? $full['data'] : array();
+        foreach ($data as $row) {
+            if (!is_array($row) || empty($row['username']) || !isset($row['id']) || !is_numeric($row['id'])) {
+                continue;
+            }
+            if (strtolower(trim((string) $row['username'])) === $username && (int) $row['id'] > 0) {
+                return (int) $row['id'];
+            }
+        }
+        return 0;
+    }
+
+    private function sasLoginManagerId($row)
+    {
+        if (!is_array($row)) {
+            return 0;
+        }
+        if (isset($row['manager_id']) && is_numeric($row['manager_id']) && (int) $row['manager_id'] > 0) {
+            return (int) $row['manager_id'];
+        }
+        if (isset($row['id']) && is_numeric($row['id']) && (int) $row['id'] > 0) {
+            return (int) $row['id'];
+        }
+        if (isset($row['user']) && is_array($row['user'])) {
+            return $this->sasLoginManagerId($row['user']);
+        }
+        return 0;
+    }
+
+    private function sasSeriesOwnerId($row)
+    {
+        if (!is_array($row)) {
+            return 0;
+        }
+        foreach (array('owner', 'owner_id', 'manager_id') as $k) {
+            if (isset($row[$k]) && is_numeric($row[$k]) && (int) $row[$k] > 0) {
+                return (int) $row[$k];
+            }
+        }
+        if (isset($row['owner_details']) && is_array($row['owner_details'])
+            && isset($row['owner_details']['id']) && is_numeric($row['owner_details']['id'])) {
+            return (int) $row['owner_details']['id'];
+        }
+        return 0;
+    }
+
+    private function sasNameKey($name)
+    {
+        $s = strtolower(trim((string) $name));
+        $s = str_replace(array('_', '–', '—', ' '), '-', $s);
+        $s = preg_replace('/-+/', '-', $s);
+        return trim((string) $s, '-');
+    }
+
+    /**
+     * سلاسل الكروت كما يراها دخول الساس: المالك، الفئة، الشاغر (qty - used).
+     * null إذا الدخول فشل.
+     */
+    public function listSeriesStock()
+    {
+        if (!$this->token && !$this->login()) {
+            return null;
+        }
+        $payload = array(
+            'page' => 1,
+            'count' => 100,
+            'sortBy' => 'series_date',
+            'direction' => 'desc',
+            'search' => '',
+        );
+        $series = $this->sasCardFetchPaged(array('index/series'), $payload, 20);
+        $me = $this->loggedManagerId();
+        $out = array();
+        $seenSeries = array();
+        foreach ($series as $srow) {
+            if (!is_array($srow)) {
+                continue;
+            }
+            if (!empty($srow['suspended']) && (string) $srow['suspended'] === '1') {
+                continue;
+            }
+            $unused = $this->sasCardSeriesUnusedCount($srow);
+            if ($unused < 0) {
+                $unused = 0;
+            }
+            $seriesKey = '';
+            if (!empty($srow['series']) && !is_array($srow['series'])) {
+                $seriesKey = trim((string) $srow['series']);
+            }
+            if ($seriesKey === '') {
+                $seriesKey = $this->sasCardSeriesCode($srow);
+            }
+            if ($seriesKey === '') {
+                continue;
+            }
+            if (!empty($seenSeries[$seriesKey])) {
+                continue;
+            }
+            $seenSeries[$seriesKey] = true;
+            $owner = $this->sasSeriesOwnerId($srow);
+            if ($owner <= 0) {
+                $owner = $me;
+            }
+            $name = $this->sasRowProfileName($srow);
+            if ($name === '' && !empty($srow['profile']['name']) && !is_array($srow['profile']['name'])) {
+                $name = trim((string) $srow['profile']['name']);
+            }
+            $used = 0;
+            if (isset($srow['used']) && is_numeric($srow['used'])) {
+                $used = (int) $srow['used'];
+            }
+            $out[] = array(
+                'series' => $seriesKey,
+                'owner' => (int) $owner,
+                'name' => $name,
+                'profile_id' => $this->sasCardSeriesProfileId($srow),
+                'unused' => (int) $unused,
+                'used' => $used,
+            );
+        }
+        return $out;
+    }
+
+    /**
+     * سلاسل الوكيل ما تظهر بقائمة الأوفيس. آخر نقل بالساس يحدد مالكها.
+     */
+    public function listPinlessOwnerSeries($ownerId)
+    {
+        $ownerId = (int) $ownerId;
+        if ($ownerId <= 0) {
+            return array();
+        }
+        if (!$this->token && !$this->login()) {
+            return array();
+        }
+        $payload = array(
+            'page' => 1,
+            'count' => 40,
+            'sortBy' => 'id',
+            'direction' => 'desc',
+            'search' => '',
+            'new_owner_id' => $ownerId,
+        );
+        $full = $this->decodeApiBody($this->post('index/cardsTransferLog', $payload, true), false);
+        $rows = (is_array($full) && isset($full['data']) && is_array($full['data'])) ? $full['data'] : array();
+        $out = array();
+        $seen = array();
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $series = isset($row['series']) ? trim((string) $row['series']) : '';
+            if ($series === '' || isset($seen[$series])) {
+                continue;
+            }
+            $seen[$series] = true;
+            if ($this->sasLatestSeriesOwner($series) !== $ownerId) {
+                continue;
+            }
+            $info = $this->sasSeriesRangeInfo($series);
+            $len = isset($info['length']) ? (int) $info['length'] : 0;
+            $start = isset($info['start']) ? (int) $info['start'] : 0;
+            $end = isset($info['end']) ? (int) $info['end'] : 0;
+            if ($len < 1 || $start <= 0) {
+                continue;
+            }
+            $name = '';
+            if (isset($row['profile_details']) && is_array($row['profile_details']) && !empty($row['profile_details']['name'])) {
+                $name = trim((string) $row['profile_details']['name']);
+            }
+            $pid = (isset($row['profile_id']) && is_numeric($row['profile_id'])) ? (int) $row['profile_id'] : 0;
+            $out[] = array(
+                'series' => $series,
+                'owner' => $ownerId,
+                'name' => $name,
+                'profile_id' => $pid,
+                'unused' => $len,
+                'used' => 0,
+                'pinless' => 1,
+                'range_start' => $start,
+                'range_end' => $end > 0 ? $end : $start,
+            );
+            if (count($out) >= 20) {
+                break;
+            }
+        }
+        return $out;
+    }
+
+    private function sasLatestSeriesOwner($series)
+    {
+        $series = trim((string) $series);
+        if ($series === '') {
+            return 0;
+        }
+        $page = 1;
+        while ($page <= 4) {
+            $payload = array(
+                'page' => $page,
+                'count' => 50,
+                'sortBy' => 'id',
+                'direction' => 'desc',
+                'search' => $series,
+            );
+            $full = $this->decodeApiBody($this->post('index/cardsTransferLog', $payload, true), false);
+            $rows = (is_array($full) && isset($full['data']) && is_array($full['data'])) ? $full['data'] : array();
+            if (!$rows) {
+                return 0;
+            }
+            foreach ($rows as $row) {
+                if (!is_array($row)) {
+                    continue;
+                }
+                $code = isset($row['series']) ? trim((string) $row['series']) : '';
+                if ($code !== $series) {
+                    continue;
+                }
+                return (isset($row['new_owner_id']) && is_numeric($row['new_owner_id'])) ? (int) $row['new_owner_id'] : 0;
+            }
+            $total = (is_array($full) && isset($full['total']) && is_numeric($full['total'])) ? (int) $full['total'] : 0;
+            if (count($rows) < 50 || ($total > 0 && ($page * 50) >= $total)) {
+                return 0;
+            }
+            $page++;
+        }
+        return 0;
+    }
+
+    private function sasSeriesRangeInfo($series)
+    {
+        $series = trim((string) $series);
+        $empty = array('start' => 0, 'end' => 0, 'length' => 0);
+        if ($series === '') {
+            return $empty;
+        }
+        $full = $this->decodeApiBody($this->get('series/rangeInfo/' . rawurlencode($series), true), false);
+        $data = (is_array($full) && isset($full['data']) && is_array($full['data'])) ? $full['data'] : $full;
+        if (!is_array($data)) {
+            return $empty;
+        }
+        $start = (isset($data['range_start']) && is_numeric($data['range_start'])) ? (int) $data['range_start'] : 0;
+        $end = (isset($data['range_end']) && is_numeric($data['range_end'])) ? (int) $data['range_end'] : 0;
+        $len = (isset($data['range_length']) && is_numeric($data['range_length'])) ? (int) $data['range_length'] : 0;
+        if ($len < 1 && $start > 0 && $end >= $start) {
+            $len = $end - $start + 1;
+        }
+        return array('start' => $start, 'end' => $end, 'length' => $len);
+    }
+
+    private function sasCardPinIsFree($row)
+    {
+        if (!is_array($row)) {
+            return false;
+        }
+        if (isset($row['used']) && !is_array($row['used']) && ($row['used'] === 1 || $row['used'] === '1' || $row['used'] === true)) {
+            return false;
+        }
+        foreach (array('used_at', 'usedAt', 'used_date', 'date_used', 'activated_at') as $k) {
+            if (empty($row[$k]) || is_array($row[$k])) {
+                continue;
+            }
+            $v = trim((string) $row[$k]);
+            if ($v !== '' && $v !== '0' && $v !== '0000-00-00' && $v !== '0000-00-00 00:00:00') {
+                return false;
+            }
+        }
+        if (isset($row['user_details']) && is_array($row['user_details'])) {
+            if (!empty($row['user_details']['username']) && !is_array($row['user_details']['username'])) {
+                return false;
+            }
+            if (isset($row['user_details']['id']) && is_numeric($row['user_details']['id']) && (int) $row['user_details']['id'] > 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private function sasFreeCardIds($seriesCode)
+    {
+        $seriesCode = trim((string) $seriesCode);
+        if ($seriesCode === '') {
+            return array('ok' => false, 'ids' => array());
+        }
+        $page = array(
+            'page' => 1,
+            'count' => 100,
+            'sortBy' => 'id',
+            'direction' => 'asc',
+            'search' => '',
+            'used' => 0,
+        );
+        $routes = array('index/card/' . $seriesCode);
+        $rows = $this->sasCardFetchPaged($routes, $page, 8);
+        if (!$rows) {
+            unset($page['used']);
+            $rows = $this->sasCardFetchPaged($routes, $page, 4);
+        }
+        if (!$rows) {
+            return array('ok' => false, 'ids' => array());
+        }
+        $ids = array();
+        $saw = false;
+        foreach ($rows as $row) {
+            if (!is_array($row) || $this->sasCardLooksLikeSeries($row)) {
+                continue;
+            }
+            $saw = true;
+            if (!$this->sasCardPinIsFree($row)) {
+                continue;
+            }
+            $id = (isset($row['id']) && is_numeric($row['id'])) ? (int) $row['id'] : 0;
+            if ($id > 0) {
+                $ids[$id] = $id;
+            }
+        }
+        $list = array_values($ids);
+        sort($list);
+        return array('ok' => $saw || $list, 'ids' => $list);
+    }
+
+    private function sasContiguousIdChunks($ids)
+    {
+        $chunks = array();
+        if (!is_array($ids) || !$ids) {
+            return $chunks;
+        }
+        $start = (int) $ids[0];
+        $prev = $start;
+        $n = count($ids);
+        for ($i = 1; $i < $n; $i++) {
+            $id = (int) $ids[$i];
+            if ($id === $prev + 1) {
+                $prev = $id;
+                continue;
+            }
+            $chunks[] = array($start, $prev);
+            $start = $id;
+            $prev = $id;
+        }
+        $chunks[] = array($start, $prev);
+        return $chunks;
+    }
+
+    private function sasSeriesRangeStart($series)
+    {
+        $series = trim((string) $series);
+        if ($series === '') {
+            return 0;
+        }
+        $full = $this->decodeApiBody($this->get('series/rangeInfo/' . rawurlencode($series), true), false);
+        $data = (is_array($full) && isset($full['data']) && is_array($full['data'])) ? $full['data'] : $full;
+        if (!is_array($data)) {
+            return 0;
+        }
+        foreach (array('range_start', 'start', 'from_id', 'first_id') as $k) {
+            if (isset($data[$k]) && is_numeric($data[$k]) && (int) $data[$k] > 0) {
+                return (int) $data[$k];
+            }
+        }
+        return 0;
+    }
+
+    private function sasWriteSucceeded($decoded)
+    {
+        if (!is_array($decoded) || !$decoded) {
+            return false;
+        }
+        foreach (array('__http_error', '__auth_error', '__curl_error', '__decrypt_error', '__json_error') as $k) {
+            if (!empty($decoded[$k])) {
+                return false;
+            }
+        }
+        if (isset($decoded['status']) && is_numeric($decoded['status']) && (int) $decoded['status'] !== 200) {
+            return false;
+        }
+        if (isset($decoded['success']) && ($decoded['success'] === false || $decoded['success'] === 0 || $decoded['success'] === '0')) {
+            return false;
+        }
+        return true;
+    }
+
+    private function sasWriteErrorText($decoded)
+    {
+        if (!is_array($decoded)) {
+            return '';
+        }
+        if (!empty($decoded['message']) && !is_array($decoded['message'])) {
+            return trim((string) $decoded['message']);
+        }
+        if (isset($decoded['status']) && is_numeric($decoded['status'])) {
+            return 'HTTP ' . (int) $decoded['status'];
+        }
+        return '';
+    }
+
+    private function sasPostWrite($route, $payload)
+    {
+        $raw = $this->post($route, $payload, true);
+        $decoded = $this->decodeApiBody($raw, false);
+        if ($this->sasWriteSucceeded($decoded)) {
+            return array(true, '');
+        }
+        $msg = $this->sasWriteErrorText($decoded);
+        return array(false, $msg);
+    }
+
+    private function sasOwnerIs($series, $ownerId)
+    {
+        $ownerId = (int) $ownerId;
+        if ($this->sasLatestSeriesOwner($series) === $ownerId) {
+            return true;
+        }
+        sleep(1);
+        return $this->sasLatestSeriesOwner($series) === $ownerId;
+    }
+
+    /**
+     * نقل سلسلة كاملة. إذا حساب الوكالة رجع 403 لأن السلسلة عند وكيل تحته،
+     * نسحبها لحساب الوكالة فقط عبر حساب الريسيلر الأعلى على نفس السيرفر.
+     * @return array(bool, string)
+     */
+    private function sasReclaimSeries($series, $toOwnerId, $currentOwnerId)
+    {
+        $series = trim((string) $series);
+        $toOwnerId = (int) $toOwnerId;
+        $currentOwnerId = (int) $currentOwnerId;
+        if ($series === '' || $toOwnerId <= 0) {
+            return array(false, 'sas');
+        }
+        list($ok, $msg) = $this->sasPostWrite('series/changeOwner', array(
+            'series' => array($series),
+            'owner' => $toOwnerId,
+        ));
+        if ($ok && $this->sasOwnerIs($series, $toOwnerId)) {
+            return array(true, '');
+        }
+        if ($ok) {
+            return array(false, 'sas');
+        }
+        $denied = (strpos((string) $msg, '403') !== false);
+        if ($denied) {
+            list($okC, $msgC) = $this->sasReclaimByCount($series, $toOwnerId);
+            if ($okC) {
+                return array(true, '');
+            }
+            if ($msgC !== '' && strpos($msgC, '403') === false) {
+                return array(false, $msgC);
+            }
+        }
+        $me = (int) $this->loggedManagerId();
+        if (!$denied || $toOwnerId !== $me || $this->reclaimUser === '' || $this->reclaimPass === '') {
+            return array(false, $msg !== '' ? $msg : 'sas');
+        }
+        $lift = new self($this->host, $this->reclaimUser, $this->reclaimPass, $this->portal);
+        $lift->setTimeout($this->timeout);
+        if (!$lift->login()) {
+            return array(false, $msg);
+        }
+        $before = (int) $lift->sasLatestSeriesOwner($series);
+        if ($before === $toOwnerId) {
+            return array(true, '');
+        }
+        if ($before > 0 && $currentOwnerId > 0 && $before !== $currentOwnerId) {
+            return array(false, $msg);
+        }
+        list($ok2, $msg2) = $lift->sasPostWrite('series/changeOwner', array(
+            'series' => array($series),
+            'owner' => $toOwnerId,
+        ));
+        if ($lift->sasOwnerIs($series, $toOwnerId)) {
+            return array(true, '');
+        }
+        if ($ok2) {
+            return array(false, 'sas');
+        }
+        return array(false, $msg2 !== '' ? $msg2 : $msg);
+    }
+
+    /**
+     * نقل السلسلة كاملة بالعدد. changeOwner يرفض سلسلة الوكيل، والعدّ يقبله.
+     * @return array(bool, string)
+     */
+    private function sasReclaimByCount($series, $toOwnerId)
+    {
+        $series = trim((string) $series);
+        $toOwnerId = (int) $toOwnerId;
+        $info = $this->sasSeriesRangeInfo($series);
+        $start = (int) $info['start'];
+        $len = (int) $info['length'];
+        if ($series === '' || $toOwnerId <= 0 || $start <= 0 || $len < 1 || $len > 500) {
+            return array(false, 'pins');
+        }
+        list($ok, $msg) = $this->sasPostWrite('series/changeOwnerCount', array(
+            'series' => $series,
+            'selected_owner' => $toOwnerId,
+            'count' => $len,
+            'from_id' => $start,
+            'to_id' => $start + $len - 1,
+        ));
+        if (!$ok) {
+            return array(false, $msg !== '' ? $msg : 'sas');
+        }
+        $after = $this->sasSeriesRangeInfo($series);
+        $left = (int) $after['length'];
+        $afterStart = (int) $after['start'];
+        if ($left === 0 || ($afterStart > 0 && $afterStart !== $start)) {
+            return array(true, '');
+        }
+        if ($left < $len) {
+            return array(false, 'undone');
+        }
+        return array(false, 'sas');
+    }
+
+    private function sasPrefixSnapshot($series)
+    {
+        $series = trim((string) $series);
+        $idsPack = $this->sasFreeCardIds($series);
+        $ids = (is_array($idsPack) && !empty($idsPack['ids']) && is_array($idsPack['ids'])) ? $idsPack['ids'] : array();
+        $start = $this->sasSeriesRangeStart($series);
+        if ($series === '' || $start <= 0 || !$ids) {
+            return array('ok' => false, 'message' => 'pins');
+        }
+        if ((int) $ids[0] !== $start) {
+            return array('ok' => false, 'message' => 'not_first');
+        }
+        return array('ok' => true, 'message' => '', 'start' => (int) $start, 'ids' => $ids);
+    }
+
+    private function sasSeriesOwnerNow($series)
+    {
+        $series = trim((string) $series);
+        $rows = $this->listSeriesStock();
+        if (!is_array($rows)) {
+            return -1;
+        }
+        foreach ($rows as $s) {
+            if (!is_array($s) || empty($s['series'])) {
+                continue;
+            }
+            if (trim((string) $s['series']) === $series) {
+                return (int) $s['owner'];
+            }
+        }
+        return 0;
+    }
+
+    private function sasFindSeriesStartingAt($cardId, $prefer)
+    {
+        $cardId = (int) $cardId;
+        if ($cardId <= 0) {
+            return '';
+        }
+        $prefer = trim((string) $prefer);
+        if ($prefer !== '' && $this->sasSeriesRangeStart($prefer) === $cardId) {
+            return $prefer;
+        }
+        $rows = $this->listSeriesStock();
+        if (!is_array($rows)) {
+            return '';
+        }
+        $n = 0;
+        foreach ($rows as $s) {
+            if ($n >= 40) {
+                break;
+            }
+            if (!is_array($s) || empty($s['series'])) {
+                continue;
+            }
+            $code = trim((string) $s['series']);
+            if ($code === '' || $code === $prefer) {
+                continue;
+            }
+            $n++;
+            if ($this->sasSeriesRangeStart($code) === $cardId) {
+                return $code;
+            }
+        }
+        return '';
+    }
+
+    /**
+     * exact = انقص العدد المطلوب وصار أول الباقي هو الكارت التالي.
+     * wrong = اننقل عدد غير المطلوب أو تبدل مالك السلسلة كلها.
+     * unchanged = البداية والمالك ما تغيروا.
+     */
+    private function sasPrefixJudge($series, $snap, $count, $newOwner, $backOwner)
+    {
+        $count = (int) $count;
+        $ids = $snap['ids'];
+        $start = (int) $snap['start'];
+        $newStart = $this->sasSeriesRangeStart($series);
+        $keep = (count($ids) > $count) ? (int) $ids[$count] : 0;
+        if ($keep > 0 && $newStart === $keep) {
+            return 'exact';
+        }
+        if ($keep === 0 && $count === count($ids) && $newStart !== $start && $newStart > 0) {
+            return 'exact';
+        }
+        if ($newStart === $start) {
+            $after = $this->sasFreeCardIds($series);
+            $afterIds = (is_array($after) && !empty($after['ids']) && is_array($after['ids'])) ? $after['ids'] : array();
+            $ownerNow = $this->sasSeriesOwnerNow($series);
+            if ($afterIds && count($afterIds) === $count && (int) $afterIds[0] === $start
+                && $ownerNow === (int) $newOwner && (int) $newOwner !== (int) $backOwner) {
+                return 'exact';
+            }
+            if ($ownerNow === (int) $newOwner && (int) $newOwner !== (int) $backOwner) {
+                return 'wrong';
+            }
+            return 'unchanged';
+        }
+        return 'wrong';
+    }
+
+    private function sasUndoPrefix($startId, $backOwner, $hint)
+    {
+        $startId = (int) $startId;
+        $backOwner = (int) $backOwner;
+        if ($startId <= 0 || $backOwner <= 0) {
+            return false;
+        }
+        $found = $this->sasFindSeriesStartingAt($startId, $hint);
+        if ($found === '') {
+            return false;
+        }
+        list($ok,) = $this->sasPostWrite('series/changeOwner', array(
+            'series' => array($found),
+            'owner' => $backOwner,
+        ));
+        return $ok ? true : false;
+    }
+
+    /**
+     * ينقل أول N كارت شاغر ويقارن بداية السلسلة بعد الطلب.
+     * إذا الساس نقل عدد ثاني نرجّع السلسلة المنفصلة كاملة ونتوقف.
+     * @return array(bool, string, int fromId, int toId, string movedSeries)
+     */
+    private function sasMovePrefixExact($series, $count, $newOwner, $backOwner)
+    {
+        $series = trim((string) $series);
+        $count = (int) $count;
+        $newOwner = (int) $newOwner;
+        $backOwner = (int) $backOwner;
+        $fail = array(false, 'range', 0, 0, '');
+        if ($series === '' || $count < 1 || $newOwner <= 0 || $backOwner <= 0) {
+            return $fail;
+        }
+        $snap = $this->sasPrefixSnapshot($series);
+        if (empty($snap['ok'])) {
+            $fail[1] = !empty($snap['message']) ? $snap['message'] : 'pins';
+            return $fail;
+        }
+        if (count($snap['ids']) < $count) {
+            $fail[1] = 'short:' . count($snap['ids']);
+            return $fail;
+        }
+        $attempt = $this->sasPrefixAttempt($series, $snap, $count, $newOwner, $backOwner, 'series/changeOwnerRange', $count);
+        if (!empty($attempt['exact'])) {
+            return array(true, '', (int) $snap['start'], (int) $snap['ids'][$count - 1], $attempt['moved_series']);
+        }
+        if (empty($attempt['wrote']) || !empty($attempt['unchanged'])) {
+            $fail[1] = !empty($attempt['message']) ? $attempt['message'] : 'sas';
+            return $fail;
+        }
+        if (!$this->sasUndoPrefix((int) $snap['start'], $backOwner, $attempt['moved_series'])) {
+            $fail[1] = 'stuck';
+            return $fail;
+        }
+        $series2 = $this->sasFindSeriesStartingAt((int) $snap['start'], '');
+        if ($series2 === '') {
+            $series2 = $series;
+        }
+        $snap2 = $this->sasPrefixSnapshot($series2);
+        if (empty($snap2['ok']) || (int) $snap2['start'] !== (int) $snap['start'] || count($snap2['ids']) < $count) {
+            $fail[1] = 'undone';
+            return $fail;
+        }
+        $attempt2 = $this->sasPrefixAttempt($series2, $snap2, $count, $newOwner, $backOwner, 'series/changeOwnerCount', $count - 1);
+        if (!empty($attempt2['exact'])) {
+            return array(true, '', (int) $snap2['start'], (int) $snap2['ids'][$count - 1], $attempt2['moved_series']);
+        }
+        if (!empty($attempt2['wrote']) && empty($attempt2['unchanged'])) {
+            if (!$this->sasUndoPrefix((int) $snap2['start'], $backOwner, $attempt2['moved_series'])) {
+                $fail[1] = 'stuck';
+                return $fail;
+            }
+        }
+        $fail[1] = 'undone';
+        return $fail;
+    }
+
+    private function sasPrefixAttempt($series, $snap, $count, $newOwner, $backOwner, $route, $payloadCount)
+    {
+        $start = (int) $snap['start'];
+        $payload = array(
+            'series' => $series,
+            'selected_owner' => (int) $newOwner,
+            'from_id' => $start,
+            'to_id' => (int) $snap['ids'][$count - 1],
+            'count' => (int) $payloadCount,
+        );
+        list($ok, $msg) = $this->sasPostWrite($route, $payload);
+        $out = array(
+            'wrote' => $ok ? true : false,
+            'unchanged' => false,
+            'exact' => false,
+            'message' => $msg,
+            'moved_series' => '',
+        );
+        if (!$ok) {
+            return $out;
+        }
+        $judge = $this->sasPrefixJudge($series, $snap, $count, $newOwner, $backOwner);
+        if ($judge === 'unchanged') {
+            $out['unchanged'] = true;
+            $out['message'] = $msg !== '' ? $msg : 'sas';
+            return $out;
+        }
+        $moved = $this->sasFindSeriesStartingAt($start, $series);
+        if ($moved === '' && $this->sasSeriesRangeStart($series) === $start) {
+            $moved = $series;
+        }
+        $out['moved_series'] = $moved;
+        if ($judge === 'exact' && $moved !== '') {
+            $out['exact'] = true;
+            return $out;
+        }
+        return $out;
+    }
+
+    private function sasChangeOwnerRange($series, $fromId, $toId, $newOwner)
+    {
+        $fromId = (int) $fromId;
+        $toId = (int) $toId;
+        $count = $toId - $fromId + 1;
+        if ($series === '' || $count < 1 || (int) $newOwner <= 0) {
+            return array(false, 'range');
+        }
+        $payload = array(
+            'series' => (string) $series,
+            'selected_owner' => (int) $newOwner,
+            'from_id' => $fromId,
+            'to_id' => $toId,
+            'count' => $count,
+        );
+        $raw = $this->post('series/changeOwnerRange', $payload, true);
+        $decoded = $this->decodeApiBody($raw, false);
+        if ($this->sasWriteSucceeded($decoded)) {
+            return array(true, '');
+        }
+        $st = (is_array($decoded) && isset($decoded['status'])) ? (int) $decoded['status'] : 0;
+        $msg = $this->sasWriteErrorText($decoded);
+        if ($st === 404 || $st === 405) {
+            $raw2 = $this->post('series/changeOwnerCount', $payload, true);
+            $decoded2 = $this->decodeApiBody($raw2, false);
+            if ($this->sasWriteSucceeded($decoded2)) {
+                return array(true, '');
+            }
+            $msg2 = $this->sasWriteErrorText($decoded2);
+            if ($msg2 !== '') {
+                $msg = $msg2;
+            }
+        }
+        return array(false, $msg !== '' ? $msg : 'sas');
+    }
+
+    /**
+     * ينقل كروت شاغرة من مالك إلى مالك داخل الساس.
+     * @return array ok, message, moved, ranges
+     */
+    public function moveUnusedCardsToOwner($profileId, $profileName, $qty, $toOwnerId, $fromOwnerId, $foreignOwnerIds = array())
+    {
+        $qty = (int) $qty;
+        $toOwnerId = (int) $toOwnerId;
+        $fromOwnerId = (int) $fromOwnerId;
+        $profileId = (int) $profileId;
+        $empty = array('ok' => false, 'message' => 'qty', 'moved' => 0, 'ranges' => array());
+        if ($qty <= 0 || $toOwnerId <= 0) {
+            return $empty;
+        }
+        if (!$this->token && !$this->login()) {
+            $empty['message'] = 'login';
+            return $empty;
+        }
+        $me = $this->loggedManagerId();
+        if ($fromOwnerId <= 0) {
+            $fromOwnerId = $me;
+        }
+        $wantKey = $this->sasNameKey($profileName);
+        $seriesRows = $this->listSeriesStock();
+        if (!is_array($seriesRows)) {
+            $empty['message'] = 'login';
+            return $empty;
+        }
+        $foreign = array();
+        $homePool = is_array($foreignOwnerIds) && count($foreignOwnerIds) > 0;
+        if ($homePool) {
+            foreach ($foreignOwnerIds as $fid) {
+                $fid = (int) $fid;
+                if ($fid > 0 && $fid !== $me && $fid !== $fromOwnerId) {
+                    $foreign[$fid] = true;
+                }
+            }
+        }
+        if (!$homePool && $fromOwnerId <= 0) {
+            $empty['message'] = 'login';
+            return $empty;
+        }
+        $picked = array();
+        $have = 0;
+        $pickSeries = function ($s, $ignoreOwner) use (&$picked, &$have, $wantKey, $profileId, $homePool, $fromOwnerId, $foreign) {
+            if (!is_array($s) || $s['series'] === '') {
+                return;
+            }
+            $owner = (int) $s['owner'];
+            if (!$ignoreOwner) {
+                if ($homePool) {
+                    if ($owner > 0 && !empty($foreign[$owner])) {
+                        return;
+                    }
+                } elseif ($owner !== $fromOwnerId) {
+                    return;
+                }
+            }
+            $nameOk = ($wantKey !== '' && $this->sasNameKey($s['name']) === $wantKey);
+            $idOk = ($profileId > 0 && (int) $s['profile_id'] > 0 && (int) $s['profile_id'] === $profileId);
+            if (!$nameOk && !$idOk) {
+                return;
+            }
+            foreach ($picked as $already) {
+                if ($already['series'] === $s['series']) {
+                    return;
+                }
+            }
+            $n = (int) $s['unused'];
+            $freeIds = array();
+            if ($n <= 0) {
+                $free = $this->sasFreeCardIds($s['series']);
+                if (!empty($free['ok']) && !empty($free['ids'])) {
+                    $freeIds = $free['ids'];
+                    $n = count($freeIds);
+                }
+            }
+            if ($n <= 0) {
+                return;
+            }
+            $s['unused'] = $n;
+            if ($freeIds) {
+                $s['free_ids'] = $freeIds;
+            }
+            $picked[] = $s;
+            $have += $n;
+        };
+        foreach ($seriesRows as $s) {
+            $pickSeries($s, false);
+        }
+        if ($have < $qty && $homePool) {
+            foreach ($seriesRows as $s) {
+                $pickSeries($s, true);
+            }
+        }
+        if ($have < $qty && !$homePool && $fromOwnerId > 0) {
+            $pinlessRows = $this->listPinlessOwnerSeries($fromOwnerId);
+            foreach ($pinlessRows as $s) {
+                $pickSeries($s, false);
+            }
+        }
+        if ($have < $qty) {
+            $empty['message'] = 'short:' . $have;
+            return $empty;
+        }
+        $need = $qty;
+        $ranges = array();
+        foreach ($picked as $s) {
+            if ($need <= 0) {
+                break;
+            }
+            $owner = (int) $s['owner'];
+            $take = min($need, (int) $s['unused']);
+            if ($take < 1) {
+                continue;
+            }
+            $backOwner = $owner > 0 ? $owner : $fromOwnerId;
+            if (!empty($s['pinless'])) {
+                if ($take !== (int) $s['unused']) {
+                    continue;
+                }
+                list($okW, $msgW) = $this->sasReclaimSeries((string) $s['series'], $toOwnerId, $backOwner);
+                if (!$okW) {
+                    $this->restoreCardRanges($ranges, $fromOwnerId);
+                    $empty['message'] = ($msgW !== '') ? $msgW : 'sas';
+                    return $empty;
+                }
+                $fromCard = isset($s['range_start']) ? (int) $s['range_start'] : 0;
+                $toCard = isset($s['range_end']) ? (int) $s['range_end'] : $fromCard;
+                $movedSeries = (string) $s['series'];
+            } else {
+                list($okM, $msgM, $fromCard, $toCard, $movedSeries) = $this->sasMovePrefixExact($s['series'], $take, $toOwnerId, $backOwner);
+                if (!$okM) {
+                    $this->restoreCardRanges($ranges, $fromOwnerId);
+                    $empty['message'] = $msgM;
+                    return $empty;
+                }
+            }
+            $ranges[] = array(
+                'series' => (string) $s['series'],
+                'moved_series' => (string) $movedSeries,
+                'from_id' => (int) $fromCard,
+                'to_id' => (int) $toCard,
+                'owner' => $backOwner,
+            );
+            $need -= $take;
+        }
+        if ($need > 0) {
+            $this->restoreCardRanges($ranges, $fromOwnerId);
+            $empty['message'] = ($have >= $qty) ? 'sas' : ('short:' . $have);
+            return $empty;
+        }
+        return array('ok' => true, 'message' => '', 'moved' => $qty, 'ranges' => $ranges);
+    }
+
+    public function restoreCardRanges($ranges, $ownerId, $forceOwner = 0)
+    {
+        $ownerId = (int) $ownerId;
+        $forceOwner = (int) $forceOwner;
+        $this->lastError = '';
+        if (!is_array($ranges) || !$ranges) {
+            $this->lastError = 'prefix';
+            return false;
+        }
+        if (!$this->token && !$this->login()) {
+            $this->lastError = 'login';
+            return false;
+        }
+        $movedAny = false;
+        foreach ($ranges as $r) {
+            if (!is_array($r)) {
+                $this->lastError = 'prefix';
+                return false;
+            }
+            $from = isset($r['from_id']) ? (int) $r['from_id'] : 0;
+            $to = isset($r['to_id']) ? (int) $r['to_id'] : 0;
+            $back = $forceOwner > 0 ? $forceOwner : ((isset($r['owner']) && (int) $r['owner'] > 0) ? (int) $r['owner'] : $ownerId);
+            $count = ($to >= $from && $from > 0) ? ($to - $from + 1) : 0;
+            $prefer = !empty($r['moved_series']) ? trim((string) $r['moved_series']) : '';
+            $hint = isset($r['series']) ? trim((string) $r['series']) : '';
+            if ($from <= 0 || $count < 1 || $back <= 0) {
+                $this->lastError = 'prefix';
+                return false;
+            }
+            $found = $this->sasFindSeriesStartingAt($from, $prefer);
+            if ($found === '' && $hint !== '') {
+                $found = $this->sasFindSeriesStartingAt($from, $hint);
+            }
+            if ($found === '') {
+                $this->lastError = 'prefix';
+                return false;
+            }
+            $pins = $this->sasFreeCardIds($found);
+            $ids = (is_array($pins) && !empty($pins['ids']) && is_array($pins['ids'])) ? $pins['ids'] : array();
+            $n = count($ids);
+            $maxBack = ($prefer === '') ? ($count + 1) : $count;
+            if ($n < 1 || (int) $ids[0] !== $from || $n > $maxBack) {
+                $this->lastError = 'prefix';
+                return false;
+            }
+            for ($i = 0; $i < $n; $i++) {
+                if ((int) $ids[$i] !== $from + $i) {
+                    $this->lastError = 'prefix';
+                    return false;
+                }
+            }
+            $ownerNow = $this->sasSeriesOwnerNow($found);
+            if ($ownerNow <= 0) {
+                $this->lastError = 'prefix';
+                return false;
+            }
+            if ($ownerNow === $back) {
+                continue;
+            }
+            list($one, $msgW) = $this->sasReclaimSeries($found, $back, $ownerNow);
+            if (!$one) {
+                $this->lastError = $msgW !== '' ? $msgW : 'sas';
+                return false;
+            }
+            $movedAny = true;
+        }
+        if (!$movedAny) {
+            $this->lastError = 'already_home';
+        }
+        return true;
     }
 
     public function listOnlineUsers()

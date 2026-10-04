@@ -37,6 +37,7 @@ sh.CurrentDirectory = dir
 
 ' Help AV HTTPS inspection / expired intermediate on some PCs
 sh.Environment("Process")("WA_TLS_INSECURE") = "1"
+sh.Environment("Process")("WA_LEGACY_SESSION") = "u10"
 sh.Environment("Process")("PORT") = "3001"
 
 nodeExe = FindNode()

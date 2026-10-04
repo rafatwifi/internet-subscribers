@@ -223,6 +223,89 @@ function whatsapp_session_for_subscriber($pdo, $subscriberId, $parentId = 0)
     return whatsapp_session_for_sas_parent($pdo, $parentId);
 }
 
+/** هذا الرقم يرسل فقط لمن جلسة واتسابه هي جلسة الحساب المفتوح */
+function whatsapp_may_message_subscriber($pdo, $subscriberId, $parentId = 0)
+{
+    $mine = function_exists('whatsapp_session_id') ? whatsapp_session_id() : '';
+    if ($mine === '' || $mine === 'default') {
+        return false;
+    }
+    $sess = whatsapp_session_for_subscriber($pdo, (int) $subscriberId, (int) $parentId);
+    return $sess !== '' && $sess === $mine;
+}
+
+/** مدراء الساس اللي رسائلهم تطلع من واتساب الحساب المفتوح */
+function whatsapp_my_sas_parent_ids($pdo)
+{
+    static $done = false;
+    static $ready = false;
+    static $ids = array();
+    if ($done) {
+        return array($ready, $ids);
+    }
+    $done = true;
+    $mine = function_exists('whatsapp_session_id') ? whatsapp_session_id() : '';
+    if ($mine === '' || $mine === 'default' || !$pdo || !function_exists('whatsapp_session_for_sas_parent')) {
+        return array($ready, $ids);
+    }
+    $pool = array();
+    if (function_exists('portal_sas_tree_maps')) {
+        $maps = portal_sas_tree_maps($pdo);
+        if (!empty($maps['parent_of']) && is_array($maps['parent_of'])) {
+            $ready = true;
+            foreach ($maps['parent_of'] as $child => $parent) {
+                $pool[(int) $child] = true;
+                $pool[(int) $parent] = true;
+            }
+        }
+        if (!empty($maps['by_user']) && is_array($maps['by_user'])) {
+            $ready = true;
+            foreach ($maps['by_user'] as $mid) {
+                $pool[(int) $mid] = true;
+            }
+        }
+    }
+    foreach (array_keys($pool) as $pid) {
+        if ($pid > 0 && whatsapp_session_for_sas_parent($pdo, $pid) === $mine) {
+            $ids[] = (int) $pid;
+        }
+    }
+    return array($ready, $ids);
+}
+
+function whatsapp_log_scope_sql($alias = 's')
+{
+    global $pdo;
+    $a = preg_replace('/[^a-zA-Z0-9_]/', '', (string) $alias);
+    if ($a === '') {
+        $a = 's';
+    }
+    list($ready, $ids) = whatsapp_my_sas_parent_ids(isset($pdo) ? $pdo : null);
+    if (!$ready) {
+        return '';
+    }
+    if (!$ids) {
+        return ' AND 1=0';
+    }
+    $in = implode(',', array_map('intval', $ids));
+    $nameEq = function_exists('sas_sql_username_eq')
+        ? sas_sql_username_eq($a . '.sas_username', 'cwa.username')
+        : ($a . '.sas_username = cwa.username');
+    return ' AND (
+        SELECT cwa.parent_id FROM sas_users_cache cwa
+        WHERE cwa.parent_id > 0
+          AND (
+            cwa.local_subscriber_id = ' . $a . '.id
+            OR (
+                ' . $a . '.sas_username IS NOT NULL AND ' . $a . '.sas_username <> \'\'
+                AND ' . $nameEq . '
+            )
+          )
+        ORDER BY cwa.synced_at DESC
+        LIMIT 1
+    ) IN (' . $in . ')';
+}
+
 function whatsapp_agency_sender_session($pdo, $userRow)
 {
     if (!$userRow) {
@@ -356,6 +439,85 @@ function whatsapp_cover_selected($pdo, $userId)
     return $out;
 }
 
+function whatsapp_notify_owner_id($pdo)
+{
+    $me = function_exists('current_admin') ? current_admin() : null;
+    $meId = $me ? (int) $me['id'] : 0;
+    if ($meId > 0 && function_exists('is_admin_user') && is_admin_user()
+        && !(function_exists('is_accountant_user') && is_accountant_user())) {
+        return $meId;
+    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+    if ($tid > 0 && $pdo) {
+        try {
+            $st = $pdo->prepare(
+                'SELECT id FROM admin_users WHERE role = "admin" AND tenant_id = :t ORDER BY id ASC LIMIT 1'
+            );
+            $st->execute(array(':t' => $tid));
+            $oid = (int) $st->fetchColumn();
+            if ($oid > 0) {
+                return $oid;
+            }
+        } catch (Exception $e) {
+        }
+    }
+    return $meId;
+}
+
+function whatsapp_notifications_enabled($pdo = null, $sessionId = null)
+{
+    if (!$pdo) {
+        global $pdo;
+    }
+    if (!$pdo) {
+        return true;
+    }
+    if (function_exists('ensure_admin_users_table')) {
+        ensure_admin_users_table($pdo);
+    }
+    $uid = 0;
+    $sessionId = trim((string) $sessionId);
+    if (preg_match('/^u(\d+)$/', $sessionId, $m)) {
+        $uid = (int) $m[1];
+    } elseif (preg_match('/^agent_(\d+)$/', $sessionId, $m)) {
+        $uid = (int) $m[1];
+    }
+    if ($uid <= 0) {
+        $uid = whatsapp_notify_owner_id($pdo);
+    } else {
+        try {
+            $stT = $pdo->prepare('SELECT tenant_id, role FROM admin_users WHERE id = :id LIMIT 1');
+            $stT->execute(array(':id' => $uid));
+            $rowT = $stT->fetch();
+            if ($rowT && (string) $rowT['role'] !== 'admin') {
+                $stO = $pdo->prepare(
+                    'SELECT id FROM admin_users WHERE role = "admin" AND tenant_id = :t ORDER BY id ASC LIMIT 1'
+                );
+                $stO->execute(array(':t' => (int) $rowT['tenant_id']));
+                $oid = (int) $stO->fetchColumn();
+                if ($oid > 0) {
+                    $uid = $oid;
+                }
+            }
+        } catch (Exception $e) {
+        }
+    }
+    if ($uid <= 0) {
+        return true;
+    }
+    try {
+        $st = $pdo->prepare('SELECT wa_notify FROM admin_users WHERE id = :id LIMIT 1');
+        $st->execute(array(':id' => $uid));
+        $v = $st->fetchColumn();
+        if ($v === false || $v === null) {
+            return true;
+        }
+        return (int) $v === 1;
+    } catch (Exception $e) {
+        return true;
+    }
+}
+
 function whatsapp_send($config, $phone, $message, $type = 'text', $sessionId = null)
 {
     $wa = isset($config['whatsapp']) ? $config['whatsapp'] : array();
@@ -381,6 +543,24 @@ function whatsapp_send($config, $phone, $message, $type = 'text', $sessionId = n
             'body' => $message,
             'type' => $type,
         );
+    }
+
+    $notifySession = $sessionId;
+    if ($notifySession === null && function_exists('whatsapp_session_id')) {
+        $notifySession = whatsapp_session_id();
+    }
+    if (function_exists('whatsapp_notifications_enabled')) {
+        global $pdo;
+        if (isset($pdo) && !whatsapp_notifications_enabled($pdo, $notifySession)) {
+            return array(
+                'success' => false,
+                'skipped' => true,
+                'response' => 'إشعارات واتساب متوقفة لهذه الوكالة',
+                'phone' => $phone,
+                'body' => $message,
+                'type' => $type,
+            );
+        }
     }
 
     if ($sessionId === null) {
@@ -412,6 +592,58 @@ function whatsapp_send($config, $phone, $message, $type = 'text', $sessionId = n
     return whatsapp_send_meta($wa, $phone, $message, $type);
 }
 
+function whatsapp_gateway_fetch_status($wa, $sessionId)
+{
+    $base = isset($wa['local_url']) ? rtrim((string) $wa['local_url'], '/') : '';
+    $key = isset($wa['local_key']) ? (string) $wa['local_key'] : '';
+    $sessionId = trim((string) $sessionId);
+    if ($base === '' || strpos($base, 'http') !== 0 || $sessionId === '') {
+        return null;
+    }
+    $url = $base . '/status?key=' . rawurlencode($key) . '&session=' . rawurlencode($sessionId);
+    $ch = curl_init($url);
+    curl_setopt_array($ch, array(
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_CONNECTTIMEOUT => 4,
+        CURLOPT_TIMEOUT => 8,
+        CURLOPT_HTTPHEADER => array(
+            'X-Api-Key: ' . $key,
+            'X-Wa-Session: ' . $sessionId,
+            'Accept: application/json',
+        ),
+    ));
+    $raw = curl_exec($ch);
+    curl_close($ch);
+    if ($raw === false || $raw === '') {
+        return null;
+    }
+    $data = json_decode($raw, true);
+    return is_array($data) ? $data : null;
+}
+
+function whatsapp_gateway_status_for_account($wa, $sessionId)
+{
+    $sessionId = trim((string) $sessionId);
+    $blank = array(
+        'success' => true,
+        'ready' => false,
+        'has_qr' => false,
+        'phone' => '',
+        'session' => '',
+        'session_ok' => false,
+        'status' => 'need_link',
+    );
+    $data = whatsapp_gateway_fetch_status($wa, $sessionId);
+    if (!is_array($data) || !isset($data['session']) || (string) $data['session'] !== $sessionId || $sessionId === '') {
+        return $blank;
+    }
+    $data['session_ok'] = true;
+    if (empty($data['ready'])) {
+        $data['phone'] = '';
+    }
+    return $data;
+}
+
 function whatsapp_send_local($wa, $phone, $message, $type, $sessionId = '')
 {
     $base = isset($wa['local_url']) ? rtrim($wa['local_url'], '/') : 'http://127.0.0.1:3001';
@@ -427,6 +659,17 @@ function whatsapp_send_local($wa, $phone, $message, $type, $sessionId = '')
             'success' => false,
             'skipped' => true,
             'response' => 'لا توجد جلسة واتساب لهذا الوكيل',
+            'phone' => $phone,
+            'body' => $message,
+            'type' => $type,
+        );
+    }
+    $gate = whatsapp_gateway_status_for_account($wa, $sessionId);
+    if (empty($gate['ready']) || !isset($gate['session']) || (string) $gate['session'] !== $sessionId) {
+        return array(
+            'success' => false,
+            'skipped' => true,
+            'response' => 'يرجى ربط واتساب',
             'phone' => $phone,
             'body' => $message,
             'type' => $type,
@@ -449,7 +692,7 @@ function whatsapp_send_local($wa, $phone, $message, $type, $sessionId = '')
         ),
         CURLOPT_POSTFIELDS => json_encode($payload),
         CURLOPT_CONNECTTIMEOUT => 8,
-        CURLOPT_TIMEOUT => 45,
+        CURLOPT_TIMEOUT => 60,
     ));
 
     $raw = curl_exec($ch);
@@ -465,6 +708,18 @@ function whatsapp_send_local($wa, $phone, $message, $type, $sessionId = '')
         if (is_array($decoded)) {
             if (isset($decoded['success']) && !$decoded['success']) {
                 $ok = false;
+            }
+            $echo = isset($decoded['session']) ? (string) $decoded['session'] : '';
+            $msgId = (isset($decoded['result']) && is_array($decoded['result']) && !empty($decoded['result']['id']))
+                ? (string) $decoded['result']['id'] : '';
+            if ($ok && ($echo !== $sessionId || $msgId === '' || empty($decoded['acked']))) {
+                $ok = false;
+                $decoded['success'] = false;
+                $decoded['code'] = 'no_ack';
+                if (empty($decoded['error'])) {
+                    $decoded['error'] = 'WhatsApp did not confirm the message';
+                }
+                $raw = json_encode($decoded);
             }
             $errText = '';
             if (isset($decoded['error'])) {
@@ -581,9 +836,29 @@ function subscriber_msg_is_no_whatsapp($response)
         if (isset($decoded['message'])) {
             $err .= ' ' . (string) $decoded['message'];
         }
-        return (stripos($err, 'not on WhatsApp') !== false);
+        return (stripos($err, 'not on WhatsApp') !== false)
+            || (strpos($err, 'لا يتوفر واتساب') !== false)
+            || (strpos($err, 'ماعنده واتساب') !== false)
+            || (strpos($err, 'ماكو واتساب') !== false);
     }
-    return (stripos($response, 'not on WhatsApp') !== false);
+    return (stripos($response, 'not on WhatsApp') !== false)
+        || (strpos($response, 'لا يتوفر واتساب') !== false)
+        || (strpos($response, 'ماعنده واتساب') !== false)
+        || (strpos($response, 'ماكو واتساب') !== false);
+}
+}
+
+if (!function_exists('subscriber_phone_missing')) {
+function subscriber_phone_missing($phone)
+{
+    $phone = trim((string) $phone);
+    if ($phone === '' || $phone === '-' || $phone === '—') {
+        return true;
+    }
+    if (function_exists('phone_is_placeholder') && phone_is_placeholder($phone)) {
+        return true;
+    }
+    return false;
 }
 }
 
@@ -765,7 +1040,7 @@ function wa_miss_html($noWa)
     if (!$noWa) {
         return '';
     }
-    return '<span class="wa-miss" title="لا يتوفر واتساب">⊘</span>';
+    return '<span class="wa-miss" title="تحذير: الرقم موجود بس مو على واتساب">⊘</span>';
 }
 }
 
@@ -799,41 +1074,45 @@ function subscriber_whatsapp_phone($pdo, $subscriberId, $fallback = '')
 {
     $subscriberId = (int) $subscriberId;
     $candidates = array();
+    $live = '';
+    $cachePhones = array();
     if ($subscriberId > 0 && $pdo) {
-        try {
-            $st = $pdo->prepare(
-                'SELECT phone FROM sas_users_cache
-                 WHERE local_subscriber_id = :id AND phone IS NOT NULL AND phone <> \'\'
-                 LIMIT 5'
-            );
-            $st->execute(array(':id' => $subscriberId));
-            while ($cachePhone = $st->fetchColumn()) {
-                $candidates[] = (string) $cachePhone;
-            }
-        } catch (Exception $e) {
-        }
         try {
             $stU = $pdo->prepare('SELECT sas_username, phone FROM subscribers WHERE id = :id LIMIT 1');
             $stU->execute(array(':id' => $subscriberId));
             $loc = $stU->fetch();
             if ($loc) {
-                $candidates[] = isset($loc['phone']) ? (string) $loc['phone'] : '';
+                $live = isset($loc['phone']) ? (string) $loc['phone'] : '';
                 $u = isset($loc['sas_username']) ? trim((string) $loc['sas_username']) : '';
                 if ($u !== '') {
-                    $stC = $pdo->prepare(
-                        'SELECT phone FROM sas_users_cache WHERE username = :u AND phone IS NOT NULL AND phone <> \'\' LIMIT 1'
-                    );
-                    $stC->execute(array(':u' => $u));
+                    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+                    $sqlC = 'SELECT phone FROM sas_users_cache WHERE username = :u AND phone IS NOT NULL AND phone <> \'\'';
+                    $parC = array(':u' => $u);
+                    if ($tid > 0) {
+                        $sqlC .= ' AND tenant_id = :t';
+                        $parC[':t'] = $tid;
+                    }
+                    $sqlC .= ' LIMIT 1';
+                    $stC = $pdo->prepare($sqlC);
+                    $stC->execute($parC);
                     $cp = $stC->fetchColumn();
-                    if ($cp !== false) {
-                        array_unshift($candidates, (string) $cp);
+                    if ($cp !== false && (string) $cp !== '') {
+                        $cachePhones[] = (string) $cp;
                     }
                 }
             }
         } catch (Exception $e2) {
         }
     }
-    $candidates[] = $fallback;
+    if ($live !== '') {
+        $candidates[] = $live;
+    }
+    if ((string) $fallback !== '') {
+        $candidates[] = (string) $fallback;
+    }
+    foreach ($cachePhones as $cachePhone) {
+        $candidates[] = $cachePhone;
+    }
     if (function_exists('phone_first_valid')) {
         return phone_first_valid($candidates);
     }
@@ -869,11 +1148,14 @@ function subscriber_should_hide_no_whatsapp($phones, $everOk = false)
 }
 
 if (!function_exists('msg_table_status_html')) {
-function msg_table_status_html($hasMsg, $msgOk, $noWa, $rowId, $logId, $lang = 'ar')
+function msg_table_status_html($hasMsg, $msgOk, $noWa, $rowId, $logId, $lang = 'ar', $noPhone = false)
 {
     $retryTitle = ($lang === 'en') ? 'Retry send' : 'إعادة المحاولة';
-    $noWaLabel = ($lang === 'en') ? 'No WhatsApp' : 'ماكو واتساب';
-    $noWaTitle = ($lang === 'en') ? 'This number is not on WhatsApp' : 'لا يتوفر واتساب لدى المشترك';
+    $noWaLabel = ($lang === 'en') ? 'No WhatsApp' : 'ماعنده واتساب';
+    $noWaTitle = ($lang === 'en') ? 'Warning: this number is not on WhatsApp' : 'تحذير: الرقم موجود بس مو على واتساب';
+    $noPhoneLabel = ($lang === 'en') ? 'No number' : 'ماعنده رقم';
+    $noPhoneTitle = ($lang === 'en') ? 'Warning: this subscriber has no phone number' : 'تحذير: المشترك ما عنده رقم';
+    $failTitle = ($lang === 'en') ? 'Warning: send failed' : 'تحذير: فشل الإرسال';
     $retryBtn = '';
     if ((int) $logId > 0) {
         $retryBtn = '<button type="button" class="msg-retry-btn" data-retry="1" data-id="'
@@ -885,15 +1167,16 @@ function msg_table_status_html($hasMsg, $msgOk, $noWa, $rowId, $logId, $lang = '
             . '</svg></button>';
     }
     $html = '<span class="msg-status-row">';
-    if (!$hasMsg) {
+    if ($noPhone) {
+        $html .= '<span class="msg-nowa msg-nophone" title="' . e($noPhoneTitle) . '">' . e($noPhoneLabel) . '</span>';
+    } elseif ($noWa) {
+        $html .= '<span class="msg-nowa" title="' . e($noWaTitle) . '">' . e($noWaLabel) . '</span>';
+    } elseif (!$hasMsg) {
         $html .= '<span class="dot-msg off" title="' . e($lang === 'en' ? 'No message sent' : 'لم تُرسل رسالة') . '"></span>';
     } elseif ($msgOk) {
         $html .= '<span class="dot-msg ok" title="' . e($lang === 'en' ? 'Sent' : 'أُرسلت') . '"></span>';
-    } elseif ($noWa) {
-        $html .= '<span class="msg-nowa" title="' . e($noWaTitle) . '">' . e($noWaLabel) . '</span>';
-        $html .= $retryBtn;
     } else {
-        $html .= '<span class="dot-msg fail" title="' . e($lang === 'en' ? 'Send failed' : 'فشل الإرسال') . '"></span>';
+        $html .= '<span class="dot-msg fail" title="' . e($failTitle) . '"></span>';
         $html .= $retryBtn;
     }
     $html .= '</span>';
@@ -933,6 +1216,12 @@ function whatsapp_fail_user_message($result, $fallback = 'فشل إرسال وا
         return 'السيرفر ما وصل لبوابة واتساب — تأكد أن الجهاز شغّال';
     }
     if ($err !== '') {
+        if (stripos($err, 'did not confirm') !== false || stripos($err, 'no_ack') !== false || stripos($err, 'Could not verify') !== false) {
+            return 'واتساب ما أكد الإرسال — الرسالة ما وصلت للتلفون';
+        }
+        if (stripos($err, 'rejected the message') !== false || stripos($err, 'send_rejected') !== false) {
+            return 'واتساب رفض الرسالة';
+        }
         if (stripos($err, 'not ready') !== false || stripos($err, 'Scan QR') !== false) {
             return 'فشلت إعادة الإرسال — تأكد أن واتساب متصل';
         }
@@ -1099,16 +1388,17 @@ function delete_failed_message_log($pdo, $logId)
         return array(false, 'معرّف غير صالح');
     }
     try {
-        $st = $pdo->prepare('SELECT id, success FROM message_logs WHERE id = :id LIMIT 1');
+        $st = $pdo->prepare('SELECT id, subscriber_id FROM message_logs WHERE id = :id LIMIT 1');
         $st->execute(array(':id' => $logId));
         $row = $st->fetch();
         if (!$row) {
             return array(false, 'الرسالة غير موجودة');
         }
-        if (!empty($row['success'])) {
-            return array(false, 'ما يصير حذف رسالة ناجحة');
+        $sid = isset($row['subscriber_id']) ? (int) $row['subscriber_id'] : 0;
+        if ($sid > 0 && function_exists('user_can_access_subscriber') && !user_can_access_subscriber($pdo, $sid)) {
+            return array(false, 'ما عندك صلاحية لهذه الرسالة');
         }
-        $pdo->prepare('DELETE FROM message_logs WHERE id = :id AND success = 0')
+        $pdo->prepare('DELETE FROM message_logs WHERE id = :id')
             ->execute(array(':id' => $logId));
         return array(true, 'تم الحذف');
     } catch (Exception $e) {
@@ -1167,7 +1457,7 @@ function retry_failed_message($pdo, $config, $logId, $subscriberId = 0)
     $sql = 'SELECT m.*, s.phone AS sub_phone, s.id AS sid
             FROM message_logs m
             JOIN subscribers s ON s.id = m.subscriber_id
-            WHERE m.id = :id AND m.success = 0';
+            WHERE m.id = :id';
     $params = array(':id' => (int) $logId);
     if ($subscriberId > 0) {
         $sql .= ' AND m.subscriber_id = :sid';
@@ -1177,15 +1467,26 @@ function retry_failed_message($pdo, $config, $logId, $subscriberId = 0)
     $stmt->execute($params);
     $log = $stmt->fetch();
     if (!$log) {
-        return array(false, 'الرسالة غير موجودة أو تم إرسالها مسبقاً');
+        return array(false, 'الرسالة غير موجودة');
     }
     $body = trim((string) $log['body']);
     if ($body === '') {
         return array(false, 'نص الرسالة فارغ');
     }
-    $phone = function_exists('subscriber_whatsapp_phone')
-        ? subscriber_whatsapp_phone($pdo, (int) $log['sid'], !empty($log['sub_phone']) ? $log['sub_phone'] : $log['phone'])
-        : (!empty($log['sub_phone']) ? $log['sub_phone'] : $log['phone']);
+    $currentPhone = !empty($log['sub_phone']) ? (string) $log['sub_phone'] : '';
+    $phone = '';
+    if ($currentPhone !== '' && (!function_exists('phone_is_placeholder') || !phone_is_placeholder($currentPhone))) {
+        $phone = function_exists('normalize_phone') ? normalize_phone($currentPhone) : $currentPhone;
+        if ($phone === '') {
+            $phone = $currentPhone;
+        }
+    }
+    if ($phone === '' && function_exists('subscriber_whatsapp_phone')) {
+        $phone = subscriber_whatsapp_phone($pdo, (int) $log['sid'], '');
+    }
+    if ($phone === '') {
+        $phone = !empty($log['phone']) ? (string) $log['phone'] : '';
+    }
     $type = (string) $log['message_type'];
     if ($type === '') {
         $type = 'text';
@@ -1193,7 +1494,11 @@ function retry_failed_message($pdo, $config, $logId, $subscriberId = 0)
     if (substr($type, -6) !== '_retry') {
         $type .= '_retry';
     }
-    $result = whatsapp_send($config, $phone, $body, $type);
+    if (function_exists('whatsapp_may_message_subscriber') && !whatsapp_may_message_subscriber($pdo, (int) $log['sid'])) {
+        return array(false, 'هذا المشترك مو تابع لواتساب الحساب المفتوح');
+    }
+    $retrySession = function_exists('whatsapp_session_id') ? whatsapp_session_id() : '';
+    $result = whatsapp_send($config, $phone, $body, $type, $retrySession);
     // نخلي النوع الأصلي بالسجل أوضح للعرض
     $result['type'] = preg_replace('/_retry$/', '', (string) $log['message_type']);
     if ($result['type'] === '') {

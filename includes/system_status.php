@@ -281,6 +281,16 @@ function system_whatsapp_status($config)
             'label' => 'Error',
         );
     }
+    $asked = ($waSession !== '') ? $waSession : 'default';
+    if (!isset($data['session']) || (string) $data['session'] !== $asked) {
+        return array(
+            'ok' => false,
+            'ready' => false,
+            'state' => 'offline',
+            'phone' => '',
+            'label' => 'يرجى ربط واتساب',
+        );
+    }
     $ready = !empty($data['ready']);
     $phone = isset($data['phone']) ? (string) $data['phone'] : '';
     if ($ready) {

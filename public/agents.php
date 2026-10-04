@@ -51,6 +51,135 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     $action = post('action');
 
+    if ($action === 'return_agent_cards') {
+        $aid = (int) post('user_id', '0');
+        $profileName = trim((string) post('profile_name', ''));
+        $profileId = (int) post('profile_id', '0');
+        $homeIdRet = function_exists('user_card_source_id') ? (int) user_card_source_id($pdo) : $meId;
+        $rowRet = function_exists('get_admin_user') ? get_admin_user($pdo, $aid) : null;
+        $myTidRet = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        $rowTidRet = $rowRet && isset($rowRet['tenant_id']) ? (int) $rowRet['tenant_id'] : 0;
+        $rowRoleRet = $rowRet ? normalize_admin_role($rowRet['role']) : '';
+        if ($aid <= 0 || $aid === $homeIdRet || $profileName === '' || !$rowRet || $rowTidRet !== $myTidRet
+            || !in_array($rowRoleRet, array('agent', 'group_manager'), true)) {
+            flash('error', $isEn ? 'Choose an agent under you' : 'اختر وكيلاً من اللي تحتك');
+            redirect('agents.php');
+        }
+        if (!function_exists('sas_make_connector') || !function_exists('sas_is_ready') || !sas_is_ready($config)
+            || !function_exists('card_sas_stock_map') || !function_exists('card_user_sas_manager_id')) {
+            flash('error', $isEn ? 'SAS is not ready' : 'الساس غير جاهز');
+            redirect('agents.php');
+        }
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(120);
+        }
+        if (function_exists('card_sas_stock_forget')) {
+            card_sas_stock_forget();
+        }
+        $mapRet = card_sas_stock_map($pdo, $config, $homeIdRet);
+        $bagRet = isset($mapRet[$aid]) && is_array($mapRet[$aid]) ? $mapRet[$aid] : array();
+        $qtyRet = 0;
+        $wantRet = function_exists('card_name_key') ? card_name_key($profileName) : strtolower($profileName);
+        foreach ($bagRet as $nmRet => $qRet) {
+            $kRet = function_exists('card_name_key') ? card_name_key($nmRet) : strtolower(trim((string) $nmRet));
+            if ($wantRet !== '' && $kRet === $wantRet) {
+                $qtyRet = (int) $qRet;
+                $profileName = trim((string) $nmRet);
+                break;
+            }
+        }
+        if ($qtyRet <= 0) {
+            flash('error', $isEn ? 'This agent has no free cards in that package' : 'ماكو كروت شاغرة بهالفئة عند الوكيل');
+            redirect('agents.php');
+        }
+        $wholesale = 0;
+        $agentPrice = 0;
+        if (function_exists('agent_card_price_get')) {
+            $prRet = agent_card_price_get($pdo, $aid, $profileId, $profileName);
+            if ($prRet) {
+                $wholesale = (float) $prRet['wholesale_price'];
+                $agentPrice = (float) $prRet['agent_price'];
+                if ($profileId <= 0 && isset($prRet['profile_id'])) {
+                    $profileId = (int) $prRet['profile_id'];
+                }
+            }
+        }
+        if ($agentPrice <= 0 && function_exists('agent_card_prices_list') && function_exists('card_price_soft_key')) {
+            $wantSoft = card_price_soft_key($profileName);
+            if ($wantSoft !== '') {
+                foreach (agent_card_prices_list($pdo, $aid) as $rowSoft) {
+                    $rowName = isset($rowSoft['profile_name']) ? (string) $rowSoft['profile_name'] : '';
+                    if (card_price_soft_key($rowName) !== $wantSoft) {
+                        continue;
+                    }
+                    $wholesale = isset($rowSoft['wholesale_price']) ? (float) $rowSoft['wholesale_price'] : 0;
+                    $agentPrice = isset($rowSoft['agent_price']) ? (float) $rowSoft['agent_price'] : 0;
+                    if ($profileId <= 0 && isset($rowSoft['profile_id'])) {
+                        $profileId = (int) $rowSoft['profile_id'];
+                    }
+                    break;
+                }
+            }
+        }
+        $apiMove = sas_make_connector($config);
+        if (!$apiMove || !method_exists($apiMove, 'moveUnusedCardsToOwner')) {
+            flash('error', $isEn ? 'SAS is not ready' : 'الساس غير جاهز');
+            redirect('agents.php');
+        }
+        if (method_exists($apiMove, 'setTimeout')) {
+            $apiMove->setTimeout(50);
+        }
+        $fromMid = card_user_sas_manager_id($pdo, $aid, $homeIdRet, $apiMove);
+        $toMid = card_user_sas_manager_id($pdo, $homeIdRet, $homeIdRet, $apiMove);
+        if ($toMid <= 0) {
+            flash('error', function_exists('card_transfer_error_message') ? card_transfer_error_message('sas_home_missing', $lang) : 'تعذر معرفة حساب الساس');
+            redirect('agents.php');
+        }
+        if ($fromMid <= 0) {
+            flash('error', function_exists('card_transfer_error_message') ? card_transfer_error_message('sas_manager_missing', $lang) : 'الوكيل غير مربوط بمدير ساس');
+            redirect('agents.php');
+        }
+        if ($fromMid === $toMid) {
+            flash('error', function_exists('card_transfer_error_message') ? card_transfer_error_message('sas_same_owner', $lang) : 'نفس الحساب');
+            redirect('agents.php');
+        }
+        $move = $apiMove->moveUnusedCardsToOwner($profileId, $profileName, $qtyRet, $toMid, $fromMid, array());
+        if (empty($move['ok'])) {
+            if (function_exists('card_sas_stock_forget')) {
+                card_sas_stock_forget();
+            }
+            flash('error', function_exists('card_sas_move_error') ? card_sas_move_error($move, $lang) : 'الساس ما رجّع الكروت');
+            redirect('agents.php');
+        }
+        $movedQty = isset($move['moved']) ? (int) $move['moved'] : $qtyRet;
+        list($okRet, $codeRet) = transfer_cards(
+            $pdo,
+            $aid,
+            $homeIdRet,
+            $profileId,
+            $profileName,
+            $movedQty,
+            $wholesale,
+            $agentPrice,
+            'استرجاع من صفحة الوكلاء',
+            $meId,
+            false,
+            isset($move['ranges']) ? $move['ranges'] : array()
+        );
+        if (!$okRet && method_exists($apiMove, 'restoreCardRanges')) {
+            $apiMove->restoreCardRanges(isset($move['ranges']) ? $move['ranges'] : array(), $fromMid);
+            flash('error', function_exists('card_transfer_error_message') ? card_transfer_error_message($codeRet, $lang) : 'ما انحفظ الاسترجاع');
+            redirect('agents.php');
+        }
+        if (function_exists('card_sas_stock_forget')) {
+            card_sas_stock_forget();
+        }
+        flash('success', $isEn
+            ? ('Returned — ' . $movedQty . ' ' . $profileName . ' cards are back on your agency')
+            : ('تم الاسترجاع — رجعت ' . $movedQty . ' كرت من ' . $profileName . ' إلى وكالتك'));
+        redirect('agents.php');
+    }
+
     if ($action === 'save_acc_widgets') {
         $uid = (int) post('user_id', '0');
         $row = get_admin_user($pdo, $uid);
@@ -665,6 +794,88 @@ try {
 } catch (Exception $e) {
 }
 
+$cardHomeId = function_exists('user_card_source_id') ? (int) user_card_source_id($pdo) : $meId;
+$agentCardMap = array();
+if ($cardHomeId > 0 && function_exists('card_sas_stock_map') && function_exists('sas_is_ready') && sas_is_ready($config)) {
+    $agentCardMap = card_sas_stock_map($pdo, $config, $cardHomeId);
+    if (!is_array($agentCardMap)) {
+        $agentCardMap = array();
+    }
+}
+$agentPriceRows = array();
+try {
+    if (function_exists('ensure_agent_card_prices_table')) {
+        ensure_agent_card_prices_table($pdo);
+    }
+    $priceIds = array();
+    foreach ($agents as $aPrice) {
+        $priceIds[] = (int) $aPrice['id'];
+    }
+    if ($priceIds) {
+        $inPrice = implode(',', $priceIds);
+        $stPrice = $pdo->query(
+            'SELECT agent_user_id, profile_id, profile_name, wholesale_price, agent_price
+             FROM agent_card_prices WHERE agent_user_id IN (' . $inPrice . ')'
+        );
+        foreach ($stPrice->fetchAll() as $prRow) {
+            $pAid = (int) $prRow['agent_user_id'];
+            if (!isset($agentPriceRows[$pAid])) {
+                $agentPriceRows[$pAid] = array();
+            }
+            $agentPriceRows[$pAid][] = $prRow;
+        }
+    }
+} catch (Exception $e) {
+}
+if (!function_exists('agents_card_lines_html')) {
+    function agents_card_lines_html($aid, $lines, $withReturn, $isEn, $currency)
+    {
+        if (!$lines) {
+            return '<span class="meta">' . e($isEn ? 'None' : 'ماكو') . '</span>';
+        }
+        $html = '<div class="ag-cards">';
+        $due = 0.0;
+        foreach ($lines as $ln) {
+            $html .= '<div class="ag-card-line">';
+            $html .= '<span class="ag-card-name">' . e($ln['name']) . '</span>';
+            $html .= '<span class="ag-card-math">' . (int) $ln['qty'] . ' ' . e($isEn ? 'cards' : 'كرت');
+            if ((float) $ln['unit'] > 0) {
+                $due += (float) $ln['amount'];
+                $html .= ' × ' . e(number_format((float) $ln['unit'], 0, '.', ','));
+                $html .= ' = ' . e(function_exists('money_format_iqd') ? money_format_iqd($ln['amount'], $currency) : (string) $ln['amount']);
+            } else {
+                $html .= ' — ' . e($isEn ? 'no price' : 'بدون سعر');
+            }
+            $html .= '</span>';
+            if ($withReturn) {
+                $confirm = $isEn
+                    ? ('Return all ' . (int) $ln['qty'] . ' ' . $ln['name'] . ' cards to your agency?')
+                    : ('ترجع كل كروت ' . $ln['name'] . ' (' . (int) $ln['qty'] . ') إلى وكالتك بالساس؟');
+                $html .= '<form method="post">';
+                $html .= '<input type="hidden" name="csrf" value="' . e(csrf_token()) . '">';
+                $html .= '<input type="hidden" name="action" value="return_agent_cards">';
+                $html .= '<input type="hidden" name="user_id" value="' . (int) $aid . '">';
+                $html .= '<input type="hidden" name="profile_id" value="' . (int) $ln['profile_id'] . '">';
+                $html .= '<input type="hidden" name="profile_name" value="' . e($ln['name']) . '">';
+                $html .= '<button class="btn ghost sm" type="submit" onclick="return confirm('
+                    . htmlspecialchars(json_encode($confirm), ENT_QUOTES, 'UTF-8') . ');">'
+                    . e($isEn ? 'Return' : 'استرجاع') . '</button>';
+                $html .= '</form>';
+            }
+            $html .= '</div>';
+        }
+        if ($due > 0) {
+            $html .= '<div class="ag-card-due" style="margin-top:6px;font-weight:800;color:#9a3412">'
+                . e($isEn ? 'Card debt: ' : 'دين الكروت: ')
+                . e(function_exists('money_format_iqd') ? money_format_iqd($due, $currency) : (string) $due)
+                . '</div>';
+        }
+        $html .= '</div>';
+        return $html;
+    }
+}
+$cardCurrency = (isset($config['currency']) && trim((string) $config['currency']) !== '') ? (string) $config['currency'] : 'د.ع';
+
 if (empty($sasManagers)) {
 $sasReady = function_exists('sas_is_ready') && sas_is_ready($config);
 if ($sasReady && function_exists('sas_page_connector') && function_exists('sas_managers_for_ui')) {
@@ -713,19 +924,16 @@ if (function_exists('is_accountant_user') && is_accountant_user()) {
         $aid = (int) $ag['id'];
         $nm = trim((string) $ag['display_name']) !== '' ? $ag['display_name'] : $ag['username'];
         $owed = function_exists('card_agent_remaining_balance') ? card_agent_remaining_balance($pdo, $aid) : 0;
-        $stockBits = array();
-        if (function_exists('card_agent_stock_summary')) {
-            $stk = card_agent_stock_summary($pdo, $aid);
-            if (!empty($stk['rows'])) {
-                foreach ($stk['rows'] as $sr) {
-                    $stockBits[] = (isset($sr['profile_name']) ? $sr['profile_name'] : '') . ' ' . (int) $sr['qty'];
-                }
-            }
-        }
+        $cardLines = function_exists('card_agent_category_lines')
+            ? card_agent_category_lines(
+                isset($agentCardMap[$aid]) ? $agentCardMap[$aid] : array(),
+                isset($agentPriceRows[$aid]) ? $agentPriceRows[$aid] : array()
+            )
+            : array();
         $on = ($pick === $aid) ? ' style="background:#ecfeff"' : '';
         echo '<tr' . $on . '><td><a href="agents.php?pick=' . $aid . '">' . e($nm) . '</a></td>';
         echo '<td>' . e(function_exists('money_format_iqd') ? money_format_iqd($owed, isset($config['currency']) ? $config['currency'] : '') : (string) $owed) . '</td>';
-        echo '<td>' . e($stockBits ? implode(' · ', $stockBits) : ($isEn ? 'None' : 'ماكو')) . '</td></tr>';
+        echo '<td>' . agents_card_lines_html($aid, $cardLines, false, $isEn, $cardCurrency) . '</td></tr>';
     }
     echo '</tbody></table></div></div>';
     render_footer();
@@ -830,6 +1038,7 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
             <th><?php echo e($isEn ? 'Name' : 'الاسم'); ?></th>
             <th><?php echo e($isEn ? 'Subscribers' : 'المشتركين'); ?></th>
             <th><?php echo e($isEn ? 'Status' : 'الحالة'); ?></th>
+            <th><?php echo e($isEn ? 'Cards' : 'الكروت'); ?></th>
             <?php if (function_exists('is_admin_user') && is_admin_user()): ?>
             <th class="ag-as-col" title="<?php echo e($isEn ? 'Allow login-as' : 'السماح بالدخول بـ'); ?>"><?php echo e($isEn ? 'Login-as' : 'دخول بـ'); ?></th>
             <?php endif; ?>
@@ -838,7 +1047,7 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
         </thead>
         <tbody>
         <?php if (!$agentShown): ?>
-            <tr><td colspan="<?php echo (function_exists('is_admin_user') && is_admin_user()) ? 7 : 6; ?>" class="msg-empty"><?php echo e($agentQ !== '' ? ($isEn ? 'No matches' : 'ماكو نتيجة') : ($isEn ? 'No agents yet.' : 'ماكو وكلاء بعد.')); ?></td></tr>
+            <tr><td colspan="<?php echo (function_exists('is_admin_user') && is_admin_user()) ? 8 : 7; ?>" class="msg-empty"><?php echo e($agentQ !== '' ? ($isEn ? 'No matches' : 'ماكو نتيجة') : ($isEn ? 'No agents yet.' : 'ماكو وكلاء بعد.')); ?></td></tr>
         <?php endif; ?>
         <?php
         $allowMap = array();
@@ -867,7 +1076,7 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
                     || ($rowRole === 'admin' && $rowTid > 1 && $rowTid !== $myTidView)
                 );
             $rowAllow = !isset($allowMap[$aid]) || !empty($allowMap[$aid]);
-            $span = (function_exists('is_admin_user') && is_admin_user()) ? 7 : 6;
+            $span = (function_exists('is_admin_user') && is_admin_user()) ? 8 : 7;
             ?>
         <tr>
             <td><?php echo (int) $agNo; ?></td>
@@ -875,6 +1084,18 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
             <td><?php echo e($a['display_name']); ?></td>
             <td><?php echo isset($counts[$aid]) ? (int) $counts[$aid] : 0; ?></td>
             <td><span class="<?php echo $active ? 'sas-logged' : 'sas-logged-off'; ?>"><?php echo e($active ? ($isEn ? 'Active' : 'فعال') : ($isEn ? 'Off' : 'موقوف')); ?></span></td>
+            <td class="ag-cards-cell">
+                <?php
+                $cardLines = function_exists('card_agent_category_lines')
+                    ? card_agent_category_lines(
+                        isset($agentCardMap[$aid]) ? $agentCardMap[$aid] : array(),
+                        isset($agentPriceRows[$aid]) ? $agentPriceRows[$aid] : array()
+                    )
+                    : array();
+                $canReturnCards = ($aid !== $cardHomeId) && !$isPortal;
+                echo agents_card_lines_html($aid, $cardLines, $canReturnCards, $isEn, $cardCurrency);
+                ?>
+            </td>
             <?php if (function_exists('is_admin_user') && is_admin_user()): ?>
             <td class="ag-as-col">
                 <?php if ($canSetAs): ?>
@@ -1344,6 +1565,12 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
     .sys-search { display:flex; gap:8px; margin:0 0 14px; }
     .sys-search input[type="search"] { max-width:320px; }
     .ag-actions { display:flex; gap:6px; align-items:center; justify-content:flex-end; flex-wrap:wrap; }
+    .ag-cards-cell { min-width: 240px; }
+    .ag-cards { display:flex; flex-direction:column; gap:6px; }
+    .ag-card-line { display:flex; flex-wrap:wrap; align-items:center; gap:8px; font-size:13px; }
+    .ag-card-name { font-weight:800; }
+    .ag-card-math { color:#334155; }
+    .ag-card-line form { margin:0; }
     .ag-as-col { width:52px; text-align:center; padding-left:4px; padding-right:4px; }
     .ag-as-form { margin:0; display:inline-flex; }
     .ag-as { position:relative; display:inline-flex; margin:0; cursor:pointer; }

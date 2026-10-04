@@ -1176,6 +1176,54 @@ th {
 .alert-error { background: #f8d7da; color: #721c24; }
 .alert-info { background: #d1ecf1; color: #0c5460; }
 
+.sas-toast {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 90;
+  min-width: 240px;
+  max-width: min(520px, 92vw);
+  padding: 14px 18px;
+  border-radius: 14px;
+  font-weight: 800;
+  text-align: center;
+  box-shadow: 0 14px 40px rgba(15, 23, 42, .22);
+}
+.sas-toast-success { background: #146c43; color: #fff; }
+.sas-toast-error { background: #9b2331; color: #fff; }
+.sas-toast-info { background: #0b5e78; color: #fff; }
+.sas-busy {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: rgba(15, 23, 42, .42);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.sas-busy[hidden] { display: none !important; }
+.sas-busy-card {
+  background: #fff;
+  color: #0f172a;
+  border-radius: 16px;
+  padding: 20px 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-weight: 800;
+  box-shadow: 0 16px 48px rgba(15, 23, 42, .28);
+}
+.sas-busy-spin {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 3px solid #dbe3ee;
+  border-top-color: #2563eb;
+  animation: sasSpin .7s linear infinite;
+}
+@keyframes sasSpin { to { transform: rotate(360deg); } }
+
 .feature-box {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

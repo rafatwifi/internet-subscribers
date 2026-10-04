@@ -425,6 +425,9 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
         <?php
         // شريط واتساب: للأدمن فقط (مو للوكيل / الدخول بصفة وكيل)
         $showWaBar = !$isImpersonating && function_exists('is_agent_user') && !is_agent_user();
+        if ($showWaBar && function_exists('whatsapp_notifications_enabled') && isset($pdo) && !whatsapp_notifications_enabled($pdo)) {
+            $showWaBar = false;
+        }
         ?>
         <div id="waConnBar" class="wa-conn-bar wa-conn-checking wa-conn-hidden" role="status" aria-live="polite" <?php echo $showWaBar ? '' : 'hidden'; ?> data-disabled="<?php echo $showWaBar ? '0' : '1'; ?>">
             <span class="wa-conn-dot" aria-hidden="true"></span>
@@ -459,7 +462,41 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
         <main class="container">
             <?php if ($flash): ?>
                 <div class="alert alert-<?php echo e($flash['type']); ?>"><?php echo e($flash['message']); ?></div>
+                <div class="sas-toast sas-toast-<?php echo e($flash['type']); ?>" role="status"><?php echo e($flash['message']); ?></div>
             <?php endif; ?>
+            <style>
+            #sasBusy[hidden] { display: none !important; }
+            #sasBusy {
+                position: fixed; inset: 0; z-index: 100000;
+                background: rgba(15, 23, 42, .55);
+                display: flex; align-items: center; justify-content: center;
+            }
+            #sasBusy .sas-busy-card {
+                background: #fff; color: #0f172a; border-radius: 16px;
+                padding: 22px 26px; display: flex; align-items: center; gap: 12px;
+                font-weight: 800; box-shadow: 0 16px 48px rgba(15, 23, 42, .28);
+            }
+            #sasBusy .sas-busy-spin {
+                width: 22px; height: 22px; border-radius: 50%;
+                border: 3px solid #dbe3ee; border-top-color: #2563eb;
+                animation: sasSpin .7s linear infinite;
+            }
+            .sas-toast {
+                position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+                z-index: 100001; min-width: 240px; max-width: min(520px, 92vw);
+                padding: 14px 18px; border-radius: 14px; font-weight: 800; text-align: center;
+                box-shadow: 0 14px 40px rgba(15, 23, 42, .22);
+            }
+            .sas-toast-success { background: #146c43; color: #fff; }
+            .sas-toast-error { background: #9b2331; color: #fff; }
+            .sas-toast-info { background: #0b5e78; color: #fff; }
+            </style>
+            <div id="sasBusy" hidden>
+                <div class="sas-busy-card">
+                    <span class="sas-busy-spin" aria-hidden="true"></span>
+                    <span><?php echo e($isEn ? 'Working in SAS… don’t close the page' : 'جاري التنفيذ بالساس… لا تسكر الصفحة'); ?></span>
+                </div>
+            </div>
 <?php
     // بعد رسم الهيدر: حرّر قفل الجلسة لطلبات GET حتى لا يتوقف التنقّل على أجاكس خلفي
     // احفظ رمز الحماية قبل الإغلاق، وإلا تعديل الاسم يطلع «طلب غير صالح»
@@ -477,8 +514,9 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
 
 function render_footer()
 {
-    global $siteName;
+    global $siteName, $lang;
     $name = isset($siteName) ? $siteName : 'WiFi-Net-SALES';
+    $isEn = (isset($lang) && $lang === 'en');
     ?>
         </main>
         <footer class="footer"><?php echo e($name); ?> © <?php echo date('Y'); ?></footer>
@@ -799,6 +837,36 @@ body.nav-pending .nav-progress { display: block; }
       }, 220);
     });
   }
+})();
+</script>
+<script>
+(function () {
+  var busy = document.getElementById('sasBusy');
+  var toast = document.querySelector('.sas-toast');
+  if (toast) {
+    setTimeout(function () {
+      toast.style.opacity = '0';
+      toast.style.transition = 'opacity .35s ease';
+      setTimeout(function () {
+        if (toast.parentNode) toast.parentNode.removeChild(toast);
+      }, 400);
+    }, 6500);
+  }
+  document.addEventListener('submit', function (ev) {
+    if (ev.defaultPrevented) return;
+    var form = ev.target;
+    if (!form || !form.querySelector) return;
+    var act = form.querySelector('input[name="action"]');
+    if (!act) return;
+    var v = act.value || '';
+    if (v !== 'transfer' && v !== 'return_transfer' && v !== 'return_agent_cards' && v !== 'recover_missing_cards') return;
+    var btn = form.querySelector('button[type="submit"]');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = <?php echo json_encode($isEn ? 'Working…' : 'جاري التنفيذ…'); ?>;
+    }
+    if (busy) busy.hidden = false;
+  });
 })();
 </script>
 </body>

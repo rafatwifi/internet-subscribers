@@ -384,7 +384,41 @@ function sas_make_connector_for_tenant($pdo, $config, $tenantId = null)
     if (empty($s['host']) || $s['username'] === '' || $s['password'] === '') {
         return null;
     }
-    return new SASConnector($s['host'], $s['username'], $s['password'], 'acp');
+    $api = new SASConnector($s['host'], $s['username'], $s['password'], 'acp');
+    sas_attach_reclaim_account($pdo, $api, $s['host'], $s['username']);
+    return $api;
+}
+
+function sas_attach_reclaim_account($pdo, $api, $host, $currentUser)
+{
+    if (!$pdo || !$api || !method_exists($api, 'setReclaimAccount')) {
+        return;
+    }
+    $currentUser = trim((string) $currentUser);
+    $host = strtolower(preg_replace('#^https?://#i', '', rtrim(trim((string) $host), '/')));
+    if ($host === '' || strcasecmp($currentUser, 'wifi') === 0) {
+        return;
+    }
+    try {
+        $st = $pdo->query("SELECT sas_host, sas_username, sas_password FROM tenant_sas_accounts WHERE sas_username = 'wifi'");
+        $rows = $st ? $st->fetchAll(PDO::FETCH_ASSOC) : array();
+    } catch (Exception $e) {
+        return;
+    }
+    if (!is_array($rows)) {
+        return;
+    }
+    foreach ($rows as $r) {
+        if (!is_array($r)) {
+            continue;
+        }
+        $h = strtolower(preg_replace('#^https?://#i', '', rtrim(trim((string) $r['sas_host']), '/')));
+        $pass = isset($r['sas_password']) ? (string) $r['sas_password'] : '';
+        if ($h === $host && $pass !== '') {
+            $api->setReclaimAccount('wifi', $pass);
+            return;
+        }
+    }
 }
 
 function tenant_save($pdo, $tenantId, $fields)

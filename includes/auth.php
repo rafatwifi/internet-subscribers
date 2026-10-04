@@ -1033,6 +1033,10 @@ function ensure_admin_users_table($pdo, $config = null)
             if (!$col) {
                 $pdo->exec('ALTER TABLE admin_users ADD COLUMN wa_cover_ids TEXT NULL');
             }
+            $col = $pdo->query("SHOW COLUMNS FROM admin_users LIKE 'wa_notify'")->fetch();
+            if (!$col) {
+                $pdo->exec('ALTER TABLE admin_users ADD COLUMN wa_notify TINYINT(1) NOT NULL DEFAULT 1');
+            }
         } catch (Exception $e) {
         }
         try {

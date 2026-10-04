@@ -186,6 +186,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             flash('error', $lang === 'en' ? 'Could not save' : 'ما انحفظ');
         }
         redirect('settings.php?tab=whatsapp');
+    } elseif ($section === 'wa_notify') {
+        $skipSettingsSave = true;
+        $tab = 'whatsapp';
+        if (function_exists('ensure_admin_users_table')) {
+            ensure_admin_users_table($pdo);
+        }
+        $ownerNotify = function_exists('whatsapp_notify_owner_id') ? whatsapp_notify_owner_id($pdo) : 0;
+        if ($ownerNotify <= 0) {
+            flash('error', $lang === 'en' ? 'Not allowed' : 'غير مسموح');
+            redirect('settings.php?tab=whatsapp');
+        }
+        $waOn = post('wa_notify') === '1' ? 1 : 0;
+        try {
+            $pdo->prepare('UPDATE admin_users SET wa_notify = :n WHERE id = :id')
+                ->execute(array(':n' => $waOn, ':id' => $ownerNotify));
+            flash('success', $lang === 'en' ? 'Saved' : 'تم الحفظ');
+        } catch (Exception $e) {
+            flash('error', $lang === 'en' ? 'Could not save' : 'ما انحفظ');
+        }
+        redirect('settings.php?tab=whatsapp');
     } elseif ($section === 'sas_test') {
         $skipSettingsSave = true;
         $tab = 'sas';
@@ -1744,6 +1764,33 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
 .wa-actions-row .btn { flex:1 1 140px; justify-content:center; }
 </style>
 
+<?php
+$waNotifyOn = true;
+if (function_exists('whatsapp_notifications_enabled') && isset($pdo)) {
+    $waNotifyOn = whatsapp_notifications_enabled($pdo);
+}
+?>
+<div class="wa-card" style="margin-bottom:16px">
+  <h2><?php echo e($lang === 'en' ? 'WhatsApp notifications' : 'واتساب للإشعارات'); ?></h2>
+  <p class="wa-lead"><?php echo e($lang === 'en'
+      ? 'Turn this off if this agency will not link WhatsApp. Messages and the link warning stop everywhere, not only on this page.'
+      : 'إذا الوكالة ما تريد تربط واتساب، أوقف الإشعارات. يتوقف الإرسال وتحذير الربط بكل الصفحات، مو بس هنا.'); ?></p>
+  <form method="post">
+    <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+    <input type="hidden" name="section" value="wa_notify">
+    <div style="max-width:280px">
+      <label><?php echo e($lang === 'en' ? 'Use WhatsApp for notifications' : 'استخدام واتساب للإشعارات'); ?></label>
+      <select name="wa_notify">
+        <option value="1" <?php echo $waNotifyOn ? 'selected' : ''; ?>><?php echo e($lang === 'en' ? 'ON' : 'تشغيل'); ?></option>
+        <option value="0" <?php echo $waNotifyOn ? '' : 'selected'; ?>><?php echo e($lang === 'en' ? 'OFF' : 'إيقاف'); ?></option>
+      </select>
+    </div>
+    <div class="actions" style="margin-top:12px">
+      <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
+    </div>
+  </form>
+</div>
+<?php if ($waNotifyOn || $isPlatformAdmin): ?>
 <div class="wa-layout">
   <?php if ($isPlatformAdmin): ?>
   <div class="wa-card">
@@ -1791,6 +1838,7 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
   </div>
   <?php endif; ?>
 
+  <?php if ($waNotifyOn): ?>
   <div class="wa-card">
     <h2><?php echo e($lang === 'en' ? 'Link WhatsApp' : 'ربط واتساب'); ?></h2>
     <p class="wa-lead"><?php echo e($lang === 'en'
@@ -1799,17 +1847,18 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
     <div id="wa-status" class="wa-status-pill warn"><span class="wa-status-dot"></span><span id="wa-status-text">...</span></div>
     <div id="wa-qr" class="wa-qr-stage">
         <img id="wa-qr-img" alt="QR" style="display:none">
-        <div id="wa-qr-placeholder"><?php echo e($lang === 'en' ? 'Waiting for QR…' : 'بانتظار رمز QR…'); ?></div>
-        <div class="wa-qr-hint" id="wa-qr-title"><?php echo e($lang === 'en' ? 'QR shows automatically when gateway is ready' : 'الرمز يظهر تلقائياً لما البوابة جاهزة'); ?></div>
+        <div id="wa-qr-placeholder"><?php echo e($lang === 'en' ? 'Loading QR…' : 'جاري إظهار رمز الربط…'); ?></div>
+        <div class="wa-qr-hint" id="wa-qr-title" style="display:none"></div>
     </div>
-    <div class="wa-actions-row">
-        <button class="btn" type="button" onclick="checkWhatsApp(true)"><?php echo e($lang === 'en' ? 'Show QR' : 'إظهار QR'); ?></button>
-        <button class="btn danger" type="button" onclick="logoutWhatsApp()"><?php echo e($lang === 'en' ? 'Disconnect & relink' : 'قطع الاتصال وإعادة الربط'); ?></button>
+    <div class="wa-actions-row" id="waActions" style="display:none">
+        <button class="btn danger" type="button" id="waLogoutBtn" onclick="logoutWhatsApp()"><?php echo e($lang === 'en' ? 'Disconnect & relink' : 'قطع الاتصال وإعادة الربط'); ?></button>
     </div>
   </div>
+  <?php endif; ?>
 </div>
+<?php endif; ?>
 <?php
-$waCoverTargets = function_exists('whatsapp_cover_targets') ? whatsapp_cover_targets($pdo) : array();
+$waCoverTargets = ($waNotifyOn && function_exists('whatsapp_cover_targets')) ? whatsapp_cover_targets($pdo) : array();
 $waMe = function_exists('current_admin') ? current_admin() : null;
 $waMeId = $waMe ? (int) $waMe['id'] : 0;
 $waCoverOn = ($waMeId > 0 && function_exists('whatsapp_cover_selected')) ? whatsapp_cover_selected($pdo, $waMeId) : array();
@@ -1850,6 +1899,7 @@ if ($waCoverTargets):
 </div>
 <?php endif; ?>
 
+<?php if ($waNotifyOn): ?>
 <script>
 (function () {
   var urlInput = document.getElementById('gwUrl');
@@ -1867,11 +1917,15 @@ if ($waCoverTargets):
 
 var waBusy = false;
 var qrWaitTimer = null;
+var waExpect = <?php echo json_encode(function_exists('whatsapp_session_id') ? (string) whatsapp_session_id() : ''); ?>;
+function waMine(data) {
+  return !!(data && waExpect && data.session && String(data.session) === String(waExpect));
+}
 var L = {
   connected: <?php echo json_encode($lang === 'en' ? 'Connected — ready to send' : 'متصل — جاهز للإرسال'); ?>,
   needDisconnect: <?php echo json_encode($lang === 'en' ? 'Already connected. Press Disconnect for a new QR.' : 'متصل حالياً. اضغط قطع الاتصال لـ QR جديد.'); ?>,
   fetching: <?php echo json_encode($lang === 'en' ? 'Fetching QR…' : 'جاري جلب QR…'); ?>,
-  scanBelow: <?php echo json_encode($lang === 'en' ? 'Scan the QR below once' : 'امسح رمز QR تحت مرة واحدة'); ?>,
+  scanBelow: <?php echo json_encode($lang === 'en' ? 'Scan the code. It refreshes by itself.' : 'امسح الرمز. يتحدث لحاله.'); ?>,
   waiting: <?php echo json_encode($lang === 'en' ? 'Waiting for QR…' : 'بانتظار QR…'); ?>,
   gatewayDown: <?php echo json_encode($lang === 'en'
     ? 'Cannot reach Windows gateway. On PC ' . $hostHint . ' run install-autostart.bat or start-gateway.bat.'
@@ -1893,11 +1947,35 @@ function setStatus(cls, text) {
   box.className = 'wa-status-pill ' + cls;
   if (tx) tx.textContent = text; else box.textContent = text;
 }
+var lastQrUrl = '';
+function paintConnected(on) {
+  var row = document.getElementById('waActions');
+  if (row) row.style.display = on ? '' : 'none';
+}
+function setHint(text) {
+  var hint = document.getElementById('wa-qr-title');
+  if (!hint) return;
+  if (!text) {
+    hint.style.display = 'none';
+    hint.textContent = '';
+    return;
+  }
+  hint.style.display = '';
+  hint.textContent = text;
+}
 function showQr(dataUrl) {
   var img = document.getElementById('wa-qr-img');
   var ph = document.getElementById('wa-qr-placeholder');
-  if (!dataUrl) return false;
-  img.src = dataUrl;
+  if (!dataUrl || !img) return false;
+  if (dataUrl !== lastQrUrl) {
+    lastQrUrl = dataUrl;
+    img.src = dataUrl;
+    var stamp = '';
+    try {
+      stamp = ' · ' + new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    } catch (e) {}
+    setHint(L.scanBelow + stamp);
+  }
   img.style.display = 'inline-block';
   if (ph) ph.style.display = 'none';
   return true;
@@ -1905,67 +1983,82 @@ function showQr(dataUrl) {
 function showWaitingBox(text) {
   var img = document.getElementById('wa-qr-img');
   var ph = document.getElementById('wa-qr-placeholder');
-  img.style.display = 'none';
-  img.removeAttribute('src');
+  lastQrUrl = '';
+  if (img) {
+    img.style.display = 'none';
+    img.removeAttribute('src');
+  }
+  setHint('');
   if (ph) {
     ph.style.display = 'block';
     ph.textContent = text || L.waiting;
   }
 }
-function checkWhatsApp(forceQr) {
-  if (waBusy && !forceQr) return;
+var waChecking = false;
+function checkWhatsApp() {
+  if (waBusy || waChecking) return;
+  waChecking = true;
   fetch('wa_proxy.php?action=status&_=' + Date.now())
     .then(function (r) { return r.json(); })
     .then(function (data) {
       if (data && data.error && !data.ready) {
+        paintConnected(false);
         setStatus('err', data.error);
         showWaitingBox(L.gatewayDown);
         return null;
       }
-      if (data && data.ready) {
+      if (waMine(data) && data.ready) {
+        paintConnected(true);
         var phone = data.phone ? (' — ' + data.phone) : '';
         setStatus('ok', L.connected + phone);
-        if (!forceQr) {
-          showWaitingBox(<?php echo json_encode($lang === 'en' ? 'Connected — disconnect to change number' : 'متصل — اقطع الاتصال لتغيير الرقم'); ?>);
-        } else {
-          setStatus('warn', L.needDisconnect);
-        }
+        showWaitingBox(<?php echo json_encode($lang === 'en' ? 'Connected — disconnect to change number' : 'متصل — اقطع الاتصال لتغيير الرقم'); ?>);
         return null;
       }
+      paintConnected(false);
       if (data && (data.status === 'cert_expired' || data.status === 'tls_retry')) {
         setStatus('warn', data.status === 'tls_retry' ? L.tlsRetry : L.certExpired);
         showWaitingBox(data.status === 'tls_retry' ? L.tlsRetry : L.certExpired);
-        if (!forceQr && !(data && data.has_qr)) return null;
-      }
-      if (!forceQr && !(data && data.has_qr)) {
-        var waitMsg = L.pressShow;
-        if (data && data.status === 'logout_cooldown') waitMsg = L.loggingOut;
-        setStatus('warn', waitMsg);
-        showWaitingBox(waitMsg);
         return null;
       }
-      setStatus('warn', L.fetching);
-      showWaitingBox(L.waiting);
+      if (waMine(data) && data.qr_data_url && showQr(data.qr_data_url)) {
+        setStatus('warn', L.scanBelow);
+        return null;
+      }
+      if (data && data.status === 'logout_cooldown') {
+        setStatus('warn', L.loggingOut);
+        if (!lastQrUrl) showWaitingBox(L.loggingOut);
+        return null;
+      }
       return fetch('wa_proxy.php?action=qr&_=' + Date.now()).then(function (r) { return r.json(); });
     })
     .then(function (qr) {
       if (!qr) return;
-      if (qr.error) {
-        setStatus('err', qr.error);
-        showWaitingBox(qr.error);
+      if (waMine(qr) && qr.ready) {
+        paintConnected(true);
+        setStatus('ok', L.connected + (qr.phone ? (' — ' + qr.phone) : ''));
+        showWaitingBox(<?php echo json_encode($lang === 'en' ? 'Connected — disconnect to change number' : 'متصل — اقطع الاتصال لتغيير الرقم'); ?>);
         return;
       }
-      if (qr.qr_data_url && showQr(qr.qr_data_url)) {
+      paintConnected(false);
+      if (qr.error) {
+        setStatus('err', qr.error);
+        if (!lastQrUrl) showWaitingBox(qr.error);
+        return;
+      }
+      if (waMine(qr) && qr.qr_data_url && showQr(qr.qr_data_url)) {
         setStatus('warn', L.scanBelow);
-      } else {
-        setStatus('warn', L.waiting);
-        showWaitingBox(L.waiting);
+        return;
+      }
+      if (!lastQrUrl) {
+        setStatus('warn', L.pressShow);
+        showWaitingBox(L.pressShow);
       }
     })
     .catch(function () {
       setStatus('err', L.gatewayDown);
-      showWaitingBox(L.gatewayDown);
-    });
+      if (!lastQrUrl) showWaitingBox(L.gatewayDown);
+    })
+    .then(function () { waChecking = false; }, function () { waChecking = false; });
 }
 function waitForQr(tries) {
   if (tries <= 0) {
@@ -1983,12 +2076,15 @@ function waitForQr(tries) {
         qrWaitTimer = setTimeout(function () { waitForQr(tries - 1); }, 4000);
         return;
       }
-      if (qr && qr.ready) {
+      if (qr && waMine(qr) && qr.ready) {
+        paintConnected(true);
         setStatus('ok', L.connected);
+        showWaitingBox(<?php echo json_encode($lang === 'en' ? 'Connected — disconnect to change number' : 'متصل — اقطع الاتصال لتغيير الرقم'); ?>);
         waBusy = false;
         return;
       }
-      if (qr && qr.qr_data_url && showQr(qr.qr_data_url)) {
+      if (qr && waMine(qr) && qr.qr_data_url && showQr(qr.qr_data_url)) {
+        paintConnected(false);
         setStatus('warn', L.scanNew);
         waBusy = false;
         return;
@@ -2026,11 +2122,13 @@ function logoutWhatsApp() {
       waBusy = false;
     });
 }
-checkWhatsApp(false);
+paintConnected(false);
+checkWhatsApp();
 setInterval(function () {
-  if (!waBusy) checkWhatsApp(false);
-}, 20000);
+  if (!waBusy) checkWhatsApp();
+}, 8000);
 </script>
+<?php endif; ?>
 <?php endif; ?>
 
 <?php if ($tab === 'sas'): ?>

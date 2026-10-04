@@ -285,6 +285,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 $pdo->prepare('UPDATE subscribers SET phone = :p WHERE id = :id')
                     ->execute(array(':p' => $phone, ':id' => $sid));
+                try {
+                    $uSt = $pdo->prepare('SELECT sas_username FROM subscribers WHERE id = :id LIMIT 1');
+                    $uSt->execute(array(':id' => $sid));
+                    $sasUser = trim((string) $uSt->fetchColumn());
+                    if ($sasUser !== '' && function_exists('sas_cache_patch')) {
+                        $shown = function_exists('format_phone_display') ? format_phone_display($phone) : $phone;
+                        sas_cache_patch($pdo, $sasUser, array('phone' => $shown));
+                    }
+                } catch (Exception $e) {
+                }
                 if (function_exists('log_subscriber_phone_change')) {
                     log_subscriber_phone_change($pdo, $sid, $oldPhone, $phone, 'جدول المشتركين');
                 }
@@ -761,14 +771,22 @@ function render_subscriber_table_row($row, $n, $config, $lang)
     $searchText = strtolower($row['name'] . ' ' . format_phone_display($row['phone']) . ' ' . $row['phone']);
     $hasMsg = isset($row['last_msg_at']) && $row['last_msg_at'] !== null && $row['last_msg_at'] !== '';
     $msgOk = $hasMsg && !empty($row['last_msg_ok']);
-    $noWa = function_exists('subscriber_row_is_no_whatsapp')
+    $phoneDisp = format_phone_display($row['phone']);
+    $noPhone = function_exists('subscriber_phone_missing')
+        ? subscriber_phone_missing($phoneDisp)
+        : ($phoneDisp === '' || $phoneDisp === '—' || $phoneDisp === '-');
+    $noWa = !$noPhone && (function_exists('subscriber_row_is_no_whatsapp')
         ? subscriber_row_is_no_whatsapp($row)
-        : ($hasMsg && !$msgOk && subscriber_msg_is_no_whatsapp(isset($row['last_msg_response']) ? $row['last_msg_response'] : ''));
+        : ($hasMsg && !$msgOk && subscriber_msg_is_no_whatsapp(isset($row['last_msg_response']) ? $row['last_msg_response'] : '')));
     $msgShort = $hasMsg
         ? message_short_summary($row['last_msg_type'], $row['last_msg_body'], $msgOk)
         : ($lang === 'en' ? 'No message sent' : 'لم تُرسل رسالة');
-    if ($noWa) {
-        $msgShort = 'لا يتوفر واتساب لدى المشترك';
+    if ($noPhone) {
+        $msgShort = $lang === 'en' ? 'Warning: this subscriber has no phone number' : 'تحذير: المشترك ما عنده رقم';
+    } elseif ($noWa) {
+        $msgShort = $lang === 'en' ? 'Warning: this number is not on WhatsApp' : 'تحذير: الرقم موجود بس مو على واتساب';
+    } elseif ($hasMsg && !$msgOk) {
+        $msgShort = $lang === 'en' ? 'Warning: send failed' : 'تحذير: فشل الإرسال';
     }
     $hasActive = !empty($row['active_end']);
     $hadSub = (int) $row['sub_count'] > 0;
@@ -811,7 +829,6 @@ function render_subscriber_table_row($row, $n, $config, $lang)
     $html .= '<td class="col-name"><a class="sub-name cell-edit" href="subscriber.php?id=' . (int) $row['id'] . '" data-edit="name" data-id="' . (int) $row['id'] . '" data-value="' . e($row['name']) . '">' . e($row['name']) . '</a>';
     $html .= rental_badge_html($row);
     $html .= '</td>';
-    $phoneDisp = format_phone_display($row['phone']);
     $html .= '<td class="col-phone"><span class="cell-edit phone-edit" tabindex="0" data-edit="phone" data-id="' . (int) $row['id'] . '" data-value="' . e($row['phone']) . '" title="' . e($lang === 'en' ? 'Click to edit' : 'اضغط للتعديل') . '">' . e($phoneDisp) . '</span>'
         . (function_exists('wa_miss_html') ? wa_miss_html($noWa) : '') . '</td>';
     $html .= '<td class="col-pkg">' . e($pkgLabel);
@@ -847,7 +864,7 @@ function render_subscriber_table_row($row, $n, $config, $lang)
     $html .= render_subscriber_month_cell($row, $lang);
     $html .= '<td class="msg-status-cell col-msg" title="' . e($msgShort) . '">';
     $html .= function_exists('msg_table_status_html')
-        ? msg_table_status_html($hasMsg, $msgOk, $noWa, (int) $row['id'], $logId, $lang)
+        ? msg_table_status_html($hasMsg, $msgOk, $noWa, (int) $row['id'], $logId, $lang, $noPhone)
         : '<span class="dot-msg ' . ($hasMsg ? ($msgOk ? 'ok' : 'fail') : 'off') . '"></span>';
     $html .= '</td>';
     $html .= '</tr>';
@@ -1227,6 +1244,10 @@ function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
   font-weight: 800;
   white-space: nowrap;
   line-height: 1;
+}
+#subsTable .msg-nowa.msg-nophone {
+  background: rgba(245, 158, 11, 0.2);
+  color: #b45309;
 }
 #subsTable .msg-x {
   display: inline-flex;

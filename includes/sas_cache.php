@@ -1829,6 +1829,22 @@ function sas_cards_inventory_save_persisted($groups)
     return @file_put_contents(sas_cards_inventory_cache_path(), $json, LOCK_EX) !== false;
 }
 
+function sas_cards_inventory_forget()
+{
+    $path = sas_cards_inventory_cache_path();
+    if (is_file($path)) {
+        @unlink($path);
+    }
+    unset(
+        $_SESSION['sas_card_groups_v5'],
+        $_SESSION['sas_card_groups_v5_at'],
+        $_SESSION['sas_card_groups_v2'],
+        $_SESSION['sas_card_groups_v2_at'],
+        $_SESSION['sas_unused_ui_v6'],
+        $_SESSION['sas_unused_ui_v6_at']
+    );
+}
+
 function sas_store_dash_card_groups($groups, $source = 'dash')
 {
     if (!is_array($groups)) {
@@ -4534,7 +4550,10 @@ function sas_render_table_row($row, $n, $config, $lang)
 
     $hasMsg = isset($row['last_msg_at']) && $row['last_msg_at'] !== null && $row['last_msg_at'] !== '';
     $msgOk = $hasMsg && !empty($row['last_msg_ok']);
-    $noWa = function_exists('subscriber_row_is_no_whatsapp')
+    $noPhone = function_exists('subscriber_phone_missing')
+        ? subscriber_phone_missing($phone)
+        : ($phone === '' || $phone === '-' || $phone === '—');
+    $noWa = (!$noPhone && function_exists('subscriber_row_is_no_whatsapp'))
         ? subscriber_row_is_no_whatsapp($row)
         : false;
     $msgFail = ($hasMsg && !$msgOk) ? '1' : '0';
@@ -4651,12 +4670,16 @@ function sas_render_table_row($row, $n, $config, $lang)
             ? message_short_summary(isset($row['last_msg_type']) ? $row['last_msg_type'] : '', isset($row['last_msg_body']) ? $row['last_msg_body'] : '', $msgOk)
             : '')
         : ($lang === 'en' ? 'No message sent' : 'لم تُرسل رسالة');
-    if ($noWa) {
-        $msgShort = $lang === 'en' ? 'This number is not on WhatsApp' : 'لا يتوفر واتساب لدى المشترك';
+    if ($noPhone) {
+        $msgShort = $lang === 'en' ? 'Warning: this subscriber has no phone number' : 'تحذير: المشترك ما عنده رقم';
+    } elseif ($noWa) {
+        $msgShort = $lang === 'en' ? 'Warning: this number is not on WhatsApp' : 'تحذير: الرقم موجود بس مو على واتساب';
+    } elseif ($hasMsg && !$msgOk) {
+        $msgShort = $lang === 'en' ? 'Warning: send failed' : 'تحذير: فشل الإرسال';
     }
     $html .= '<td class="msg-status-cell col-msg" title="' . e($msgShort) . '">';
     $html .= function_exists('msg_table_status_html')
-        ? msg_table_status_html($hasMsg, $msgOk, $noWa, $username, $logId, $lang)
+        ? msg_table_status_html($hasMsg, $msgOk, $noWa, $username, $logId, $lang, $noPhone)
         : '<span class="dot-msg ' . ($hasMsg ? ($msgOk ? 'ok' : 'fail') : 'off') . '"></span>';
     $html .= '</td>';
     $html .= '</tr>';

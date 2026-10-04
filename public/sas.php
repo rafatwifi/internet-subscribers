@@ -1270,9 +1270,10 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   text-align: left;
 }
 .sas-radius-page #subsTable .col-msg {
-  width: 96px;
-  min-width: 72px;
-  max-width: 160px;
+  width: 124px;
+  min-width: 108px;
+  max-width: 180px;
+  white-space: nowrap;
 }
 .sas-radius-page #subsTable .msg-status-row {
   display: inline-flex;
@@ -1302,6 +1303,10 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   font-weight: 800;
   white-space: nowrap;
   line-height: 1;
+}
+.sas-radius-page #subsTable .msg-nowa.msg-nophone {
+  background: rgba(245, 158, 11, 0.2);
+  color: #b45309;
 }
 .sas-radius-page #subsTable .msg-retry-btn {
   width: 22px;

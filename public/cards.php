@@ -71,10 +71,28 @@ $treeIds = (function_exists('is_accountant_user') && is_accountant_user() && fun
     ? accountant_tree_ids($pdo) : array();
 $gmTeam = (function_exists('is_group_manager_user') && is_group_manager_user() && function_exists('group_manager_team_ids'))
     ? group_manager_team_ids($pdo) : array();
+$homeUserKey = '';
+$homeNameKey = '';
+if ($homeRow) {
+    $homeUserKey = strtolower(trim((string) $homeRow['username']));
+    $homeNameKey = strtolower(trim((string) (isset($homeRow['display_name']) ? $homeRow['display_name'] : '')));
+}
+if ($homeNameKey === '' && $homeLabel !== '') {
+    $homeNameKey = strtolower(trim($homeLabel));
+}
 $xferTargets = array();
+$xferSeen = array();
 foreach ($agents as $ag) {
     $aid = (int) $ag['id'];
-    if ($aid <= 0 || $aid === $homeId || $aid === $meId) {
+    if ($aid <= 0 || $aid === $homeId || $aid === $meId || !empty($xferSeen[$aid])) {
+        continue;
+    }
+    $agUser = strtolower(trim((string) (isset($ag['username']) ? $ag['username'] : '')));
+    $agName = strtolower(trim((string) (isset($ag['display_name']) ? $ag['display_name'] : '')));
+    if ($homeUserKey !== '' && ($agUser === $homeUserKey || $agName === $homeUserKey)) {
+        continue;
+    }
+    if ($homeNameKey !== '' && ($agUser === $homeNameKey || $agName === $homeNameKey)) {
         continue;
     }
     if ($treeIds && !in_array($aid, $treeIds, true)) {
@@ -88,6 +106,7 @@ foreach ($agents as $ag) {
     if (!$isChildAgency && !in_array($roleAg, array('agent', 'group_manager'), true)) {
         continue;
     }
+    $xferSeen[$aid] = true;
     $xferTargets[] = $ag;
 }
 usort($xferTargets, function ($a, $b) {
@@ -106,6 +125,63 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
         redirect('cards.php');
     }
     $action = post('action');
+        if ($action === 'return_transfer') {
+            $tidRet = (int) post('transfer_id', '0');
+            if (function_exists('set_time_limit')) {
+                @set_time_limit(120);
+            }
+            $ret = card_transfer_return($pdo, $tidRet, $homeId, $meId, $config);
+            if (!empty($ret[0])) {
+                if (function_exists('activity_log')) {
+                    activity_log(
+                        $pdo,
+                        0,
+                        'card_return',
+                        isset($ret[4]) ? (int) $ret[4] : 0,
+                        'card_transfer',
+                        'استرجاع ' . (int) (isset($ret[3]) ? $ret[3] : 0) . ' — ' . (isset($ret[2]) ? $ret[2] : '') . ' إلى ' . $homeLabel,
+                        ''
+                    );
+                }
+                flash('success', $isEn ? 'Returned — the cards are back on your agency in SAS' : 'تم الاسترجاع — الكروت رجعت لوكالتك بالساس');
+            } else {
+                if (function_exists('card_sas_stock_forget')) {
+                    card_sas_stock_forget();
+                }
+                flash('error', card_transfer_error_message(isset($ret[1]) ? $ret[1] : '', $lang));
+            }
+            redirect('cards.php#card-transfer');
+        }
+        if ($action === 'recover_missing_cards') {
+            $tidRec = (int) post('transfer_id', '0');
+            if (function_exists('set_time_limit')) {
+                @set_time_limit(120);
+            }
+            $rec = function_exists('card_transfer_recover_prefix')
+                ? card_transfer_recover_prefix($pdo, $tidRec, $homeId, $config)
+                : array(false, 'sas_not_ready');
+            if (!empty($rec[0])) {
+                if (function_exists('activity_log')) {
+                    activity_log($pdo, 0, 'card_return', $tidRec, 'card_transfer', 'إرجاع كروت ناقصة من سلسلة الوكيل إلى ' . $homeLabel, '');
+                }
+                flash('success', $isEn ? 'The missing cards were returned from the agent series' : 'رجعت الكروت الناقصة من سلسلة الوكيل إلى وكالتك');
+            } else {
+                if (function_exists('card_sas_stock_forget')) {
+                    card_sas_stock_forget();
+                }
+                flash('error', card_transfer_error_message(isset($rec[1]) ? $rec[1] : '', $lang));
+            }
+            redirect('cards.php#card-transfer');
+        }
+        if ($action === 'clear_transfer_history') {
+            $tidClear = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+            $byClear = (function_exists('is_accountant_user') && is_accountant_user()) ? $meId : null;
+            if (function_exists('card_transfer_history_clear')) {
+                card_transfer_history_clear($pdo, $tidClear, $byClear);
+            }
+            flash('success', $isEn ? 'Transfer history cleared. Cards in SAS were not moved.' : 'انمسح سجل التحويل. الكروت بالساس ما انمسّت.');
+            redirect('cards.php#card-transfer');
+        }
     if ($action === 'transfer') {
         $fromAgentId = (int) post('from_agent_id', '0');
         if ($fromAgentId <= 0) {
@@ -134,26 +210,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
         $profileName = trim((string) post('profile_name', ''));
         $qty = (int) post('qty', '0');
         $note = trim((string) post('note', ''));
-        if ($fromAgentId !== $homeId && function_exists('card_agent_stock_summary')) {
-            $haveQty = 0;
-            $fromStock = card_agent_stock_summary($pdo, $fromAgentId);
-            if (!empty($fromStock['rows'])) {
-                foreach ($fromStock['rows'] as $sr) {
-                    $sameName = (string) $sr['profile_name'] === $profileName;
-                    $samePid = $profileId > 0 && (int) $sr['profile_id'] === $profileId;
-                    if ($sameName || $samePid) {
-                        $haveQty = (int) $sr['qty'];
-                        break;
-                    }
-                }
-            }
-            if ($qty > $haveQty) {
-                flash('error', $isEn
-                    ? ('Quantity is above the available ' . $haveQty)
-                    : ('العدد أكبر من المتوفر (' . $haveQty . ')'));
-                redirect('cards.php#card-transfer');
-            }
-        }
         $wholesale = 0;
         $agentPrice = 0;
         $priceAgentId = ($fromAgentId === $homeId) ? $toAgentId : $fromAgentId;
@@ -162,6 +218,64 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
             if ($pr) {
                 $wholesale = (float) $pr['wholesale_price'];
                 $agentPrice = (float) $pr['agent_price'];
+            }
+            if ($wholesale <= 0 && $agentPrice <= 0 && function_exists('agent_card_prices_list')) {
+                $wantName = strtolower($profileName);
+                $wantPid = $profileId;
+                $planNames = array();
+                $planPids = array();
+                if ($wantName !== '') {
+                    $planNames[$wantName] = true;
+                }
+                if ($wantPid > 0) {
+                    $planPids[$wantPid] = true;
+                }
+                try {
+                    $stPl = $pdo->query('SELECT name, sas_profile_id FROM service_plans WHERE is_active = 1');
+                    foreach ($stPl->fetchAll() as $pl) {
+                        $pn = strtolower(trim((string) $pl['name']));
+                        $pp = isset($pl['sas_profile_id']) ? (int) $pl['sas_profile_id'] : 0;
+                        $hit = ($wantName !== '' && $pn === $wantName) || ($wantPid > 0 && $pp > 0 && $pp === $wantPid);
+                        if (!$hit) {
+                            continue;
+                        }
+                        if ($pn !== '') {
+                            $planNames[$pn] = true;
+                        }
+                        if ($pp > 0) {
+                            $planPids[$pp] = true;
+                        }
+                    }
+                } catch (Exception $e) {
+                }
+                $best = null;
+                $bestScore = 0;
+                foreach (agent_card_prices_list($pdo, $priceAgentId) as $row) {
+                    $rn = strtolower(trim((string) $row['profile_name']));
+                    $rp = isset($row['profile_id']) ? (int) $row['profile_id'] : 0;
+                    $score = 0;
+                    if ($wantName !== '' && $rn === $wantName) {
+                        $score = 3;
+                    } elseif ($rn !== '' && !empty($planNames[$rn])) {
+                        $score = 2;
+                    } elseif ($rp > 0 && !empty($planPids[$rp])) {
+                        $score = 1;
+                    }
+                    if ($score > $bestScore) {
+                        $bestScore = $score;
+                        $best = $row;
+                    }
+                }
+                if ($best) {
+                    $wholesale = (float) $best['wholesale_price'];
+                    $agentPrice = (float) $best['agent_price'];
+                    if ($wholesale <= 0) {
+                        $wholesale = $agentPrice;
+                    }
+                    if ($agentPrice <= 0) {
+                        $agentPrice = $wholesale;
+                    }
+                }
             }
         }
         if ($wholesale <= 0 && $agentPrice <= 0 && $fromAgentId !== $homeId && function_exists('card_agent_stock_summary')) {
@@ -182,6 +296,51 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
             redirect('cards.php#card-transfer');
         }
 
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(120);
+        }
+        if (!function_exists('sas_make_connector') || !function_exists('sas_is_ready') || !sas_is_ready($config)) {
+            flash('error', card_transfer_error_message('sas_not_ready', $lang));
+            redirect('cards.php#card-transfer');
+        }
+        $apiMove = sas_make_connector($config);
+        if (!$apiMove || !method_exists($apiMove, 'moveUnusedCardsToOwner')) {
+            flash('error', card_transfer_error_message('sas_not_ready', $lang));
+            redirect('cards.php#card-transfer');
+        }
+        if (method_exists($apiMove, 'setTimeout')) {
+            $apiMove->setTimeout(50);
+        }
+        $fromMid = card_user_sas_manager_id($pdo, $fromAgentId, $homeId, $apiMove);
+        $toMid = card_user_sas_manager_id($pdo, $toAgentId, $homeId, $apiMove);
+        if ($toAgentId === $homeId && $toMid <= 0) {
+            flash('error', card_transfer_error_message('sas_home_missing', $lang));
+            redirect('cards.php#card-transfer');
+        }
+        if (($fromAgentId !== $homeId && $fromMid <= 0) || ($toAgentId !== $homeId && $toMid <= 0)) {
+            flash('error', card_transfer_error_message('sas_manager_missing', $lang));
+            redirect('cards.php#card-transfer');
+        }
+        if ($fromMid > 0 && $toMid > 0 && $fromMid === $toMid) {
+            flash('error', card_transfer_error_message('sas_same_owner', $lang));
+            redirect('cards.php#card-transfer');
+        }
+        $foreignOwners = array();
+        if ($fromAgentId === $homeId) {
+            $foreignOwners = card_child_sas_manager_ids($pdo, $homeId);
+            if (!$foreignOwners) {
+                $foreignOwners = array(-1);
+            }
+        }
+        $move = $apiMove->moveUnusedCardsToOwner($profileId, $profileName, $qty, $toMid, $fromMid, $foreignOwners);
+        if (empty($move['ok'])) {
+            if (function_exists('card_sas_stock_forget')) {
+                card_sas_stock_forget();
+            }
+            flash('error', card_sas_move_error($move, $lang));
+            redirect('cards.php#card-transfer');
+        }
+
         list($ok, $code) = transfer_cards(
             $pdo,
             $fromAgentId,
@@ -192,8 +351,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
             $wholesale,
             $agentPrice,
             $note,
-            $meId
+            $meId,
+            false,
+            isset($move['ranges']) ? $move['ranges'] : array()
         );
+        if (!$ok && method_exists($apiMove, 'restoreCardRanges')) {
+            $apiMove->restoreCardRanges(isset($move['ranges']) ? $move['ranges'] : array(), $fromMid);
+        }
+        if ($ok && function_exists('card_sas_stock_forget')) {
+            card_sas_stock_forget();
+        }
         if ($ok) {
             if (function_exists('activity_log')) {
                 $toName = $toRow && !empty($toRow['display_name']) ? $toRow['display_name'] : ('#' . $toAgentId);
@@ -209,7 +376,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
                     $note
                 );
             }
-            flash('success', $isEn ? 'Transfer recorded' : 'تم تسجيل التحويل');
+            flash('success', $isEn ? 'Transferred — the cards moved in SAS' : 'تم التحويل — الكروت انتقلت بالساس');
         } else {
             flash('error', card_transfer_error_message($code, $lang));
         }
@@ -241,13 +408,16 @@ function cards_page_fetch_inventory($config, $force = false)
 {
     $groups = array();
     if (!$force && function_exists('sas_cards_inventory_load_persisted')) {
-        $cached = sas_cards_inventory_load_persisted(300);
+        $cached = sas_cards_inventory_load_persisted(180);
         if ($cached && !empty($cached['groups'])) {
             return array($cached['groups'], true);
         }
     }
     if (!function_exists('sas_page_connector')) {
         return array($groups, false);
+    }
+    if (function_exists('app_session_close')) {
+        app_session_close();
     }
     $api = sas_page_connector($config);
     if (!$api) {
@@ -480,6 +650,61 @@ function cards_filter_groups_scope($pdo, $groups)
     return $groups;
 }
 
+function cards_page_xfer_stock($homeId, $groups, $xferTargets, $sasMap)
+{
+    $xferStock = array();
+    $alignBag = function ($nameQty) use ($groups) {
+        $bag = array();
+        $keys = array();
+        if (is_array($groups)) {
+            foreach ($groups as $g0) {
+                $gn = isset($g0['name']) ? (string) $g0['name'] : '';
+                if ($gn === '') {
+                    continue;
+                }
+                $bag[$gn] = 0;
+                if (function_exists('card_name_key')) {
+                    $keys[card_name_key($gn)] = $gn;
+                }
+            }
+        }
+        if (!is_array($nameQty)) {
+            $nameQty = array();
+        }
+        foreach ($nameQty as $nm => $qtyBag) {
+            $nm = (string) $nm;
+            $k = function_exists('card_name_key') ? card_name_key($nm) : strtolower(trim($nm));
+            if ($k !== '' && isset($keys[$k])) {
+                $bag[$keys[$k]] += (int) $qtyBag;
+            } elseif (trim($nm) !== '') {
+                if (!isset($bag[$nm])) {
+                    $bag[$nm] = 0;
+                }
+                $bag[$nm] += (int) $qtyBag;
+            }
+        }
+        return $bag;
+    };
+    $homeNames = array();
+    if (!empty($groups)) {
+        foreach ($groups as $g0) {
+            $gn = isset($g0['name']) ? (string) $g0['name'] : '';
+            if ($gn === '') {
+                continue;
+            }
+            $homeNames[$gn] = isset($g0['unused']) ? (int) $g0['unused'] : 0;
+        }
+    }
+    $xferStock[(string) $homeId] = $homeNames;
+    if (is_array($xferTargets)) {
+        foreach ($xferTargets as $ag) {
+            $aid = (int) $ag['id'];
+            $xferStock[(string) $aid] = $alignBag(isset($sasMap[$aid]) ? $sasMap[$aid] : array());
+        }
+    }
+    return $xferStock;
+}
+
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'inventory') {
     header('Content-Type: application/json; charset=utf-8');
     $force = (isset($_GET['refresh']) && $_GET['refresh'] === '1');
@@ -567,6 +792,34 @@ foreach ($groups as $g0) {
     $sumUnused += isset($g0['unused']) ? (int) $g0['unused'] : 0;
 }
 
+$sasMapCached = null;
+$sasMapKey = 'card_sas_stock_map_v2';
+if (!empty($_SESSION[$sasMapKey]) && is_array($_SESSION[$sasMapKey]) && !empty($_SESSION[$sasMapKey . '_at'])
+    && (time() - (int) $_SESSION[$sasMapKey . '_at']) < 180) {
+    $sasMapCached = $_SESSION[$sasMapKey];
+}
+$xferStockPending = ($sasMapCached === null && $canTransfer);
+
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'xfer_stock') {
+    header('Content-Type: application/json; charset=utf-8');
+    if (function_exists('set_time_limit')) {
+        @set_time_limit(90);
+    }
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
+    $liveMap = ($canTransfer && function_exists('card_sas_stock_map'))
+        ? card_sas_stock_map($pdo, $config, $homeId)
+        : array();
+    echo json_encode(array(
+        'ok' => true,
+        'stock' => cards_page_xfer_stock($homeId, $groups, $xferTargets, is_array($liveMap) ? $liveMap : array()),
+    ));
+    exit;
+}
+
+$xferStock = cards_page_xfer_stock($homeId, $groups, $xferTargets, is_array($sasMapCached) ? $sasMapCached : array());
+
 render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 ?>
 <?php if ($agentStockPanel && !empty($agentStockPanel['stock']['rows'])): ?>
@@ -604,6 +857,18 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 </div>
 <?php endif; ?>
 <style>
+.cards-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.cards-page .cards-block { order: 1; }
+.cards-page .xfer-panel { order: 2; }
+.cards-page .cards-section-title {
+  margin: 0 0 10px;
+  font-size: 18px;
+  font-weight: 800;
+}
 .cards-page .cards-wids {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -620,8 +885,10 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
   min-height: 112px; padding: 16px 16px 14px 18px; width: 100%; text-align: inherit; font: inherit;
   cursor: pointer;
   background: linear-gradient(145deg, var(--c1) 0%, var(--c2) 100%);
-  box-shadow: 6px 7px 0 rgba(15, 23, 42, 0.12);
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
+  transition: transform .15s ease, box-shadow .15s ease;
 }
+.cards-page .sas-box:hover { transform: translateY(-1px); box-shadow: 0 10px 22px rgba(15, 23, 42, 0.16); }
 .cards-page .sas-box-title { font-size: 13px; font-weight: 800; opacity: .95; }
 .cards-page .sas-box-sub { font-size: 11px; font-weight: 600; opacity: .8; margin-top: 2px; }
 .cards-page .sas-box-val { font-size: 28px; font-weight: 800; margin-top: 10px; }
@@ -744,10 +1011,17 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 .cards-page .used-fold.is-open .used-fold-body { display: block; }
 .cards-page .used-fold.is-open .used-fold-chevron { transform: rotate(90deg); display: inline-block; }
 .cards-page .xfer-panel {
-  border: 1px solid #d8dee8; border-radius: 14px; background: #fff;
-  padding: 16px; margin: 0 0 18px;
+  border: 1px solid #e2e8f0; border-radius: 16px; background: #fff;
+  padding: 16px 16px 8px; margin: 6px 0 0;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.04);
 }
-.cards-page .xfer-panel h2 { margin: 0 0 12px; font-size: 16px; }
+.cards-page .xfer-panel h2 { margin: 0 0 6px; font-size: 18px; }
+.cards-page .xfer-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin: 16px 0 8px;
+}
+.cards-page .xfer-head h3 { margin: 0; font-size: 14px; }
+.cards-page .xfer-scroll { max-height: 320px; overflow: auto; border: 1px solid #eef2f6; border-radius: 12px; }
 .cards-page .xfer-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px;
 }
@@ -772,38 +1046,9 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
     <div class="xfer-panel" id="card-transfer">
         <h2><?php echo e($isEn ? 'Card transfer' : 'تحويل كروت'); ?></h2>
         <p class="meta" style="margin:0 0 10px"><?php echo e($isEn
-            ? 'Amount is taken from the agent price set by the admin.'
-            : 'المبلغ ينحسب من تسعيرة الوكيل اللي حاطها الأدمن.'); ?></p>
+            ? 'Available is the unused count in SAS. Transfer changes the card owner there.'
+            : 'المتوفر هو الشاغر بالساس، والتحويل يغيّر مالك الكروت هناك.'); ?></p>
         <?php
-        $xferStock = array();
-        $homeBag = array();
-        $homeSum = function_exists('card_agent_stock_summary') ? card_agent_stock_summary($pdo, $homeId) : array('rows' => array());
-        if (!empty($homeSum['rows'])) {
-            foreach ($homeSum['rows'] as $sr) {
-                $homeBag[(string) $sr['profile_name']] = (int) $sr['qty'];
-            }
-        } elseif (!empty($groups)) {
-            foreach ($groups as $g0) {
-                $gn = isset($g0['name']) ? (string) $g0['name'] : '';
-                if ($gn === '') {
-                    continue;
-                }
-                $homeBag[$gn] = isset($g0['unused']) ? (int) $g0['unused'] : 0;
-            }
-        }
-        $xferStock[(string) $homeId] = $homeBag;
-        if (function_exists('card_agent_stock_summary')) {
-            foreach ($xferTargets as $ag) {
-                $bag = array();
-                $sum = card_agent_stock_summary($pdo, (int) $ag['id']);
-                if (!empty($sum['rows'])) {
-                    foreach ($sum['rows'] as $sr) {
-                        $bag[(string) $sr['profile_name']] = (int) $sr['qty'];
-                    }
-                }
-                $xferStock[(string) (int) $ag['id']] = $bag;
-            }
-        }
         $xferOpt = function ($ag) use ($isEn) {
             $opt = trim((string) $ag['display_name']) !== '' ? $ag['display_name'] : $ag['username'];
             if (isset($ag['is_active']) && (int) $ag['is_active'] !== 1) {
@@ -874,11 +1119,13 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
           var availEl = document.getElementById('xferAvail');
           var homeId = <?php echo (int) $homeId; ?>;
           var stock = <?php echo json_encode($xferStock); ?> || {};
+          var stockPending = <?php echo $xferStockPending ? 'true' : 'false'; ?>;
           var availWord = <?php echo json_encode($isEn ? 'Available: ' : 'المتوفر: '); ?>;
           if (!form || !fromSel || !toSel || !qty) return;
           function availNow() {
             var name = profile ? profile.value : '';
             if (!name) return null;
+            if (stockPending && String(fromSel.value) !== String(homeId)) return null;
             var bag = stock[fromSel.value] || {};
             if (typeof bag[name] === 'undefined') return 0;
             return parseInt(bag[name], 10) || 0;
@@ -941,12 +1188,56 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
           });
           paintEnds();
           paintQty();
+          if (stockPending) {
+            var stockXhr = new XMLHttpRequest();
+            stockXhr.open('GET', 'cards.php?ajax=xfer_stock', true);
+            stockXhr.onload = function () {
+              var data = null;
+              try { data = JSON.parse(stockXhr.responseText); } catch (e) {}
+              stockPending = false;
+              if (data && data.stock) {
+                var sk;
+                for (sk in data.stock) {
+                  if (Object.prototype.hasOwnProperty.call(data.stock, sk)) stock[sk] = data.stock[sk];
+                }
+              }
+              paintQty();
+            };
+            stockXhr.onerror = function () {
+              stockPending = false;
+              paintQty();
+            };
+            stockXhr.send();
+          }
+          window.cardXferApplyGroups = function (groups) {
+            var bag = {};
+            var i, g, name;
+            for (i = 0; i < (groups || []).length; i++) {
+              g = groups[i];
+              if (!g || !g.name) continue;
+              name = String(g.name);
+              bag[name] = parseInt(g.unused, 10) || 0;
+            }
+            stock[String(homeId)] = bag;
+            paintQty();
+          };
         })();
         </script>
 
+        <div class="xfer-head">
+            <h3><?php echo e($isEn ? 'Recent transfers' : 'آخر التحويلات'); ?></h3>
+            <?php if ($recentTransfers): ?>
+            <form method="post" style="margin:0" onsubmit="return confirm(<?php echo json_encode($isEn
+                ? 'Clear this transfer history? Cards in SAS stay where they are.'
+                : 'تمسح سجل التحويل من البوابة؟ الكروت بالساس تبقى بمكانها.'); ?>);">
+                <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                <input type="hidden" name="action" value="clear_transfer_history">
+                <button class="btn ghost sm" type="submit"><?php echo e($isEn ? 'Clear history' : 'مسح السجل'); ?></button>
+            </form>
+            <?php endif; ?>
+        </div>
         <?php if ($recentTransfers): ?>
-        <h3 style="margin:18px 0 8px;font-size:14px"><?php echo e($isEn ? 'Recent transfers' : 'آخر التحويلات'); ?></h3>
-        <div class="table-wrap">
+        <div class="table-wrap xfer-scroll">
             <table class="xfer-table">
                 <thead>
                 <tr>
@@ -958,22 +1249,60 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
                     <th><?php echo e($isEn ? 'Profit' : 'ربح'); ?></th>
                     <th><?php echo e($isEn ? 'Note' : 'ملاحظة'); ?></th>
                     <th><?php echo e($isEn ? 'By' : 'بواسطة'); ?></th>
+                    <th></th>
                 </tr>
                 </thead>
                 <tbody>
-                <?php foreach ($recentTransfers as $tr):
+                <?php
+                $returnedIds = array();
+                foreach ($recentTransfers as $trMark) {
+                    if (!empty($trMark['return_of_id'])) {
+                        $returnedIds[(int) $trMark['return_of_id']] = true;
+                    }
+                }
+                foreach ($recentTransfers as $tr):
                     $fromLbl = $tr['from_name'] ? $tr['from_name'] : ($isEn ? 'Warehouse' : 'مخزن');
                     $profit = card_transfer_profit($tr['wholesale_price'], $tr['agent_price'], $tr['qty']);
+                    $isReturn = !empty($tr['return_of_id']);
+                    $canReturn = $canTransfer && !$isReturn && empty($returnedIds[(int) $tr['id']]);
+                    $trTo = isset($tr['to_agent_id']) ? (int) $tr['to_agent_id'] : 0;
+                    $trFrom = isset($tr['from_agent_id']) ? (int) $tr['from_agent_id'] : 0;
+                    if ($trTo === (int) $homeId || ($trFrom > 0 && $trFrom !== (int) $homeId)) {
+                        $canReturn = false;
+                    }
+                    $hasSasMove = !empty($tr['sas_ranges']);
                     ?>
                     <tr>
                         <td><?php echo e(isset($tr['created_at']) ? $tr['created_at'] : ''); ?></td>
                         <td><?php echo e($fromLbl); ?></td>
                         <td><?php echo e(isset($tr['to_name']) ? $tr['to_name'] : ''); ?></td>
-                        <td><?php echo e(isset($tr['profile_name']) ? $tr['profile_name'] : ''); ?></td>
+                        <td><?php echo e(isset($tr['profile_name']) ? $tr['profile_name'] : ''); ?><?php if ($isReturn): ?> <span class="meta"><?php echo e($isEn ? 'return' : 'استرجاع'); ?></span><?php endif; ?></td>
                         <td><?php echo (int) $tr['qty']; ?></td>
-                        <td><?php echo e(money_format_iqd($profit, $config['currency'])); ?></td>
+                        <td><?php echo e(money_format_iqd($isReturn ? (0 - $profit) : $profit, $config['currency'])); ?></td>
                         <td><?php echo e(isset($tr['note']) ? $tr['note'] : ''); ?></td>
                         <td><?php echo e(isset($tr['created_by_name']) ? $tr['created_by_name'] : ''); ?></td>
+                        <td>
+                            <?php if ($canReturn && $hasSasMove): ?>
+                            <form method="post" style="margin:0" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Return these cards to your agency?' : 'ترجع هذي الكروت إلى وكالتك؟'); ?>);">
+                                <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                                <input type="hidden" name="action" value="return_transfer">
+                                <input type="hidden" name="transfer_id" value="<?php echo (int) $tr['id']; ?>">
+                                <button class="btn ghost sm" type="submit"><?php echo e($isEn ? 'Return cards' : 'استرجاع الكروت'); ?></button>
+                            </form>
+                            <?php elseif (!$isReturn && $hasSasMove && !empty($returnedIds[(int) $tr['id']])): ?>
+                            <span class="meta"><?php echo e($isEn ? 'Returned' : 'مسترجع'); ?></span>
+                            <form method="post" style="margin:6px 0 0" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Bring back only the series that still starts with the original first card. The remaining card stays.' : 'إذا بقت كروت ناقصة بسلسلة تبدأ بأول كارت اننقل، ترجع لوكالتك. الكرت الباقي ما ينلمس.'); ?>);">
+                                <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                                <input type="hidden" name="action" value="recover_missing_cards">
+                                <input type="hidden" name="transfer_id" value="<?php echo (int) $tr['id']; ?>">
+                                <button class="btn ghost sm" type="submit"><?php echo e($isEn ? 'Bring missing cards' : 'رجّع الكروت الناقصة'); ?></button>
+                            </form>
+                            <?php elseif ($isReturn || !empty($returnedIds[(int) $tr['id']])): ?>
+                            <span class="meta"><?php echo e($isEn ? 'Returned' : 'مسترجع'); ?></span>
+                            <?php elseif ($canReturn && !$hasSasMove): ?>
+                            <span class="meta"><?php echo e($isEn ? 'Not moved in SAS' : 'ما اننقل بالساس'); ?></span>
+                            <?php endif; ?>
+                        </td>
                     </tr>
                 <?php endforeach; ?>
                 </tbody>
@@ -983,6 +1312,8 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
     </div>
     <?php endif; ?>
     <?php if (!$cardsOwnStockOnly): ?>
+    <div class="cards-block">
+    <h2 class="cards-section-title"><?php echo e($isEn ? 'Cards' : 'الكروت الموجودة'); ?></h2>
     <p class="cards-sync<?php echo $fromCache ? '' : ' is-busy'; ?>" id="cardsSync">
         <?php
         if ($err) {
@@ -1131,6 +1462,7 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
         <?php endforeach; ?>
         </div>
     <?php endif; ?>
+    </div>
     </div>
     <?php endif; ?>
 </div>
@@ -1432,6 +1764,9 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
           return;
         }
         renderGroups(d.groups || []);
+        if (typeof window.cardXferApplyGroups === 'function') {
+          window.cardXferApplyGroups(d.groups || []);
+        }
         if (syncEl) {
           syncEl.classList.remove('is-busy');
           syncEl.textContent = isEn ? 'Synced' : 'تمت المزامنة';

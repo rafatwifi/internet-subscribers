@@ -6,6 +6,75 @@ require_once __DIR__ . '/../includes/settings_tabs.php';
 require_login();
 require_perm('plans');
 
+function plans_priced_user_id($pdo)
+{
+    $me = function_exists('current_admin') ? current_admin() : null;
+    if (!$me) {
+        return 0;
+    }
+    $uid = (int) $me['id'];
+    $role = isset($me['role']) ? (string) $me['role'] : '';
+    if ($role === 'admin') {
+        return $uid;
+    }
+    $tid = isset($me['tenant_id']) ? (int) $me['tenant_id'] : 0;
+    if ($tid <= 0 || !$pdo) {
+        return $uid;
+    }
+    try {
+        $st = $pdo->prepare('SELECT id FROM admin_users WHERE role = "admin" AND tenant_id = :t ORDER BY id ASC LIMIT 1');
+        $st->execute(array(':t' => $tid));
+        $id = (int) $st->fetchColumn();
+        if ($id > 0) {
+            return $id;
+        }
+    } catch (Exception $e) {
+    }
+    return $uid;
+}
+
+function plans_price_floors($pdo)
+{
+    $byName = array();
+    $byPid = array();
+    $uid = plans_priced_user_id($pdo);
+    if ($uid <= 0 || !$pdo || !function_exists('agent_card_prices_list')) {
+        return array($byName, $byPid);
+    }
+    foreach (agent_card_prices_list($pdo, $uid) as $row) {
+        $v = isset($row['agent_price']) ? (float) $row['agent_price'] : 0;
+        if ($v <= 0 && isset($row['wholesale_price'])) {
+            $v = (float) $row['wholesale_price'];
+        }
+        if ($v <= 0) {
+            continue;
+        }
+        $nk = strtolower(trim((string) $row['profile_name']));
+        if ($nk !== '' && (!isset($byName[$nk]) || $byName[$nk] < $v)) {
+            $byName[$nk] = $v;
+        }
+        $pid = isset($row['profile_id']) ? (int) $row['profile_id'] : 0;
+        if ($pid > 0 && (!isset($byPid[$pid]) || $byPid[$pid] < $v)) {
+            $byPid[$pid] = $v;
+        }
+    }
+    return array($byName, $byPid);
+}
+
+function plans_floor_for($byName, $byPid, $name, $sasId)
+{
+    $floor = 0;
+    $nk = strtolower(trim((string) $name));
+    if ($nk !== '' && isset($byName[$nk]) && (float) $byName[$nk] > $floor) {
+        $floor = (float) $byName[$nk];
+    }
+    $sasId = (int) $sasId;
+    if ($sasId > 0 && isset($byPid[$sasId]) && (float) $byPid[$sasId] > $floor) {
+        $floor = (float) $byPid[$sasId];
+    }
+    return $floor;
+}
+
 $editId = isset($_GET['edit']) ? (int) $_GET['edit'] : 0;
 $editPlan = null;
 
@@ -20,13 +89,50 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'create' || $action === 'update') {
         $id = (int) post('id', '0');
         $name = trim((string) post('name', ''));
-        $price = (float) post('monthly_price', '0');
         $cost = (float) post('cost_price', '0');
         $sort = (int) post('sort_order', '100');
         $sasProfile = (int) post('sas_profile_id', '0');
+        $price = $cost;
+        if ($action === 'update' && $id > 0) {
+            try {
+                $stKeep = $pdo->prepare('SELECT monthly_price FROM service_plans WHERE id = :id LIMIT 1');
+                $stKeep->execute(array(':id' => $id));
+                $kept = $stKeep->fetchColumn();
+                if ($kept !== false && $kept !== null) {
+                    $price = (float) $kept;
+                }
+            } catch (Exception $e) {
+            }
+        }
 
         if ($name === '' || $price < 0 || $cost < 0) {
             flash('error', 'اسم الباقة مطلوب والأسعار لا تكون سالبة');
+            redirect($action === 'update' ? ('plans.php?edit=' . $id) : 'plans.php');
+        }
+
+        list($floorByName, $floorByPid) = plans_price_floors($pdo);
+        $floor = plans_floor_for($floorByName, $floorByPid, $name, $sasProfile);
+        if ($action === 'update' && $id > 0) {
+            try {
+                $stOld = $pdo->prepare('SELECT name, sas_profile_id FROM service_plans WHERE id = :id LIMIT 1');
+                $stOld->execute(array(':id' => $id));
+                $oldPlan = $stOld->fetch();
+                if ($oldPlan) {
+                    $oldFloor = plans_floor_for(
+                        $floorByName,
+                        $floorByPid,
+                        isset($oldPlan['name']) ? $oldPlan['name'] : '',
+                        isset($oldPlan['sas_profile_id']) ? $oldPlan['sas_profile_id'] : 0
+                    );
+                    if ($oldFloor > $floor) {
+                        $floor = $oldFloor;
+                    }
+                }
+            } catch (Exception $e) {
+            }
+        }
+        if ($floor > 0 && $cost + 0.001 < $floor) {
+            flash('error', 'السعر ما ينزل عن ' . (int) $floor . '. الصفحة اللي فوق مسعّرة هذا الوكيل بهذا السعر.');
             redirect($action === 'update' ? ('plans.php?edit=' . $id) : 'plans.php');
         }
 
@@ -168,7 +274,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $sort++;
             $added++;
         }
-        flash('success', 'تم الاستيراد من الساس: ' . $added . ' باقة جديدة' . ($linked > 0 ? ('، وربط ' . $linked) : '') . '. سعّر الكوست والبيع هنا لحساب الربح.');
+        flash('success', 'تم الاستيراد من الساس: ' . $added . ' باقة جديدة' . ($linked > 0 ? ('، وربط ' . $linked) : '') . '.');
         redirect('plans.php');
     }
 }
@@ -184,6 +290,16 @@ if ($editId > 0) {
 }
 
 $plans = $pdo->query('SELECT * FROM service_plans ORDER BY sort_order ASC, monthly_price ASC, id ASC')->fetchAll();
+list($floorByName, $floorByPid) = plans_price_floors($pdo);
+$editFloor = 0;
+if ($editPlan) {
+    $editFloor = plans_floor_for(
+        $floorByName,
+        $floorByPid,
+        isset($editPlan['name']) ? $editPlan['name'] : '',
+        isset($editPlan['sas_profile_id']) ? $editPlan['sas_profile_id'] : 0
+    );
+}
 $nextSort = 1;
 if ($plans) {
     $maxSort = 0;
@@ -247,14 +363,12 @@ render_settings_tabs('plans');
                            value="<?php echo e($editPlan ? $editPlan['name'] : ''); ?>">
                 </div>
                 <div>
-                    <label>سعر البيع للمشترك</label>
-                    <input type="number" name="monthly_price" min="0" step="1000"
-                           value="<?php echo e($editPlan ? (string) (int) $editPlan['monthly_price'] : '0'); ?>">
-                </div>
-                <div>
-                    <label>سعر الجملة / تكلفتك</label>
-                    <input type="number" name="cost_price" min="0" step="1000" required
+                    <label>السعر</label>
+                    <input type="number" name="cost_price" min="<?php echo $editFloor > 0 ? (int) $editFloor : 0; ?>" step="any" required
                            value="<?php echo e($editPlan ? (string) (int) $editPlan['cost_price'] : '0'); ?>">
+                    <?php if ($editFloor > 0): ?>
+                    <p class="meta" style="margin:6px 0 0">ما ينزل عن <?php echo (int) $editFloor; ?> — سعر الصفحة اللي فوق.</p>
+                    <?php endif; ?>
                 </div>
                 <div>
                     <label><?php echo e(t('sort_order')); ?></label>
@@ -283,33 +397,33 @@ render_settings_tabs('plans');
                 <th>#</th>
                 <th>التسلسل</th>
                 <th>الباقة</th>
-                <th>سعر البيع</th>
-                <th>التكلفة</th>
+                <th>السعر</th>
                 <th>SAS</th>
-                <th>الربح</th>
                 <th>الحالة</th>
                 <th>إجراءات</th>
             </tr>
             </thead>
             <tbody id="plansBody">
             <?php if (!$plans): ?>
-                <tr><td colspan="10"><?php echo e($lang === 'en' ? 'No packages yet — press +' : 'لا توجد باقات بعد — اضغط +'); ?></td></tr>
+                <tr><td colspan="8"><?php echo e($lang === 'en' ? 'No packages yet — press +' : 'لا توجد باقات بعد — اضغط +'); ?></td></tr>
             <?php endif; ?>
             <?php foreach ($plans as $p): ?>
                 <?php
-                $sell = (float) $p['monthly_price'];
                 $cost = isset($p['cost_price']) ? (float) $p['cost_price'] : 0;
-                $profit = $sell - $cost;
+                $rowFloor = plans_floor_for(
+                    $floorByName,
+                    $floorByPid,
+                    isset($p['name']) ? $p['name'] : '',
+                    isset($p['sas_profile_id']) ? $p['sas_profile_id'] : 0
+                );
                 ?>
                 <tr draggable="true" data-id="<?php echo (int) $p['id']; ?>">
                     <td class="drag-handle" title="اسحب">☰</td>
                     <td class="row-num"></td>
                     <td><strong><?php echo (int) $p['sort_order']; ?></strong></td>
                     <td><strong><?php echo e($p['name']); ?></strong></td>
-                    <td><?php echo e(money_format_iqd($sell, $config['currency'])); ?></td>
-                    <td><?php echo e(money_format_iqd($cost, $config['currency'])); ?></td>
+                    <td><?php echo e(money_format_iqd($cost, $config['currency'])); ?><?php if ($rowFloor > 0 && $cost + 0.001 < $rowFloor): ?><div class="meta">الحد <?php echo (int) $rowFloor; ?></div><?php endif; ?></td>
                     <td><?php echo !empty($p['sas_profile_id']) ? ('#' . (int) $p['sas_profile_id']) : '—'; ?></td>
-                    <td><?php echo e(money_format_iqd($profit, $config['currency'])); ?></td>
                     <td>
                         <span class="badge <?php echo ((int) $p['is_active'] === 1) ? 'active' : 'expired'; ?>">
                             <?php echo ((int) $p['is_active'] === 1) ? 'مفعّلة' : 'موقوفة'; ?>
