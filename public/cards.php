@@ -3,6 +3,9 @@
 require_once __DIR__ . '/../includes/bootstrap.php';
 require_once __DIR__ . '/../includes/layout.php';
 require_login();
+if (function_exists('account_viewer_is_leaf_child') && account_viewer_is_leaf_child($pdo)) {
+    redirect('index.php');
+}
 if (!user_can('cards') && !user_can('card_accounting')) {
     require_perm('cards');
 }
@@ -408,7 +411,7 @@ function cards_page_fetch_inventory($config, $force = false)
 {
     $groups = array();
     if (!$force && function_exists('sas_cards_inventory_load_persisted')) {
-        $cached = sas_cards_inventory_load_persisted(180);
+        $cached = sas_cards_inventory_load_persisted(0);
         if ($cached && !empty($cached['groups'])) {
             return array($cached['groups'], true);
         }
@@ -456,6 +459,9 @@ function cards_page_fetch_inventory($config, $force = false)
         if (is_array($pins)) {
             $_SESSION['sas_unused_ui_v6'] = $pins;
             $_SESSION['sas_unused_ui_v6_at'] = time();
+            if (session_status() !== PHP_SESSION_ACTIVE && function_exists('app_session_touch')) {
+                app_session_touch();
+            }
         }
     }
     return array($groups, false);
@@ -710,13 +716,17 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'inventory') {
     $force = (isset($_GET['refresh']) && $_GET['refresh'] === '1');
     $out = array('ok' => true, 'groups' => array(), 'from_cache' => false, 'error' => '');
     if (!$sasReady) {
-        $out['ok'] = false;
-        $out['error'] = $isEn ? 'Enable SAS in settings first' : 'فعّل ربط SAS من الإعدادات أولاً';
+        $out['ok'] = true;
+        $out['groups'] = array();
+        $out['from_cache'] = true;
         echo json_encode($out);
         exit;
     }
     if (function_exists('set_time_limit')) {
         @set_time_limit(90);
+    }
+    if (function_exists('app_session_close')) {
+        app_session_close();
     }
     try {
         list($groups, $fromCache) = cards_page_fetch_inventory($config, $force);
@@ -777,8 +787,6 @@ if ($sasReady) {
             $fromCache = true;
         }
     }
-} else {
-    $err = $isEn ? 'Enable SAS in settings first' : 'فعّل ربط SAS من الإعدادات أولاً';
 }
 
 $groups = cards_filter_groups_scope($pdo, cards_enrich_used_by_links($pdo, $groups));
@@ -915,6 +923,7 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 .cards-page .cards-sync {
   font-size: 12px; font-weight: 700; color: #64748b; margin: 0 0 10px;
 }
+.cards-page .cards-sync:empty { display: none; margin: 0; }
 .cards-page .cards-sync.is-busy { color: #0f766e; }
 .cards-page .cat-block {
   border: 1px solid #d8dee8;
@@ -1314,19 +1323,17 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
     <?php if (!$cardsOwnStockOnly): ?>
     <div class="cards-block">
     <h2 class="cards-section-title"><?php echo e($isEn ? 'Cards' : 'الكروت الموجودة'); ?></h2>
-    <p class="cards-sync<?php echo $fromCache ? '' : ' is-busy'; ?>" id="cardsSync">
-        <?php
-        if ($err) {
+    <p class="cards-sync<?php echo ($sasReady && ($err || !$fromCache)) ? ' is-busy' : ''; ?>" id="cardsSync"><?php
+        if ($sasReady && $err) {
             echo e($err);
-        } elseif ($fromCache) {
-            echo e($isEn ? 'Showing saved cards — syncing quietly…' : 'عرض الكروت المحفوظة — مزامنة بهدوء…');
-        } else {
+        } elseif ($sasReady && !$fromCache) {
             echo e($isEn ? 'Loading cards…' : 'جاري تحميل الكروت…');
         }
-        ?>
-    </p>
+    ?></p>
     <div id="cardsRoot">
-    <?php if ($err && !$groups): ?>
+    <?php if (!$sasReady && !$groups): ?>
+        <p style="font-weight:700;color:#64748b" id="cardsEmpty"><?php echo e($isEn ? 'This account has no SAS or reseller, so cards are not synced.' : 'هذا الحساب ما مربوط بساس أو ريسلر، فماكو مزامنة كروت.'); ?></p>
+    <?php elseif ($err && !$groups): ?>
         <p style="color:#dd4b39;font-weight:700"><?php echo e($err); ?></p>
     <?php elseif (!$groups): ?>
         <p style="font-weight:700;color:#64748b" id="cardsEmpty"><?php echo e($isEn ? 'Loading…' : 'جاري التحميل…'); ?></p>
@@ -1471,6 +1478,7 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 (function () {
   var isEn = <?php echo $isEn ? 'true' : 'false'; ?>;
   var ownStockOnly = <?php echo $cardsOwnStockOnly ? 'true' : 'false'; ?>;
+  var sasReady = <?php echo !empty($sasReady) ? 'true' : 'false'; ?>;
   var syncEl = document.getElementById('cardsSync');
   var root = document.getElementById('cardsRoot');
 
@@ -1749,6 +1757,9 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
   }
 
   function sync(force) {
+    if (!sasReady) {
+      return;
+    }
     if (syncEl) {
       syncEl.classList.add('is-busy');
       syncEl.textContent = isEn ? 'Syncing with SAS…' : 'جاري المزامنة مع الساس…';
@@ -1780,9 +1791,18 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
       });
   }
 
-  if (!ownStockOnly) {
+  if (!ownStockOnly && sasReady) {
     bindUi();
-    setTimeout(function () { sync(false); }, 200);
+    var hasCards = root && root.querySelector('[data-cat]');
+    if (!hasCards) {
+      setTimeout(function () { sync(false); }, 200);
+    } else if (syncEl) {
+      syncEl.textContent = '';
+      syncEl.classList.remove('is-busy');
+    }
+  } else if (syncEl) {
+    syncEl.textContent = '';
+    syncEl.classList.remove('is-busy');
   }
 
   var profileInput = document.getElementById('xferProfileName');

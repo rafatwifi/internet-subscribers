@@ -62,7 +62,7 @@ if ($tab === 'users') {
 } elseif ($tab === 'plans') {
     redirect('plans.php');
 } elseif ($tab === 'schedule') {
-    redirect('schedule.php');
+    redirect('messages.php?mode=schedule');
 } elseif ($tab === 'sensitive' || $tab === 'update') {
     require_perm($tab === 'sensitive' ? 'clear_data' : 'settings');
     if (!function_exists('is_super_admin_user') || !is_super_admin_user()) {
@@ -126,6 +126,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'sys_status') {
         'sas_ms' => $sasMs,
         'sas_ok' => $sasOk,
         'sas_host' => $sasHost,
+        'sas_name' => isset($sys['sas_latency']['name']) ? (string) $sys['sas_latency']['name'] : '',
         'bank' => $fmtMs($sasMs),
         'points' => $points,
         'ram' => $sys['ram']['label'],
@@ -201,7 +202,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         try {
             $pdo->prepare('UPDATE admin_users SET wa_notify = :n WHERE id = :id')
                 ->execute(array(':n' => $waOn, ':id' => $ownerNotify));
-            flash('success', $lang === 'en' ? 'Saved' : 'تم الحفظ');
         } catch (Exception $e) {
             flash('error', $lang === 'en' ? 'Could not save' : 'ما انحفظ');
         }
@@ -924,18 +924,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
         $tab = 'schedule';
+        if (function_exists('schedule_settings_save') && function_exists('current_tenant_id')) {
+            schedule_settings_save($pdo, (int) current_tenant_id(), array(
+                'schedule_cut_enabled' => !empty($data['schedule_cut_enabled']),
+                'schedule_cut_send_wa' => !empty($data['schedule_cut_send_wa']),
+                'wa_case_schedule_cut' => 'schedule_cut',
+            ));
+            unset($data['schedule_cut_enabled'], $data['schedule_cut_send_wa'], $data['wa_case_schedule_cut']);
+        }
         if (post('schedule_run_now') === '1' && function_exists('run_schedule_debt_cuts')) {
-            // احفظ أولاً ثم شغّل بالكود المحدّث
-            if (settings_save($data)) {
-                $settings = settings_load();
-                $config = apply_settings_to_config($config, $settings);
+            if (function_exists('schedule_settings_for_tenant') && function_exists('schedule_config_with_tenant')) {
+                $config = schedule_config_with_tenant(
+                    $config,
+                    schedule_settings_for_tenant($pdo, function_exists('current_tenant_id') ? (int) current_tenant_id() : 1)
+                );
+            }
+            if (!empty($config['schedule_cut_enabled'])) {
                 $run = run_schedule_debt_cuts($pdo, $config, 100);
                 $msg = 'تشغيل: فحص ' . (int) $run['checked']
                     . ' — قطع ' . (int) $run['cut']
                     . ' — واتساب ' . (int) $run['wa_sent'];
                 flash('success', $msg);
             } else {
-                flash('error', 'Cannot write settings.json');
+                flash('error', 'فعّل القطع التلقائي أولاً');
             }
             redirect('settings.php?tab=schedule');
         }
@@ -1336,13 +1347,19 @@ $gLatTone = ($gMs === null || !$gOk) ? 'bad' : (($gMs >= 200) ? 'bad' : (($gMs >
             <div class="sys-card-s" id="sysGoogleSub"><?php echo $gOk ? e($lang === 'en' ? 'Reachable' : 'متاح') : e($lang === 'en' ? 'Failed' : 'فشل'); ?></div>
         </div>
         <div class="sys-card tone-<?php echo e($sasLatTone); ?>" id="sysBankCard">
-            <div class="sys-card-k"><?php echo e($lang === 'en' ? 'SAS latency' : 'بنك الساس'); ?></div>
+            <div class="sys-card-k" id="sysBankTitle"><?php
+                $sasLatName = isset($sasLat['name']) ? trim((string) $sasLat['name']) : '';
+                if ($sasLatName === '') {
+                    $sasLatName = $lang === 'en' ? 'Reseller' : 'الريسلر';
+                }
+                echo e($lang === 'en' ? ($sasLatName . ' ping') : ('بنك ' . $sasLatName));
+            ?></div>
             <div class="sys-card-v" id="sysBankVal"><?php echo e($sasLatDisp); ?></div>
             <div class="sys-card-s" id="sysBankSub"><?php
                 if ($sasLatHost !== '') {
-                    echo e(($lang === 'en' ? 'Ping → ' : 'Latency → ') . $sasLatHost);
+                    echo e(($lang === 'en' ? 'Ping → ' : 'بنق → ') . $sasLatHost);
                 } else {
-                    echo e($lang === 'en' ? 'SAS domain ping' : 'بينغ دومين الساس');
+                    echo e($lang === 'en' ? 'Reseller host ping' : 'بنق هوست الريسلر');
                 }
             ?></div>
         </div>
@@ -1358,11 +1375,15 @@ $gLatTone = ($gMs === null || !$gOk) ? 'bad' : (($gMs >= 200) ? 'bad' : (($gMs >
     if (cpu) cpu.textContent = d.cpu || '—';
     var bank = document.getElementById('sysBankVal');
     if (bank) bank.textContent = d.bank || '—';
+    var bt = document.getElementById('sysBankTitle');
+    if (bt && d.sas_name) {
+      bt.textContent = <?php echo json_encode($lang === 'en' ? '' : 'بنك '); ?> + d.sas_name + <?php echo json_encode($lang === 'en' ? ' ping' : ''); ?>;
+    }
     var bs = document.getElementById('sysBankSub');
     if (bs) {
       bs.textContent = d.sas_host
-        ? (<?php echo json_encode($lang === 'en' ? 'Ping → ' : 'Latency → '); ?> + d.sas_host)
-        : <?php echo json_encode($lang === 'en' ? 'SAS domain ping' : 'بينغ دومين الساس'); ?>;
+        ? (<?php echo json_encode($lang === 'en' ? 'Ping → ' : 'بنق → '); ?> + d.sas_host)
+        : <?php echo json_encode($lang === 'en' ? 'Reseller host ping' : 'بنق هوست الريسلر'); ?>;
     }
     var g = document.getElementById('sysGoogleVal');
     if (g) g.textContent = d.google_label || '—';
@@ -1745,23 +1766,52 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
 
 <?php if ($tab === 'whatsapp'): ?>
 <style>
-.wa-layout { display:grid; grid-template-columns: minmax(0,1fr) minmax(280px,420px); gap:16px; align-items:start; }
-@media (max-width: 960px) { .wa-layout { grid-template-columns: 1fr; } }
-.wa-card { border:1px solid var(--line,#e2e8f0); border-radius:16px; background:rgba(255,255,255,.92); padding:18px; box-shadow:0 8px 28px rgba(15,23,42,.06); }
-.wa-card h2 { margin:0 0 6px; font-size:1.15rem; }
-.wa-card .wa-lead { margin:0 0 14px; color:var(--muted,#64748b); font-weight:600; line-height:1.55; font-size:13px; }
-.wa-tips { margin:0 0 14px; padding:12px 14px; border-radius:12px; background:linear-gradient(135deg,#f0f9ff,#f8fafc); border:1px solid #dbeafe; color:#334155; font-size:13px; font-weight:600; line-height:1.65; }
-.wa-tips strong { color:#0f172a; }
-.wa-status-pill { display:flex; align-items:center; gap:10px; padding:12px 14px; border-radius:12px; font-weight:800; margin-bottom:14px; border:1px solid transparent; }
+.wa-page { display:flex; flex-direction:column; gap:16px; }
+.wa-hero { display:grid; grid-template-columns: minmax(0,1.15fr) minmax(260px,380px); gap:18px; align-items:stretch; padding:22px; border-radius:20px; background:#fff; border:1px solid #e2e8f0; box-shadow:0 12px 32px rgba(15,23,42,.06); }
+.wa-hero.is-linked { grid-template-columns: 1fr; }
+.wa-hero.is-linked #wa-guide,
+.wa-hero.is-linked #wa-qr { display: none; }
+@media (max-width: 960px) { .wa-hero { grid-template-columns: 1fr; } }
+.wa-kicker { margin:0 0 6px; color:#0f766e; font-size:12px; font-weight:800; letter-spacing:.02em; }
+.wa-hero h2 { margin:0 0 8px; font-size:1.35rem; }
+.wa-lead { margin:0; color:#64748b; font-weight:650; line-height:1.65; font-size:13.5px; }
+.wa-steps { list-style:none; margin:16px 0 0; padding:0; display:flex; flex-direction:column; gap:10px; }
+.wa-steps li { display:flex; gap:10px; align-items:flex-start; background:#f8fafc; border:1px solid #e2e8f0; border-radius:12px; padding:10px 12px; color:#334155; font-weight:700; font-size:13.5px; line-height:1.55; }
+.wa-steps b { width:26px; height:26px; border-radius:999px; background:#0f172a; color:#fff; display:grid; place-items:center; flex:0 0 auto; font-size:12px; }
+.wa-card { border:1px solid #e2e8f0; border-radius:16px; background:#fff; padding:18px; box-shadow:0 8px 24px rgba(15,23,42,.04); }
+.wa-card h2 { margin:0 0 6px; font-size:1.05rem; }
+.wa-card .wa-lead { margin:0 0 14px; }
+.wa-tips { margin:14px 0 0; padding:12px 14px; border-radius:12px; background:#f0f9ff; border:1px solid #dbeafe; color:#334155; font-size:13px; font-weight:650; line-height:1.65; }
+.wa-status-pill { display:flex; align-items:flex-start; gap:10px; padding:12px 14px; border-radius:12px; font-weight:800; margin-top:14px; border:1px solid transparent; line-height:1.5; }
 .wa-status-pill.ok { background:#ecfdf5; color:#047857; border-color:#a7f3d0; }
 .wa-status-pill.warn { background:#fffbeb; color:#b45309; border-color:#fde68a; }
 .wa-status-pill.err { background:#fef2f2; color:#b91c1c; border-color:#fecaca; }
-.wa-status-dot { width:10px; height:10px; border-radius:50%; background:currentColor; flex:0 0 auto; box-shadow:0 0 0 4px rgba(0,0,0,.06); }
-.wa-qr-stage { border-radius:16px; border:1px dashed #cbd5e1; background:radial-gradient(circle at 30% 20%,#f8fafc,#eef2ff 70%,#f1f5f9); min-height:300px; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:18px; text-align:center; }
-.wa-qr-stage img { max-width:min(280px,100%); border-radius:12px; background:#fff; padding:10px; box-shadow:0 10px 30px rgba(15,23,42,.12); }
-.wa-qr-stage .wa-qr-hint { margin-top:12px; color:#64748b; font-weight:700; font-size:13px; }
-.wa-actions-row { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
-.wa-actions-row .btn { flex:1 1 140px; justify-content:center; }
+.wa-status-dot { width:10px; height:10px; border-radius:50%; background:currentColor; flex:0 0 auto; margin-top:6px; box-shadow:0 0 0 4px rgba(0,0,0,.05); }
+.wa-qr-stage { border-radius:18px; border:1px dashed #cbd5e1; background:linear-gradient(180deg,#f8fafc,#eef2ff); min-height:340px; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:18px; text-align:center; }
+.wa-qr-stage.is-ok { border-style:solid; border-color:#a7f3d0; background:linear-gradient(180deg,#f0fdf4,#ecfdf5); }
+.wa-qr-stage.is-down { border-style:solid; border-color:#fecaca; background:linear-gradient(180deg,#fff,#fef2f2); }
+.wa-qr-stage.is-scan { border-style:solid; border-color:#fde68a; background:#fffbeb; }
+.wa-qr-stage img { width:min(260px,100%); height:auto; border-radius:12px; background:#fff; padding:10px; box-shadow:0 10px 30px rgba(15,23,42,.12); }
+.wa-qr-stage .wa-qr-hint, #wa-qr-placeholder { margin-top:12px; color:#475569; font-weight:750; font-size:13.5px; line-height:1.6; max-width:32ch; }
+.wa-qr-stage.is-ok #wa-qr-placeholder { color:#047857; }
+.wa-qr-stage.is-down #wa-qr-placeholder { color:#b91c1c; }
+.wa-actions-row { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+.wa-notify { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; }
+.wa-notify .btn { margin-bottom:1px; }
+.wa-cover-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:8px; }
+.wa-cover-item { display:flex; gap:8px; align-items:center; padding:10px 12px; border:1px solid #e2e8f0; border-radius:12px; background:#fff; font-weight:750; }
+.wa-cover-item.stopped { background:#f8fafc; color:#64748b; }
+.wa-cover-head { margin:14px 0 8px; font-size:12px; font-weight:800; color:#64748b; }
+.wa-switch-row { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:12px 14px; border:1px solid #e2e8f0; border-radius:14px; background:#fff; }
+.wa-switch-row p { margin:0; color:#334155; font-weight:750; font-size:13.5px; line-height:1.55; }
+.wa-switch { position:relative; width:48px; height:28px; flex:0 0 auto; }
+.wa-switch input { position:absolute; opacity:0; width:0; height:0; }
+.wa-switch i { position:absolute; inset:0; border-radius:999px; background:#cbd5e1; transition:.15s ease; cursor:pointer; }
+.wa-switch i:before { content:""; position:absolute; width:22px; height:22px; top:3px; left:3px; border-radius:50%; background:#fff; transition:.15s ease; box-shadow:0 1px 3px rgba(15,23,42,.25); }
+.wa-switch input:checked + i { background:#16a34a; }
+.wa-switch input:checked + i:before { transform:translateX(20px); }
+.wa-switch b { position:absolute; inset:0; display:flex; align-items:center; justify-content:flex-end; padding-right:8px; color:#fff; font-size:9px; font-weight:800; pointer-events:none; letter-spacing:.04em; }
+.wa-switch input:checked ~ b { justify-content:flex-start; padding:0 0 0 7px; }
 </style>
 
 <?php
@@ -1770,91 +1820,68 @@ if (function_exists('whatsapp_notifications_enabled') && isset($pdo)) {
     $waNotifyOn = whatsapp_notifications_enabled($pdo);
 }
 ?>
-<div class="wa-card" style="margin-bottom:16px">
-  <h2><?php echo e($lang === 'en' ? 'WhatsApp notifications' : 'واتساب للإشعارات'); ?></h2>
-  <p class="wa-lead"><?php echo e($lang === 'en'
-      ? 'Turn this off if this agency will not link WhatsApp. Messages and the link warning stop everywhere, not only on this page.'
-      : 'إذا الوكالة ما تريد تربط واتساب، أوقف الإشعارات. يتوقف الإرسال وتحذير الربط بكل الصفحات، مو بس هنا.'); ?></p>
-  <form method="post">
+<div class="wa-page">
+<form method="post" class="wa-switch-row">
+  <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+  <input type="hidden" name="section" value="wa_notify">
+  <input type="hidden" name="wa_notify" value="0">
+  <p><?php echo e($lang === 'en'
+      ? 'Use this to message your subscribers on WhatsApp: activation, expiry, and debt reminders.'
+      : 'استخدم هذه الخاصية لإرسال رسائل لمشتركيك عبر واتساب، منها رسائل التفعيل والانتهاء وتذكير الديون.'); ?></p>
+  <label class="wa-switch" title="<?php echo e($waNotifyOn ? ($lang === 'en' ? 'ON' : 'تشغيل') : ($lang === 'en' ? 'OFF' : 'إيقاف')); ?>">
+    <input type="checkbox" name="wa_notify" value="1" <?php echo $waNotifyOn ? 'checked' : ''; ?> onchange="this.form.submit()">
+    <i></i>
+    <b><?php echo $waNotifyOn ? 'ON' : 'OFF'; ?></b>
+  </label>
+</form>
+<?php if ($waNotifyOn): ?>
+<section class="wa-hero">
+  <div>
+    <h2 id="wa-title"><?php echo e($lang === 'en' ? 'Link WhatsApp' : 'ربط واتساب'); ?></h2>
+    <div id="wa-status" class="wa-status-pill warn"><span class="wa-status-dot"></span><span id="wa-status-text"><?php echo e($lang === 'en' ? 'Checking the saved link…' : 'جاري فحص الربط المحفوظ…'); ?></span></div>
+    <div class="wa-actions-row" id="waActions" style="display:none">
+      <button class="btn danger" type="button" id="waLogoutBtn" onclick="logoutWhatsApp()"><?php echo e($lang === 'en' ? 'Disconnect and show a new code' : 'قطع الاتصال وإظهار رمز جديد'); ?></button>
+    </div>
+  </div>
+  <div id="wa-qr" class="wa-qr-stage">
+    <img id="wa-qr-img" alt="QR" style="display:none">
+    <div id="wa-qr-placeholder"><?php echo e($lang === 'en' ? 'Checking the saved link…' : 'جاري فحص الربط المحفوظ…'); ?></div>
+    <div class="wa-qr-hint" id="wa-qr-title" style="display:none"></div>
+  </div>
+</section>
+<?php endif; ?>
+
+<?php if ($isPlatformAdmin): ?>
+<div class="wa-card">
+  <h2><?php echo e(t('settings_whatsapp')); ?></h2>
+  <form method="post" id="waForm">
     <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
-    <input type="hidden" name="section" value="wa_notify">
-    <div style="max-width:280px">
-      <label><?php echo e($lang === 'en' ? 'Use WhatsApp for notifications' : 'استخدام واتساب للإشعارات'); ?></label>
-      <select name="wa_notify">
-        <option value="1" <?php echo $waNotifyOn ? 'selected' : ''; ?>><?php echo e($lang === 'en' ? 'ON' : 'تشغيل'); ?></option>
-        <option value="0" <?php echo $waNotifyOn ? '' : 'selected'; ?>><?php echo e($lang === 'en' ? 'OFF' : 'إيقاف'); ?></option>
-      </select>
+    <input type="hidden" name="section" value="whatsapp">
+    <div class="form-grid">
+      <div>
+        <label><?php echo e(t('gateway_url')); ?></label>
+        <input class="ltr" id="gwUrl" name="whatsapp_local_url" value="<?php echo e($s['whatsapp_local_url']); ?>" required>
+      </div>
+      <div>
+        <label><?php echo e(t('gateway_key')); ?></label>
+        <input class="ltr" name="whatsapp_local_key" value="<?php echo e($s['whatsapp_local_key']); ?>" required>
+      </div>
+      <div>
+        <label><?php echo e(t('whatsapp_on')); ?></label>
+        <select name="whatsapp_enabled">
+          <option value="1" <?php echo !empty($s['whatsapp_enabled']) ? 'selected' : ''; ?>><?php echo e($lang === 'en' ? 'ON' : 'تشغيل'); ?></option>
+          <option value="0" <?php echo empty($s['whatsapp_enabled']) ? 'selected' : ''; ?>><?php echo e($lang === 'en' ? 'OFF' : 'إيقاف'); ?></option>
+        </select>
+      </div>
+      <div>
+        <label><?php echo e($lang === 'en' ? 'Fixed note' : 'ملاحظة ثابتة'); ?></label>
+        <input name="whatsapp_sender_note" value="<?php echo e($s['whatsapp_sender_note']); ?>">
+      </div>
     </div>
     <div class="actions" style="margin-top:12px">
       <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
     </div>
   </form>
-</div>
-<?php if ($waNotifyOn || $isPlatformAdmin): ?>
-<div class="wa-layout">
-  <?php if ($isPlatformAdmin): ?>
-  <div class="wa-card">
-    <h2><?php echo e(t('settings_whatsapp')); ?></h2>
-    <p class="wa-lead"><?php echo e($lang === 'en'
-        ? 'Gateway must run on the Windows PC. After reboot it starts hidden if you installed auto-start.'
-        : 'البوابة لازم تشتغل على جهاز الويندوز. بعد الريبوت تشتغل مخفية إذا ثبّت التشغيل التلقائي.'); ?></p>
-    <form method="post" id="waForm">
-        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
-        <input type="hidden" name="section" value="whatsapp">
-        <div class="form-grid">
-            <div>
-                <label><?php echo e(t('gateway_url')); ?></label>
-                <input class="ltr" id="gwUrl" name="whatsapp_local_url" value="<?php echo e($s['whatsapp_local_url']); ?>" required>
-            </div>
-            <div>
-                <label><?php echo e(t('gateway_key')); ?></label>
-                <input class="ltr" name="whatsapp_local_key" value="<?php echo e($s['whatsapp_local_key']); ?>" required>
-            </div>
-            <div>
-                <label><?php echo e(t('whatsapp_on')); ?></label>
-                <select name="whatsapp_enabled">
-                    <option value="1" <?php echo !empty($s['whatsapp_enabled']) ? 'selected' : ''; ?>><?php echo e($lang === 'en' ? 'ON' : 'تشغيل'); ?></option>
-                    <option value="0" <?php echo empty($s['whatsapp_enabled']) ? 'selected' : ''; ?>><?php echo e($lang === 'en' ? 'OFF' : 'إيقاف'); ?></option>
-                </select>
-            </div>
-            <div>
-                <label><?php echo e($lang === 'en' ? 'Fixed note' : 'ملاحظة ثابتة'); ?></label>
-                <input name="whatsapp_sender_note" value="<?php echo e($s['whatsapp_sender_note']); ?>">
-            </div>
-        </div>
-        <div class="actions" style="margin-top:12px">
-            <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
-        </div>
-    </form>
-    <div class="wa-tips" style="margin-top:16px">
-      <?php if ($lang === 'en'): ?>
-        On PC <strong class="ltr" id="gwHost"><?php echo e($hostHint); ?></strong>: run <strong>install-autostart.bat</strong> once so gateway starts after reboot.
-        If phone says linking blocked, wait 15–30 minutes. Use Disconnect only when you want a new QR.
-      <?php else: ?>
-        على الجهاز <strong class="ltr" id="gwHost"><?php echo e($hostHint); ?></strong>: شغّل <strong>install-autostart.bat</strong> مرة واحدة حتى تشتغل البوابة بعد الريبوت تلقائياً.
-        إذا الهاتف قال يتعذر الربط: انتظر 15–30 دقيقة. «قطع الاتصال» فقط لما تريد QR جديد.
-      <?php endif; ?>
-    </div>
-  </div>
-  <?php endif; ?>
-
-  <?php if ($waNotifyOn): ?>
-  <div class="wa-card">
-    <h2><?php echo e($lang === 'en' ? 'Link WhatsApp' : 'ربط واتساب'); ?></h2>
-    <p class="wa-lead"><?php echo e($lang === 'en'
-        ? 'This link is only for the account you are in now. It does not use another agency number. Expiry messages go out from this number to your subscribers only.'
-        : 'هذا الربط لحسابك الحالي فقط، وما يستخدم رقم وكالة ثانية. إشعار الانتهاء يطلع من هذا الرقم لمشتركيك أنت.'); ?></p>
-    <div id="wa-status" class="wa-status-pill warn"><span class="wa-status-dot"></span><span id="wa-status-text">...</span></div>
-    <div id="wa-qr" class="wa-qr-stage">
-        <img id="wa-qr-img" alt="QR" style="display:none">
-        <div id="wa-qr-placeholder"><?php echo e($lang === 'en' ? 'Loading QR…' : 'جاري إظهار رمز الربط…'); ?></div>
-        <div class="wa-qr-hint" id="wa-qr-title" style="display:none"></div>
-    </div>
-    <div class="wa-actions-row" id="waActions" style="display:none">
-        <button class="btn danger" type="button" id="waLogoutBtn" onclick="logoutWhatsApp()"><?php echo e($lang === 'en' ? 'Disconnect & relink' : 'قطع الاتصال وإعادة الربط'); ?></button>
-    </div>
-  </div>
-  <?php endif; ?>
 </div>
 <?php endif; ?>
 <?php
@@ -1869,35 +1896,55 @@ if ($waCoverTargets):
         return strcasecmp($an, $bn);
     });
 ?>
-<div class="wa-card" style="margin-top:16px">
+<?php
+$waCoverLive = array();
+$waCoverStopped = array();
+foreach ($waCoverTargets as $tgt) {
+    if (isset($tgt['is_active']) && (int) $tgt['is_active'] !== 1) {
+        $waCoverStopped[] = $tgt;
+    } else {
+        $waCoverLive[] = $tgt;
+    }
+}
+$waCoverGroups = array(
+    array('title' => ($lang === 'en' ? 'Active agents' : 'وكلاء شغالين'), 'rows' => $waCoverLive, 'stopped' => false),
+    array('title' => ($lang === 'en' ? 'Stopped agents' : 'وكلاء موقوفين'), 'rows' => $waCoverStopped, 'stopped' => true),
+);
+?>
+<div class="wa-card">
     <h2><?php echo e($lang === 'en' ? 'Who this number covers' : 'من يشملهم هذا الرقم'); ?></h2>
     <p class="wa-lead"><?php echo e($lang === 'en'
-        ? 'Off by default: your number messages only your own subscribers. Turn on an agent below only if this number should also message that agent’s subscribers.'
-        : 'الافتراضي مغلق: رقمك يرسل لمشتركيك فقط. فعّل وكيلاً تحت إذا تريد هذا الرقم يرسل لمشتركيه هو كمان.'); ?></p>
+        ? 'Off by default: your number messages only your own subscribers. Tick an agent only if this number should also message that agent’s subscribers.'
+        : 'الافتراضي مغلق: رقمك يرسل لمشتركيك فقط. علّم الوكيل إذا تريد هذا الرقم يرسل لمشتركيه هو كمان.'); ?></p>
     <form method="post">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="section" value="wa_cover">
-        <div style="display:flex;flex-direction:column;gap:8px;max-height:360px;overflow:auto">
-            <?php foreach ($waCoverTargets as $tgt):
+        <?php foreach ($waCoverGroups as $grp):
+            if (!$grp['rows']) {
+                continue;
+            }
+            ?>
+            <div class="wa-cover-head"><?php echo e($grp['title']); ?></div>
+            <div class="wa-cover-grid">
+            <?php foreach ($grp['rows'] as $tgt):
                 $tidOpt = (int) $tgt['id'];
                 $tlabel = (isset($tgt['display_name']) && trim((string) $tgt['display_name']) !== '')
                     ? (string) $tgt['display_name'] : (string) $tgt['username'];
-                if (isset($tgt['is_active']) && (int) $tgt['is_active'] !== 1) {
-                    $tlabel .= $lang === 'en' ? ' (stopped)' : ' (موقوف)';
-                }
                 ?>
-                <label style="display:flex;gap:8px;align-items:center;font-weight:700">
+                <label class="wa-cover-item<?php echo $grp['stopped'] ? ' stopped' : ''; ?>">
                     <input type="checkbox" name="wa_cover[]" value="<?php echo $tidOpt; ?>" <?php echo !empty($waCoverOn[$tidOpt]) ? 'checked' : ''; ?>>
-                    <span><?php echo e($tlabel); ?></span>
+                    <span><?php echo e($tlabel); ?><?php echo $grp['stopped'] ? e($lang === 'en' ? ' · stopped' : ' · موقوف') : ''; ?></span>
                 </label>
             <?php endforeach; ?>
-        </div>
+            </div>
+        <?php endforeach; ?>
         <div class="actions" style="margin-top:12px">
             <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
         </div>
     </form>
 </div>
 <?php endif; ?>
+</div>
 
 <?php if ($waNotifyOn): ?>
 <script>
@@ -1905,6 +1952,7 @@ if ($waCoverTargets):
   var urlInput = document.getElementById('gwUrl');
   var hostEl = document.getElementById('gwHost');
   function syncHost() {
+    if (!hostEl || !urlInput) return;
     try {
       var u = new URL(urlInput.value);
       hostEl.textContent = u.hostname || urlInput.value;
@@ -1922,23 +1970,23 @@ function waMine(data) {
   return !!(data && waExpect && data.session && String(data.session) === String(waExpect));
 }
 var L = {
-  connected: <?php echo json_encode($lang === 'en' ? 'Connected — ready to send' : 'متصل — جاهز للإرسال'); ?>,
-  needDisconnect: <?php echo json_encode($lang === 'en' ? 'Already connected. Press Disconnect for a new QR.' : 'متصل حالياً. اضغط قطع الاتصال لـ QR جديد.'); ?>,
-  fetching: <?php echo json_encode($lang === 'en' ? 'Fetching QR…' : 'جاري جلب QR…'); ?>,
-  scanBelow: <?php echo json_encode($lang === 'en' ? 'Scan the code. It refreshes by itself.' : 'امسح الرمز. يتحدث لحاله.'); ?>,
-  waiting: <?php echo json_encode($lang === 'en' ? 'Waiting for QR…' : 'بانتظار QR…'); ?>,
-  gatewayDown: <?php echo json_encode($lang === 'en'
-    ? 'Cannot reach Windows gateway. On PC ' . $hostHint . ' run install-autostart.bat or start-gateway.bat.'
-    : 'ما وصلت لبوابة الويندوز. على جهاز ' . $hostHint . ' شغّل install-autostart.bat أو start-gateway.bat.'); ?>,
-  scanNew: <?php echo json_encode($lang === 'en' ? 'New QR ready — scan once' : 'QR جديد جاهز — امسحه مرة واحدة'); ?>,
-  confirmLogout: <?php echo json_encode($lang === 'en' ? 'Disconnect and show a new QR?' : 'تقطع الاتصال وتعرض QR جديد؟'); ?>,
-  loggingOut: <?php echo json_encode($lang === 'en' ? 'Disconnecting… QR in ~12 seconds' : 'جاري قطع الاتصال… QR خلال ~12 ثانية'); ?>,
-  pressShow: <?php echo json_encode($lang === 'en' ? 'Please link WhatsApp' : 'يرجى ربط واتساب'); ?>,
-  rateLimit: <?php echo json_encode($lang === 'en' ? 'WhatsApp blocked linking temporarily. Wait 15–30 minutes.' : 'واتساب حظر الربط مؤقتاً. انتظر 15–30 دقيقة.'); ?>,
+  titleOn: <?php echo json_encode($lang === 'en' ? 'WhatsApp connected' : 'واتساب متصل'); ?>,
+  titleOff: <?php echo json_encode($lang === 'en' ? 'Link WhatsApp' : 'ربط واتساب'); ?>,
+  connected: <?php echo json_encode($lang === 'en' ? 'Connected' : 'متصل'); ?>,
+  connectedBox: <?php echo json_encode($lang === 'en' ? 'Linked.' : 'الربط محفوظ.'); ?>,
+  scanBelow: <?php echo json_encode($lang === 'en' ? 'WhatsApp → Linked devices → Link a device.' : 'واتساب ← الأجهزة المرتبطة ← ربط جهاز.'); ?>,
+  restoring: <?php echo json_encode($lang === 'en' ? 'Opening the saved link.' : 'جاري فتح الربط المحفوظ.'); ?>,
+  gatewayDown: <?php echo json_encode($lang === 'en' ? 'WhatsApp is not connected.' : 'واتساب غير متصل.'); ?>,
+  lost: <?php echo json_encode($lang === 'en' ? 'The phone unlinked this device.' : 'الموبايل فك الربط.'); ?>,
+  needOnce: <?php echo json_encode($lang === 'en' ? 'This account is not linked yet.' : 'هذا الحساب بعد ما مربوط.'); ?>,
+  waiting: <?php echo json_encode($lang === 'en' ? 'Waiting for the picture from the gateway…' : 'ننتظر صورة الربط من البوابة…'); ?>,
+  scanNew: <?php echo json_encode($lang === 'en' ? 'New picture ready' : 'صورة جديدة جاهزة'); ?>,
+  confirmLogout: <?php echo json_encode($lang === 'en' ? 'Disconnect? The saved link is erased and you must scan a new picture.' : 'تقطع الاتصال؟ الربط المحفوظ ينمسح وتحتاج تمسح صورة جديدة.'); ?>,
+  loggingOut: <?php echo json_encode($lang === 'en' ? 'Disconnecting… a new picture comes in a few seconds' : 'جاري قطع الاتصال… صورة جديدة خلال ثواني'); ?>,
   certExpired: <?php echo json_encode($lang === 'en'
-    ? 'TLS/cert issue on the PC (often antivirus). Gateway retries with WA_TLS_INSECURE. Wait for QR — do not spam refresh.'
-    : 'مشكلة شهادة/TLS على الحاسبة (غالباً أنتيفايروس). البوابة تعيد المحاولة تلقائياً. انتظر QR — لا تضغط تحديث مرّات.'); ?>,
-  tlsRetry: <?php echo json_encode($lang === 'en' ? 'Retrying connection (TLS workaround)…' : 'إعادة اتصال (تجاوز TLS)…'); ?>
+    ? 'Certificate problem on the PC. The gateway retries by itself. Wait, do not refresh many times.'
+    : 'مشكلة شهادة على الحاسبة. البوابة تعيد المحاولة وحدها. انتظر ولا تحدّث الصفحة كثير.'); ?>,
+  tlsRetry: <?php echo json_encode($lang === 'en' ? 'Reconnecting…' : 'إعادة اتصال…'); ?>
 };
 
 function setStatus(cls, text) {
@@ -1951,6 +1999,10 @@ var lastQrUrl = '';
 function paintConnected(on) {
   var row = document.getElementById('waActions');
   if (row) row.style.display = on ? '' : 'none';
+  var hero = document.querySelector('.wa-hero');
+  if (hero) hero.classList.toggle('is-linked', !!on);
+  var title = document.getElementById('wa-title');
+  if (title) title.textContent = on ? L.titleOn : L.titleOff;
 }
 function setHint(text) {
   var hint = document.getElementById('wa-qr-title');
@@ -1963,27 +2015,29 @@ function setHint(text) {
   hint.style.display = '';
   hint.textContent = text;
 }
+function stageMode(mode) {
+  var stage = document.getElementById('wa-qr');
+  if (stage) stage.className = 'wa-qr-stage' + (mode ? (' is-' + mode) : '');
+}
 function showQr(dataUrl) {
   var img = document.getElementById('wa-qr-img');
   var ph = document.getElementById('wa-qr-placeholder');
   if (!dataUrl || !img) return false;
+  stageMode('scan');
   if (dataUrl !== lastQrUrl) {
     lastQrUrl = dataUrl;
     img.src = dataUrl;
-    var stamp = '';
-    try {
-      stamp = ' · ' + new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    } catch (e) {}
-    setHint(L.scanBelow + stamp);
+    setHint(L.scanBelow);
   }
   img.style.display = 'inline-block';
   if (ph) ph.style.display = 'none';
   return true;
 }
-function showWaitingBox(text) {
+function showWaitingBox(text, mode) {
   var img = document.getElementById('wa-qr-img');
   var ph = document.getElementById('wa-qr-placeholder');
   lastQrUrl = '';
+  stageMode(mode || '');
   if (img) {
     img.style.display = 'none';
     img.removeAttribute('src');
@@ -1994,6 +2048,50 @@ function showWaitingBox(text) {
     ph.textContent = text || L.waiting;
   }
 }
+function paintState(data) {
+  if (!data || data.success === false || data.status === 'gateway_down') {
+    paintConnected(false);
+    var down = (data && data.error) ? data.error : L.gatewayDown;
+    setStatus('err', down);
+    showWaitingBox(down, 'down');
+    return 'stop';
+  }
+  if (waMine(data) && data.ready) {
+    paintConnected(true);
+    setStatus('ok', L.connected + (data.phone ? (' — ' + data.phone) : ''));
+    showWaitingBox(L.connectedBox, 'ok');
+    return 'stop';
+  }
+  paintConnected(false);
+  if (data.status === 'cert_expired' || data.status === 'tls_retry') {
+    var tls = data.status === 'tls_retry' ? L.tlsRetry : L.certExpired;
+    setStatus('warn', tls);
+    showWaitingBox(tls, '');
+    return 'stop';
+  }
+  if (waMine(data) && data.qr_data_url && showQr(data.qr_data_url)) {
+    setStatus('warn', L.scanBelow);
+    return 'stop';
+  }
+  if (data.status === 'logout_cooldown') {
+    setStatus('warn', L.loggingOut);
+    if (!lastQrUrl) showWaitingBox(L.loggingOut, '');
+    return 'stop';
+  }
+  if (data.status === 'closed_401') {
+    setStatus('warn', L.lost);
+    showWaitingBox(L.lost, '');
+    return 'qr';
+  }
+  if (data.status === 'need_link') {
+    setStatus('warn', L.needOnce);
+    if (!lastQrUrl) showWaitingBox(L.needOnce, '');
+    return 'qr';
+  }
+  setStatus('warn', L.restoring);
+  if (!lastQrUrl) showWaitingBox(L.restoring, '');
+  return 'qr';
+}
 var waChecking = false;
 function checkWhatsApp() {
   if (waBusy || waChecking) return;
@@ -2001,101 +2099,52 @@ function checkWhatsApp() {
   fetch('wa_proxy.php?action=status&_=' + Date.now())
     .then(function (r) { return r.json(); })
     .then(function (data) {
-      if (data && data.error && !data.ready) {
-        paintConnected(false);
-        setStatus('err', data.error);
-        showWaitingBox(L.gatewayDown);
-        return null;
-      }
-      if (waMine(data) && data.ready) {
-        paintConnected(true);
-        var phone = data.phone ? (' — ' + data.phone) : '';
-        setStatus('ok', L.connected + phone);
-        showWaitingBox(<?php echo json_encode($lang === 'en' ? 'Connected — disconnect to change number' : 'متصل — اقطع الاتصال لتغيير الرقم'); ?>);
-        return null;
-      }
-      paintConnected(false);
-      if (data && (data.status === 'cert_expired' || data.status === 'tls_retry')) {
-        setStatus('warn', data.status === 'tls_retry' ? L.tlsRetry : L.certExpired);
-        showWaitingBox(data.status === 'tls_retry' ? L.tlsRetry : L.certExpired);
-        return null;
-      }
-      if (waMine(data) && data.qr_data_url && showQr(data.qr_data_url)) {
-        setStatus('warn', L.scanBelow);
-        return null;
-      }
-      if (data && data.status === 'logout_cooldown') {
-        setStatus('warn', L.loggingOut);
-        if (!lastQrUrl) showWaitingBox(L.loggingOut);
-        return null;
-      }
+      if (paintState(data) !== 'qr') return null;
       return fetch('wa_proxy.php?action=qr&_=' + Date.now()).then(function (r) { return r.json(); });
     })
     .then(function (qr) {
       if (!qr) return;
-      if (waMine(qr) && qr.ready) {
-        paintConnected(true);
-        setStatus('ok', L.connected + (qr.phone ? (' — ' + qr.phone) : ''));
-        showWaitingBox(<?php echo json_encode($lang === 'en' ? 'Connected — disconnect to change number' : 'متصل — اقطع الاتصال لتغيير الرقم'); ?>);
-        return;
-      }
-      paintConnected(false);
-      if (qr.error) {
-        setStatus('err', qr.error);
-        if (!lastQrUrl) showWaitingBox(qr.error);
-        return;
-      }
-      if (waMine(qr) && qr.qr_data_url && showQr(qr.qr_data_url)) {
-        setStatus('warn', L.scanBelow);
-        return;
-      }
-      if (!lastQrUrl) {
-        setStatus('warn', L.pressShow);
-        showWaitingBox(L.pressShow);
-      }
+      paintState(qr);
     })
     .catch(function () {
       setStatus('err', L.gatewayDown);
-      if (!lastQrUrl) showWaitingBox(L.gatewayDown);
+      if (!lastQrUrl) showWaitingBox(L.gatewayDown, 'down');
     })
     .then(function () { waChecking = false; }, function () { waChecking = false; });
 }
 function waitForQr(tries) {
   if (tries <= 0) {
     waBusy = false;
-    setStatus('warn', L.pressShow);
-    showWaitingBox(L.pressShow);
+    setStatus('warn', L.waiting);
+    showWaitingBox(L.waiting, '');
     return;
   }
   fetch('wa_proxy.php?action=qr&_=' + Date.now())
     .then(function (r) { return r.json(); })
     .then(function (qr) {
-      if (qr && qr.error) {
-        setStatus('err', qr.error);
-        showWaitingBox(qr.error.indexOf('gateway') >= 0 || qr.error.indexOf('بوابة') >= 0 || qr.error.indexOf('reach') >= 0 ? L.gatewayDown : qr.error);
-        qrWaitTimer = setTimeout(function () { waitForQr(tries - 1); }, 4000);
-        return;
-      }
-      if (qr && waMine(qr) && qr.ready) {
-        paintConnected(true);
-        setStatus('ok', L.connected);
-        showWaitingBox(<?php echo json_encode($lang === 'en' ? 'Connected — disconnect to change number' : 'متصل — اقطع الاتصال لتغيير الرقم'); ?>);
-        waBusy = false;
-        return;
-      }
-      if (qr && waMine(qr) && qr.qr_data_url && showQr(qr.qr_data_url)) {
+      if (qr && qr.qr_data_url && waMine(qr) && showQr(qr.qr_data_url)) {
         paintConnected(false);
         setStatus('warn', L.scanNew);
         waBusy = false;
         return;
       }
-      setStatus('warn', L.waiting + ' (' + tries + ')');
-      showWaitingBox(L.waiting + ' (' + tries + ')');
+      if (qr && waMine(qr) && qr.ready) {
+        paintState(qr);
+        waBusy = false;
+        return;
+      }
+      if (qr && (qr.success === false || qr.status === 'gateway_down')) {
+        paintState(qr);
+        qrWaitTimer = setTimeout(function () { waitForQr(tries - 1); }, 4000);
+        return;
+      }
+      setStatus('warn', L.waiting);
+      showWaitingBox(L.waiting, '');
       qrWaitTimer = setTimeout(function () { waitForQr(tries - 1); }, 4000);
     })
     .catch(function () {
       setStatus('err', L.gatewayDown);
-      showWaitingBox(L.gatewayDown);
+      showWaitingBox(L.gatewayDown, 'down');
       qrWaitTimer = setTimeout(function () { waitForQr(tries - 1); }, 5000);
     });
 }
@@ -2110,7 +2159,7 @@ function logoutWhatsApp() {
     .then(function (data) {
       if (data && data.error && data.success === false) {
         setStatus('err', data.error);
-        showWaitingBox(data.error);
+        showWaitingBox(data.error, 'down');
         waBusy = false;
         return;
       }
@@ -2118,7 +2167,7 @@ function logoutWhatsApp() {
     })
     .catch(function () {
       setStatus('err', L.gatewayDown);
-      showWaitingBox(L.gatewayDown);
+      showWaitingBox(L.gatewayDown, 'down');
       waBusy = false;
     });
 }

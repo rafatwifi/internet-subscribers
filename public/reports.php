@@ -181,6 +181,37 @@ try {
 } catch (Throwable $e) {
 }
 
+$reportLeaf = function_exists('account_viewer_is_leaf_child') && account_viewer_is_leaf_child($pdo);
+if ($reportLeaf) {
+    $planCostRep = array();
+    try {
+        foreach ($pdo->query('SELECT name, cost_price, sas_profile_id FROM service_plans') as $pl) {
+            $planCostRep[strtolower(trim((string) $pl['name']))] = $pl;
+        }
+    } catch (Exception $e) {
+    }
+    $cost = 0.0;
+    $profit = 0.0;
+    foreach ($activationRows as $idx => $row) {
+        $nm = isset($row['service_name']) ? (string) $row['service_name'] : '';
+        $key = strtolower(trim($nm));
+        $sell = isset($row['monthly_price']) ? (float) $row['monthly_price'] : 0;
+        $cat = isset($planCostRep[$key]) ? (float) $planCostRep[$key]['cost_price'] : 0;
+        $sasId = isset($planCostRep[$key]['sas_profile_id']) ? (int) $planCostRep[$key]['sas_profile_id'] : 0;
+        $his = function_exists('account_viewer_package_price')
+            ? (float) account_viewer_package_price($pdo, $nm, $sasId, $cat)
+            : $cat;
+        $gain = $sell - $his;
+        if ($gain < 0) {
+            $gain = 0;
+        }
+        $activationRows[$idx]['leaf_cost'] = $his;
+        $activationRows[$idx]['leaf_profit'] = $gain;
+        $cost += $his;
+        $profit += $gain;
+    }
+}
+
 render_header(t('reports'), 'reports');
 ?>
 <div class="panel no-print panel-compact">
@@ -216,7 +247,7 @@ render_header(t('reports'), 'reports');
         <div class="value"><?php echo e(money_format_iqd($monthDebt, $config['currency'])); ?></div>
     </div>
     <div class="card-stat cyan">
-        <div class="label"><?php echo e(t('cost_price')); ?></div>
+        <div class="label"><?php echo e($reportLeaf ? ($lang === 'en' ? 'Your cost' : 'التكلفة') : t('cost_price')); ?></div>
         <div class="value"><?php echo e(money_format_iqd($cost, $config['currency'])); ?></div>
     </div>
     <div class="card-stat green">
@@ -234,6 +265,10 @@ render_header(t('reports'), 'reports');
                 <th><?php echo e(t('name')); ?></th>
                 <th><?php echo e(t('package')); ?></th>
                 <th><?php echo e(t('sell_price')); ?></th>
+                <?php if ($reportLeaf): ?>
+                <th><?php echo e($lang === 'en' ? 'Cost' : 'التكلفة'); ?></th>
+                <th><?php echo e(t('profit')); ?></th>
+                <?php endif; ?>
                 <th><?php echo e(t('from_date')); ?></th>
                 <th><?php echo e(t('to_date')); ?></th>
                 <th><?php echo e($lang === 'en' ? 'Created' : 'التسجيل'); ?></th>
@@ -241,7 +276,7 @@ render_header(t('reports'), 'reports');
             </thead>
             <tbody>
             <?php if (!$activationRows): ?>
-                <tr><td colspan="6"><?php echo e($lang === 'en' ? 'No activations this month' : 'ماكو تفعيلات بهذا الشهر'); ?></td></tr>
+                <tr><td colspan="<?php echo $reportLeaf ? 8 : 6; ?>"><?php echo e($lang === 'en' ? 'No activations this month' : 'ماكو تفعيلات بهذا الشهر'); ?></td></tr>
             <?php endif; ?>
             <?php foreach ($activationRows as $row): ?>
                 <tr>
@@ -251,6 +286,10 @@ render_header(t('reports'), 'reports');
                     </td>
                     <td><?php echo e($row['service_name']); ?></td>
                     <td><?php echo e(money_format_iqd($row['monthly_price'], $config['currency'])); ?></td>
+                    <?php if ($reportLeaf): ?>
+                    <td><?php echo e(money_format_iqd(isset($row['leaf_cost']) ? $row['leaf_cost'] : 0, $config['currency'])); ?></td>
+                    <td><?php echo e(money_format_iqd(isset($row['leaf_profit']) ? $row['leaf_profit'] : 0, $config['currency'])); ?></td>
+                    <?php endif; ?>
                     <td><?php echo e($row['start_date']); ?></td>
                     <td><?php echo e($row['end_date']); ?></td>
                     <td><?php echo e($row['created_at']); ?></td>
@@ -269,21 +308,25 @@ render_header(t('reports'), 'reports');
             <tr>
                 <th><?php echo e(t('name')); ?></th>
                 <th><?php echo e($lang === 'en' ? 'Amount' : 'المبلغ'); ?></th>
+                <?php if (!$reportLeaf): ?>
                 <th><?php echo e(t('cost_price')); ?></th>
                 <th><?php echo e(t('profit')); ?></th>
+                <?php endif; ?>
                 <th><?php echo e($lang === 'en' ? 'Paid at' : 'تاريخ التسديد'); ?></th>
             </tr>
             </thead>
             <tbody>
             <?php if (!$paidRows): ?>
-                <tr><td colspan="5"><?php echo e($lang === 'en' ? 'No payments this month' : 'لا توجد تسديدات بهذا الشهر'); ?></td></tr>
+                <tr><td colspan="<?php echo $reportLeaf ? 3 : 5; ?>"><?php echo e($lang === 'en' ? 'No payments this month' : 'لا توجد تسديدات بهذا الشهر'); ?></td></tr>
             <?php endif; ?>
             <?php foreach ($paidRows as $row): ?>
                 <tr>
                     <td><?php echo e($row['name']); ?><br><small><?php echo e(format_phone_display($row['phone'])); ?></small></td>
                     <td><?php echo e(money_format_iqd($row['amount'], $config['currency'])); ?></td>
+                    <?php if (!$reportLeaf): ?>
                     <td><?php echo e(money_format_iqd(isset($row['cost_price']) ? $row['cost_price'] : 0, $config['currency'])); ?></td>
                     <td><?php echo e(money_format_iqd(isset($row['profit']) ? $row['profit'] : 0, $config['currency'])); ?></td>
+                    <?php endif; ?>
                     <td><?php echo e($row['paid_at']); ?></td>
                 </tr>
             <?php endforeach; ?>

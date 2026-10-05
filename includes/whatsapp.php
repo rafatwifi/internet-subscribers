@@ -665,12 +665,14 @@ function whatsapp_send_local($wa, $phone, $message, $type, $sessionId = '')
         );
     }
     $gate = whatsapp_gateway_status_for_account($wa, $sessionId);
+    $fromPhone = isset($gate['phone']) ? trim((string) $gate['phone']) : '';
     if (empty($gate['ready']) || !isset($gate['session']) || (string) $gate['session'] !== $sessionId) {
         return array(
             'success' => false,
             'skipped' => true,
             'response' => 'يرجى ربط واتساب',
             'phone' => $phone,
+            'from_phone' => $fromPhone,
             'body' => $message,
             'type' => $type,
         );
@@ -747,6 +749,7 @@ function whatsapp_send_local($wa, $phone, $message, $type, $sessionId = '')
         'http_code' => $code,
         'response' => ($raw !== false) ? $raw : $err,
         'phone' => $phone,
+        'from_phone' => $fromPhone,
         'body' => $message,
         'type' => $type,
     );
@@ -1250,21 +1253,144 @@ function whatsapp_fail_user_message($result, $fallback = 'فشل إرسال وا
     return $fallback;
 }
 
+function ensure_message_log_extra($pdo)
+{
+    static $done = false;
+    if ($done || !$pdo) {
+        return;
+    }
+    $done = true;
+    $cols = array(
+        'from_phone' => 'VARCHAR(40) NULL DEFAULT NULL',
+        'attempt' => 'TINYINT UNSIGNED NOT NULL DEFAULT 1',
+        'next_retry_at' => 'DATETIME NULL DEFAULT NULL',
+        'fail_reason' => 'VARCHAR(255) NULL DEFAULT NULL',
+    );
+    foreach ($cols as $name => $def) {
+        try {
+            $c = $pdo->query('SHOW COLUMNS FROM message_logs LIKE ' . $pdo->quote($name))->fetch();
+            if (!$c) {
+                $pdo->exec('ALTER TABLE message_logs ADD COLUMN ' . $name . ' ' . $def);
+            }
+        } catch (Exception $e) {
+        }
+    }
+    try {
+        $idx = $pdo->query("SHOW INDEX FROM message_logs WHERE Key_name = 'idx_msg_retry'")->fetch();
+        if (!$idx) {
+            $pdo->exec('ALTER TABLE message_logs ADD INDEX idx_msg_retry (success, next_retry_at)');
+        }
+    } catch (Exception $e) {
+    }
+}
+
+function message_log_fail_text($row)
+{
+    if (is_array($row) && !empty($row['fail_reason'])) {
+        return trim((string) $row['fail_reason']);
+    }
+    $resp = (is_array($row) && isset($row['response_json'])) ? (string) $row['response_json'] : '';
+    if ($resp === '') {
+        return '';
+    }
+    return whatsapp_fail_user_message(array(
+        'success' => false,
+        'response' => $resp,
+    ));
+}
+
+function message_log_schedule_retry($result, $attempt)
+{
+    $attempt = (int) $attempt;
+    $type = isset($result['type']) ? (string) $result['type'] : '';
+    if ($type === 'expiry_auto' || strpos($type, 'expiry_auto') === 0) {
+        return null;
+    }
+    if (!empty($result['success']) || $attempt >= 3) {
+        return null;
+    }
+    if (!empty($result['no_whatsapp']) || !empty($result['skipped'])) {
+        return null;
+    }
+    return date('Y-m-d H:i:s', time() + 300);
+}
+
 function log_message($pdo, $subscriberId, $result)
 {
+    ensure_message_log_extra($pdo);
+    $ok = !empty($result['success']);
+    $attempt = isset($result['attempt']) ? (int) $result['attempt'] : 1;
+    if ($attempt < 1) {
+        $attempt = 1;
+    }
+    if ($attempt > 3) {
+        $attempt = 3;
+    }
+    $reason = $ok ? '' : whatsapp_fail_user_message($result);
+    if (function_exists('mb_substr') && mb_strlen($reason, 'UTF-8') > 250) {
+        $reason = mb_substr($reason, 0, 247, 'UTF-8') . '...';
+    } elseif (strlen($reason) > 250) {
+        $reason = substr($reason, 0, 247) . '...';
+    }
+    $next = message_log_schedule_retry($result, $attempt);
+    $nextSql = ($next === null || $next === '') ? 'NULL' : $pdo->quote($next);
     $stmt = $pdo->prepare(
-        'INSERT INTO message_logs (subscriber_id, phone, message_type, body, success, response_json)
-         VALUES (:subscriber_id, :phone, :message_type, :body, :success, :response_json)'
+        'INSERT INTO message_logs
+            (subscriber_id, phone, message_type, body, success, response_json, from_phone, attempt, next_retry_at, fail_reason)
+         VALUES
+            (:subscriber_id, :phone, :message_type, :body, :success, :response_json, :from_phone, :attempt, ' . $nextSql . ', :fail_reason)'
     );
     $stmt->execute(array(
         ':subscriber_id' => $subscriberId,
         ':phone' => isset($result['phone']) ? $result['phone'] : '',
         ':message_type' => isset($result['type']) ? $result['type'] : 'text',
         ':body' => isset($result['body']) ? $result['body'] : '',
-        ':success' => !empty($result['success']) ? 1 : 0,
+        ':success' => $ok ? 1 : 0,
         ':response_json' => isset($result['response']) && is_string($result['response'])
             ? $result['response']
             : json_encode($result),
+        ':from_phone' => isset($result['from_phone']) ? (string) $result['from_phone'] : '',
+        ':attempt' => $attempt,
+        ':fail_reason' => $reason,
+    ));
+}
+
+function message_log_apply_result($pdo, $logId, $result, $attempt)
+{
+    ensure_message_log_extra($pdo);
+    $logId = (int) $logId;
+    $ok = !empty($result['success']);
+    $attempt = (int) $attempt;
+    if ($attempt < 1) {
+        $attempt = 1;
+    }
+    if ($attempt > 3) {
+        $attempt = 3;
+    }
+    $reason = $ok ? '' : whatsapp_fail_user_message($result);
+    if (function_exists('mb_substr') && mb_strlen($reason, 'UTF-8') > 250) {
+        $reason = mb_substr($reason, 0, 247, 'UTF-8') . '...';
+    } elseif (strlen($reason) > 250) {
+        $reason = substr($reason, 0, 247) . '...';
+    }
+    $next = message_log_schedule_retry($result, $attempt);
+    $nextSql = ($next === null || $next === '') ? 'NULL' : $pdo->quote($next);
+    $stmt = $pdo->prepare(
+        'UPDATE message_logs
+         SET success = :success, response_json = :response_json, phone = :phone,
+             from_phone = :from_phone, attempt = :attempt, next_retry_at = ' . $nextSql . ', fail_reason = :fail_reason
+         WHERE id = :id'
+    );
+    $stmt->execute(array(
+        ':success' => $ok ? 1 : 0,
+        ':response_json' => isset($result['response']) && is_string($result['response'])
+            ? $result['response']
+            : json_encode($result),
+        ':phone' => isset($result['phone']) ? $result['phone'] : '',
+        ':from_phone' => isset($result['from_phone']) ? (string) $result['from_phone'] : '',
+        ':attempt' => $attempt,
+        ':fail_reason' => $reason,
+        ':id' => $logId,
     ));
 }
 
@@ -1452,13 +1578,48 @@ function message_logs_resolved_map($pdo, $logRows)
  * إعادة محاولة إرسال رسالة فاشلة من السجل
  * يرجع array($ok, $message)
  */
+function wa_session_for_subscriber($pdo, $subscriberId)
+{
+    $subscriberId = (int) $subscriberId;
+    if ($subscriberId <= 0 || !$pdo) {
+        return '';
+    }
+    try {
+        $st = $pdo->prepare('SELECT tenant_id FROM subscribers WHERE id = :id LIMIT 1');
+        $st->execute(array(':id' => $subscriberId));
+        $tid = (int) $st->fetchColumn();
+    } catch (Exception $e) {
+        return '';
+    }
+    if ($tid <= 0) {
+        return '';
+    }
+    try {
+        $st = $pdo->prepare(
+            'SELECT id FROM admin_users WHERE tenant_id = :t AND role = "admin" AND is_active = 1 ORDER BY id ASC LIMIT 1'
+        );
+        $st->execute(array(':t' => $tid));
+        $oid = (int) $st->fetchColumn();
+    } catch (Exception $e) {
+        return '';
+    }
+    if ($oid <= 0) {
+        return '';
+    }
+    return 'u' . $oid;
+}
+
 function retry_failed_message($pdo, $config, $logId, $subscriberId = 0)
 {
+    $logId = (int) $logId;
+    if ($logId <= 0) {
+        return array(false, 'ما تحددت الرسالة. اضغط إعادة الإرسال مرة ثانية.');
+    }
     $sql = 'SELECT m.*, s.phone AS sub_phone, s.id AS sid
             FROM message_logs m
-            JOIN subscribers s ON s.id = m.subscriber_id
+            LEFT JOIN subscribers s ON s.id = m.subscriber_id
             WHERE m.id = :id';
-    $params = array(':id' => (int) $logId);
+    $params = array(':id' => $logId);
     if ($subscriberId > 0) {
         $sql .= ' AND m.subscriber_id = :sid';
         $params[':sid'] = (int) $subscriberId;
@@ -1467,7 +1628,7 @@ function retry_failed_message($pdo, $config, $logId, $subscriberId = 0)
     $stmt->execute($params);
     $log = $stmt->fetch();
     if (!$log) {
-        return array(false, 'الرسالة غير موجودة');
+        return array(false, 'الرسالة غير موجودة بالسجل. حدّث الصفحة وحاول مرة ثانية.');
     }
     $body = trim((string) $log['body']);
     if ($body === '') {
@@ -1495,20 +1656,108 @@ function retry_failed_message($pdo, $config, $logId, $subscriberId = 0)
         $type .= '_retry';
     }
     if (function_exists('whatsapp_may_message_subscriber') && !whatsapp_may_message_subscriber($pdo, (int) $log['sid'])) {
-        return array(false, 'هذا المشترك مو تابع لواتساب الحساب المفتوح');
+        $sessNow = function_exists('whatsapp_session_id') ? whatsapp_session_id() : '';
+        if ($sessNow !== '') {
+            return array(false, 'هذا المشترك مو تابع لواتساب الحساب المفتوح');
+        }
     }
     $retrySession = function_exists('whatsapp_session_id') ? whatsapp_session_id() : '';
+    if ($retrySession === '') {
+        $retrySession = wa_session_for_subscriber($pdo, (int) $log['sid']);
+    }
     $result = whatsapp_send($config, $phone, $body, $type, $retrySession);
-    // نخلي النوع الأصلي بالسجل أوضح للعرض
     $result['type'] = preg_replace('/_retry$/', '', (string) $log['message_type']);
     if ($result['type'] === '') {
         $result['type'] = 'text';
     }
-    log_message($pdo, (int) $log['sid'], $result);
+    $prevTry = isset($log['attempt']) ? (int) $log['attempt'] : 1;
+    if ($prevTry < 1) {
+        $prevTry = 1;
+    }
+    $attempt = $prevTry + 1;
+    if ($attempt > 3) {
+        $attempt = 3;
+    }
+    if (empty($result['from_phone']) && !empty($log['from_phone'])) {
+        $result['from_phone'] = (string) $log['from_phone'];
+    }
+    message_log_apply_result($pdo, (int) $log['id'], $result, $attempt);
     if (!empty($result['success'])) {
         return array(true, 'تمت إعادة الإرسال بنجاح');
     }
     return array(false, whatsapp_fail_user_message($result, 'فشلت إعادة الإرسال — تأكد أن واتساب متصل'));
+}
+
+/**
+ * إعادة رسائل فاشلة مستحقة: رسالتين كحد أقصى، بعد 5 دقائق، لحد 3 محاولات.
+ */
+function wa_retry_due_batch($pdo, $config, $limit = 2)
+{
+    if (!$pdo) {
+        return 0;
+    }
+    $lock = __DIR__ . '/../config/wa_retry.lock';
+    $now = time();
+    if (is_file($lock)) {
+        $prev = (int) trim((string) @file_get_contents($lock));
+        if ($prev > 0 && ($now - $prev) < 50) {
+            return 0;
+        }
+    }
+    @file_put_contents($lock, (string) $now);
+    ensure_message_log_extra($pdo);
+    $limit = (int) $limit;
+    if ($limit < 1) {
+        $limit = 1;
+    }
+    if ($limit > 2) {
+        $limit = 2;
+    }
+    $tid = 0;
+    if (!empty($_SESSION['admin_logged_in']) && function_exists('current_tenant_id')) {
+        $tid = (int) current_tenant_id();
+    }
+    $sql = 'SELECT m.id FROM message_logs m';
+    if ($tid > 0) {
+        $sql .= ' INNER JOIN subscribers s ON s.id = m.subscriber_id AND s.tenant_id = ' . $tid;
+    }
+    $sql .= ' WHERE m.success = 0 AND m.subscriber_id IS NOT NULL
+              AND m.next_retry_at IS NOT NULL AND m.next_retry_at <= NOW() AND m.attempt < 3
+              ORDER BY m.next_retry_at ASC
+              LIMIT ' . $limit;
+    try {
+        $ids = $pdo->query($sql)->fetchAll(PDO::FETCH_COLUMN);
+    } catch (Exception $e) {
+        return 0;
+    }
+    if (!is_array($ids) || !$ids) {
+        return 0;
+    }
+    $claim = $pdo->prepare(
+        'UPDATE message_logs SET next_retry_at = NULL
+         WHERE id = :id AND success = 0 AND next_retry_at IS NOT NULL AND next_retry_at <= NOW()'
+    );
+    $done = 0;
+    foreach ($ids as $id) {
+        $id = (int) $id;
+        if ($id <= 0) {
+            continue;
+        }
+        try {
+            $claim->execute(array(':id' => $id));
+            if ($claim->rowCount() < 1) {
+                continue;
+            }
+        } catch (Exception $e) {
+            continue;
+        }
+        try {
+            retry_failed_message($pdo, $config, $id, 0);
+            $done++;
+        } catch (Exception $e) {
+        }
+    }
+    return $done;
 }
 
 function wa_template_choices($lang = 'ar', $cfg = null)
@@ -2098,6 +2347,181 @@ function ensure_sas_expiry_remind_column($pdo)
     }
 }
 
+function expiry_remind_lock_name($key)
+{
+    return 'exr' . substr(sha1((string) $key), 0, 20);
+}
+
+function expiry_remind_lock($pdo, $key)
+{
+    if (!$pdo || $key === '') {
+        return true;
+    }
+    try {
+        $st = $pdo->query('SELECT GET_LOCK(' . $pdo->quote(expiry_remind_lock_name($key)) . ', 4) AS lk');
+        $row = $st ? $st->fetch(PDO::FETCH_ASSOC) : null;
+        return $row && isset($row['lk']) && (string) $row['lk'] === '1';
+    } catch (Exception $e) {
+        return true;
+    }
+}
+
+function expiry_remind_unlock($pdo, $key)
+{
+    if (!$pdo || $key === '') {
+        return;
+    }
+    try {
+        $pdo->query('SELECT RELEASE_LOCK(' . $pdo->quote(expiry_remind_lock_name($key)) . ')');
+    } catch (Exception $e) {
+    }
+}
+
+function expiry_cache_has_mark($pdo, $username, $tenantId, $endDate)
+{
+    $username = trim((string) $username);
+    $endDate = trim((string) $endDate);
+    if ($username === '' || $endDate === '' || !$pdo) {
+        return false;
+    }
+    $sql = 'SELECT expiry_remind_for_expire FROM sas_users_cache WHERE username = :u';
+    $params = array(':u' => $username);
+    if ((int) $tenantId > 0) {
+        $sql .= ' AND tenant_id = :t';
+        $params[':t'] = (int) $tenantId;
+    }
+    $sql .= ' LIMIT 1';
+    try {
+        $st = $pdo->prepare($sql);
+        $st->execute($params);
+        $prev = $st->fetchColumn();
+        return $prev !== false && $prev !== null && (string) $prev === $endDate;
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+function expiry_remind_already($pdo, $phone, $subscriberId)
+{
+    $phone = trim((string) $phone);
+    if ($phone !== '' && function_exists('normalize_phone')) {
+        $norm = normalize_phone($phone);
+        if ($norm !== '') {
+            $phone = $norm;
+        }
+    }
+    $subscriberId = (int) $subscriberId;
+    $parts = array();
+    $params = array();
+    if ($subscriberId > 0) {
+        $parts[] = 'subscriber_id = :sid';
+        $params[':sid'] = $subscriberId;
+    }
+    if ($phone !== '') {
+        $parts[] = 'phone = :ph';
+        $params[':ph'] = $phone;
+    }
+    if (!$parts) {
+        return false;
+    }
+    $sql = 'SELECT id FROM message_logs
+            WHERE success = 1
+              AND message_type = \'expiry_auto\'
+              AND created_at >= DATE_SUB(NOW(), INTERVAL 3 DAY)
+              AND (' . implode(' OR ', $parts) . ')
+            LIMIT 1';
+    try {
+        $st = $pdo->prepare($sql);
+        $st->execute($params);
+        return (bool) $st->fetchColumn();
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+function expiry_remind_mark($pdo, $username, $tenantId, $endDate, $subRowId, $subscriberId)
+{
+    $endDate = trim((string) $endDate);
+    if ($endDate === '' || !$pdo) {
+        return;
+    }
+    $username = trim((string) $username);
+    $tenantId = (int) $tenantId;
+    if ($username !== '') {
+        try {
+            $sql = 'UPDATE sas_users_cache SET expiry_remind_for_expire = :e WHERE username = :u';
+            $params = array(':e' => $endDate, ':u' => $username);
+            if ($tenantId > 0) {
+                $sql .= ' AND tenant_id = :t';
+                $params[':t'] = $tenantId;
+            }
+            $pdo->prepare($sql)->execute($params);
+        } catch (Exception $e) {
+        }
+    }
+    $subRowId = (int) $subRowId;
+    if ($subRowId > 0) {
+        try {
+            $pdo->prepare('UPDATE subscriptions SET expiry_remind_for_end = :e WHERE id = :id')
+                ->execute(array(':e' => $endDate, ':id' => $subRowId));
+        } catch (Exception $e) {
+        }
+    }
+    $subscriberId = (int) $subscriberId;
+    if ($subscriberId > 0) {
+        try {
+            $pdo->prepare(
+                'UPDATE subscriptions SET expiry_remind_for_end = end_date
+                 WHERE subscriber_id = :sid AND status = \'active\'
+                   AND end_date >= CURDATE()
+                   AND (expiry_remind_for_end IS NULL OR expiry_remind_for_end <> end_date)'
+            )->execute(array(':sid' => $subscriberId));
+        } catch (Exception $e) {
+        }
+    }
+}
+
+function expiry_remind_claim($pdo, $username, $tenantId, $endDate, $subRowId)
+{
+    $claimed = false;
+    $endDate = trim((string) $endDate);
+    $username = trim((string) $username);
+    $tenantId = (int) $tenantId;
+    $subRowId = (int) $subRowId;
+    if ($username !== '') {
+        try {
+            $sql = 'UPDATE sas_users_cache SET expiry_remind_for_expire = :e
+                    WHERE username = :u
+                      AND (expiry_remind_for_expire IS NULL OR expiry_remind_for_expire <> :e2)';
+            $params = array(':e' => $endDate, ':e2' => $endDate, ':u' => $username);
+            if ($tenantId > 0) {
+                $sql .= ' AND tenant_id = :t';
+                $params[':t'] = $tenantId;
+            }
+            $st = $pdo->prepare($sql);
+            $st->execute($params);
+            if ($st->rowCount() > 0) {
+                $claimed = true;
+            }
+        } catch (Exception $e) {
+        }
+    }
+    if ($subRowId > 0) {
+        try {
+            $st = $pdo->prepare(
+                'UPDATE subscriptions SET expiry_remind_for_end = :e
+                 WHERE id = :id AND (expiry_remind_for_end IS NULL OR expiry_remind_for_end <> :e2)'
+            );
+            $st->execute(array(':e' => $endDate, ':e2' => $endDate, ':id' => $subRowId));
+            if ($st->rowCount() > 0) {
+                $claimed = true;
+            }
+        } catch (Exception $e) {
+        }
+    }
+    return $claimed;
+}
+
 /**
  * إرسال تذكير لمن ينتهي اشتراكهم خلال N أيام
  * (اشتراكات محلية + تواريخ انتهاء كاش الساس)
@@ -2131,6 +2555,13 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
 
     $limit = max(1, (int) $limit);
     $doneUsers = array();
+    $donePhones = array();
+    $remindTid = 0;
+    if (!empty($GLOBALS['schedule_tenant_id'])) {
+        $remindTid = (int) $GLOBALS['schedule_tenant_id'];
+    } elseif (function_exists('current_tenant_id')) {
+        $remindTid = (int) current_tenant_id();
+    }
 
     // 1) تواريخ الانتهاء من كاش المشتركين
     $sasRows = array();
@@ -2145,10 +2576,15 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
             continue;
         }
         try {
-            $stR = $pdo->prepare(
-                'SELECT expiry_remind_for_expire FROM sas_users_cache WHERE username = :u LIMIT 1'
-            );
-            $stR->execute(array(':u' => $u));
+            $prevSql = 'SELECT expiry_remind_for_expire FROM sas_users_cache WHERE username = :u';
+            $prevParams = array(':u' => $u);
+            if ($remindTid > 0) {
+                $prevSql .= ' AND tenant_id = :t';
+                $prevParams[':t'] = $remindTid;
+            }
+            $prevSql .= ' LIMIT 1';
+            $stR = $pdo->prepare($prevSql);
+            $stR->execute($prevParams);
             $prev = $stR->fetchColumn();
             $endDate = date('Y-m-d', strtotime((string) $crow['expire_at']));
             if ($prev !== false && $prev !== null && (string) $prev === $endDate) {
@@ -2213,11 +2649,40 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
                 $phone = '';
             }
         }
+        if ($phone !== '' && function_exists('normalize_phone')) {
+            $normPhone = normalize_phone($phone);
+            if ($normPhone !== '') {
+                $phone = $normPhone;
+            }
+        }
         if ($phone === '' || (function_exists('phone_is_placeholder') && phone_is_placeholder($phone))) {
             $out['skipped']++;
             continue;
         }
         $endDate = date('Y-m-d', strtotime((string) $crow['expire_at']));
+        $waSession = whatsapp_session_for_subscriber($pdo, $sid, isset($crow['parent_id']) ? (int) $crow['parent_id'] : 0);
+        if ($waSession === '') {
+            $out['skipped']++;
+            continue;
+        }
+        if (isset($donePhones[$phone])) {
+            expiry_remind_mark($pdo, $username, $remindTid, $endDate, 0, $sid);
+            $doneUsers[$username] = true;
+            $out['skipped']++;
+            continue;
+        }
+        if (!expiry_remind_lock($pdo, $phone)) {
+            $out['skipped']++;
+            continue;
+        }
+        if (expiry_remind_already($pdo, $phone, $sid) || !expiry_remind_claim($pdo, $username, $remindTid, $endDate, 0)) {
+            expiry_remind_mark($pdo, $username, $remindTid, $endDate, 0, $sid);
+            expiry_remind_unlock($pdo, $phone);
+            $doneUsers[$username] = true;
+            $donePhones[$phone] = true;
+            $out['skipped']++;
+            continue;
+        }
         $startDate = date('Y-m-d', strtotime($endDate . ' -30 days'));
         $info = subscription_days_info($startDate, $endDate);
         $pkg = isset($crow['profile_name']) ? (string) $crow['profile_name'] : '';
@@ -2228,25 +2693,31 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
             'from' => $startDate,
             'to' => $endDate,
         ), $config);
-        $waSession = whatsapp_session_for_subscriber($pdo, $sid, isset($crow['parent_id']) ? (int) $crow['parent_id'] : 0);
-        if ($waSession === '') {
-            $out['skipped']++;
-            continue;
-        }
         $result = whatsapp_send($config, $phone, $body, 'expiry_auto', $waSession);
+        if (!is_array($result)) {
+            $result = array('success' => false, 'skipped' => true);
+        }
+        $result['type'] = 'expiry_auto';
         log_message($pdo, $sid, $result);
+        expiry_remind_unlock($pdo, $phone);
         $doneUsers[$username] = true;
+        $donePhones[$phone] = true;
         if (!empty($result['success'])) {
-            try {
-                $pdo->prepare(
-                    'UPDATE sas_users_cache SET expiry_remind_for_expire = :e WHERE username = :u'
-                )->execute(array(':e' => $endDate, ':u' => $username));
-            } catch (Exception $e) {
-                // ignore
-            }
+            expiry_remind_mark($pdo, $username, $remindTid, $endDate, 0, $sid);
             $out['sent']++;
             usleep(250000);
         } elseif (!empty($result['skipped'])) {
+            try {
+                $rel = 'UPDATE sas_users_cache SET expiry_remind_for_expire = NULL
+                        WHERE username = :u AND expiry_remind_for_expire = :e';
+                $relParams = array(':u' => $username, ':e' => $endDate);
+                if ($remindTid > 0) {
+                    $rel .= ' AND tenant_id = :t';
+                    $relParams[':t'] = $remindTid;
+                }
+                $pdo->prepare($rel)->execute($relParams);
+            } catch (Exception $e) {
+            }
             $out['skipped']++;
         } else {
             $out['failed']++;
@@ -2260,6 +2731,7 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
         $remain = 0;
     }
     if ($remain > 0) {
+        $tenantSql = ($remindTid > 0) ? (' AND s.tenant_id = ' . (int) $remindTid) : '';
         $sql = 'SELECT sub.id AS sub_id, sub.subscriber_id, sub.service_name, sub.start_date, sub.end_date,
                        s.name, s.phone, s.sas_username
                 FROM subscriptions sub
@@ -2267,7 +2739,8 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
                 WHERE sub.status = \'active\'
                   AND sub.end_date >= CURDATE()
                   AND sub.end_date <= DATE_ADD(CURDATE(), INTERVAL ' . (int) $daysN . ' DAY)
-                  AND (sub.expiry_remind_for_end IS NULL OR sub.expiry_remind_for_end <> sub.end_date)
+                  AND (sub.expiry_remind_for_end IS NULL OR sub.expiry_remind_for_end <> sub.end_date)'
+                  . $tenantSql . '
                 ORDER BY sub.end_date ASC
                 LIMIT ' . (int) $remain;
         try {
@@ -2294,18 +2767,60 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
                 $out['skipped']++;
                 continue;
             }
+            $localPhone = isset($row['phone']) ? trim((string) $row['phone']) : '';
+            if ($localPhone !== '' && function_exists('normalize_phone')) {
+                $normLocal = normalize_phone($localPhone);
+                if ($normLocal !== '') {
+                    $localPhone = $normLocal;
+                }
+            }
+            if ($localPhone !== '' && isset($donePhones[$localPhone])) {
+                expiry_remind_mark($pdo, $u, $remindTid, (string) $row['end_date'], (int) $row['sub_id'], (int) $row['subscriber_id']);
+                $out['skipped']++;
+                continue;
+            }
+            $lockKey = $localPhone !== '' ? $localPhone : ('s' . (int) $row['subscriber_id']);
+            if (!expiry_remind_lock($pdo, $lockKey)) {
+                $out['skipped']++;
+                continue;
+            }
+            if (expiry_cache_has_mark($pdo, $u, $remindTid, (string) $row['end_date'])
+                || expiry_remind_already($pdo, $localPhone, (int) $row['subscriber_id'])
+                || !expiry_remind_claim($pdo, $u, $remindTid, (string) $row['end_date'], (int) $row['sub_id'])
+            ) {
+                expiry_remind_mark($pdo, $u, $remindTid, (string) $row['end_date'], (int) $row['sub_id'], (int) $row['subscriber_id']);
+                expiry_remind_unlock($pdo, $lockKey);
+                if ($localPhone !== '') {
+                    $donePhones[$localPhone] = true;
+                }
+                $out['skipped']++;
+                continue;
+            }
             $result = whatsapp_send($config, $row['phone'], $body, 'expiry_auto', $waSession);
+            if (!is_array($result)) {
+                $result = array('success' => false, 'skipped' => true);
+            }
+            $result['type'] = 'expiry_auto';
             log_message($pdo, (int) $row['subscriber_id'], $result);
+            expiry_remind_unlock($pdo, $lockKey);
             if ($u !== '') {
                 $doneUsers[$u] = true;
             }
+            if ($localPhone !== '') {
+                $donePhones[$localPhone] = true;
+            }
             if (!empty($result['success'])) {
-                $pdo->prepare(
-                    'UPDATE subscriptions SET expiry_remind_for_end = :e WHERE id = :id'
-                )->execute(array(':e' => $row['end_date'], ':id' => (int) $row['sub_id']));
+                expiry_remind_mark($pdo, $u, $remindTid, (string) $row['end_date'], (int) $row['sub_id'], (int) $row['subscriber_id']);
                 $out['sent']++;
                 usleep(250000);
             } elseif (!empty($result['skipped'])) {
+                try {
+                    $pdo->prepare(
+                        'UPDATE subscriptions SET expiry_remind_for_end = NULL
+                         WHERE id = :id AND expiry_remind_for_end = :e'
+                    )->execute(array(':id' => (int) $row['sub_id'], ':e' => $row['end_date']));
+                } catch (Exception $e) {
+                }
                 $out['skipped']++;
             } else {
                 $out['failed']++;
@@ -2343,7 +2858,18 @@ function maybe_run_expiry_auto_reminders($pdo, $config)
  */
 function maybe_run_auto_schedule_jobs($pdo, $config)
 {
-    $lock = __DIR__ . '/../config/auto_schedule.lock';
+    $lockTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($lockTid <= 0) {
+        $lockTid = 1;
+    }
+    if (function_exists('schedule_settings_for_tenant') && function_exists('schedule_config_with_tenant')) {
+        try {
+            $schedNow = schedule_settings_for_tenant($pdo, $lockTid);
+            $config = schedule_config_with_tenant($config, $schedNow);
+        } catch (Exception $e) {
+        }
+    }
+    $lock = __DIR__ . '/../config/auto_schedule_t' . $lockTid . '.lock';
     $now = time();
     if (is_file($lock)) {
         $prev = (int) trim((string) @file_get_contents($lock));
@@ -2352,14 +2878,6 @@ function maybe_run_auto_schedule_jobs($pdo, $config)
         }
     }
     @file_put_contents($lock, (string) $now);
-
-    if (function_exists('sas_maybe_background_sync')) {
-        try {
-            @sas_maybe_background_sync($pdo, $config, false);
-        } catch (Exception $e) {
-            // ignore
-        }
-    }
 
     if (!empty($config['expiry_auto_remind_enabled']) && function_exists('run_expiry_soon_reminders')) {
         try {

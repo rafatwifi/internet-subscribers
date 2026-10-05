@@ -78,6 +78,9 @@ function sas_json_out($ok, $message, $extra = array())
 }
 
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'quote') {
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
     $username = isset($_GET['username']) ? trim((string) $_GET['username']) : '';
     $profileId = isset($_GET['profile_id']) ? (int) $_GET['profile_id'] : 0;
     $quote = function_exists('sas_activation_quote')
@@ -87,6 +90,35 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'quote') {
 }
 
 if (isset($_GET['ajax']) && ($_GET['ajax'] === 'profiles' || $_GET['ajax'] === 'cards' || $_GET['ajax'] === 'managers')) {
+    $ajaxKind = (string) $_GET['ajax'];
+    $forceCards = isset($_GET['refresh']) && $_GET['refresh'] === '1';
+    if ($ajaxKind === 'profiles' && !$forceCards
+        && isset($_SESSION['sas_profiles_ui']) && is_array($_SESSION['sas_profiles_ui'])
+        && !empty($_SESSION['sas_profiles_ui_at'])
+        && (time() - (int) $_SESSION['sas_profiles_ui_at']) < 600
+        && $_SESSION['sas_profiles_ui']) {
+        sas_json_out(true, '', array('profiles' => $_SESSION['sas_profiles_ui']));
+    }
+    if ($ajaxKind === 'managers' && !$forceCards
+        && isset($_SESSION['sas_managers_ui']) && is_array($_SESSION['sas_managers_ui'])
+        && !empty($_SESSION['sas_managers_ui_at'])
+        && (time() - (int) $_SESSION['sas_managers_ui_at']) < 600
+        && $_SESSION['sas_managers_ui']) {
+        sas_json_out(true, '', array('managers' => $_SESSION['sas_managers_ui']));
+    }
+    if ($ajaxKind === 'cards' && !$forceCards && function_exists('sas_cards_inventory_load_persisted')) {
+        $invHit = sas_cards_inventory_load_persisted(600);
+        if ($invHit && isset($invHit['groups']) && is_array($invHit['groups']) && function_exists('sas_unused_pins_from_inventory_cache')) {
+            $pins = sas_unused_pins_from_inventory_cache();
+            sas_json_out(true, '', array(
+                'cards' => is_array($pins) ? $pins : array(),
+                'profile_id' => 0,
+            ));
+        }
+    }
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
     $api = sas_page_connector($config);
     if (!$api) {
         sas_json_out(false, 'تعذر الدخول للساس');
@@ -741,15 +773,22 @@ if (strlen($parentFilter) > 80) {
 }
 
 $cacheCount = 0;
+$sasAjaxEarly = isset($_GET['ajax']) ? (string) $_GET['ajax'] : '';
 try {
-    if (function_exists('shop_restore_sep22_if_empty')) {
-        shop_restore_sep22_if_empty($pdo);
-    }
-    if (function_exists('sas_cache_fill_from_subscribers')) {
-        sas_cache_fill_from_subscribers($pdo);
-    }
-    if (function_exists('sas_relink_ledger_rows')) {
-        sas_relink_ledger_rows($pdo);
+    if ($sasAjaxEarly === '') {
+        if (function_exists('shop_restore_sep22_if_empty')) {
+            shop_restore_sep22_if_empty($pdo);
+        }
+        if (function_exists('sas_cache_fill_from_subscribers')) {
+            sas_cache_fill_from_subscribers($pdo);
+        }
+        $relinkTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        $relinkFile = dirname(__DIR__) . '/storage/cache/relink_t' . $relinkTid . '.txt';
+        $relinkAge = is_file($relinkFile) ? (time() - (int) trim((string) @file_get_contents($relinkFile))) : 99999;
+        if ($relinkAge > 600 && function_exists('sas_relink_ledger_rows')) {
+            sas_relink_ledger_rows($pdo);
+            @file_put_contents($relinkFile, (string) time());
+        }
     }
     $tidCnt = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
     $stCnt = $pdo->prepare('SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = :t');
@@ -1133,7 +1172,7 @@ $sasLastErr = (!empty($syncMeta['last_error'])) ? (string) $syncMeta['last_error
 $sasKnownOnline = false;
 if ($sasReady && function_exists('sas_connection_status')) {
     try {
-        $cst = sas_connection_status($pdo, $config);
+        $cst = sas_connection_status($pdo, $config, null, false);
         $sasKnownOnline = is_array($cst) && !empty($cst['ok']);
     } catch (Exception $e) {
         $sasKnownOnline = false;
@@ -2563,9 +2602,9 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
         <div class="alert alert-error" style="margin:10px 0;font-weight:700">
             <?php if ($tidUi > 1): ?>
                 <?php echo e($lang === 'en'
-                    ? 'This agency has no SAS login yet. Open Settings → SAS login, enter YOUR page host/user/password, save, then sync. System login is separate from SAS.'
-                    : 'هذي الوكالة ما مربوط لها ساس بعد. ادخل إعدادات → تسجيل الدخول عبر SAS، اكتب رابط/يوزر/باسورد صفحتك، احفظ، ثم اعمل مزامنة. دخول النظام غير دخول الساس.'); ?>
-                — <a href="settings.php?tab=sas"><?php echo e($lang === 'en' ? 'SAS login' : 'تسجيل الدخول عبر SAS'); ?></a>
+                    ? 'To manage your subscribers, add your reseller account'
+                    : 'لادارة مشتركيك قم باضافه حساب الرسلر الخاص بك'); ?>
+                <a href="settings.php?tab=sas"><?php echo e($lang === 'en' ? 'from here' : 'من هنا'); ?></a>
             <?php else: ?>
                 <?php echo e($lang === 'en' ? 'Enable SAS in settings first.' : 'فعّل ربط SAS من الإعدادات أولاً.'); ?>
                 <a href="settings.php?tab=sas"><?php echo e($lang === 'en' ? 'SAS settings' : 'إعدادات SAS'); ?></a>
@@ -2663,8 +2702,8 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
                 $tidUi2 = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
                 if (!$sasReady && $tidUi2 > 1) {
                     $emptyMsg = ($lang === 'en')
-                        ? 'No users — bind your SAS page in Settings first (system login ≠ SAS).'
-                        : 'ماكو يوزرات — اربط صفحة الساس من الإعدادات أولاً (دخول النظام ≠ دخول الساس).';
+                        ? 'To manage your subscribers, add your reseller account from here.'
+                        : 'لادارة مشتركيك قم باضافه حساب الرسلر الخاص بك من هنا.';
                 } elseif ($sasReady && $cacheCount <= 0) {
                     $emptyMsg = ($lang === 'en') ? 'Loading users from SAS…' : 'جاري جلب المشتركين من الساس…';
                 } else {
@@ -3605,7 +3644,9 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
       }
       var tr = e.target && e.target.closest ? e.target.closest('tr[data-id]') : null;
       if (!tr || !tbody.contains(tr)) return;
+      if (e.target.closest('a,button,input,label')) return;
       markSasRowCtx(tr);
+      selectOnlyRow(tr);
     });
     tbody.addEventListener('contextmenu', function (e) {
       var tr = e.target && e.target.closest ? e.target.closest('tr[data-id]') : null;
@@ -3651,7 +3692,13 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
       e.stopPropagation();
       var open = opsDrop.classList.contains('hidden');
       closeMenus();
-      if (open) openOpsMenu();
+      if (open) {
+        if (selectedRows().length === 0 && tbody) {
+          var ctx = tbody.querySelector('tr.sas-row-ctx');
+          if (ctx) selectOnlyRow(ctx);
+        }
+        openOpsMenu();
+      }
     });
   }
   if (opsDrop) {

@@ -14,6 +14,15 @@ ensure_admin_users_table($pdo);
 $isEn = ($lang === 'en');
 $me = current_admin();
 $meId = $me ? (int) $me['id'] : 0;
+$agentsAjaxStock = (isset($_GET['ajax']) && (string) $_GET['ajax'] === 'card_stock');
+if ($agentsAjaxStock) {
+    if (function_exists('csrf_token')) {
+        csrf_token();
+    }
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
+}
 $agencyLogin = '';
 try {
     $tidAgency = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
@@ -524,16 +533,20 @@ if (isset($_GET['export_agent'])) {
 $sasManagers = array();
 $sasReady = function_exists('sas_is_ready') && sas_is_ready($config);
 $canEditAgents = !(function_exists('is_agent_user') && is_agent_user());
-if ($sasReady && $canEditAgents && function_exists('sas_page_connector') && $_SERVER['REQUEST_METHOD'] !== 'POST') {
-    $pullAt = isset($_SESSION['agents_auto_import_at']) ? (int) $_SESSION['agents_auto_import_at'] : 0;
-    if ($pullAt <= 0 || (time() - $pullAt) > 90) {
-        try {
-            $apiPull = sas_page_connector($config);
-        } catch (Exception $e) {
-            $apiPull = null;
-        }
-        if ($apiPull) {
-            $_SESSION['agents_auto_import_at'] = time();
+$importTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+$importFile = dirname(__DIR__) . '/storage/cache/agents_import_t' . $importTid . '.txt';
+$importAge = is_file($importFile) ? (time() - (int) trim((string) @file_get_contents($importFile))) : 99999;
+if ($sasReady && $canEditAgents && function_exists('sas_page_connector') && !empty($agentsAjaxStock) && $importAge > 600) {
+    @file_put_contents($importFile, (string) time());
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
+    try {
+        $apiPull = sas_page_connector($config);
+    } catch (Exception $e) {
+        $apiPull = null;
+    }
+    if ($apiPull) {
             $rawManagers = array();
             if (method_exists($apiPull, 'getManagers')) {
                 $raw = $apiPull->getManagers();
@@ -718,8 +731,11 @@ if ($sasReady && $canEditAgents && function_exists('sas_page_connector') && $_SE
                 }
                 flash('success', $msg);
             }
+            if ($sasManagers) {
+                $mgrFile = dirname(__DIR__) . '/storage/cache/sas_managers_t' . $importTid . '.json';
+                @file_put_contents($mgrFile, json_encode($sasManagers));
+            }
         }
-    }
 }
 
 $agents = list_agent_users($pdo, false);
@@ -797,7 +813,7 @@ try {
 $cardHomeId = function_exists('user_card_source_id') ? (int) user_card_source_id($pdo) : $meId;
 $agentCardMap = array();
 if ($cardHomeId > 0 && function_exists('card_sas_stock_map') && function_exists('sas_is_ready') && sas_is_ready($config)) {
-    $agentCardMap = card_sas_stock_map($pdo, $config, $cardHomeId);
+    $agentCardMap = card_sas_stock_map($pdo, $config, $cardHomeId, !empty($agentsAjaxStock));
     if (!is_array($agentCardMap)) {
         $agentCardMap = array();
     }
@@ -877,18 +893,44 @@ if (!function_exists('agents_card_lines_html')) {
 $cardCurrency = (isset($config['currency']) && trim((string) $config['currency']) !== '') ? (string) $config['currency'] : 'د.ع';
 
 if (empty($sasManagers)) {
-$sasReady = function_exists('sas_is_ready') && sas_is_ready($config);
-if ($sasReady && function_exists('sas_page_connector') && function_exists('sas_managers_for_ui')) {
-    try {
-        $apiMgr = sas_page_connector($config);
-        if ($apiMgr) {
-            $sasManagers = sas_managers_for_ui($apiMgr);
+    $mgrFile = dirname(__DIR__) . '/storage/cache/sas_managers_t' . (function_exists('current_tenant_id') ? (int) current_tenant_id() : 1) . '.json';
+    if (is_file($mgrFile)) {
+        $mj = @json_decode((string) @file_get_contents($mgrFile), true);
+        if (is_array($mj)) {
+            $sasManagers = $mj;
         }
-    } catch (Exception $e) {
-        $sasManagers = array();
+    }
+    if (empty($sasManagers) && isset($_SESSION['sas_managers_ui']) && is_array($_SESSION['sas_managers_ui'])) {
+        $sasManagers = $_SESSION['sas_managers_ui'];
     }
 }
+
+if (!empty($agentsAjaxStock)) {
+    header('Content-Type: application/json; charset=utf-8');
+    $portalAjax = array();
+    if ($agencyLogin !== '') {
+        $portalAjax[strtolower($agencyLogin)] = true;
+    }
+    if ($me && !empty($me['username'])) {
+        $portalAjax[strtolower(trim((string) $me['username']))] = true;
+    }
+    $cells = array();
+    foreach ($agents as $agAjax) {
+        $aidAjax = (int) $agAjax['id'];
+        $cardLinesAjax = function_exists('card_agent_category_lines')
+            ? card_agent_category_lines(
+                isset($agentCardMap[$aidAjax]) ? $agentCardMap[$aidAjax] : array(),
+                isset($agentPriceRows[$aidAjax]) ? $agentPriceRows[$aidAjax] : array()
+            )
+            : array();
+        $isPortalAjax = ($aidAjax === $meId) || isset($portalAjax[strtolower((string) $agAjax['username'])]);
+        $canReturnAjax = ($aidAjax !== $cardHomeId) && !$isPortalAjax;
+        $cells[(string) $aidAjax] = agents_card_lines_html($aidAjax, $cardLinesAjax, $canReturnAjax, $isEn, $cardCurrency);
+    }
+    echo json_encode(array('ok' => true, 'cells' => $cells));
+    exit;
 }
+$agentsStockScript = '<script>(function(){var nodes=document.querySelectorAll("[data-ag-cards]");if(!nodes.length)return;fetch("agents.php?ajax=card_stock",{credentials:"same-origin"}).then(function(r){return r.json();}).then(function(d){if(!d||!d.cells)return;for(var id in d.cells){var el=document.querySelector(\'[data-ag-cards="\'+id+\'"]\');if(el)el.innerHTML=d.cells[id];}}).catch(function(){});})();</script>';
 
 $accOnly = (isset($_GET['view']) && $_GET['view'] === 'accountant');
 $childAgents = function_exists('admin_user_child_count')
@@ -933,9 +975,10 @@ if (function_exists('is_accountant_user') && is_accountant_user()) {
         $on = ($pick === $aid) ? ' style="background:#ecfeff"' : '';
         echo '<tr' . $on . '><td><a href="agents.php?pick=' . $aid . '">' . e($nm) . '</a></td>';
         echo '<td>' . e(function_exists('money_format_iqd') ? money_format_iqd($owed, isset($config['currency']) ? $config['currency'] : '') : (string) $owed) . '</td>';
-        echo '<td>' . agents_card_lines_html($aid, $cardLines, false, $isEn, $cardCurrency) . '</td></tr>';
+        echo '<td data-ag-cards="' . (int) $aid . '">' . agents_card_lines_html($aid, $cardLines, false, $isEn, $cardCurrency) . '</td></tr>';
     }
     echo '</tbody></table></div></div>';
+    echo $agentsStockScript;
     render_footer();
     return;
 }
@@ -1084,7 +1127,7 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
             <td><?php echo e($a['display_name']); ?></td>
             <td><?php echo isset($counts[$aid]) ? (int) $counts[$aid] : 0; ?></td>
             <td><span class="<?php echo $active ? 'sas-logged' : 'sas-logged-off'; ?>"><?php echo e($active ? ($isEn ? 'Active' : 'فعال') : ($isEn ? 'Off' : 'موقوف')); ?></span></td>
-            <td class="ag-cards-cell">
+            <td class="ag-cards-cell" data-ag-cards="<?php echo (int) $aid; ?>">
                 <?php
                 $cardLines = function_exists('card_agent_category_lines')
                     ? card_agent_category_lines(
@@ -1825,4 +1868,5 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
     })();
     </script>
 </div>
+<?php echo $agentsStockScript; ?>
 <?php render_footer(); ?>

@@ -1,8 +1,250 @@
 <?php
 
 /**
- * الجدول الدوري: قطع الخدمة بعد تجاوز أيام السماح بدون تسديد
+ * الجدول الدوري: قطع الخدمة بعد تجاوز أيام السماح بدون تسديد.
+ * إعدادات التشغيل خاصة بكل وكالة، مو ملف واحد للكل.
  */
+
+function schedule_setting_defaults()
+{
+    $global = function_exists('settings_load') ? settings_load() : array();
+    $days = isset($global['expiry_auto_remind_days']) ? (int) $global['expiry_auto_remind_days'] : 1;
+    if ($days < 0) {
+        $days = 0;
+    }
+    if ($days > 60) {
+        $days = 60;
+    }
+    $after = isset($global['unpaid_remind_after_days']) ? (int) $global['unpaid_remind_after_days'] : 7;
+    if ($after < 1) {
+        $after = 1;
+    }
+    if ($after > 365) {
+        $after = 365;
+    }
+    return array(
+        'schedule_cut_enabled' => !empty($global['schedule_cut_enabled']),
+        'schedule_cut_send_wa' => !isset($global['schedule_cut_send_wa']) || !empty($global['schedule_cut_send_wa']),
+        'expiry_auto_remind_enabled' => !empty($global['expiry_auto_remind_enabled']),
+        'expiry_auto_remind_days' => $days,
+        'unpaid_remind_enabled' => !empty($global['unpaid_remind_enabled']),
+        'unpaid_remind_after_days' => $after,
+        'wa_case_expiry_soon' => isset($global['wa_case_expiry_soon']) ? (string) $global['wa_case_expiry_soon'] : '',
+        'wa_case_schedule_cut' => isset($global['wa_case_schedule_cut']) ? (string) $global['wa_case_schedule_cut'] : '',
+        'wa_case_unpaid_overdue' => isset($global['wa_case_unpaid_overdue']) ? (string) $global['wa_case_unpaid_overdue'] : '',
+    );
+}
+
+function schedule_settings_normalize($data, $base = null)
+{
+    if (!is_array($base)) {
+        $base = schedule_setting_defaults();
+    }
+    if (!is_array($data)) {
+        $data = array();
+    }
+    $out = $base;
+    if (array_key_exists('schedule_cut_enabled', $data)) {
+        $out['schedule_cut_enabled'] = !empty($data['schedule_cut_enabled']);
+    }
+    if (array_key_exists('schedule_cut_send_wa', $data)) {
+        $out['schedule_cut_send_wa'] = !empty($data['schedule_cut_send_wa']);
+    }
+    if (array_key_exists('expiry_auto_remind_enabled', $data)) {
+        $out['expiry_auto_remind_enabled'] = !empty($data['expiry_auto_remind_enabled']);
+    }
+    if (array_key_exists('expiry_auto_remind_days', $data)) {
+        $days = (int) $data['expiry_auto_remind_days'];
+        if ($days < 0) {
+            $days = 0;
+        }
+        if ($days > 60) {
+            $days = 60;
+        }
+        $out['expiry_auto_remind_days'] = $days;
+    }
+    if (array_key_exists('unpaid_remind_enabled', $data)) {
+        $out['unpaid_remind_enabled'] = !empty($data['unpaid_remind_enabled']);
+    }
+    if (array_key_exists('unpaid_remind_after_days', $data)) {
+        $after = (int) $data['unpaid_remind_after_days'];
+        if ($after < 1) {
+            $after = 1;
+        }
+        if ($after > 365) {
+            $after = 365;
+        }
+        $out['unpaid_remind_after_days'] = $after;
+    }
+    foreach (array('expiry_soon', 'schedule_cut', 'unpaid_overdue') as $case) {
+        $k = 'wa_case_' . $case;
+        if (array_key_exists($k, $data)) {
+            $out[$k] = trim((string) $data[$k]);
+        }
+    }
+    return $out;
+}
+
+function ensure_tenant_schedule_table($pdo)
+{
+    $pdo->exec(
+        'CREATE TABLE IF NOT EXISTS tenant_schedule (
+            tenant_id INT NOT NULL PRIMARY KEY,
+            settings_json TEXT NULL,
+            updated_at TIMESTAMP NULL DEFAULT NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+    );
+}
+
+function schedule_settings_read_row($pdo, $tenantId)
+{
+    $tenantId = (int) $tenantId;
+    if ($tenantId <= 0) {
+        return null;
+    }
+    try {
+        ensure_tenant_schedule_table($pdo);
+        $st = $pdo->prepare('SELECT settings_json FROM tenant_schedule WHERE tenant_id = :t LIMIT 1');
+        $st->execute(array(':t' => $tenantId));
+        $raw = $st->fetchColumn();
+    } catch (Exception $e) {
+        return null;
+    }
+    if ($raw === false || $raw === null || trim((string) $raw) === '') {
+        return null;
+    }
+    $data = json_decode((string) $raw, true);
+    return is_array($data) ? $data : null;
+}
+
+function schedule_settings_for_tenant($pdo, $tenantId)
+{
+    $tenantId = (int) $tenantId;
+    if ($tenantId <= 0) {
+        $tenantId = 1;
+    }
+    $row = schedule_settings_read_row($pdo, $tenantId);
+    if (is_array($row)) {
+        return schedule_settings_normalize($row, array(
+            'schedule_cut_enabled' => false,
+            'schedule_cut_send_wa' => true,
+            'expiry_auto_remind_enabled' => false,
+            'expiry_auto_remind_days' => 1,
+            'unpaid_remind_enabled' => false,
+            'unpaid_remind_after_days' => 7,
+            'wa_case_expiry_soon' => '',
+            'wa_case_schedule_cut' => '',
+            'wa_case_unpaid_overdue' => '',
+        ));
+    }
+    $seed = schedule_setting_defaults();
+    schedule_settings_save($pdo, $tenantId, $seed);
+    return $seed;
+}
+
+function schedule_settings_save($pdo, $tenantId, $data)
+{
+    $tenantId = (int) $tenantId;
+    if ($tenantId <= 0) {
+        return false;
+    }
+    $existing = schedule_settings_read_row($pdo, $tenantId);
+    $base = is_array($existing)
+        ? schedule_settings_normalize($existing, array(
+            'schedule_cut_enabled' => false,
+            'schedule_cut_send_wa' => true,
+            'expiry_auto_remind_enabled' => false,
+            'expiry_auto_remind_days' => 1,
+            'unpaid_remind_enabled' => false,
+            'unpaid_remind_after_days' => 7,
+            'wa_case_expiry_soon' => '',
+            'wa_case_schedule_cut' => '',
+            'wa_case_unpaid_overdue' => '',
+        ))
+        : schedule_setting_defaults();
+    $merged = schedule_settings_normalize($data, $base);
+    $flags = 0;
+    if (defined('JSON_UNESCAPED_UNICODE')) {
+        $flags |= JSON_UNESCAPED_UNICODE;
+    }
+    $json = json_encode($merged, $flags);
+    try {
+        ensure_tenant_schedule_table($pdo);
+        $pdo->prepare(
+            'INSERT INTO tenant_schedule (tenant_id, settings_json, updated_at)
+             VALUES (:t, :j, NOW())
+             ON DUPLICATE KEY UPDATE settings_json = VALUES(settings_json), updated_at = NOW()'
+        )->execute(array(':t' => $tenantId, ':j' => $json));
+        return true;
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+function schedule_config_with_tenant($config, $sched)
+{
+    if (!is_array($config)) {
+        $config = array();
+    }
+    if (!is_array($sched)) {
+        $sched = array();
+    }
+    $config['schedule_cut_enabled'] = !empty($sched['schedule_cut_enabled']);
+    $config['schedule_cut_send_wa'] = !empty($sched['schedule_cut_send_wa']);
+    $config['expiry_auto_remind_enabled'] = !empty($sched['expiry_auto_remind_enabled']);
+    $config['expiry_auto_remind_days'] = isset($sched['expiry_auto_remind_days'])
+        ? max(0, (int) $sched['expiry_auto_remind_days'])
+        : 1;
+    $config['unpaid_remind_enabled'] = !empty($sched['unpaid_remind_enabled']);
+    $config['unpaid_remind_after_days'] = isset($sched['unpaid_remind_after_days'])
+        ? max(1, (int) $sched['unpaid_remind_after_days'])
+        : 7;
+    if (!isset($config['wa_cases']) || !is_array($config['wa_cases'])) {
+        $config['wa_cases'] = array();
+    }
+    foreach (array('expiry_soon', 'schedule_cut', 'unpaid_overdue') as $case) {
+        $k = 'wa_case_' . $case;
+        if (!array_key_exists($k, $sched)) {
+            continue;
+        }
+        $v = trim((string) $sched[$k]);
+        if ($v === '__none__') {
+            $config['wa_cases'][$case] = '';
+        } elseif ($v !== '') {
+            $config['wa_cases'][$case] = $v;
+        }
+    }
+    return $config;
+}
+
+function schedule_each_tenant($pdo, $config, $fn)
+{
+    $ids = array();
+    try {
+        $st = $pdo->query('SELECT id FROM tenants ORDER BY id ASC');
+        if ($st) {
+            foreach ($st->fetchAll() as $r) {
+                $id = isset($r['id']) ? (int) $r['id'] : 0;
+                if ($id > 0) {
+                    $ids[] = $id;
+                }
+            }
+        }
+    } catch (Exception $e) {
+    }
+    if (!$ids) {
+        $ids[] = 1;
+    }
+    $out = array();
+    foreach ($ids as $tid) {
+        $GLOBALS['schedule_tenant_id'] = $tid;
+        $sched = schedule_settings_for_tenant($pdo, $tid);
+        $cfg = schedule_config_with_tenant($config, $sched);
+        $out[$tid] = call_user_func($fn, $tid, $cfg, $sched);
+    }
+    unset($GLOBALS['schedule_tenant_id']);
+    return $out;
+}
 
 function schedule_cut_message($row, $config)
 {
@@ -43,6 +285,14 @@ function schedule_cut_message($row, $config)
  */
 function schedule_viewer_scope_sql($alias)
 {
+    $forced = !empty($GLOBALS['schedule_tenant_id']) ? (int) $GLOBALS['schedule_tenant_id'] : 0;
+    if ($forced > 0) {
+        $a = preg_replace('/[^a-zA-Z0-9_]/', '', (string) $alias);
+        if ($a === '') {
+            $a = 's';
+        }
+        return ' AND ' . $a . '.tenant_id = ' . $forced;
+    }
     if (empty($_SESSION['admin_logged_in'])) {
         return '';
     }

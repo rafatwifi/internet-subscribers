@@ -5,6 +5,7 @@ require_once __DIR__ . '/../includes/layout.php';
 require_once __DIR__ . '/../includes/settings_tabs.php';
 require_login();
 require_perm('plans');
+$plansLeaf = function_exists('account_viewer_is_leaf_child') && account_viewer_is_leaf_child($pdo);
 
 function plans_priced_user_id($pdo)
 {
@@ -61,6 +62,77 @@ function plans_price_floors($pdo)
     return array($byName, $byPid);
 }
 
+function plans_account_book($pdo)
+{
+    $byName = array();
+    $bySoft = array();
+    $byPid = array();
+    $me = function_exists('current_admin') ? current_admin() : null;
+    $uid = $me ? (int) $me['id'] : 0;
+    if ($uid > 0 && $pdo && function_exists('agent_card_prices_list')) {
+        foreach (agent_card_prices_list($pdo, $uid) as $row) {
+            // سعر الأب لهذا الحساب فقط. سعر التكلفة المنسوخ من الساس ما ينحسب تسعيرة.
+            $v = isset($row['agent_price']) ? (float) $row['agent_price'] : 0;
+            if ($v <= 0) {
+                continue;
+            }
+            $name = isset($row['profile_name']) ? (string) $row['profile_name'] : '';
+            $nk = strtolower(trim($name));
+            if ($nk !== '' && !isset($byName[$nk])) {
+                $byName[$nk] = $v;
+            }
+            if ($nk !== '' && function_exists('card_price_soft_key')) {
+                $sk = card_price_soft_key($name);
+                if ($sk !== '' && !isset($bySoft[$sk])) {
+                    $bySoft[$sk] = $v;
+                }
+            }
+            $pid = isset($row['profile_id']) ? (int) $row['profile_id'] : 0;
+            if ($pid > 0 && !isset($byPid[$pid])) {
+                $byPid[$pid] = $v;
+            }
+        }
+    }
+    $has = ($byName || $bySoft || $byPid);
+    $role = ($me && isset($me['role'])) ? (string) $me['role'] : '';
+    $parentId = 0;
+    if ($uid > 0 && $pdo) {
+        try {
+            $stP = $pdo->prepare('SELECT reports_to_user_id FROM admin_users WHERE id = :id LIMIT 1');
+            $stP->execute(array(':id' => $uid));
+            $parentId = (int) $stP->fetchColumn();
+        } catch (Exception $e) {
+            $parentId = 0;
+        }
+    }
+    $child = ($parentId > 0 || $role === 'agent' || $role === 'group_manager');
+    // الابن ما يكتب فوق سعر الساس العام. الباقة اللي الأب ما مسعّرها تبقى على سعر الساس بالعرض.
+    $shareCatalog = !$child;
+    return array($uid, $has, $shareCatalog, $byName, $bySoft, $byPid);
+}
+
+function plans_account_price($book, $name, $sasId)
+{
+    $byName = $book[3];
+    $bySoft = $book[4];
+    $byPid = $book[5];
+    $nk = strtolower(trim((string) $name));
+    if ($nk !== '' && isset($byName[$nk])) {
+        return (float) $byName[$nk];
+    }
+    $sasId = (int) $sasId;
+    if ($sasId > 0 && isset($byPid[$sasId])) {
+        return (float) $byPid[$sasId];
+    }
+    if ($nk !== '' && function_exists('card_price_soft_key')) {
+        $sk = card_price_soft_key($name);
+        if ($sk !== '' && isset($bySoft[$sk])) {
+            return (float) $bySoft[$sk];
+        }
+    }
+    return null;
+}
+
 function plans_floor_for($byName, $byPid, $name, $sasId)
 {
     $floor = 0;
@@ -79,6 +151,10 @@ $editId = isset($_GET['edit']) ? (int) $_GET['edit'] : 0;
 $editPlan = null;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if ($plansLeaf) {
+        flash('error', 'الباقات للعرض فقط');
+        redirect('plans.php');
+    }
     if (!verify_csrf(post('csrf'))) {
         flash('error', 'طلب غير صالح');
         redirect('plans.php');
@@ -108,6 +184,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($name === '' || $price < 0 || $cost < 0) {
             flash('error', 'اسم الباقة مطلوب والأسعار لا تكون سالبة');
             redirect($action === 'update' ? ('plans.php?edit=' . $id) : 'plans.php');
+        }
+
+        $priceBook = plans_account_book($pdo);
+        $keepSharedCost = !empty($priceBook[1]) || empty($priceBook[2]);
+        $globalCost = $cost;
+        if ($keepSharedCost && $action === 'update' && $id > 0) {
+            try {
+                $stGlob = $pdo->prepare('SELECT cost_price FROM service_plans WHERE id = :id LIMIT 1');
+                $stGlob->execute(array(':id' => $id));
+                $glob = $stGlob->fetchColumn();
+                if ($glob !== false && $glob !== null) {
+                    $globalCost = (float) $glob;
+                }
+            } catch (Exception $e) {
+            }
         }
 
         list($floorByName, $floorByPid) = plans_price_floors($pdo);
@@ -144,10 +235,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $stmt->execute(array(
                 ':name' => $name,
                 ':price' => $price,
-                ':cost' => $cost,
+                ':cost' => $keepSharedCost ? 0 : $cost,
                 ':sas_profile' => $sasProfile > 0 ? $sasProfile : null,
                 ':sort' => $sort,
             ));
+            if ($keepSharedCost && (int) $priceBook[0] > 0 && function_exists('agent_card_price_save')) {
+                agent_card_price_save($pdo, (int) $priceBook[0], $sasProfile, $name, $cost, $cost, $cost);
+            }
             flash('success', 'تمت إضافة الباقة');
         } else {
             if ($id <= 0) {
@@ -164,10 +258,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 ':id' => $id,
                 ':name' => $name,
                 ':price' => $price,
-                ':cost' => $cost,
+                ':cost' => $globalCost,
                 ':sas_profile' => $sasProfile > 0 ? $sasProfile : null,
                 ':sort' => $sort,
             ));
+            if ($keepSharedCost && (int) $priceBook[0] > 0 && function_exists('agent_card_price_save')) {
+                agent_card_price_save($pdo, (int) $priceBook[0], $sasProfile, $name, $cost, $cost, null);
+            }
             flash('success', 'تم تعديل الباقة');
         }
         redirect('plans.php');
@@ -289,15 +386,75 @@ if ($editId > 0) {
     }
 }
 
+if ($plansLeaf && $_SERVER['REQUEST_METHOD'] !== 'POST') {
+    $pullProfiles = array();
+    if (isset($_SESSION['sas_profiles_ui']) && is_array($_SESSION['sas_profiles_ui'])) {
+        $pullProfiles = $_SESSION['sas_profiles_ui'];
+    }
+    if (!$pullProfiles && function_exists('sas_is_ready') && sas_is_ready($config) && function_exists('sas_page_connector') && function_exists('sas_profiles_for_ui')) {
+        $pullApi = sas_page_connector($config);
+        if ($pullApi) {
+            $pullProfiles = sas_profiles_for_ui($pullApi);
+        }
+    }
+    if ($pullProfiles) {
+        try {
+            $existingPull = $pdo->query('SELECT id, name, sas_profile_id FROM service_plans')->fetchAll();
+            $byPidPull = array();
+            $byNamePull = array();
+            foreach ($existingPull as $er) {
+                if (!empty($er['sas_profile_id'])) {
+                    $byPidPull[(int) $er['sas_profile_id']] = (int) $er['id'];
+                }
+                $nmPull = function_exists('mb_strtolower')
+                    ? mb_strtolower(trim((string) $er['name']), 'UTF-8')
+                    : strtolower(trim((string) $er['name']));
+                if ($nmPull !== '') {
+                    $byNamePull[$nmPull] = (int) $er['id'];
+                }
+            }
+            $sortPull = (int) $pdo->query('SELECT COALESCE(MAX(sort_order),0) FROM service_plans')->fetchColumn() + 1;
+            $insPull = $pdo->prepare(
+                'INSERT INTO service_plans (name, monthly_price, cost_price, sas_profile_id, sort_order, is_active)
+                 VALUES (:name, 0, 0, :pid, :sort, 1)'
+            );
+            foreach ($pullProfiles as $pr) {
+                $pidPull = isset($pr['id']) ? (int) $pr['id'] : 0;
+                $pnamePull = isset($pr['name']) ? trim((string) $pr['name']) : '';
+                if ($pidPull <= 0 || $pnamePull === '' || isset($byPidPull[$pidPull])) {
+                    continue;
+                }
+                $keyPull = function_exists('mb_strtolower') ? mb_strtolower($pnamePull, 'UTF-8') : strtolower($pnamePull);
+                if (isset($byNamePull[$keyPull])) {
+                    continue;
+                }
+                $insPull->execute(array(':name' => $pnamePull, ':pid' => $pidPull, ':sort' => $sortPull));
+                $byPidPull[$pidPull] = (int) $pdo->lastInsertId();
+                $byNamePull[$keyPull] = $byPidPull[$pidPull];
+                $sortPull++;
+            }
+        } catch (Exception $e) {
+        }
+    }
+}
+
 $plans = $pdo->query('SELECT * FROM service_plans ORDER BY sort_order ASC, monthly_price ASC, id ASC')->fetchAll();
+$priceBook = plans_account_book($pdo);
 list($floorByName, $floorByPid) = plans_price_floors($pdo);
 $editFloor = 0;
+$editCostShown = 0;
 if ($editPlan) {
     $editFloor = plans_floor_for(
         $floorByName,
         $floorByPid,
         isset($editPlan['name']) ? $editPlan['name'] : '',
         isset($editPlan['sas_profile_id']) ? $editPlan['sas_profile_id'] : 0
+    );
+    $editCostShown = (int) account_viewer_package_price(
+        $pdo,
+        isset($editPlan['name']) ? $editPlan['name'] : '',
+        isset($editPlan['sas_profile_id']) ? $editPlan['sas_profile_id'] : 0,
+        isset($editPlan['cost_price']) ? $editPlan['cost_price'] : 0
     );
 }
 $nextSort = 1;
@@ -335,8 +492,11 @@ render_settings_tabs('plans');
     <div class="plans-head">
         <div>
             <h2><?php echo e($lang === 'en' ? 'Packages' : 'الباقات'); ?></h2>
+            <?php if (!$plansLeaf): ?>
             <p style="color:#6b7a88;margin:4px 0 0;font-weight:600"><?php echo e(t('drag_hint')); ?></p>
+            <?php endif; ?>
         </div>
+        <?php if (!$plansLeaf): ?>
         <div class="actions" style="margin:0;gap:8px;align-items:center">
             <a class="btn secondary sm" href="agent_prices.php"><?php echo e($lang === 'en' ? 'Price table' : 'جدول الأسعار'); ?></a>
             <form method="post" style="margin:0">
@@ -346,8 +506,10 @@ render_settings_tabs('plans');
             </form>
             <a class="plans-add-btn" href="plans.php?add=1" title="<?php echo e($lang === 'en' ? 'Add package' : 'إضافة باقة'); ?>" aria-label="<?php echo e($lang === 'en' ? 'Add package' : 'إضافة باقة'); ?>">+</a>
         </div>
+        <?php endif; ?>
     </div>
 
+    <?php if (!$plansLeaf): ?>
     <div class="plans-add-panel" id="plansAddPanel"<?php echo $showAdd ? '' : ' hidden'; ?>>
         <h2 style="margin-top:0"><?php echo $editPlan ? t('edit') . ' — ' . e($editPlan['name']) : ($lang === 'en' ? 'Add package' : 'إضافة باقة جديدة'); ?></h2>
         <form method="post">
@@ -365,7 +527,7 @@ render_settings_tabs('plans');
                 <div>
                     <label>السعر</label>
                     <input type="number" name="cost_price" min="<?php echo $editFloor > 0 ? (int) $editFloor : 0; ?>" step="any" required
-                           value="<?php echo e($editPlan ? (string) (int) $editPlan['cost_price'] : '0'); ?>">
+                           value="<?php echo e($editPlan ? (string) $editCostShown : '0'); ?>">
                     <?php if ($editFloor > 0): ?>
                     <p class="meta" style="margin:6px 0 0">ما ينزل عن <?php echo (int) $editFloor; ?> — سعر الصفحة اللي فوق.</p>
                     <?php endif; ?>
@@ -388,10 +550,18 @@ render_settings_tabs('plans');
             </div>
         </form>
     </div>
+    <?php endif; ?>
 
     <div class="table-wrap" style="margin-top:14px">
         <table>
             <thead>
+            <?php if ($plansLeaf): ?>
+            <tr>
+                <th>الباقة</th>
+                <th>التكلفة</th>
+                <th>سعر المشترك</th>
+            </tr>
+            <?php else: ?>
             <tr>
                 <th></th>
                 <th>#</th>
@@ -402,14 +572,31 @@ render_settings_tabs('plans');
                 <th>الحالة</th>
                 <th>إجراءات</th>
             </tr>
+            <?php endif; ?>
             </thead>
             <tbody id="plansBody">
             <?php if (!$plans): ?>
-                <tr><td colspan="8"><?php echo e($lang === 'en' ? 'No packages yet — press +' : 'لا توجد باقات بعد — اضغط +'); ?></td></tr>
+                <tr><td colspan="<?php echo $plansLeaf ? 3 : 8; ?>"><?php echo e($lang === 'en' ? 'No packages yet' : 'لا توجد باقات بعد'); ?></td></tr>
             <?php endif; ?>
             <?php foreach ($plans as $p): ?>
                 <?php
-                $cost = isset($p['cost_price']) ? (float) $p['cost_price'] : 0;
+                $cost = function_exists('account_viewer_package_price')
+                    ? account_viewer_package_price(
+                        $pdo,
+                        isset($p['name']) ? $p['name'] : '',
+                        isset($p['sas_profile_id']) ? $p['sas_profile_id'] : 0,
+                        isset($p['cost_price']) ? $p['cost_price'] : 0
+                    )
+                    : (isset($p['cost_price']) ? (float) $p['cost_price'] : 0);
+                $retailShown = function_exists('account_viewer_package_retail')
+                    ? account_viewer_package_retail(
+                        $pdo,
+                        isset($p['name']) ? $p['name'] : '',
+                        isset($p['sas_profile_id']) ? $p['sas_profile_id'] : 0,
+                        isset($p['monthly_price']) ? $p['monthly_price'] : 0
+                    )
+                    : (isset($p['monthly_price']) ? (float) $p['monthly_price'] : 0);
+                $unpriced = ($cost <= 0);
                 $rowFloor = plans_floor_for(
                     $floorByName,
                     $floorByPid,
@@ -417,12 +604,19 @@ render_settings_tabs('plans');
                     isset($p['sas_profile_id']) ? $p['sas_profile_id'] : 0
                 );
                 ?>
+                <?php if ($plansLeaf): ?>
+                <tr>
+                    <td><strong><?php echo e($p['name']); ?></strong></td>
+                    <td><?php echo $unpriced ? '—' : e(money_format_iqd($cost, $config['currency'])); ?></td>
+                    <td><?php echo e(money_format_iqd($retailShown, $config['currency'])); ?></td>
+                </tr>
+                <?php else: ?>
                 <tr draggable="true" data-id="<?php echo (int) $p['id']; ?>">
                     <td class="drag-handle" title="اسحب">☰</td>
                     <td class="row-num"></td>
                     <td><strong><?php echo (int) $p['sort_order']; ?></strong></td>
                     <td><strong><?php echo e($p['name']); ?></strong></td>
-                    <td><?php echo e(money_format_iqd($cost, $config['currency'])); ?><?php if ($rowFloor > 0 && $cost + 0.001 < $rowFloor): ?><div class="meta">الحد <?php echo (int) $rowFloor; ?></div><?php endif; ?></td>
+                    <td><?php if ($unpriced): ?><span class="meta">غير مسعر</span><?php else: ?><?php echo e(money_format_iqd($cost, $config['currency'])); ?><?php endif; ?><?php if ($rowFloor > 0 && $cost + 0.001 < $rowFloor): ?><div class="meta">الحد <?php echo (int) $rowFloor; ?></div><?php endif; ?></td>
                     <td><?php echo !empty($p['sas_profile_id']) ? ('#' . (int) $p['sas_profile_id']) : '—'; ?></td>
                     <td>
                         <span class="badge <?php echo ((int) $p['is_active'] === 1) ? 'active' : 'expired'; ?>">
@@ -447,6 +641,7 @@ render_settings_tabs('plans');
                         </div>
                     </td>
                 </tr>
+                <?php endif; ?>
             <?php endforeach; ?>
             </tbody>
         </table>

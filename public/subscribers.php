@@ -1362,8 +1362,9 @@ function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
                     <select name="plan_id" required>
                         <option value=""><?php echo e($lang === 'en' ? 'Choose package…' : 'اختر نوع الاشتراك…'); ?></option>
                         <?php foreach ($servicePlans as $sp): ?>
+                            <?php $planMoney = function_exists('account_plan_money') ? account_plan_money($pdo, $sp) : (float) $sp['monthly_price']; ?>
                             <option value="<?php echo (int) $sp['id']; ?>">
-                                <?php echo e($sp['name'] . ' — ' . money_format_iqd($sp['monthly_price'], $config['currency'])); ?>
+                                <?php echo e($sp['name'] . ' — ' . money_format_iqd($planMoney, $config['currency'])); ?>
                             </option>
                         <?php endforeach; ?>
                     </select>
@@ -2155,7 +2156,8 @@ window.DEBT_ENTRY = {
       }
       var tr = e.target && e.target.closest ? e.target.closest('tr[data-id]') : null;
       if (!tr || !tbody.contains(tr)) return;
-      markRowCtx(tr);
+      if (e.target.closest('a,button,input,label')) return;
+      selectOnlyRow(tr);
     });
     tbody.addEventListener('contextmenu', function (e) {
       var tr = e.target && e.target.closest ? e.target.closest('tr[data-id]') : null;
@@ -2208,6 +2210,10 @@ window.DEBT_ENTRY = {
       if (opsDrop && !opsDrop.classList.contains('hidden') && !opsDrop.classList.contains('ops-float')) {
         closeOpsMenu();
         return;
+      }
+      if (selectedRows().length === 0 && tbody) {
+        var ctx = tbody.querySelector('tr.subs-row-ctx');
+        if (ctx) selectOnlyRow(ctx);
       }
       openOpsMenu();
     });

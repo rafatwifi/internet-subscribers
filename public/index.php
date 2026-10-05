@@ -147,6 +147,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['disable_agent_sas']) 
     redirect('index.php#card-accounting');
 }
 
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_ping') {
+    header('Content-Type: application/json; charset=utf-8');
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
+    $pingOut = function_exists('dash_reseller_pings')
+        ? dash_reseller_pings($config)
+        : array('ok' => true, 'balance' => '-', 'sub' => '', 'count' => 0);
+    echo json_encode($pingOut);
+    exit;
+}
+
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
     header('Content-Type: application/json; charset=utf-8');
     $en = (isset($lang) && $lang === 'en');
@@ -194,6 +206,15 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
     }
 
     if (!$force) {
+        $cachedMs = isset($_SESSION['sas_latency_ms']) ? $_SESSION['sas_latency_ms'] : null;
+        $cachedHost = isset($_SESSION['sas_latency_host']) ? trim((string) $_SESSION['sas_latency_host']) : '';
+        $bankNow = function_exists('system_reseller_bank') ? system_reseller_bank($config) : array('host' => '');
+        $bankHostNow = isset($bankNow['host']) ? trim((string) $bankNow['host']) : '';
+        $hostMatch = ($bankHostNow === '' || strcasecmp($cachedHost, $bankHostNow) === 0);
+        if ($hostMatch && $cachedMs !== null && $cachedMs !== '') {
+            $out['sas_ms'] = (int) $cachedMs;
+            $out['balance'] = number_format((float) $cachedMs, 0) . ' ms';
+        }
         if (function_exists('app_session_close')) {
             app_session_close();
         }
@@ -203,6 +224,9 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
 
     if (function_exists('sas_is_ready') && sas_is_ready($config)) {
         if ($force) {
+            if (session_status() !== PHP_SESSION_ACTIVE && function_exists('app_session_reopen')) {
+                app_session_reopen();
+            }
             $_SESSION['sas_rp_at'] = 0;
             if (function_exists('sas_clear_unused_card_cache')) {
                 sas_clear_unused_card_cache();
@@ -226,7 +250,9 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
             if (isset($lat['ms']) && $lat['ms'] !== null) {
                 $out['sas_ms'] = (int) $lat['ms'];
                 $out['balance'] = number_format((float) $lat['ms'], 0) . ' ms';
-                if (session_status() !== PHP_SESSION_ACTIVE) {
+                if (session_status() !== PHP_SESSION_ACTIVE && function_exists('app_session_reopen')) {
+                    app_session_reopen();
+                } elseif (session_status() !== PHP_SESSION_ACTIVE) {
                     @session_start();
                 }
                 $_SESSION['sas_latency_ms'] = (int) $lat['ms'];
@@ -275,6 +301,9 @@ $pdo->exec("UPDATE subscriptions SET status = 'expired' WHERE status = 'active' 
 if (empty($_SESSION['archive_months_at']) || (time() - (int) $_SESSION['archive_months_at']) > 3600) {
     archive_closed_months($pdo);
     $_SESSION['archive_months_at'] = time();
+    if (function_exists('app_session_touch')) {
+        app_session_touch();
+    }
 }
 
 /* لا تنقل دفتر أو مشتركين وكالة ثانية عند فتح اللوحة */
@@ -305,6 +334,26 @@ $activatedMonth = (int) $pdo->query(
      JOIN subscribers s ON s.id = sub.subscriber_id
      WHERE DATE_FORMAT(sub.created_at, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')" . $agentScope
 )->fetchColumn();
+$dashGrowth = '0%';
+$dashGrowthSub = '';
+try {
+    $yNow = (int) date('Y');
+    $newThis = (int) $pdo->query(
+        'SELECT COUNT(*) FROM subscribers s WHERE YEAR(s.created_at) = ' . $yNow . $agentScope
+    )->fetchColumn();
+    $newLast = (int) $pdo->query(
+        'SELECT COUNT(*) FROM subscribers s WHERE YEAR(s.created_at) = ' . ($yNow - 1) . $agentScope
+    )->fetchColumn();
+    if ($newLast > 0) {
+        $pct = (int) round((($newThis - $newLast) / $newLast) * 100);
+        $dashGrowth = ($pct > 0 ? '+' : '') . $pct . '%';
+    } elseif ($newThis > 0) {
+        $dashGrowth = '+' . (int) $newThis;
+    }
+    $dashGrowthSub = (string) $newThis . ' / ' . (string) $yNow;
+} catch (Exception $e) {
+}
+$dashVersion = function_exists('app_version') ? (string) app_version() : '1.4.0';
 // رأس المال = الربح + الديون
 $capitalMonth = $profitMonth + $totalDebt;
 // نفس مشتركي جدول الإيجار، بدون تكرار صفوف الساس
@@ -444,8 +493,15 @@ if ($sasReadyDash) {
             ? number_format((int) $sasPointsVal)
             : number_format((float) $sasPointsVal, 2);
     }
-    // لا نعمل ping للساس عند فتح الصفحة — فقط من الكاش/الأجاكس (يمنع صفنة التنقل)
-    if (isset($_SESSION['sas_latency_ms']) && $_SESSION['sas_latency_ms'] !== null && $_SESSION['sas_latency_ms'] !== '') {
+    $dashBankInfo = function_exists('system_reseller_bank')
+        ? system_reseller_bank($config)
+        : array('host' => '', 'name' => '');
+    $dashBankHost = isset($dashBankInfo['host']) ? trim((string) $dashBankInfo['host']) : '';
+    $dashBankName = isset($dashBankInfo['name']) ? trim((string) $dashBankInfo['name']) : '';
+    $cachedLatHost = isset($_SESSION['sas_latency_host']) ? trim((string) $_SESSION['sas_latency_host']) : '';
+    $latHostOk = ($dashBankHost === '' || strcasecmp($cachedLatHost, $dashBankHost) === 0);
+    // لا نعمل ping عند فتح الصفحة — فقط من الكاش إذا كان لنفس الريسلر
+    if ($latHostOk && isset($_SESSION['sas_latency_ms']) && $_SESSION['sas_latency_ms'] !== null && $_SESSION['sas_latency_ms'] !== '') {
         $sasBalanceDisp = number_format((float) $_SESSION['sas_latency_ms'], 0) . ' ms';
     }
 } else {
@@ -464,10 +520,11 @@ if ($sasReadyDash) {
 }
 
 if (!function_exists('dash_sas_box')) {
-    function dash_sas_box($href, $tone, $title, $sub, $value, $ico, $boxId = '')
+    function dash_sas_box($href, $tone, $title, $sub, $value, $ico, $boxId = '', $extra = '')
     {
         echo '<a class="sas-box ' . e($tone) . '" href="' . e($href) . '"'
-            . ($boxId !== '' ? (' id="' . e($boxId) . '"') : '') . '>';
+            . ($boxId !== '' ? (' id="' . e($boxId) . '"') : '')
+            . ($extra !== '' ? (' ' . $extra) : '') . '>';
         echo '<div class="sas-box-title">' . e($title) . '</div>';
         if ($sub !== '' || $boxId !== '') {
             echo '<div class="sas-box-sub"' . ($boxId !== '' ? (' id="' . e($boxId) . 'Sub"') : '') . '>' . e($sub) . '</div>';
@@ -598,13 +655,13 @@ body:has(.sas-dash) .container {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
+  justify-content: flex-start;
   color: var(--ink) !important;
   text-decoration: none !important;
   font-family: inherit;
   border-radius: 2px 20px 2px 16px;
-  min-height: 112px;
-  padding: 16px 16px 14px 18px;
+  min-height: 92px;
+  padding: 14px 16px 12px 18px;
   background: linear-gradient(145deg, var(--c1) 0%, var(--c2) 100%);
   border: 0;
   box-shadow: 6px 7px 0 rgba(15, 23, 42, 0.12);
@@ -635,9 +692,13 @@ body:has(.sas-dash) .container {
   transform: translate(-2px, -3px);
   box-shadow: 9px 10px 0 rgba(15, 23, 42, 0.14);
 }
-.sas-box-title { font-size: 13px; font-weight: 800; opacity: .95; z-index: 1; }
-.sas-box-sub { font-size: 11px; font-weight: 600; opacity: .8; margin-top: 2px; z-index: 1; }
-.sas-box-val { font-size: 28px; font-weight: 800; margin-top: 10px; z-index: 1; letter-spacing: -0.02em; }
+.sas-box-title { font-size: 13px; font-weight: 800; opacity: .95; z-index: 1; line-height: 1.25; }
+.sas-box-sub { font-size: 11px; font-weight: 600; opacity: .8; margin-top: 2px; z-index: 1; min-height: 14px; line-height: 1.3; }
+.sas-box-sub:empty { display: none; min-height: 0; }
+.sas-box-val { font-size: 26px; font-weight: 800; margin-top: 6px; z-index: 1; letter-spacing: -0.02em; line-height: 1.1; }
+#dashPing[data-count="2"] .sas-box-val,
+#dashPing[data-count="3"] .sas-box-val,
+#dashPing[data-count="4"] .sas-box-val { font-size: 15px; line-height: 1.35; letter-spacing: 0; }
 .sas-box-ico { position: absolute; inset-inline-end: 14px; inset-block-start: 12px; font-size: 22px; opacity: .35; }
 .sas-box.tone-blue { --c1: #38bdf8; --c2: #0369a1; }
 .sas-box.tone-green { --c1: #4ade80; --c2: #15803d; }
@@ -731,6 +792,39 @@ $showWid = function ($id) use ($accLocked, $accWidList) {
 };
 $isAccDash = function_exists('is_accountant_user') && is_accountant_user();
 $en = ($lang === 'en');
+if (!isset($dashBankName)) {
+    $dashBankName = '';
+}
+if (!isset($dashBankHost)) {
+    $dashBankHost = '';
+}
+$dashBankTitle = $dashBankName !== ''
+    ? ($en ? ($dashBankName . ' ping') : ('بنك ' . $dashBankName))
+    : ($en ? 'Reseller ping' : 'بنك الريسلر');
+$dashBankSub = $dashBankHost !== ''
+    ? $dashBankHost
+    : ($en ? 'Reseller host' : 'هوست الريسلر');
+if (!isset($dashBankInfo) || !is_array($dashBankInfo)) {
+    $dashBankInfo = function_exists('system_reseller_bank')
+        ? system_reseller_bank($config)
+        : array('host' => '', 'name' => '');
+    $dashBankHost = isset($dashBankInfo['host']) ? trim((string) $dashBankInfo['host']) : '';
+    $dashBankName = isset($dashBankInfo['name']) ? trim((string) $dashBankInfo['name']) : '';
+}
+$dashPingRows = function_exists('dash_linked_resellers') ? dash_linked_resellers($config) : array();
+$dashPingCount = count($dashPingRows);
+$dashPingHost = '';
+$dashPingNames = array();
+foreach ($dashPingRows as $dashPingRow) {
+    if ($dashPingHost === '' && !empty($dashPingRow['host'])) {
+        $dashPingHost = (string) $dashPingRow['host'];
+    }
+    if (!empty($dashPingRow['name'])) {
+        $dashPingNames[] = (string) $dashPingRow['name'];
+    }
+}
+$dashPingSub = $dashPingNames ? implode(' · ', $dashPingNames) : '';
+$dashPingVal = $dashPingCount > 0 ? '…' : '-';
 if ($isAccDash) {
     $full = function_exists('accountant_widget_catalog_full') ? accountant_widget_catalog_full() : array();
     $order = function_exists('accountant_widgets_effective') ? accountant_widgets_effective($pdo) : null;
@@ -839,7 +933,7 @@ if ($isAccDash) {
         } elseif ($wid === 'points' && $sasReadyDash) {
             dash_sas_box('sas.php', 'tone-lime', $en ? 'Reward points' : 'نقاط تشجيعية', '', (string) $sasPointsDisp, '🎁', 'dashPoints');
         } elseif ($wid === 'latency' && $sasReadyDash) {
-            dash_sas_box('sas.php', 'tone-navy', $en ? 'SAS latency' : 'بنك الساس', $en ? 'Domain ping' : 'Latency دومين الساس', (string) $sasBalanceDisp, '📡', 'dashBank');
+            dash_sas_box('sas.php', 'tone-navy', $dashBankTitle, $dashBankSub, (string) $sasBalanceDisp, '📡', 'dashBank');
         }
     }
     echo '</div>';
@@ -852,12 +946,12 @@ if (!$accLocked || $showWid('subscribers')) {
     if ($accLocked) {
         dash_sas_box($usersHome, 'tone-blue', $en ? 'Subscribers' : 'المشتركين', '', (string) (int) $sasCounts['total'], '👤');
     } else {
-        dash_sas_box($usersHome, 'tone-blue', $en ? 'Total users' : 'كل المشتركين', $en ? 'Registered users' : '', (string) (int) $sasCounts['total'], '👤');
-        dash_sas_box('sas.php?sub=active', 'tone-green', $en ? 'Active users' : 'فعال', '', (string) (int) $sasCounts['active'], '☺');
-        dash_sas_box('sas.php?sub=online', 'tone-aqua', $en ? 'Online users' : 'متصل حاليا', $en ? 'Connected' : '', (string) (int) $sasCounts['online'], '💡');
-        dash_sas_box('sas.php?sub=expired', 'tone-red', $en ? 'Expired users' : 'منتهي', '', (string) (int) $sasCounts['expired'], '☹');
-        dash_sas_box('sas.php?sub=soon', 'tone-yellow', $en ? 'About to expire' : 'على وشك الانتهاء', $en ? 'In 3 days' : '', (string) (int) $sasCounts['soon'], '📅');
-        dash_sas_box('sas.php?sub=today', 'tone-teal', $en ? 'Expiring today' : 'ينتهي اليوم', '', (string) (int) $sasCounts['today'], '📅');
+        dash_sas_box($usersHome, 'tone-blue', $en ? 'Total users' : 'كل المشتركين', $en ? 'Registered users' : 'مسجّلين', (string) (int) $sasCounts['total'], '👤');
+        dash_sas_box('sas.php?sub=active', 'tone-green', $en ? 'Active users' : 'فعال', $en ? 'Running line' : 'خط شغال', (string) (int) $sasCounts['active'], '☺');
+        dash_sas_box('sas.php?sub=online', 'tone-aqua', $en ? 'Online users' : 'متصل حاليا', $en ? 'Connected' : 'على الخط', (string) (int) $sasCounts['online'], '💡');
+        dash_sas_box('sas.php?sub=expired', 'tone-red', $en ? 'Expired users' : 'منتهي', $en ? 'Ended' : 'انتهى الخط', (string) (int) $sasCounts['expired'], '☹');
+        dash_sas_box('sas.php?sub=soon', 'tone-yellow', $en ? 'About to expire' : 'على وشك الانتهاء', $en ? 'In 3 days' : 'خلال 3 أيام', (string) (int) $sasCounts['soon'], '📅');
+        dash_sas_box('sas.php?sub=today', 'tone-teal', $en ? 'Expiring today' : 'ينتهي اليوم', $en ? 'Today' : 'اليوم', (string) (int) $sasCounts['today'], '📅');
     }
 }
 if ($isAccDash && $showWid('agents') && $accLocked) {
@@ -865,27 +959,22 @@ if ($isAccDash && $showWid('agents') && $accLocked) {
     dash_sas_box('agents.php', 'tone-purple', $en ? 'Agents' : 'الوكلاء', '', (string) (int) $agentN, '👥');
 }
 if ($sasReadyDash && !$accLocked) {
-    dash_sas_box('sas.php', 'tone-lime', $en ? 'Reward points' : 'نقاط تشجيعية', '', (string) $sasPointsDisp, '🎁', 'dashPoints');
-    dash_sas_box('sas.php', 'tone-navy', $en ? 'SAS latency' : 'بنك الساس', $en ? 'Domain ping' : 'Latency دومين الساس', (string) $sasBalanceDisp, '📡', 'dashBank');
+    dash_sas_box('sas.php', 'tone-lime', $en ? 'Reward points' : 'نقاط تشجيعية', $en ? 'Balance' : 'الرصيد', (string) $sasPointsDisp, '🎁', 'dashPoints');
+    dash_sas_box('sas.php', 'tone-navy', $dashBankTitle, $dashBankSub, (string) $sasBalanceDisp, '📡', 'dashBank');
 }
-?>
-</div>
-
-<div class="sas-boxes">
-<?php
 if ($showWid('collected')) {
-    dash_sas_box('reports.php', 'tone-yellow', $en ? 'Collected' : 'المقبوض', '', money_format_iqd($receivedMonth, $config['currency']), '💵');
+    dash_sas_box('reports.php', 'tone-yellow', $en ? 'Collected' : 'المقبوض', $en ? 'This month' : 'هذا الشهر', money_format_iqd($receivedMonth, $config['currency']), '💵');
 }
 if ($showWid('debts')) {
-    dash_sas_box('debts.php?status=unpaid', 'tone-red', $en ? 'Debts' : 'الديون', '', money_format_iqd($totalDebt, $config['currency']), '📄');
+    dash_sas_box('debts.php?status=unpaid', 'tone-red', $en ? 'Debts' : 'الديون', $en ? 'Unpaid' : 'غير مدفوع', money_format_iqd($totalDebt, $config['currency']), '📄');
 }
 if ($showWid('profit')) {
-    dash_sas_box('reports.php', 'tone-green', $en ? 'Profit' : 'الربح', '', money_format_iqd($profitMonth, $config['currency']), '📈');
+    dash_sas_box('reports.php', 'tone-green', $en ? 'Profit' : 'الربح', $en ? 'This month' : 'هذا الشهر', money_format_iqd($profitMonth, $config['currency']), '📈');
     dash_sas_box('reports.php', 'tone-teal', $en ? 'Capital' : 'رأس المال', $en ? 'Profit + debts' : 'الربح + الديون', money_format_iqd($capitalMonth, $config['currency']), '🏦');
 }
 if ($showWid('activations')) {
-    dash_sas_box('subscriptions.php', 'tone-purple', $en ? 'Sales' : 'المبيعات', '', money_format_iqd($salesMonth, $config['currency']), '🧾');
-    dash_sas_box('subscriptions.php', 'tone-aqua', $en ? 'Activations' : 'تفعيلات الشهر', '', (string) (int) $activatedMonth, '⚡');
+    dash_sas_box('subscriptions.php', 'tone-purple', $en ? 'Sales' : 'المبيعات', $en ? 'This month' : 'هذا الشهر', money_format_iqd($salesMonth, $config['currency']), '🧾');
+    dash_sas_box('subscriptions.php', 'tone-aqua', $en ? 'Activations' : 'تفعيلات الشهر', $en ? 'This month' : 'هذا الشهر', (string) (int) $activatedMonth, '⚡');
 }
 if ($showWid('rentals')) {
     dash_sas_box('rentals.php', 'tone-navy', $en ? 'Rental towers' : 'أبراج الإيجار', $en ? 'Active of total' : 'فعال من أصل الكل', ((int) $rentalActiveCount) . '\\' . (int) $rentalTotalCount, '📡');
@@ -907,16 +996,34 @@ if ($sasReadyDash && $showWid('cards')) {
     $cardSub = $cardParts ? implode(' · ', $cardParts) : ($en ? 'Unused' : 'شاغرة');
     dash_sas_box('cards.php', 'tone-navy', $en ? 'Cards' : 'الكروت', $cardSub, (string) (int) $cardTotal, '🃏', 'dashCards');
 }
+if (!$accLocked) {
+    dash_sas_box(
+        $dashPingHost !== '' ? 'settings.php?tab=sas' : 'index.php',
+        'tone-navy',
+        'Ping',
+        $dashPingSub,
+        $dashPingVal,
+        '📡',
+        'dashPing',
+        'data-has="' . ($dashPingCount > 0 ? '1' : '0') . '" data-count="' . (int) $dashPingCount . '"'
+    );
+    dash_sas_box('settings.php', 'tone-purple', $en ? 'System version' : 'إصدار النظام', $en ? 'Portal' : 'البوابة', 'v' . $dashVersion, '📦');
+    dash_sas_box('subscribers.php', 'tone-lime', $en ? 'Subscriber growth' : 'نمو المشتركين', $dashGrowthSub !== '' ? $dashGrowthSub : ($en ? 'This year' : 'هذي السنة'), $dashGrowth, '📈');
+}
 ?>
 </div>
 <?php } ?>
 </div>
 <?php if ($sasReadyDash): ?>
 <style>
-#dashCards.is-loading #dashCardsVal {
+#dashCards.is-loading #dashCardsVal,
+#dashBank.is-loading #dashBankVal,
+#dashPing.is-loading #dashPingVal {
   position: relative;
 }
-#dashCards.is-loading #dashCardsVal::after {
+#dashCards.is-loading #dashCardsVal::after,
+#dashBank.is-loading #dashBankVal::after,
+#dashPing.is-loading #dashPingVal::after {
   content: "";
   position: absolute;
   inset-inline-start: 0;
@@ -962,8 +1069,38 @@ if ($sasReadyDash && $showWid('cards')) {
         if (box) box.classList.remove('is-loading');
       });
   }
+  function loadBank() {
+    var box = document.getElementById('dashBank');
+    var ping = document.getElementById('dashPing');
+    var b = document.getElementById('dashBankVal');
+    var pv = document.getElementById('dashPingVal');
+    var had = (b && String(b.textContent || '').indexOf('ms') >= 0)
+      || (pv && String(pv.textContent || '').indexOf('ms') >= 0);
+    if (box && !had) box.classList.add('is-loading');
+    if (ping && ping.getAttribute('data-has') === '1' && !had) ping.classList.add('is-loading');
+    return fetch('index.php?ajax=dash_ping', { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d || !d.balance || d.balance === '—') return;
+        if (b && (!d.count || d.count === 1) && d.balance !== '-') b.textContent = d.balance;
+        if (pv && ping && ping.getAttribute('data-has') === '1') {
+          pv.textContent = d.balance;
+          if (d.sub) {
+            var ps = document.getElementById('dashPingSub');
+            if (ps) ps.textContent = d.sub;
+          }
+          if (d.count) ping.setAttribute('data-count', String(d.count));
+        }
+      })
+      .catch(function () {})
+      .then(function () {
+        if (box) box.classList.remove('is-loading');
+        if (ping) ping.classList.remove('is-loading');
+      });
+  }
   loadDash(false, true);
-  setInterval(function () { loadDash(false, true); }, 180000);
+  loadBank();
+  setInterval(function () { loadDash(false, true); loadBank(); }, 180000);
 })();
 </script>
 <?php endif; ?>
@@ -995,4 +1132,32 @@ if ($sasReadyDash && $showWid('cards')) {
         <?php endfor; ?>
     </div>
 </div>
+<?php if (empty($sasReadyDash)): ?>
+<script>
+(function () {
+  var ping = document.getElementById('dashPing');
+  if (!ping || ping.getAttribute('data-has') !== '1') return;
+  function load() {
+    var pv = document.getElementById('dashPingVal');
+    var had = pv && String(pv.textContent || '').indexOf('ms') >= 0;
+    if (!had) ping.classList.add('is-loading');
+    return fetch('index.php?ajax=dash_ping', { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!pv || !d || !d.balance || d.balance === '—') return;
+        pv.textContent = d.balance;
+        if (d.sub) {
+          var ps = document.getElementById('dashPingSub');
+          if (ps) ps.textContent = d.sub;
+        }
+        if (d.count) ping.setAttribute('data-count', String(d.count));
+      })
+      .catch(function () {})
+      .then(function () { ping.classList.remove('is-loading'); });
+  }
+  load();
+  setInterval(load, 180000);
+})();
+</script>
+<?php endif; ?>
 <?php render_footer(); ?>

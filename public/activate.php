@@ -153,7 +153,8 @@ if ($preselectId > 0) {
         $rentalFeeUi = (float) rental_fee_amount($settingsUi);
     }
     if ($currentPlan) {
-        $chargePreview = (float) $currentPlan['monthly_price'] + $rentalFeeUi;
+        $planMoney = function_exists('account_plan_money') ? account_plan_money($pdo, $currentPlan) : (float) $currentPlan['monthly_price'];
+        $chargePreview = $planMoney + $rentalFeeUi;
     }
 }
 
@@ -214,10 +215,11 @@ if ($quickMode && $preselectSub):
                     </div>
                     <select name="plan_id" id="quickPlanSelect" required class="quick-plan-select">
                         <?php foreach ($plans as $p): ?>
+                            <?php $planMoney = function_exists('account_plan_money') ? account_plan_money($pdo, $p) : (float) $p['monthly_price']; ?>
                             <option value="<?php echo (int) $p['id']; ?>"
-                                data-price="<?php echo (float) $p['monthly_price']; ?>"
+                                data-price="<?php echo (float) $planMoney; ?>"
                                 <?php echo $currentPlanId === (int) $p['id'] ? ' selected' : ''; ?>>
-                                <?php echo e($p['name'] . ' | ' . money_format_iqd($p['monthly_price'], $config['currency'])); ?>
+                                <?php echo e($p['name'] . ' | ' . money_format_iqd($planMoney, $config['currency'])); ?>
                             </option>
                         <?php endforeach; ?>
                     </select>
@@ -421,8 +423,9 @@ render_header(t('activate'), 'activate');
                 <select name="plan_id" id="planSelect" required>
                     <option value="">...</option>
                     <?php foreach ($plans as $p): ?>
+                        <?php $planMoney = function_exists('account_plan_money') ? account_plan_money($pdo, $p) : (float) $p['monthly_price']; ?>
                         <option value="<?php echo (int) $p['id']; ?>"<?php echo $currentPlanId === (int) $p['id'] ? ' selected' : ''; ?>>
-                            <?php echo e($p['name'] . ' | ' . money_format_iqd($p['monthly_price'], $config['currency'])); ?>
+                            <?php echo e($p['name'] . ' | ' . money_format_iqd($planMoney, $config['currency'])); ?>
                         </option>
                     <?php endforeach; ?>
                 </select>

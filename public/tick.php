@@ -32,4 +32,10 @@ if (function_exists('backup_auto_tick')) {
     } catch (Exception $e) {
     }
 }
+if (function_exists('wa_retry_due_batch')) {
+    try {
+        @wa_retry_due_batch($pdo, $config, 1);
+    } catch (Exception $e) {
+    }
+}
 echo json_encode(array('ok' => $ok));

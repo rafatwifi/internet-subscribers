@@ -33,7 +33,9 @@ if ($base === '' || strpos($base, 'http') !== 0) {
     http_response_code(502);
     echo json_encode(array(
         'success' => false,
-        'error' => 'Gateway URL invalid. Must start with http://',
+        'ready' => false,
+        'status' => 'gateway_down',
+        'error' => 'عنوان بوابة واتساب غير مضبوط.',
     ));
     exit;
 }
@@ -45,7 +47,10 @@ function wa_proxy_request($url, $method, $key, $timeout)
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_TIMEOUT => $timeout,
         CURLOPT_CONNECTTIMEOUT => 5,
-        CURLOPT_HTTPHEADER => array('X-Api-Key: ' . $key, 'Accept: application/json'),
+        CURLOPT_HTTPHEADER => array(
+            'X-Api-Key: ' . $key,
+            'Accept: application/json',
+        ),
     );
     if ($method === 'POST') {
         $opts[CURLOPT_POST] = true;
@@ -54,90 +59,147 @@ function wa_proxy_request($url, $method, $key, $timeout)
     }
     curl_setopt_array($ch, $opts);
     $raw = curl_exec($ch);
-    $err = curl_error($ch);
     $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
-    return array($raw, $err, $code);
+    return array($raw, $code);
 }
 
-$waAccount = array('local_url' => $base, 'local_key' => $key);
-$ownStatus = function_exists('whatsapp_gateway_status_for_account')
-    ? whatsapp_gateway_status_for_account($waAccount, $sessionId)
-    : array('ready' => false, 'session' => '', 'status' => 'need_link');
-$echo = isset($ownStatus['session']) ? (string) $ownStatus['session'] : '';
-$ownsSession = !empty($ownStatus['session_ok'])
-    && $sessionId !== ''
-    && $echo === (string) $sessionId;
-if ($action === 'status' || !$ownsSession) {
-    echo json_encode(array(
-        'success' => true,
-        'ready' => $ownsSession && !empty($ownStatus['ready']),
-        'has_qr' => $ownsSession && !empty($ownStatus['has_qr']),
-        'phone' => ($ownsSession && !empty($ownStatus['ready']) && isset($ownStatus['phone'])) ? (string) $ownStatus['phone'] : '',
-        'session' => $ownsSession ? $sessionId : '',
-        'status' => $ownsSession && !empty($ownStatus['ready']) ? 'connected' : 'need_link',
-        'qr_data_url' => ($ownsSession && $action === 'qr' && !empty($ownStatus['qr_data_url'])) ? $ownStatus['qr_data_url'] : null,
-    ));
+function wa_proxy_emit($payload, $http)
+{
+    http_response_code($http);
+    echo json_encode($payload);
     exit;
+}
+
+function wa_proxy_down()
+{
+    wa_proxy_emit(array(
+        'success' => false,
+        'ready' => false,
+        'has_qr' => false,
+        'phone' => '',
+        'session' => '',
+        'status' => 'gateway_down',
+        'qr_data_url' => null,
+        'error' => 'بوابة واتساب متوقفة على جهاز الويندوز. الربط السابق محفوظ على الجهاز — شغّل start-gateway.bat وما تحتاج تمسح الرمز من جديد.',
+    ), 502);
+}
+
+function wa_proxy_status_name($raw)
+{
+    $raw = trim((string) $raw);
+    $ok = array('starting', 'connecting', 'qr_ready', 'connected', 'logout_cooldown', 'cert_expired', 'tls_retry');
+    if (in_array($raw, $ok, true)) {
+        return $raw;
+    }
+    if (strpos($raw, 'closed_') === 0 && preg_match('/^closed_[0-9]+$/', $raw)) {
+        return $raw;
+    }
+    return 'connecting';
+}
+
+list($raw, $code) = wa_proxy_request(
+    $base . '/status?key=' . rawurlencode($key) . $sessionQs,
+    'GET',
+    $key,
+    8
+);
+if ($raw === false || $code === 0) {
+    wa_proxy_down();
+}
+$decoded = json_decode($raw, true);
+if (!is_array($decoded)) {
+    wa_proxy_down();
+}
+
+$echoed = isset($decoded['session']) ? (string) $decoded['session'] : '';
+if ($echoed === '' || $echoed !== (string) $sessionId) {
+    wa_proxy_emit(array(
+        'success' => true,
+        'ready' => false,
+        'has_qr' => false,
+        'phone' => '',
+        'session' => '',
+        'status' => 'need_link',
+        'qr_data_url' => null,
+    ), 200);
 }
 
 if ($action === 'logout') {
     $urlPost = $base . '/logout?key=' . rawurlencode($key) . $sessionQs;
-    $urlGet = $urlPost;
-    list($raw, $err, $code) = wa_proxy_request($urlPost, 'POST', $key, 12);
-    if ($raw === false || $code >= 400 || $code === 0) {
-        list($raw, $err, $code) = wa_proxy_request($urlGet, 'GET', $key, 12);
+    list($lraw, $lcode) = wa_proxy_request($urlPost, 'POST', $key, 12);
+    if ($lraw === false || $lcode >= 400 || $lcode === 0) {
+        list($lraw, $lcode) = wa_proxy_request($urlPost, 'GET', $key, 12);
     }
-    // حتى لو الرد فاضي/انقطع: اعتبره نجاح وخلّي الواجهة تنتظر QR
-    $decoded = is_string($raw) ? json_decode($raw, true) : null;
-    if (is_array($decoded)) {
-        echo json_encode($decoded);
-        exit;
+    $logout = is_string($lraw) ? json_decode($lraw, true) : null;
+    if (is_array($logout)) {
+        if (!isset($logout['session']) || (string) $logout['session'] !== (string) $sessionId) {
+            $logout['session'] = $sessionId;
+        }
+        wa_proxy_emit($logout, 200);
     }
-    echo json_encode(array(
+    wa_proxy_emit(array(
         'success' => true,
+        'session' => $sessionId,
         'message' => 'Logout requested. Waiting for QR...',
-        'detail' => $err,
-        'http_code' => $code,
-    ));
-    exit;
+    ), 200);
 }
 
-$path = '/' . $action;
-$url = $base . $path . '?key=' . rawurlencode($key) . $sessionQs;
-list($raw, $err, $code) = wa_proxy_request($url, 'GET', $key, 8);
-
-if ($raw === false) {
-    http_response_code(502);
-    echo json_encode(array(
-        'success' => false,
-        'error' => 'Cannot reach Windows gateway. Run start-gateway.bat',
-        'detail' => $err,
-    ));
-    exit;
+if (!empty($decoded['ready'])) {
+    wa_proxy_emit(array(
+        'success' => true,
+        'ready' => true,
+        'has_qr' => false,
+        'phone' => isset($decoded['phone']) ? (string) $decoded['phone'] : '',
+        'session' => $sessionId,
+        'status' => 'connected',
+        'qr_data_url' => null,
+    ), 200);
 }
 
-$decoded = json_decode($raw, true);
-if (is_array($decoded)) {
-    $echoed = isset($decoded['session']) ? (string) $decoded['session'] : '';
-    if ($echoed === '' || $echoed !== (string) $sessionId) {
-        $decoded['ready'] = false;
-        $decoded['phone'] = '';
-        $decoded['session'] = '';
-        $decoded['status'] = 'need_link';
-        $decoded['qr_data_url'] = null;
-        $decoded['has_qr'] = false;
-    } elseif (empty($decoded['ready'])) {
-        $decoded['phone'] = '';
+$gwStatus = wa_proxy_status_name(isset($decoded['status']) ? $decoded['status'] : '');
+$qrImage = null;
+$hasQr = !empty($decoded['has_qr']);
+
+if ($action === 'qr') {
+    list($qraw, $qcode) = wa_proxy_request(
+        $base . '/qr?key=' . rawurlencode($key) . $sessionQs,
+        'GET',
+        $key,
+        8
+    );
+    $qr = is_string($qraw) ? json_decode($qraw, true) : null;
+    if (is_array($qr)) {
+        $qEcho = isset($qr['session']) ? (string) $qr['session'] : '';
+        if ($qEcho === (string) $sessionId) {
+            if (!empty($qr['ready'])) {
+                wa_proxy_emit(array(
+                    'success' => true,
+                    'ready' => true,
+                    'has_qr' => false,
+                    'phone' => isset($qr['phone']) ? (string) $qr['phone'] : '',
+                    'session' => $sessionId,
+                    'status' => 'connected',
+                    'qr_data_url' => null,
+                ), 200);
+            }
+            if (!empty($qr['qr_data_url'])) {
+                $qrImage = $qr['qr_data_url'];
+                $hasQr = true;
+                $gwStatus = 'qr_ready';
+            } elseif (isset($qr['status'])) {
+                $gwStatus = wa_proxy_status_name($qr['status']);
+            }
+        }
     }
-    http_response_code($code > 0 ? $code : 200);
-    echo json_encode($decoded);
-    exit;
 }
 
-http_response_code(502);
-echo json_encode(array(
-    'success' => false,
-    'error' => 'bad gateway response',
-    'raw' => substr((string) $raw, 0, 200),
-));
+wa_proxy_emit(array(
+    'success' => true,
+    'ready' => false,
+    'has_qr' => $hasQr,
+    'phone' => '',
+    'session' => $sessionId,
+    'status' => $gwStatus,
+    'qr_data_url' => $qrImage,
+), 200);

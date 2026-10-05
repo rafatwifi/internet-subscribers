@@ -66,11 +66,37 @@ foreach ($rows as $row) {
     }
 }
 
-$expiry = run_expiry_soon_reminders($pdo, $config, 200);
+$expiry = array('sent' => 0, 'failed' => 0, 'skipped' => 0, 'checked' => 0);
+if (function_exists('schedule_each_tenant')) {
+    $expiryParts = schedule_each_tenant($pdo, $config, function ($tid, $cfg, $sched) use ($pdo) {
+        return function_exists('run_expiry_soon_reminders')
+            ? run_expiry_soon_reminders($pdo, $cfg, 80)
+            : array();
+    });
+    foreach ($expiryParts as $part) {
+        if (!is_array($part)) {
+            continue;
+        }
+        $expiry['sent'] += isset($part['sent']) ? (int) $part['sent'] : 0;
+        $expiry['failed'] += isset($part['failed']) ? (int) $part['failed'] : 0;
+        $expiry['skipped'] += isset($part['skipped']) ? (int) $part['skipped'] : 0;
+        $expiry['checked'] += isset($part['checked']) ? (int) $part['checked'] : 0;
+    }
+} else {
+    $expiry = run_expiry_soon_reminders($pdo, $config, 200);
+}
 
 $cardDebt = array('checked' => 0, 'sent' => 0, 'failed' => 0);
 if (function_exists('run_card_debt_reminders')) {
     $cardDebt = run_card_debt_reminders($pdo, $config, 40);
+}
+$waRetry = 0;
+if (function_exists('wa_retry_due_batch')) {
+    try {
+        $waRetry = (int) wa_retry_due_batch($pdo, $config, 2);
+    } catch (Exception $e) {
+        $waRetry = 0;
+    }
 }
 
 $summary = array(
@@ -83,6 +109,7 @@ $summary = array(
     ),
     'expiry_soon' => $expiry,
     'card_debt' => $cardDebt,
+    'wa_retry' => $waRetry,
     'expiry_auto_enabled' => !empty($config['expiry_auto_remind_enabled']),
     'expiry_auto_days' => isset($config['expiry_auto_remind_days']) ? (int) $config['expiry_auto_remind_days'] : 1,
     'time' => date('Y-m-d H:i:s'),

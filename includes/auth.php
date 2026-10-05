@@ -532,6 +532,34 @@ function subscriber_agent_scope_sql($alias = 's')
         return $tenantSql . ' AND ' . $a . '.agent_user_id IN (' . implode(',', array_map('intval', $ids)) . ')';
     }
     if (!is_agent_user() && !is_group_manager_user()) {
+        global $pdo;
+        if ($pdo && function_exists('account_viewer_is_leaf_child') && account_viewer_is_leaf_child($pdo)) {
+            $uLeaf = current_admin();
+            $leafId = $uLeaf ? (int) $uLeaf['id'] : 0;
+            $mid = function_exists('account_viewer_sas_scope_id') ? (int) account_viewer_sas_scope_id($pdo) : 0;
+            if ($mid > 0) {
+                $tidLeaf = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+                $nameEq = function_exists('sas_sql_username_eq')
+                    ? sas_sql_username_eq($a . '.sas_username', 'leaf_c.username')
+                    : ($a . '.sas_username = leaf_c.username');
+                return $tenantSql . ' AND (' . $a . '.agent_user_id = ' . $leafId . ' OR EXISTS (
+                    SELECT 1 FROM sas_users_cache leaf_c
+                    WHERE leaf_c.tenant_id = ' . $tidLeaf . '
+                      AND leaf_c.parent_id = ' . $mid . '
+                      AND (
+                        leaf_c.local_subscriber_id = ' . $a . '.id
+                        OR (
+                            ' . $a . '.sas_username IS NOT NULL AND ' . $a . '.sas_username <> ""
+                            AND ' . $nameEq . '
+                        )
+                      )
+                ))';
+            }
+            if ($leafId > 0) {
+                return $tenantSql . ' AND ' . $a . '.agent_user_id = ' . $leafId;
+            }
+            return $tenantSql . ' AND 1=0';
+        }
         return $tenantSql;
     }
     $u = current_admin();
@@ -704,7 +732,7 @@ function accountant_widget_catalog()
         'activations' => array('ar' => 'التفعيلات', 'en' => 'Activations', 'tone' => 'tone-yellow', 'perm' => 'subscriptions', 'nav' => 'subscriptions'),
         'rentals' => array('ar' => 'الإيجار', 'en' => 'Rentals', 'tone' => 'tone-teal', 'perm' => 'rentals', 'nav' => 'rentals'),
         'points' => array('ar' => 'نقاط تشجيعية', 'en' => 'Reward points', 'tone' => 'tone-lime', 'perm' => '', 'nav' => ''),
-        'latency' => array('ar' => 'بنك الساس', 'en' => 'SAS latency', 'tone' => 'tone-navy', 'perm' => '', 'nav' => ''),
+        'latency' => array('ar' => 'بنك الريسلر', 'en' => 'Reseller ping', 'tone' => 'tone-navy', 'perm' => '', 'nav' => ''),
         'reports' => array('ar' => 'التقارير', 'en' => 'Reports', 'tone' => 'tone-green', 'perm' => 'reports', 'nav' => 'reports'),
         'messages' => array('ar' => 'الرسائل', 'en' => 'Messages', 'tone' => 'tone-aqua', 'perm' => 'messages', 'nav' => 'messages'),
     );
@@ -1117,12 +1145,21 @@ function require_login()
             if (!$ok && ($code === 'expired' || $code === 'suspended' || $code === 'pending')) {
                 if ($code === 'expired') {
                     $_SESSION['saas_force_billing'] = 1;
+                    if (session_status() !== PHP_SESSION_ACTIVE && function_exists('app_session_touch')) {
+                        app_session_touch();
+                    }
                     if (!in_array($page, $allowWhenExpired, true)) {
                         redirect('billing.php');
                     }
                 } elseif ($code !== 'expired') {
                     // معلق / pending — اخرج
+                    if (session_status() !== PHP_SESSION_ACTIVE && function_exists('app_session_start')) {
+                        app_session_start();
+                    }
                     $_SESSION = array();
+                    if (function_exists('app_session_close')) {
+                        app_session_close();
+                    }
                     if (function_exists('flash')) {
                         flash('error', $code === 'pending' ? 'بانتظار موافقة الإدارة' : 'الحساب معلّق');
                     }
@@ -1130,6 +1167,13 @@ function require_login()
                 }
             } else {
                 unset($_SESSION['saas_force_billing']);
+                if (session_status() !== PHP_SESSION_ACTIVE && function_exists('app_session_reopen')) {
+                    app_session_reopen();
+                    unset($_SESSION['saas_force_billing']);
+                    if (function_exists('app_session_close')) {
+                        app_session_close();
+                    }
+                }
             }
         }
     }
@@ -1181,6 +1225,14 @@ function sas_agent_scope_sql($alias = 'c')
         $tenantSql = ' AND ' . $a . '.tenant_id = ' . (int) current_tenant_id();
     }
     if (!is_agent_user() && !is_group_manager_user()) {
+        global $pdo;
+        if ($pdo && function_exists('account_viewer_is_leaf_child') && account_viewer_is_leaf_child($pdo)) {
+            $mid = function_exists('account_viewer_sas_scope_id') ? (int) account_viewer_sas_scope_id($pdo) : 0;
+            if ($mid > 0) {
+                return $tenantSql . ' AND ' . $a . '.parent_id = ' . $mid;
+            }
+            return $tenantSql . ' AND 1=0';
+        }
         return $tenantSql;
     }
     $u = current_admin();
@@ -2070,6 +2122,97 @@ function impersonate_start_sas($pdo, $sasId)
     return array(true, 'تم الدخول بصفة الوكيل ' . $name);
 }
 
+function portal_agency_has_other_sas_parent($pdo, $tenantId, $me)
+{
+    $tenantId = (int) $tenantId;
+    $self = array();
+    if (is_array($me)) {
+        foreach (array('username', 'display_name') as $k) {
+            if (!empty($me[$k])) {
+                $self[strtolower(trim((string) $me[$k]))] = true;
+            }
+        }
+    }
+    try {
+        $st = $pdo->prepare('SELECT sas_username FROM tenants WHERE id = :t LIMIT 1');
+        $st->execute(array(':t' => $tenantId));
+        $u = strtolower(trim((string) $st->fetchColumn()));
+        if ($u !== '') {
+            $self[$u] = true;
+        }
+    } catch (Exception $e) {
+    }
+    try {
+        $st = $pdo->prepare('SELECT sas_username FROM tenant_sas_accounts WHERE tenant_id = :t');
+        $st->execute(array(':t' => $tenantId));
+        foreach ($st->fetchAll() as $r) {
+            $u = strtolower(trim((string) (isset($r['sas_username']) ? $r['sas_username'] : '')));
+            if ($u !== '') {
+                $self[$u] = true;
+            }
+        }
+    } catch (Exception $e) {
+    }
+    try {
+        $st = $pdo->prepare(
+            'SELECT DISTINCT parent_name FROM sas_users_cache
+             WHERE tenant_id = :t AND parent_id > 0 AND parent_name IS NOT NULL AND parent_name <> ""
+             LIMIT 20'
+        );
+        $st->execute(array(':t' => $tenantId));
+        foreach ($st->fetchAll() as $r) {
+            $n = strtolower(trim((string) $r['parent_name']));
+            if ($n !== '' && !isset($self[$n])) {
+                return true;
+            }
+        }
+    } catch (Exception $e) {
+    }
+    return false;
+}
+
+/** عنده وكلاء تحته: مستخدمين بالبوابة أو ريسلر ساس غيره. النتيجة تُحفظ دقائق حتى ما تثقل كل صفحة. */
+function portal_actor_has_child_agents($pdo)
+{
+    $me = current_admin();
+    if (!$me || !$pdo) {
+        return false;
+    }
+    $id = (int) $me['id'];
+    $tid = isset($me['tenant_id']) ? (int) $me['tenant_id'] : 1;
+    $ck = 'la_kids_' . $id;
+    if (isset($_SESSION[$ck]) && is_array($_SESSION[$ck])) {
+        $at = isset($_SESSION[$ck]['at']) ? (int) $_SESSION[$ck]['at'] : 0;
+        if ($at > 0 && (time() - $at) < 180) {
+            return !empty($_SESSION[$ck]['ok']);
+        }
+    }
+    $ok = admin_user_child_count($pdo, $id, $tid) > 0;
+    $mid = isset($me['sas_manager_id']) ? (int) $me['sas_manager_id'] : 0;
+    if (!$ok && $mid > 0) {
+        $ok = portal_user_has_agent_downline($pdo, $tid, $mid);
+    }
+    if (!$ok && function_exists('is_admin_user') && is_admin_user() && $tid > 1) {
+        try {
+            $st = $pdo->prepare(
+                'SELECT COUNT(*) FROM admin_users
+                 WHERE tenant_id = :t AND id <> :id AND role IN ("agent","group_manager")'
+            );
+            $st->execute(array(':t' => $tid, ':id' => $id));
+            $ok = ((int) $st->fetchColumn()) > 0;
+        } catch (Exception $e) {
+            $ok = false;
+        }
+        if (!$ok) {
+            $ok = portal_agency_has_other_sas_parent($pdo, $tid, $me);
+        }
+    }
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        $_SESSION[$ck] = array('at' => time(), 'ok' => $ok ? 1 : 0);
+    }
+    return $ok;
+}
+
 function impersonate_actor_mode($pdo)
 {
     if (is_impersonating()) {
@@ -2090,30 +2233,16 @@ function impersonate_actor_mode($pdo)
     if ($tid <= 1 || $id <= 0) {
         return '';
     }
-    if (is_admin_user()) {
-        return 'agency';
-    }
-    if (is_group_manager_user()) {
-        $gmid = isset($me['sas_manager_id']) ? (int) $me['sas_manager_id'] : 0;
-        if (admin_user_child_count($pdo, $id, $tid) > 0 || portal_user_has_agent_downline($pdo, $tid, $gmid)) {
-            return 'agency';
-        }
+    if (!portal_actor_has_child_agents($pdo)) {
         return '';
+    }
+    if (is_admin_user() || is_group_manager_user()) {
+        return 'agency';
     }
     if (function_exists('user_can') && user_can('agents') && !is_agent_user() && !is_accountant_user()) {
         return 'agency';
     }
-    if (is_agent_user()) {
-        $mid = isset($me['sas_manager_id']) ? (int) $me['sas_manager_id'] : 0;
-        if (portal_user_has_agent_downline($pdo, $tid, $mid) || admin_user_child_count($pdo, $id, $tid) > 0) {
-            return 'parent';
-        }
-        return '';
-    }
-    if (admin_user_child_count($pdo, $id, $tid) > 0) {
-        return 'parent';
-    }
-    return '';
+    return 'parent';
 }
 
 function portal_user_has_agent_downline($pdo, $tenantId, $sasManagerId)

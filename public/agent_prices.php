@@ -481,8 +481,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             if ($agentId === $homeId) {
                 $floorW = $above;
-                $floorA = ($postedW > $above) ? $postedW : $above;
-                $floorR = $floorA;
+                if ($postedW > $floorW) {
+                    $floorW = $postedW;
+                }
+                $floorA = $floorW;
+                $floorR = $floorW;
             } else {
                 $floorW = $knownW > 0 ? $knownW : $mine;
                 $floorA = $floorW;
@@ -493,14 +496,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $check[] = array($postedR, $floorR);
             } elseif ($isAccPrice) {
                 $check[] = array($postedR, $floorR);
+            } elseif ($agentId === $homeId && isset($row['retail_price'])) {
+                $costFloor = $postedW;
+                if (function_exists('account_viewer_package_price')) {
+                    $viewFloor = (float) account_viewer_package_price(
+                        $pdo,
+                        $profileName,
+                        isset($row['profile_id']) ? (int) $row['profile_id'] : 0,
+                        $postedW > 0 ? $postedW : $sasFloor
+                    );
+                    if ($viewFloor > $costFloor) {
+                        $costFloor = $viewFloor;
+                    }
+                }
+                $check[] = array($postedR, $costFloor > 0 ? $costFloor : $floorR);
             }
-            if ($agentId === $homeId && $knownW <= 0) {
+            if ($agentId === $homeId && $knownW <= 0 && !isset($row['retail_price'])) {
                 $check[] = array($postedW, $floorW);
             }
             if (!$isAccPrice && $agentId !== $homeId) {
                 $check[] = array($postedA, $floorA);
             } elseif (!$isAccPrice && $agentId === $homeId && isset($row['agent_price'])) {
                 $check[] = array($postedA, $floorA);
+            }
+            if ($agentId === $homeId && isset($row['subagent_price'])) {
+                $postedSubCheck = (float) $row['subagent_price'];
+                $check[] = array($postedSubCheck, $postedW > 0 ? $postedW : $floorA);
             }
             foreach ($check as $pair) {
                 if ($pair[1] > 0 && $pair[0] < $pair[1]) {
@@ -528,14 +549,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $postedW = isset($row['wholesale_price']) ? (float) $row['wholesale_price'] : 0;
             $postedA = isset($row['agent_price']) ? (float) $row['agent_price'] : 0;
             $old = function_exists('agent_card_price_get') ? agent_card_price_get($pdo, $agentId, $profileId, $profileName) : null;
+            $subP = null;
             if ($isPriceAdmin || $isAccPrice) {
                 $w = $postedW;
                 $ap = $isAccPrice ? $postedW : $postedA;
                 $rp = null;
+                $subP = null;
                 if (isset($row['retail_price'])) {
                     $rp = (float) $row['retail_price'];
                 }
-                if ($agentId !== $homeId) {
+                if (isset($row['subagent_price'])) {
+                    $subP = (float) $row['subagent_price'];
+                }
+                if ($agentId === $homeId) {
+                    $oldAp = $old ? (float) $old['agent_price'] : 0;
+                    $oldW = $old ? (float) $old['wholesale_price'] : 0;
+                    if (!isset($row['agent_price'])) {
+                        $ap = $oldAp > 0 ? $oldAp : ($postedW > 0 ? $postedW : $oldW);
+                    }
+                    if ($w <= 0) {
+                        if ($oldAp > 0) {
+                            $w = $oldAp;
+                        } elseif ($oldW > 0) {
+                            $w = $oldW;
+                        }
+                    }
+                } elseif ($agentId !== $homeId) {
                     $saveKey = strtolower($profileName);
                     $knownW = 0;
                     if (isset($baseByName[$saveKey]) && (float) $baseByName[$saveKey] > 0) {
@@ -563,8 +602,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $w = $old ? (float) $old['wholesale_price'] : $postedW;
                 $ap = $old ? (float) $old['agent_price'] : $postedA;
                 $rp = null;
+                $subP = null;
+                if ($agentId === $meId || $agentId === $homeId) {
+                    if ($postedW > 0) {
+                        $w = $postedW;
+                    } elseif ($ap > 0) {
+                        $w = $ap;
+                    }
+                    if (!isset($row['agent_price']) && $old) {
+                        $ap = (float) $old['agent_price'];
+                    }
+                    if (isset($row['retail_price'])) {
+                        $rp = (float) $row['retail_price'];
+                    }
+                    if (isset($row['subagent_price'])) {
+                        $subP = (float) $row['subagent_price'];
+                    }
+                }
             }
-            if (agent_card_price_save($pdo, $agentId, $profileId, $profileName, $w, $ap, $rp)) {
+            if (agent_card_price_save($pdo, $agentId, $profileId, $profileName, $w, $ap, $rp, $subP)) {
                 $n++;
             }
         }
@@ -732,9 +788,17 @@ foreach ($picker as $opt) {
 $aid = $ag ? (int) $ag['id'] : 0;
 $saved = ($aid > 0) ? agent_card_prices_list($pdo, $aid) : array();
 $byName = array();
+$bySoft = array();
 $byPid = array();
 foreach ($saved as $sp) {
-    $byName[strtolower(trim((string) $sp['profile_name']))] = $sp;
+    $nkSaved = strtolower(trim((string) $sp['profile_name']));
+    $byName[$nkSaved] = $sp;
+    if ($nkSaved !== '' && function_exists('card_price_soft_key')) {
+        $skSaved = card_price_soft_key($sp['profile_name']);
+        if ($skSaved !== '' && !isset($bySoft[$skSaved])) {
+            $bySoft[$skSaved] = $sp;
+        }
+    }
     $spid = isset($sp['profile_id']) ? (int) $sp['profile_id'] : 0;
     if ($spid > 0 && !isset($byPid[$spid])) {
         $byPid[$spid] = $sp;
@@ -752,6 +816,13 @@ if (!$lines && $saved) {
     }
 }
 $isSelf = ($aid === $homeId);
+$hasDownline = false;
+foreach ($picker as $downOpt) {
+    if ((int) $downOpt['id'] !== (int) $homeId) {
+        $hasDownline = true;
+        break;
+    }
+}
 ?>
 <?php if ($ag): ?>
 <div class="panel">
@@ -766,7 +837,14 @@ $isSelf = ($aid === $homeId);
         ?>
         <?php if (!empty($ag['username']) && strcasecmp(trim((string) $ag['username']), trim((string) $agName)) !== 0): ?><small class="meta ltr"><?php echo e($ag['username']); ?></small><?php endif; ?>
     </h3>
-    <?php if (!$isSelf && !$isAccPrice): ?>
+    <?php if ($isSelf && !$isAccPrice): ?>
+        <p class="meta"><?php echo e($isEn
+            ? 'Cost is the price set above you, or the SAS price. The subscriber price stays at that cost or higher.'
+            : 'سعر التكلفة هو تسعيرة الأب إذا مسعّرك، وإلا سعر الساس. سعر المشترك النهائي نفسه أو أعلى.'); ?>
+            <?php if ($hasDownline): ?><?php echo e($isEn
+                ? ' With agents under you, set their sale at the cost or higher.'
+                : ' وإذا تحتك وكلاء، سعر البيع للوكيل الفرعي نفسه أو أعلى من التكلفة.'); ?><?php endif; ?></p>
+    <?php elseif (!$isSelf && !$isAccPrice): ?>
         <p class="meta"><?php echo e($isEn
             ? 'The package price is shown. Set the agent sale at that price or higher.'
             : 'سعر التكلفة ثابت من الباقة. سعّر الوكيل والمشترك النهائي، نفسه أو أعلى. الربح = سعر الوكيل − التكلفة.'); ?></p>
@@ -792,6 +870,10 @@ $isSelf = ($aid === $homeId);
                     <th><?php echo e($isEn ? 'Subscriber price' : 'سعر المشترك النهائي'); ?></th>
                     <?php elseif ($isSelf): ?>
                     <th><?php echo e($isEn ? 'Cost' : 'سعر التكلفة'); ?></th>
+                    <th><?php echo e($isEn ? 'Subscriber price' : 'سعر المشترك النهائي'); ?></th>
+                    <?php if ($hasDownline): ?>
+                    <th><?php echo e($isEn ? 'Sub-agent sale' : 'سعر البيع للوكيل الفرعي'); ?></th>
+                    <?php endif; ?>
                     <?php else: ?>
                     <th><?php echo e($isEn ? 'Cost' : 'سعر التكلفة'); ?></th>
                     <th><?php echo e($isEn ? 'Agent price' : 'سعر الوكيل'); ?></th>
@@ -808,6 +890,12 @@ $isSelf = ($aid === $homeId);
                     $linePid = isset($line['id']) ? (int) $line['id'] : 0;
                     if (!$have && $linePid > 0 && isset($byPid[$linePid])) {
                         $have = $byPid[$linePid];
+                    }
+                    if (!$have && $key !== '' && function_exists('card_price_soft_key')) {
+                        $softKey = card_price_soft_key($nm);
+                        if ($softKey !== '' && isset($bySoft[$softKey])) {
+                            $have = $bySoft[$softKey];
+                        }
                     }
                     $hp = isset($homeByView[$key]) ? $homeByView[$key] : null;
                     $sasPrice = isset($line['price']) ? (float) $line['price'] : 0;
@@ -838,6 +926,9 @@ $isSelf = ($aid === $homeId);
                         } elseif ($mine > 0) {
                             $knownW = $mine;
                         }
+                        if ($hp && isset($hp['subagent_price']) && (float) $hp['subagent_price'] > $knownW) {
+                            $knownW = (float) $hp['subagent_price'];
+                        }
                     }
                     $orig = ($have && isset($have['wholesale_price'])) ? (float) $have['wholesale_price'] : 0;
                     if (!$isSelf && $knownW > 0) {
@@ -855,6 +946,40 @@ $isSelf = ($aid === $homeId);
                         if ($retail <= 0) {
                             $retail = $knownW;
                         }
+                    }
+                    $savedAp = ($have && isset($have['agent_price'])) ? (float) $have['agent_price'] : 0;
+                    $savedW = ($have && isset($have['wholesale_price'])) ? (float) $have['wholesale_price'] : 0;
+                    $selfCost = 0;
+                    if ($isSelf && function_exists('account_viewer_package_price')) {
+                        $viewCost = (float) account_viewer_package_price(
+                            $pdo,
+                            $nm,
+                            isset($line['id']) ? (int) $line['id'] : 0,
+                            $sasPrice > 0 ? $sasPrice : $savedW
+                        );
+                        if ($viewCost > 0) {
+                            $selfCost = $viewCost;
+                        }
+                    }
+                    if ($selfCost <= 0 && $aboveId > 0 && $savedAp > 0) {
+                        $selfCost = $savedAp;
+                    } elseif ($selfCost <= 0 && $sasPrice > 0) {
+                        $selfCost = $sasPrice;
+                    } elseif ($selfCost <= 0 && $savedW > 0) {
+                        $selfCost = $savedW;
+                    }
+                    if ($isSelf) {
+                        $orig = $selfCost;
+                        $floorW = $selfCost;
+                        $floorA = $selfCost;
+                        $floorR = $selfCost;
+                        if ($retail <= 0 && $selfCost > 0) {
+                            $retail = $selfCost;
+                        }
+                    }
+                    $subagent = ($have && isset($have['subagent_price'])) ? (float) $have['subagent_price'] : 0;
+                    if ($isSelf && $hasDownline && $subagent <= 0 && $selfCost > 0) {
+                        $subagent = $selfCost;
                     }
                     $profitBase = $knownW > 0 ? $knownW : ($isSelf ? $orig : $mine);
                     $profitNow = $sell - $profitBase;
@@ -882,11 +1007,18 @@ $isSelf = ($aid === $homeId);
                         <td><input class="ltr js-price" data-col="a" type="number" min="0" step="1" data-floor="<?php echo (int) $floorA; ?>" name="rows[<?php echo (int) $i; ?>][agent_price]" value="<?php echo (int) $sell; ?>" style="max-width:140px"></td>
                         <td><input class="ltr js-price" data-col="r" type="number" min="0" step="1" data-floor="<?php echo (int) $floorR; ?>" name="rows[<?php echo (int) $i; ?>][retail_price]" value="<?php echo (int) $retail; ?>" style="max-width:140px"></td>
                         <td class="ltr js-profit" style="font-weight:800"><?php echo (int) $profitNow; ?></td>
-                        <?php else: ?>
-                        <?php if ($isSelf || $isAccPrice): ?>
-                        <td><input class="ltr js-price" data-col="w" type="number" min="0" step="1" data-floor="<?php echo (int) $floorW; ?>" name="rows[<?php echo (int) $i; ?>][wholesale_price]" value="<?php echo (int) $orig; ?>" style="max-width:140px" <?php echo ($isSelf || $lockWholesale) ? 'readonly' : ''; ?>></td>
+                        <?php elseif ($isSelf): ?>
+                        <td>
+                            <input class="ltr pkg-price" data-col="w" type="text" readonly tabindex="-1" value="<?php echo (int) $orig; ?>" style="max-width:140px">
+                            <input type="hidden" name="rows[<?php echo (int) $i; ?>][wholesale_price]" value="<?php echo (int) $savedW; ?>">
+                        </td>
+                        <td><input class="ltr js-price" data-col="r" data-bind="1" type="number" min="0" step="1" data-floor="<?php echo (int) $floorR; ?>" name="rows[<?php echo (int) $i; ?>][retail_price]" value="<?php echo (int) $retail; ?>" style="max-width:140px"></td>
+                        <?php if ($hasDownline): ?>
+                        <td><input class="ltr js-price" data-col="s" data-bind="1" type="number" min="0" step="1" data-floor="<?php echo (int) $floorA; ?>" name="rows[<?php echo (int) $i; ?>][subagent_price]" value="<?php echo (int) $subagent; ?>" style="max-width:140px"></td>
                         <?php endif; ?>
+                        <?php else: ?>
                         <?php if ($isAccPrice): ?>
+                        <td><input class="ltr js-price" data-col="w" type="number" min="0" step="1" data-floor="<?php echo (int) $floorW; ?>" name="rows[<?php echo (int) $i; ?>][wholesale_price]" value="<?php echo (int) $orig; ?>" style="max-width:140px" <?php echo $lockWholesale ? 'readonly' : ''; ?>></td>
                         <td><input class="ltr js-price" data-col="r" type="number" min="0" step="1" data-floor="<?php echo (int) $floorR; ?>" name="rows[<?php echo (int) $i; ?>][retail_price]" value="<?php echo (int) $retail; ?>" style="max-width:140px" <?php echo $canRetail ? '' : 'readonly'; ?>></td>
                         <?php endif; ?>
                         <?php endif; ?>

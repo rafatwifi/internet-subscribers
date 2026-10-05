@@ -11,6 +11,113 @@ if (function_exists('ensure_card_accounting_tables')) {
 }
 
 $isEn = ($lang === 'en');
+$leafProfit = function_exists('account_viewer_is_leaf_child') && account_viewer_is_leaf_child($pdo);
+if ($leafProfit) {
+    $month = date('Y-m');
+    $scope = function_exists('subscriber_agent_scope_sql') ? subscriber_agent_scope_sql('s') : '';
+    $actRows = array();
+    try {
+        $stAct = $pdo->prepare(
+            'SELECT sub.service_name, sub.monthly_price, s.name, s.phone
+             FROM subscriptions sub
+             JOIN subscribers s ON s.id = sub.subscriber_id
+             WHERE DATE_FORMAT(sub.created_at, \'%Y-%m\') = :m' . $scope . '
+             ORDER BY sub.id DESC'
+        );
+        $stAct->execute(array(':m' => $month));
+        $actRows = $stAct->fetchAll();
+    } catch (Exception $e) {
+        $actRows = array();
+    }
+    $planCost = array();
+    try {
+        foreach ($pdo->query('SELECT name, cost_price, sas_profile_id FROM service_plans') as $pl) {
+            $planCost[strtolower(trim((string) $pl['name']))] = $pl;
+        }
+    } catch (Exception $e) {
+    }
+    $sumSell = 0.0;
+    $sumCost = 0.0;
+    $sumProfit = 0.0;
+    $lines = array();
+    foreach ($actRows as $ar) {
+        $nm = isset($ar['service_name']) ? (string) $ar['service_name'] : '';
+        $key = strtolower(trim($nm));
+        $sell = isset($ar['monthly_price']) ? (float) $ar['monthly_price'] : 0;
+        $cat = isset($planCost[$key]) ? (float) $planCost[$key]['cost_price'] : 0;
+        $sasId = isset($planCost[$key]['sas_profile_id']) ? (int) $planCost[$key]['sas_profile_id'] : 0;
+        $his = function_exists('account_viewer_package_price')
+            ? (float) account_viewer_package_price($pdo, $nm, $sasId, $cat)
+            : $cat;
+        $gain = $sell - $his;
+        if ($gain < 0) {
+            $gain = 0;
+        }
+        $sumSell += $sell;
+        $sumCost += $his;
+        $sumProfit += $gain;
+        $lines[] = array(
+            'name' => isset($ar['name']) ? (string) $ar['name'] : '',
+            'phone' => isset($ar['phone']) ? (string) $ar['phone'] : '',
+            'pkg' => $nm,
+            'sell' => $sell,
+            'cost' => $his,
+            'profit' => $gain,
+        );
+    }
+    render_header($isEn ? 'Activation profits' : 'أرباح التفعيل', 'profit');
+    ?>
+    <div class="panel">
+        <h2><?php echo e($isEn ? 'Subscriber profit' : 'ربح المشتركين'); ?></h2>
+        <p class="meta"><?php echo e($isEn
+            ? 'Profit is the subscriber price minus your cost, for people you activate.'
+            : 'الربح هو سعر المشترك ناقص التكلفة المحددة لك، على المشتركين اللي تفعّلهم.'); ?></p>
+        <div class="cards">
+            <div class="card-stat purple">
+                <div class="label"><?php echo e($isEn ? 'Subscriber price' : 'سعر المشترك'); ?></div>
+                <div class="value"><?php echo e(money_format_iqd($sumSell, $config['currency'])); ?></div>
+            </div>
+            <div class="card-stat cyan">
+                <div class="label"><?php echo e($isEn ? 'Your cost' : 'التكلفة'); ?></div>
+                <div class="value"><?php echo e(money_format_iqd($sumCost, $config['currency'])); ?></div>
+            </div>
+            <div class="card-stat green">
+                <div class="label"><?php echo e($isEn ? 'Profit' : 'الربح'); ?></div>
+                <div class="value"><?php echo e(money_format_iqd($sumProfit, $config['currency'])); ?></div>
+            </div>
+        </div>
+        <div class="table-wrap" style="margin-top:12px">
+            <table class="table-compact">
+                <thead>
+                <tr>
+                    <th><?php echo e($isEn ? 'Subscriber' : 'المشترك'); ?></th>
+                    <th><?php echo e($isEn ? 'Package' : 'الباقة'); ?></th>
+                    <th><?php echo e($isEn ? 'Subscriber price' : 'سعر المشترك'); ?></th>
+                    <th><?php echo e($isEn ? 'Cost' : 'التكلفة'); ?></th>
+                    <th><?php echo e($isEn ? 'Profit' : 'الربح'); ?></th>
+                </tr>
+                </thead>
+                <tbody>
+                <?php if (!$lines): ?>
+                    <tr><td colspan="5"><?php echo e($isEn ? 'No activations this month.' : 'ماكو تفعيلات هذا الشهر.'); ?></td></tr>
+                <?php endif; ?>
+                <?php foreach ($lines as $ln): ?>
+                    <tr>
+                        <td><?php echo e($ln['name']); ?><?php if ($ln['phone'] !== ''): ?><br><small><?php echo e(format_phone_display($ln['phone'])); ?></small><?php endif; ?></td>
+                        <td><?php echo e($ln['pkg']); ?></td>
+                        <td><?php echo e(money_format_iqd($ln['sell'], $config['currency'])); ?></td>
+                        <td><?php echo e(money_format_iqd($ln['cost'], $config['currency'])); ?></td>
+                        <td><?php echo e(money_format_iqd($ln['profit'], $config['currency'])); ?></td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    <?php
+    render_footer();
+    exit;
+}
 $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
 $me = function_exists('current_admin') ? current_admin() : null;
 $homeId = function_exists('user_card_source_id') ? (int) user_card_source_id($pdo) : ($me ? (int) $me['id'] : 0);

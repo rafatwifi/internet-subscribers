@@ -14,6 +14,9 @@ function redirect($path)
 function flash($type, $message)
 {
     $_SESSION['flash'] = array('type' => $type, 'message' => $message);
+    if (session_status() !== PHP_SESSION_ACTIVE && function_exists('app_session_touch')) {
+        app_session_touch();
+    }
 }
 
 function get_flash()
@@ -22,7 +25,14 @@ function get_flash()
         return null;
     }
     $flash = $_SESSION['flash'];
+    $wasOpen = (session_status() === PHP_SESSION_ACTIVE);
+    if (!$wasOpen && function_exists('app_session_reopen')) {
+        app_session_reopen();
+    }
     unset($_SESSION['flash']);
+    if (!$wasOpen && function_exists('app_session_close')) {
+        app_session_close();
+    }
     return $flash;
 }
 
@@ -30,8 +40,63 @@ function get_flash()
 function app_session_close()
 {
     if (session_status() === PHP_SESSION_ACTIVE) {
+        $GLOBALS['app_session_snapshot'] = $_SESSION;
         @session_write_close();
     }
+}
+
+/** طبّق بس المفاتيح اللي تغيّرت بعد إغلاق الجلسة، وخلّي تحديث التاب الثاني */
+function app_session_apply_pending($pending)
+{
+    if (!is_array($pending)) {
+        $pending = array();
+    }
+    $snap = (isset($GLOBALS['app_session_snapshot']) && is_array($GLOBALS['app_session_snapshot']))
+        ? $GLOBALS['app_session_snapshot']
+        : null;
+    if ($snap === null) {
+        foreach ($pending as $k => $v) {
+            $_SESSION[$k] = $v;
+        }
+        return;
+    }
+    foreach ($snap as $k => $v) {
+        if (!array_key_exists($k, $pending)) {
+            unset($_SESSION[$k]);
+        }
+    }
+    foreach ($pending as $k => $v) {
+        if (!array_key_exists($k, $snap) || $snap[$k] !== $v) {
+            $_SESSION[$k] = $v;
+        }
+    }
+}
+
+/** أعد فتح الجلسة واحتفظ بتعديلات الذاكرة حتى تنحفظ */
+function app_session_reopen()
+{
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        return;
+    }
+    $pending = (isset($_SESSION) && is_array($_SESSION)) ? $_SESSION : array();
+    if (function_exists('app_session_start')) {
+        app_session_start();
+    } elseif (session_status() === PHP_SESSION_NONE) {
+        @session_start();
+    }
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        app_session_apply_pending($pending);
+    }
+}
+
+/** احفظ تعديلات الجلسة ثم اترك القفل فوراً */
+function app_session_touch()
+{
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        return;
+    }
+    app_session_reopen();
+    app_session_close();
 }
 
 function money_format_iqd($amount, $currency = 'د.ع')
@@ -153,6 +218,13 @@ function subscription_period_default_days($startDate, $config = null)
 
 function csrf_token()
 {
+    if (!empty($_SESSION['csrf'])) {
+        return $_SESSION['csrf'];
+    }
+    $wasOpen = (session_status() === PHP_SESSION_ACTIVE);
+    if (!$wasOpen && function_exists('app_session_reopen')) {
+        app_session_reopen();
+    }
     if (empty($_SESSION['csrf'])) {
         if (function_exists('random_bytes')) {
             $_SESSION['csrf'] = bin2hex(random_bytes(16));
@@ -160,7 +232,11 @@ function csrf_token()
             $_SESSION['csrf'] = md5(uniqid((string) mt_rand(), true));
         }
     }
-    return $_SESSION['csrf'];
+    $token = $_SESSION['csrf'];
+    if (!$wasOpen && function_exists('app_session_close')) {
+        app_session_close();
+    }
+    return $token;
 }
 
 function verify_csrf($token)
@@ -533,6 +609,17 @@ function apply_subscriber_days_left($pdo, $subscriberId, $days, $planId = 0)
     }
     $startDate = date('Y-m-d');
     $costPrice = isset($plan['cost_price']) ? (float) $plan['cost_price'] : 0;
+    $monthlySaved = (float) $plan['monthly_price'];
+    if (function_exists('current_admin') && function_exists('account_package_rates')) {
+        $priceMe = current_admin();
+        $priceUid = $priceMe ? (int) $priceMe['id'] : 0;
+        $sasPid = isset($plan['sas_profile_id']) ? (int) $plan['sas_profile_id'] : 0;
+        $rates = account_package_rates($pdo, $priceUid, $plan['name'], $sasPid);
+        if (!empty($rates['found'])) {
+            $costPrice = (float) $rates['cost'];
+            $monthlySaved = (float) $rates['retail'] > 0 ? (float) $rates['retail'] : $costPrice;
+        }
+    }
     $newStatus = $days > 0 ? 'active' : 'expired';
     $pdo->prepare(
         'INSERT INTO subscriptions
@@ -542,7 +629,7 @@ function apply_subscriber_days_left($pdo, $subscriberId, $days, $planId = 0)
     )->execute(array(
         ':subscriber_id' => $subscriberId,
         ':service_name' => $plan['name'],
-        ':monthly_price' => (float) $plan['monthly_price'],
+        ':monthly_price' => $monthlySaved,
         ':cost_price' => $costPrice,
         ':start_date' => $startDate,
         ':end_date' => $endDate,

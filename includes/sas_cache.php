@@ -475,6 +475,15 @@ function sas_list_expiring_rows($pdo, $daysMax, $limit = 2000)
         }
     }
     $scope = '';
+    $schedTid = 0;
+    if (!empty($GLOBALS['schedule_tenant_id'])) {
+        $schedTid = (int) $GLOBALS['schedule_tenant_id'];
+    } elseif (!empty($_SESSION['admin_logged_in']) && function_exists('current_tenant_id')) {
+        $schedTid = (int) current_tenant_id();
+    }
+    if ($schedTid > 0) {
+        $scope .= ' AND c.tenant_id = ' . $schedTid;
+    }
     if (function_exists('is_agent_user') && is_agent_user()
         && function_exists('current_admin_sas_manager_id')
         && current_admin_sas_manager_id() > 0
@@ -489,7 +498,7 @@ function sas_list_expiring_rows($pdo, $daysMax, $limit = 2000)
                    c.local_subscriber_id, c.sas_user_id, c.parent_id, c.enabled,
                    s.id AS sub_id, s.name AS sub_name, s.phone AS sub_phone, s.agent_user_id
             FROM sas_users_cache c
-            LEFT JOIN subscribers s ON (
+            LEFT JOIN subscribers s ON s.tenant_id = c.tenant_id AND (
                 (c.local_subscriber_id IS NOT NULL AND s.id = c.local_subscriber_id)
                 OR (c.local_subscriber_id IS NULL AND s.sas_username IS NOT NULL AND s.sas_username <> '' AND {$userEq})
             )
@@ -1340,6 +1349,9 @@ function sas_profiles_for_ui($api)
     if ($out) {
         $_SESSION['sas_profiles_ui'] = $out;
         $_SESSION['sas_profiles_ui_at'] = time();
+        if (session_status() !== PHP_SESSION_ACTIVE && function_exists('app_session_touch')) {
+            app_session_touch();
+        }
     }
     return $out;
 }
@@ -1382,6 +1394,9 @@ function sas_managers_for_ui($api)
     if ($out) {
         $_SESSION['sas_managers_ui'] = $out;
         $_SESSION['sas_managers_ui_at'] = time();
+        if (session_status() !== PHP_SESSION_ACTIVE && function_exists('app_session_touch')) {
+            app_session_touch();
+        }
     }
     return $out;
 }
@@ -1659,6 +1674,9 @@ function sas_mark_card_pin_used($pin)
             $_SESSION['sas_unused_ui_v6'] = $fromInv;
             $_SESSION['sas_unused_ui_v6_at'] = time();
         }
+    }
+    if (session_status() !== PHP_SESSION_ACTIVE && function_exists('app_session_touch')) {
+        app_session_touch();
     }
     return $changed;
 }
@@ -1955,12 +1973,17 @@ function sas_unused_cards_cached($api, $force = false)
             $out = is_array($fromInv) ? $fromInv : array();
             $_SESSION['sas_unused_ui_v6'] = $out;
             $_SESSION['sas_unused_ui_v6_at'] = time();
+            if (session_status() !== PHP_SESSION_ACTIVE && function_exists('app_session_touch')) {
+                app_session_touch();
+            }
             return $out;
         }
     }
 
     $wasOpen = (session_status() === PHP_SESSION_ACTIVE);
-    if ($wasOpen) {
+    if ($wasOpen && function_exists('app_session_close')) {
+        app_session_close();
+    } elseif ($wasOpen) {
         session_write_close();
     }
     $out = array();
@@ -1981,7 +2004,9 @@ function sas_unused_cards_cached($api, $force = false)
     if (!$fromInventory && $api && method_exists($api, 'listUnusedCards')) {
         $out = sas_cards_rows_to_ui($api->listUnusedCards(0, ''));
     }
-    if (session_status() !== PHP_SESSION_ACTIVE) {
+    if (session_status() !== PHP_SESSION_ACTIVE && function_exists('app_session_reopen')) {
+        app_session_reopen();
+    } elseif (session_status() !== PHP_SESSION_ACTIVE) {
         @session_start();
     }
     if ($fromInventory) {
@@ -2006,6 +2031,9 @@ function sas_unused_cards_cached($api, $force = false)
         $_SESSION['sas_unused_ui_v5'],
         $_SESSION['sas_unused_ui_v5_at']
     );
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
     return $out;
 }
 
@@ -2066,12 +2094,17 @@ function sas_dash_card_groups($api, $force = false)
                 $_SESSION['sas_card_groups_v5_at'] = $pat;
                 $_SESSION['sas_card_groups_v2'] = $preferred['groups'];
                 $_SESSION['sas_card_groups_v2_at'] = $pat;
+                if (session_status() !== PHP_SESSION_ACTIVE && function_exists('app_session_touch')) {
+                    app_session_touch();
+                }
                 return $preferred['groups'];
             }
         }
     }
     $wasOpen = (session_status() === PHP_SESSION_ACTIVE);
-    if ($wasOpen) {
+    if ($wasOpen && function_exists('app_session_close')) {
+        app_session_close();
+    } elseif ($wasOpen) {
         session_write_close();
     }
     $groups = array();
@@ -2094,10 +2127,15 @@ function sas_dash_card_groups($api, $force = false)
     if (!is_array($groups)) {
         $groups = array();
     }
-    if (session_status() !== PHP_SESSION_ACTIVE) {
+    if (session_status() !== PHP_SESSION_ACTIVE && function_exists('app_session_reopen')) {
+        app_session_reopen();
+    } elseif (session_status() !== PHP_SESSION_ACTIVE) {
         @session_start();
     }
     sas_store_dash_card_groups($groups, $source);
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
     return $groups;
 }
 
@@ -2287,7 +2325,10 @@ function sas_relink_ledger_rows($pdo)
              WHERE s.sas_username IS NOT NULL AND s.sas_username <> ""
                AND (
                     s.tenant_id IS NULL OR s.tenant_id = 0 OR s.tenant_id = 1 OR s.tenant_id = :t
-                    OR s.sas_username IN (SELECT c.username FROM sas_users_cache c WHERE c.tenant_id = :t2)
+                    OR CONVERT(s.sas_username USING utf8mb4) COLLATE utf8mb4_unicode_ci IN (
+                        SELECT CONVERT(c.username USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                        FROM sas_users_cache c WHERE c.tenant_id = :t2
+                    )
                )
              ORDER BY inv_n DESC, s.id ASC'
         );

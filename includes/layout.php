@@ -48,7 +48,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
     <noscript><link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet"></noscript>
-    <link rel="stylesheet" href="assets/style.css?v=ui12">
+    <link rel="stylesheet" href="assets/style.css?v=ui13">
     <style>
         <?php if ($bgMode === 'image' && $bgUrl !== ''): ?>
         body.app-bg-image {
@@ -187,6 +187,51 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
           background: #e2e8f0;
           color: #334155;
         }
+        .main-top-end .top-user-cluster,
+        .top-admin-menu {
+          overflow: visible;
+        }
+        .top-admin-menu { position: relative; }
+        .top-admin-dropdown {
+          position: absolute !important;
+          top: calc(100% + 8px) !important;
+          inset-inline-end: 0 !important;
+          min-width: 280px;
+          width: max-content;
+          max-width: min(340px, 92vw);
+          display: flex !important;
+          flex-direction: column !important;
+          align-items: stretch;
+          z-index: 400;
+          background: #fff;
+          border: 1px solid #e2e8f0;
+          border-radius: 12px;
+          box-shadow: 0 12px 28px rgba(15, 23, 42, .16);
+          padding: 6px;
+        }
+        .top-admin-dropdown[hidden] { display: none !important; }
+        .top-admin-dropdown a,
+        .top-admin-dropdown button {
+          display: block !important;
+          width: 100% !important;
+          max-width: none !important;
+          height: auto !important;
+          min-height: 0 !important;
+          white-space: normal !important;
+          overflow: visible !important;
+          text-overflow: clip !important;
+          border: 0 !important;
+          background: transparent;
+          box-shadow: none;
+          text-align: start;
+          line-height: 1.45;
+          padding: 10px 12px;
+          border-radius: 8px;
+          color: #0f172a;
+          font-weight: 700;
+          text-decoration: none;
+          font-size: 14px;
+        }
     </style>
 </head>
 <body class="<?php echo $isEn ? 'ltr' : 'rtl'; ?> ios-glass<?php
@@ -237,7 +282,9 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <?php if ($can('subscribers')): ?>
             <a class="<?php echo $active === 'sas' ? 'active' : ''; ?>" href="sas.php"><?php echo e(t('sas')); ?></a>
             <?php endif; ?>
-            <?php if ($can('cards')): ?>
+            <?php
+            $hideLeafCards = isset($pdo) && function_exists('account_viewer_is_leaf_child') && account_viewer_is_leaf_child($pdo);
+            if ($can('cards') && !$hideLeafCards): ?>
             <a class="<?php echo $active === 'cards' ? 'active' : ''; ?>" href="cards.php"><?php echo e($isEn ? 'Cards' : 'الكارتات'); ?></a>
             <?php endif; ?>
             <?php if ($can('plans')): ?>
@@ -264,9 +311,6 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <?php endif; ?>
             <?php if ($can('debts')): ?>
             <a class="<?php echo $active === 'debts' ? 'active' : ''; ?>" href="debts.php"><?php echo e(t('debts')); ?></a>
-            <?php endif; ?>
-            <?php if ($can('settings')): ?>
-            <a class="<?php echo $active === 'schedule' ? 'active' : ''; ?>" href="schedule.php"><?php echo e($isEn ? 'Periodic jobs' : 'الجدول الدوري'); ?></a>
             <?php endif; ?>
             <?php if ($can('subscribers')): ?>
             <a class="<?php echo $active === 'import_export' ? 'active' : ''; ?>" href="import_export.php"><?php echo e($isEn ? 'Import & Export' : 'استيراد وتصدير'); ?></a>
@@ -494,7 +538,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <div id="sasBusy" hidden>
                 <div class="sas-busy-card">
                     <span class="sas-busy-spin" aria-hidden="true"></span>
-                    <span><?php echo e($isEn ? 'Working in SAS… don’t close the page' : 'جاري التنفيذ بالساس… لا تسكر الصفحة'); ?></span>
+                    <span><?php echo e($isEn ? 'Working…' : 'جاري التنفيذ…'); ?></span>
                 </div>
             </div>
 <?php
@@ -656,9 +700,10 @@ body.nav-pending .nav-progress { display: block; }
   var text = bar.querySelector('.wa-conn-text');
   var isEn = document.documentElement.lang === 'en';
   var msgs = {
-    offline: isEn ? 'Please link WhatsApp' : 'يرجى ربط واتساب',
-    needQr: isEn ? 'Please link WhatsApp' : 'يرجى ربط واتساب',
-    unreachable: isEn ? 'WhatsApp gateway unreachable' : 'بوابة واتساب غير متاحة'
+    offline: isEn ? 'WhatsApp is not linked. Open settings and scan once.' : 'واتساب غير مربوط. افتح الإعدادات وامسح الرمز مرة واحدة.',
+    needQr: isEn ? 'Scan the WhatsApp picture once from settings.' : 'امسح صورة واتساب مرة واحدة من الإعدادات.',
+    restoring: isEn ? 'Opening the saved WhatsApp link…' : 'جاري فتح ربط واتساب المحفوظ…',
+    unreachable: isEn ? 'WhatsApp gateway is off. The saved link stays — start it on the Windows PC.' : 'بوابة واتساب متوقفة. الربط محفوظ — شغّلها على حاسبة الويندوز.'
   };
   var failStreak = 0;
   var lastKey = '';
@@ -689,9 +734,8 @@ body.nav-pending .nav-progress { display: block; }
     xhr.onload = function () {
       var data = null;
       try { data = JSON.parse(xhr.responseText); } catch (e) {}
-      if (!data || data.success === false) {
-        failStreak += 1;
-        if (failStreak >= 3) setProblem('wa-conn-off', msgs.unreachable);
+      if (!data || data.success === false || data.status === 'gateway_down') {
+        setProblem('wa-conn-off', msgs.unreachable);
         return;
       }
       failStreak = 0;
@@ -699,8 +743,12 @@ body.nav-pending .nav-progress { display: block; }
         hideBar();
         return;
       }
-      if (data.has_qr || data.status === 'qr_ready' || data.status === 'connecting') {
-        setProblem('wa-conn-warn', msgs.needQr);
+      if (data.has_qr || data.status === 'qr_ready' || data.status === 'closed_401' || data.status === 'need_link') {
+        setProblem('wa-conn-warn', data.status === 'qr_ready' || data.has_qr ? msgs.needQr : msgs.offline);
+        return;
+      }
+      if (data.status === 'connecting' || data.status === 'starting' || (data.status && String(data.status).indexOf('closed_') === 0)) {
+        setProblem('wa-conn-warn', msgs.restoring);
         return;
       }
       setProblem('wa-conn-off', msgs.offline);
@@ -855,16 +903,9 @@ body.nav-pending .nav-progress { display: block; }
   document.addEventListener('submit', function (ev) {
     if (ev.defaultPrevented) return;
     var form = ev.target;
-    if (!form || !form.querySelector) return;
-    var act = form.querySelector('input[name="action"]');
-    if (!act) return;
-    var v = act.value || '';
-    if (v !== 'transfer' && v !== 'return_transfer' && v !== 'return_agent_cards' && v !== 'recover_missing_cards') return;
-    var btn = form.querySelector('button[type="submit"]');
-    if (btn) {
-      btn.disabled = true;
-      btn.textContent = <?php echo json_encode($isEn ? 'Working…' : 'جاري التنفيذ…'); ?>;
-    }
+    if (!form || !form.getAttribute) return;
+    if (form.getAttribute('data-no-wait') === '1') return;
+    document.body.classList.add('nav-pending');
     if (busy) busy.hidden = false;
   });
 })();

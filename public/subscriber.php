@@ -814,8 +814,9 @@ if ($activeSubCard) {
                     <label><?php echo e(t('sub_type')); ?></label>
                     <select name="plan_id" required>
                         <?php foreach ($plansForChange as $pf): ?>
+                            <?php $planMoney = function_exists('account_plan_money') ? account_plan_money($pdo, $pf) : (float) $pf['monthly_price']; ?>
                             <option value="<?php echo (int) $pf['id']; ?>" <?php echo $currentPlanMatchId === (int) $pf['id'] ? 'selected' : ''; ?>>
-                                <?php echo e($pf['name'] . ' — ' . money_format_iqd($pf['monthly_price'], $config['currency'])); ?>
+                                <?php echo e($pf['name'] . ' — ' . money_format_iqd($planMoney, $config['currency'])); ?>
                             </option>
                         <?php endforeach; ?>
                     </select>
@@ -1336,7 +1337,7 @@ if ($activeSubCard) {
                 $short = $noWaLog
                     ? ($lang === 'en' ? 'This number is not on WhatsApp' : 'لا يتوفر واتساب لدى المشترك')
                     : message_short_summary($log['message_type'], $log['body'], $ok);
-                $resolvedTitle = $lang === 'en' ? 'Resolved by a later successful send' : 'انحلت لاحقاً بإرسال ناجح';
+                $failWhy = (!$ok && function_exists('message_log_fail_text')) ? message_log_fail_text($log) : '';
                 $itemCls = $ok ? '' : ($resolved ? ' msg-resolved' : ' msg-failed');
                 ?>
                 <div class="msg-log-item<?php echo $itemCls; ?>">
@@ -1344,10 +1345,9 @@ if ($activeSubCard) {
                         <?php if ($ok): ?>
                             <span class="badge paid"><?php echo e($lang === 'en' ? 'Sent' : 'أُرسلت'); ?></span>
                         <?php elseif ($resolved): ?>
-                            <span class="badge paid msg-resolved-badge" title="<?php echo e($resolvedTitle); ?>">
-                                <?php echo e($lang === 'en' ? 'Fail → Fixed' : 'فشل → انحلت'); ?>
+                            <span class="badge paid msg-resolved-badge" title="<?php echo e($failWhy !== '' ? $failWhy : ($lang === 'en' ? 'Failure reason is not stored' : 'ماكو سبب محفوظ')); ?>" style="cursor:help">
+                                <?php echo e($lang === 'en' ? 'Fail → Processed' : 'فشل → تمت المعالجة'); ?>
                             </span>
-                            <span class="msg-resolved-arrow" title="<?php echo e($resolvedTitle); ?>">→</span>
                         <?php elseif ($noWaLog): ?>
                             <span class="badge expired"><?php echo e($lang === 'en' ? 'No WhatsApp' : 'ماكو واتساب'); ?></span>
                         <?php else: ?>

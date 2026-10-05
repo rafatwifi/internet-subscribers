@@ -11,7 +11,10 @@ if (in_array($mode, array('debt', 'days', 'overdue'), true)) {
     $filter = $mode;
     $mode = 'send';
 }
-if (!in_array($mode, array('send', 'log', 'templates'), true)) {
+if (!in_array($mode, array('send', 'log', 'templates', 'schedule'), true)) {
+    $mode = 'send';
+}
+if ($mode === 'schedule' && (!function_exists('user_can') || !user_can('settings'))) {
     $mode = 'send';
 }
 if (!in_array($filter, array('debt', 'days', 'overdue'), true)) {
@@ -672,6 +675,9 @@ $logPages = 1;
 $daysEmptyHint = '';
 
 if ($mode === 'log') {
+    if (function_exists('ensure_message_log_extra')) {
+        ensure_message_log_extra($pdo);
+    }
     $where = '1=1';
     $params = array();
     $mineSess = function_exists('whatsapp_session_id') ? whatsapp_session_id() : '';
@@ -972,6 +978,12 @@ $msgModes = array(
     'templates' => array('label' => t('templates'), 'hint' => $isEnMsg ? 'Edit & assign' : 'تعديل وتخصيص'),
     'log' => array('label' => $isEnMsg ? 'Sent log' : 'سجل الرسائل', 'hint' => $isEnMsg ? 'History' : 'الأرشيف'),
 );
+if (function_exists('user_can') && user_can('settings')) {
+    $msgModes['schedule'] = array(
+        'label' => $isEnMsg ? 'Schedule' : 'الجدول الدوري',
+        'hint' => $isEnMsg ? 'Cuts and reminders' : 'قطع وتذكير',
+    );
+}
 $sendFilters = array(
     'overdue' => array('label' => $isEnMsg ? 'Late payers' : 'المتأخرين بالتسديد', 'hint' => $isEnMsg ? 'Unpaid after activation' : 'دين بعد التفعيل'),
     'debt' => array('label' => t('msg_mode_debt'), 'hint' => $isEnMsg ? 'Everyone with debt' : 'عليهم دين'),
@@ -1419,13 +1431,14 @@ $sendFilters = array(
     <form method="post" id="msgLogBulkForm">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="action" id="logBulkAction" value="retry_log_bulk">
+        <input type="hidden" name="log_id" id="logRetryId" value="">
         <input type="hidden" name="q" value="<?php echo e($logQ); ?>">
         <input type="hidden" name="type" value="<?php echo e($logType); ?>">
         <input type="hidden" name="status" value="<?php echo e($logStatus); ?>">
         <input type="hidden" name="page" value="<?php echo (int) $logPage; ?>">
         <div class="msg-bulk-bar">
-            <button class="btn secondary sm" type="submit" onclick="return logBulkGo('retry_log_bulk')"><?php echo e($isEnMsg ? 'Resend selected' : 'إعادة إرسال المحدد'); ?></button>
-            <button class="btn danger sm" type="submit" onclick="return logBulkGo('delete_log_bulk')"><?php echo e($isEnMsg ? 'Delete selected' : 'حذف المحدد'); ?></button>
+            <button class="btn secondary sm" type="submit" data-wait-label="<?php echo e($isEnMsg ? 'Resending…' : 'جاري إعادة الإرسال…'); ?>" onclick="return logBulkGo('retry_log_bulk')"><?php echo e($isEnMsg ? 'Resend selected' : 'إعادة إرسال المحدد'); ?></button>
+            <button class="btn danger sm" type="submit" data-wait-label="<?php echo e($isEnMsg ? 'Deleting…' : 'جاري الحذف…'); ?>" onclick="return logBulkGo('delete_log_bulk')"><?php echo e($isEnMsg ? 'Delete selected' : 'حذف المحدد'); ?></button>
             <span class="meta" id="logBulkCount">0 <?php echo e($isEnMsg ? 'selected' : 'محدد'); ?></span>
         </div>
     <div class="table-wrap msg-table-wrap">
@@ -1461,7 +1474,6 @@ $sendFilters = array(
                 }
                 $bodyShort = str_replace(array("\r\n", "\n", "\r"), ' ', $bodyShort);
                 $rowCls = $ok ? '' : ($resolved ? 'row-msg-resolved' : 'row-msg-fail');
-                $resolvedTitle = $isEnMsg ? 'Resolved by a later successful send' : 'انحلت لاحقاً بإرسال ناجح';
                 ?>
                 <tr class="<?php echo e($rowCls); ?>"
                     data-log-id="<?php echo (int) $row['id']; ?>"
@@ -1477,20 +1489,43 @@ $sendFilters = array(
                             —
                         <?php endif; ?>
                     </td>
-                    <td class="nowrap"><?php echo e(format_phone_display($row['phone'])); ?></td>
+                    <td class="nowrap">
+                        <?php echo e(format_phone_display($row['phone'])); ?>
+                        <?php if (!empty($row['from_phone'])): ?>
+                            <div class="msg-from-line"><?php echo e(($isEnMsg ? 'From ' : 'من ') . format_phone_display($row['from_phone'])); ?></div>
+                        <?php endif; ?>
+                    </td>
                     <td><small><?php echo e(message_type_title($row['message_type'])); ?></small></td>
                     <td class="msg-status-log">
+                        <?php
+                        $tryN = isset($row['attempt']) ? (int) $row['attempt'] : 0;
+                        if ($tryN < 1) {
+                            $tryN = 1;
+                        }
+                        if ($tryN > 3) {
+                            $tryN = 3;
+                        }
+                        $tryWaiting = !$ok && !empty($row['next_retry_at']);
+                        $showTry = !$ok && ($tryWaiting || $tryN > 1);
+                        $failText = (!$ok && function_exists('message_log_fail_text')) ? message_log_fail_text($row) : '';
+                        ?>
                         <?php if ($ok): ?>
                             <span class="dot-msg ok" title="<?php echo e($isEnMsg ? 'Sent' : 'تم'); ?>"></span>
                             <?php echo e($isEnMsg ? 'OK' : 'تم'); ?>
                         <?php elseif ($resolved): ?>
-                            <span class="dot-msg resolved" title="<?php echo e($resolvedTitle); ?>"></span>
+                            <span class="dot-msg resolved"></span>
                             <span class="msg-fail-muted"><?php echo e($isEnMsg ? 'Fail' : 'فشل'); ?></span>
-                            <span class="msg-resolved-arrow" title="<?php echo e($resolvedTitle); ?>" aria-label="<?php echo e($resolvedTitle); ?>">→</span>
-                            <span class="msg-resolved-ok"><?php echo e($isEnMsg ? 'Fixed' : 'انحلت'); ?></span>
+                            <span class="msg-resolved-arrow">→</span>
+                            <span class="msg-resolved-ok" title="<?php echo e($failText !== '' ? $failText : ($isEnMsg ? 'Failure reason is not stored' : 'ماكو سبب محفوظ')); ?>"><?php echo e($isEnMsg ? 'Processed' : 'تمت المعالجة'); ?></span>
                         <?php else: ?>
                             <span class="dot-msg fail"></span>
-                            <?php echo e($isEnMsg ? 'Fail' : 'فشل'); ?>
+                            <?php echo e($tryWaiting ? ($isEnMsg ? 'Retry' : 'إعادة') : ($isEnMsg ? 'Fail' : 'فشل')); ?>
+                            <?php if ($showTry): ?>
+                                <span class="msg-try"><?php echo (int) $tryN; ?>/3</span>
+                            <?php endif; ?>
+                        <?php endif; ?>
+                        <?php if ($failText !== '' && !$ok && !$resolved): ?>
+                            <div class="msg-fail-why" title="<?php echo e($failText); ?>"><?php echo e($failText); ?></div>
                         <?php endif; ?>
                     </td>
                     <td class="log-details msg-log-body" title="<?php echo e($bodyFull); ?>">
@@ -1504,9 +1539,9 @@ $sendFilters = array(
                     </td>
                     <td class="acts-cell">
                         <?php if (!empty($row['subscriber_id'])): ?>
-                            <button class="link-act" type="submit" name="log_id" value="<?php echo (int) $row['id']; ?>" onclick="document.getElementById('logBulkAction').value='retry_log'" title="<?php echo e($isEnMsg ? 'Resend' : 'إعادة إرسال'); ?>">↻</button>
+                            <button class="link-act" type="submit" value="<?php echo (int) $row['id']; ?>" data-wait-label="<?php echo e($isEnMsg ? 'Resending…' : 'جاري إعادة الإرسال…'); ?>" onclick="document.getElementById('logBulkAction').value='retry_log'; document.getElementById('logRetryId').value=this.value;" title="<?php echo e($isEnMsg ? 'Resend' : 'إعادة إرسال'); ?>">↻</button>
                         <?php elseif ($resolved): ?>
-                            <span class="msg-resolved-arrow acts-resolved" title="<?php echo e($resolvedTitle); ?>">→</span>
+                            <span class="msg-resolved-arrow acts-resolved" title="<?php echo e($failText !== '' ? $failText : ($isEnMsg ? 'Failure reason is not stored' : 'ماكو سبب محفوظ')); ?>">→</span>
                         <?php endif; ?>
                     </td>
                 </tr>
@@ -1526,7 +1561,7 @@ $sendFilters = array(
             <?php endif; ?>
         </div>
     <?php endif; ?>
-    <form method="post" id="msgLogDeleteForm" style="display:none">
+    <form method="post" id="msgLogDeleteForm" style="display:none" data-wait-label="<?php echo e($isEnMsg ? 'Deleting…' : 'جاري الحذف…'); ?>">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="action" value="delete_log">
         <input type="hidden" name="log_id" id="msgLogDeleteId" value="">
@@ -1561,6 +1596,10 @@ $sendFilters = array(
       #msgLogTable tr.row-msg-fail { cursor: context-menu; }
       .msg-bulk-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 10px; }
       #msgLogTable .sub-check-cell { width: 36px; text-align: center; }
+      .msg-from-line { margin-top: 3px; font-size: 11px; font-weight: 700; color: #0f766e; direction: ltr; text-align: start; }
+      .msg-fail-why { margin-top: 4px; max-width: 220px; font-size: 11px; font-weight: 700; color: #9f1239; line-height: 1.35; }
+      .msg-try { display: inline-block; margin-inline-start: 6px; padding: 1px 6px; border-radius: 999px; background: #ffedd5; color: #9a3412; font-size: 11px; font-weight: 800; }
+      .msg-resolved-ok { cursor: help; }
     </style>
     <script>
     function logBulkGo(action) {
@@ -1650,6 +1689,12 @@ $sendFilters = array(
       }
     })();
     </script>
+
+<?php elseif ($mode === 'schedule'): ?>
+    <?php
+    $GLOBALS['schedule_embed'] = true;
+    include __DIR__ . '/schedule.php';
+    ?>
 
 <?php else: ?>
 

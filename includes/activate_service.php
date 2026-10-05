@@ -167,17 +167,14 @@ function activate_one_subscriber($pdo, $config, $subscriberId, $opts = array())
     $serviceName = $plan['name'];
     $monthlyPrice = (float) $plan['monthly_price'];
     $costPrice = isset($plan['cost_price']) ? (float) $plan['cost_price'] : 0;
-    if (function_exists('current_admin') && function_exists('agent_card_prices_list')) {
+    if (function_exists('current_admin') && function_exists('account_package_rates')) {
         $priceMe = current_admin();
         $priceUid = $priceMe ? (int) $priceMe['id'] : 0;
-        if ($priceUid > 0) {
-            foreach (agent_card_prices_list($pdo, $priceUid) as $priceRow) {
-                if (strcasecmp(trim((string) $priceRow['profile_name']), trim((string) $serviceName)) === 0
-                    && (float) $priceRow['agent_price'] > 0) {
-                    $monthlyPrice = (float) $priceRow['agent_price'];
-                    break;
-                }
-            }
+        $sasPid = isset($plan['sas_profile_id']) ? (int) $plan['sas_profile_id'] : 0;
+        $rates = account_package_rates($pdo, $priceUid, $serviceName, $sasPid);
+        if (!empty($rates['found'])) {
+            $costPrice = (float) $rates['cost'];
+            $monthlyPrice = (float) $rates['retail'] > 0 ? (float) $rates['retail'] : $costPrice;
         }
     }
     $planIdSaved = isset($plan['id']) ? (int) $plan['id'] : 0;
@@ -523,6 +520,16 @@ function change_subscriber_plan($pdo, $config, $subscriberId, $planId)
     $newName = (string) $plan['name'];
     $newPrice = (float) $plan['monthly_price'];
     $newCost = isset($plan['cost_price']) ? (float) $plan['cost_price'] : 0;
+    if (function_exists('current_admin') && function_exists('account_package_rates')) {
+        $priceMe = current_admin();
+        $priceUid = $priceMe ? (int) $priceMe['id'] : 0;
+        $sasPid = isset($plan['sas_profile_id']) ? (int) $plan['sas_profile_id'] : 0;
+        $rates = account_package_rates($pdo, $priceUid, $newName, $sasPid);
+        if (!empty($rates['found'])) {
+            $newCost = (float) $rates['cost'];
+            $newPrice = (float) $rates['retail'] > 0 ? (float) $rates['retail'] : $newCost;
+        }
+    }
 
     if (strcasecmp($oldName, $newName) === 0 && abs($oldPrice - $newPrice) < 0.01) {
         return array(false, 'نوع الاشتراك نفسه — ماكو تغيير');

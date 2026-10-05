@@ -305,6 +305,13 @@ $scheduleCutFile = __DIR__ . '/schedule_cut.php';
 if (is_file($scheduleCutFile)) {
     require_once $scheduleCutFile;
 }
+if (!empty($_SESSION['admin_logged_in']) && isset($pdo) && function_exists('schedule_settings_for_tenant') && function_exists('current_tenant_id')) {
+    try {
+        $schedBoot = schedule_settings_for_tenant($pdo, (int) current_tenant_id());
+        $config = schedule_config_with_tenant($config, $schedBoot);
+    } catch (Exception $e) {
+    }
+}
 
 $archivesFile = __DIR__ . '/archives.php';
 if (is_file($archivesFile)) {
@@ -457,4 +464,14 @@ try {
     }
 } catch (Exception $e) {
 } catch (Throwable $e) {
+}
+
+// طلبات العرض ما تبقى ماسكة قفل الجلسة. أي بنغ أو ساس بعدها ما يصفّن بقية التابات.
+if (
+    PHP_SAPI !== 'cli'
+    && isset($_SERVER['REQUEST_METHOD'])
+    && strtoupper((string) $_SERVER['REQUEST_METHOD']) === 'GET'
+    && function_exists('app_session_close')
+) {
+    app_session_close();
 }

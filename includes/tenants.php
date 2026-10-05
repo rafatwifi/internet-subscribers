@@ -691,7 +691,7 @@ function tenant_test_sas_connection($host, $username, $password)
 }
 
 /** حالة الساس للواجهة — لا تمسح داتا عند الفشل */
-function sas_connection_status($pdo, $config, $tenantId = null)
+function sas_connection_status($pdo, $config, $tenantId = null, $live = true)
 {
     $tenantId = $tenantId === null ? current_tenant_id() : max(1, (int) $tenantId);
     $out = array(
@@ -711,9 +711,12 @@ function sas_connection_status($pdo, $config, $tenantId = null)
     $now = time();
     if (is_file($lock)) {
         $prev = @json_decode((string) @file_get_contents($lock), true);
-        if (is_array($prev) && !empty($prev['at']) && ($now - (int) $prev['at']) < 90) {
+        if (is_array($prev) && !empty($prev['at']) && (!$live || ($now - (int) $prev['at']) < 90)) {
             return array_merge($out, $prev, array('tenant_id' => $tenantId));
         }
+    }
+    if (!$live) {
+        return $out;
     }
     list($ok, $msg) = tenant_test_sas_connection($s['host'], $s['username'], $s['password']);
     $out['ok'] = $ok;

@@ -551,21 +551,184 @@ function system_cpu_info()
     );
 }
 
-function system_sas_latency($config)
+function system_reseller_host_key($host)
 {
+    $h = strtolower(preg_replace('#^https?://#i', '', rtrim(trim((string) $host), '/')));
+    return preg_replace('/:\d+$/', '', $h);
+}
+
+function system_reseller_label_from_host($host)
+{
+    $h = system_reseller_host_key($host);
+    if ($h === '') {
+        return '';
+    }
+    if (strpos($h, 'nbtel') !== false) {
+        return 'NBTEL';
+    }
+    if (strpos($h, 'earthlink') !== false) {
+        return 'Earthlink';
+    }
+    $drop = array('www', 'reseller', 'sas', 'admin', 'portal', 's1', 's2', 's3', 'iq', 'com', 'net', 'org', 'io');
+    $best = '';
+    foreach (explode('.', $h) as $p) {
+        $p = trim($p);
+        if ($p === '' || in_array($p, $drop, true)) {
+            continue;
+        }
+        $best = $p;
+    }
+    if ($best === '') {
+        return $h;
+    }
+    if (strlen($best) <= 8 && strpos($best, '-') === false) {
+        return strtoupper($best);
+    }
+    return ucfirst($best);
+}
+
+/**
+ * ريسلر الوكالة الحالية: الهوست اللي دخلوه، واسم الشركة (NBTEL / Earthlink…).
+ */
+function system_reseller_bank($config)
+{
+    global $pdo;
     $host = '';
-    if (function_exists('sas_config')) {
+    $name = '';
+    $companyId = 0;
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+    if (isset($pdo) && $pdo && $tid > 0 && function_exists('sas_config_for_tenant')) {
+        $s = sas_config_for_tenant($pdo, $config, $tid);
+        if (is_array($s)) {
+            $host = isset($s['host']) ? trim((string) $s['host']) : '';
+            $companyId = isset($s['company_id']) ? (int) $s['company_id'] : 0;
+        }
+    }
+    if ($host === '' && function_exists('sas_config')) {
         $s = sas_config($config);
         $host = isset($s['host']) ? trim((string) $s['host']) : '';
     }
     if ($host === '' && isset($config['sas']['host'])) {
         $host = preg_replace('#^https?://#i', '', rtrim(trim((string) $config['sas']['host']), '/'));
     }
+    if ($companyId > 0 && isset($pdo) && $pdo && function_exists('platform_company_row')) {
+        $co = platform_company_row($pdo, $companyId);
+        if ($co && !empty($co['name'])) {
+            $name = trim((string) $co['name']);
+        }
+    }
+    $want = system_reseller_host_key($host);
+    if ($name === '' && $want !== '' && isset($pdo) && $pdo) {
+        try {
+            if (function_exists('ensure_platform_companies_schema')) {
+                ensure_platform_companies_schema($pdo);
+            }
+            $rows = $pdo->query('SELECT name, sas_host FROM platform_companies WHERE is_active = 1')->fetchAll();
+            if (is_array($rows)) {
+                foreach ($rows as $r) {
+                    $ch = system_reseller_host_key(isset($r['sas_host']) ? $r['sas_host'] : '');
+                    if ($ch !== '' && $ch === $want && !empty($r['name'])) {
+                        $name = trim((string) $r['name']);
+                        break;
+                    }
+                }
+            }
+        } catch (Exception $e) {
+            $name = '';
+        }
+    }
+    if ($name !== '' && strpos($name, '.') !== false) {
+        $pretty = system_reseller_label_from_host($name);
+        if ($pretty !== '') {
+            $name = $pretty;
+        }
+    }
+    if ($name === '' && $host !== '') {
+        $name = system_reseller_label_from_host($host);
+    }
+    return array('host' => $host, 'name' => $name);
+}
+
+/**
+ * ريسلرات هذا الحساب فقط. ما ينزل لريسلر الوكالة الرئيسية إذا الحساب ما مربوط.
+ * @return array list of array('host'=>, 'name'=>)
+ */
+function dash_linked_resellers($config)
+{
+    global $pdo;
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+    if ($tid <= 0 || !isset($pdo) || !$pdo || !function_exists('tenant_sas_accounts_ready')) {
+        return array();
+    }
+    $out = array();
+    $seen = array();
+    foreach (tenant_sas_accounts_ready($pdo, $tid) as $row) {
+        $host = isset($row['sas_host']) ? trim((string) $row['sas_host']) : '';
+        $host = preg_replace('#^https?://#i', '', rtrim($host, '/'));
+        $key = function_exists('system_reseller_host_key') ? system_reseller_host_key($host) : strtolower($host);
+        if ($key === '' || isset($seen[$key])) {
+            continue;
+        }
+        $seen[$key] = true;
+        $name = '';
+        $companyId = isset($row['company_id']) ? (int) $row['company_id'] : 0;
+        if ($companyId > 0 && function_exists('platform_company_row')) {
+            $co = platform_company_row($pdo, $companyId);
+            if ($co && !empty($co['name'])) {
+                $name = trim((string) $co['name']);
+            }
+        }
+        if ($name === '' && function_exists('system_reseller_label_from_host')) {
+            $name = system_reseller_label_from_host($host);
+        }
+        if ($name === '' && !empty($row['label'])) {
+            $name = trim((string) $row['label']);
+        }
+        if ($name === '') {
+            $name = $host;
+        }
+        $out[] = array('host' => $host, 'name' => $name);
+    }
+    return $out;
+}
+
+function dash_reseller_pings($config)
+{
+    $rows = dash_linked_resellers($config);
+    if (!$rows) {
+        return array('ok' => true, 'balance' => '-', 'sub' => '', 'count' => 0);
+    }
+    $bits = array();
+    $names = array();
+    foreach ($rows as $row) {
+        $names[] = $row['name'];
+        $lat = function_exists('system_latency_to_host') ? system_latency_to_host($row['host']) : array('ms' => null);
+        $ms = isset($lat['ms']) ? $lat['ms'] : null;
+        if ($ms !== null && $ms !== '') {
+            $bits[] = number_format((float) $ms, 0) . ' ms';
+        } else {
+            $bits[] = 'فشل';
+        }
+    }
+    return array(
+        'ok' => true,
+        'balance' => implode(' · ', $bits),
+        'sub' => implode(' · ', $names),
+        'count' => count($rows),
+    );
+}
+
+function system_sas_latency($config)
+{
+    $bank = system_reseller_bank($config);
+    $host = isset($bank['host']) ? trim((string) $bank['host']) : '';
+    $name = isset($bank['name']) ? trim((string) $bank['name']) : '';
     if ($host === '') {
         return array(
             'ok' => false,
             'ms' => null,
             'host' => '',
+            'name' => $name,
             'label' => '—',
             'error' => 'no_host',
         );
@@ -577,6 +740,7 @@ function system_sas_latency($config)
         'ok' => $ok,
         'ms' => $ms,
         'host' => $host,
+        'name' => $name,
         'label' => system_format_ms($ms),
         'method' => isset($res['method']) ? $res['method'] : '',
         'http_code' => isset($res['http_code']) ? $res['http_code'] : 0,

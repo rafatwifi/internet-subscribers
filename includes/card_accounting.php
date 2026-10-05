@@ -564,13 +564,52 @@ function card_sas_stock_forget()
     }
 }
 
-function card_sas_stock_map($pdo, $config, $homeId)
+function card_sas_stock_file($homeId)
+{
+    $dir = dirname(__DIR__) . '/storage/cache';
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0755, true);
+    }
+    return $dir . '/card_stock_h' . (int) $homeId . '.json';
+}
+
+function card_sas_stock_read($homeId)
+{
+    $path = card_sas_stock_file($homeId);
+    if (!is_file($path)) {
+        return null;
+    }
+    $j = @json_decode((string) @file_get_contents($path), true);
+    if (!is_array($j) || !isset($j['map']) || !is_array($j['map'])) {
+        return null;
+    }
+    return array(
+        'at' => isset($j['at']) ? (int) $j['at'] : 0,
+        'map' => $j['map'],
+    );
+}
+
+function card_sas_stock_map($pdo, $config, $homeId, $allowLive = true)
 {
     $homeId = (int) $homeId;
     $ck = 'card_sas_stock_map_v2';
-    if (!empty($_SESSION[$ck]) && is_array($_SESSION[$ck]) && !empty($_SESSION[$ck . '_at'])
-        && (time() - (int) $_SESSION[$ck . '_at']) < 20) {
-        return $_SESSION[$ck];
+    $cached = null;
+    $cachedAt = 0;
+    if (!empty($_SESSION[$ck]) && is_array($_SESSION[$ck]) && !empty($_SESSION[$ck . '_at'])) {
+        $cached = $_SESSION[$ck];
+        $cachedAt = (int) $_SESSION[$ck . '_at'];
+    }
+    $fileHit = card_sas_stock_read($homeId);
+    if ($fileHit && (int) $fileHit['at'] >= $cachedAt) {
+        $cached = $fileHit['map'];
+        $cachedAt = (int) $fileHit['at'];
+    }
+    $fresh = ($cached !== null && $cachedAt > 0 && (time() - $cachedAt) < 180);
+    if ($cached !== null && ($fresh || !$allowLive)) {
+        return $cached;
+    }
+    if (!$allowLive) {
+        return array();
     }
     $map = array();
     if (!function_exists('sas_make_connector') || !function_exists('sas_is_ready') || !sas_is_ready($config)) {
@@ -674,11 +713,15 @@ function card_sas_stock_map($pdo, $config, $homeId)
         }
         $map[$homeId] = $homeBag;
     }
-    if (session_status() !== PHP_SESSION_ACTIVE) {
+    $savedAt = time();
+    @file_put_contents(card_sas_stock_file($homeId), json_encode(array('at' => $savedAt, 'map' => $map)));
+    if (session_status() !== PHP_SESSION_ACTIVE && function_exists('app_session_reopen')) {
+        app_session_reopen();
+    } elseif (session_status() !== PHP_SESSION_ACTIVE) {
         @session_start();
     }
     $_SESSION[$ck] = $map;
-    $_SESSION[$ck . '_at'] = time();
+    $_SESSION[$ck . '_at'] = $savedAt;
     if (function_exists('app_session_close')) {
         app_session_close();
     }
@@ -1165,6 +1208,7 @@ function ensure_agent_card_prices_table($pdo)
         );
         if (function_exists('tenants_ensure_column')) {
             tenants_ensure_column($pdo, 'agent_card_prices', 'retail_price', 'DECIMAL(12,2) NOT NULL DEFAULT 0');
+            tenants_ensure_column($pdo, 'agent_card_prices', 'subagent_price', 'DECIMAL(12,2) NOT NULL DEFAULT 0');
         }
     } catch (Exception $e) {
     }
@@ -1201,7 +1245,443 @@ function agent_card_prices_list($pdo, $agentUserId)
     return $st->fetchAll();
 }
 
-function agent_card_price_save($pdo, $agentUserId, $profileId, $profileName, $wholesale, $agentPrice, $retailPrice = null)
+/**
+ * سعر الحساب المحفوظ له من الصفحة اللي فوقه.
+ * cost = سعر الوكيل (اللي يدفعه هذا الحساب). retail = سعر المشترك إن وُجد.
+ * ما يرجع سعر الوكالة الرئيسية من جدول الباقات.
+ */
+function account_package_rates($pdo, $userId, $serviceName, $sasProfileId = 0)
+{
+    static $cache = array();
+    $userId = (int) $userId;
+    $out = array('found' => false, 'cost' => 0.0, 'retail' => 0.0);
+    if ($userId <= 0 || !$pdo) {
+        return $out;
+    }
+    if (!isset($cache[$userId])) {
+        $cache[$userId] = agent_card_prices_list($pdo, $userId);
+    }
+    $want = strtolower(trim((string) $serviceName));
+    $wantSoft = function_exists('card_price_soft_key') ? card_price_soft_key($serviceName) : '';
+    $sasProfileId = (int) $sasProfileId;
+    foreach ($cache[$userId] as $row) {
+        $rowName = isset($row['profile_name']) ? (string) $row['profile_name'] : '';
+        $hit = ($want !== '' && strtolower(trim($rowName)) === $want);
+        if (!$hit && $sasProfileId > 0 && isset($row['profile_id']) && (int) $row['profile_id'] === $sasProfileId) {
+            $hit = true;
+        }
+        if (!$hit && $wantSoft !== '' && function_exists('card_price_soft_key') && card_price_soft_key($rowName) === $wantSoft) {
+            $hit = true;
+        }
+        if (!$hit) {
+            continue;
+        }
+        $cost = isset($row['agent_price']) ? (float) $row['agent_price'] : 0;
+        if ($cost <= 0) {
+            continue;
+        }
+        $retail = isset($row['retail_price']) ? (float) $row['retail_price'] : 0;
+        $out['found'] = true;
+        $out['cost'] = $cost;
+        $out['retail'] = $retail > 0 ? $retail : $cost;
+        return $out;
+    }
+    return $out;
+}
+
+function account_viewer_parent_id($pdo)
+{
+    static $cached = null;
+    if ($cached !== null) {
+        return $cached;
+    }
+    $cached = 0;
+    $me = function_exists('current_admin') ? current_admin() : null;
+    $uid = $me ? (int) $me['id'] : 0;
+    if ($uid <= 0 || !$pdo) {
+        return 0;
+    }
+    try {
+        $st = $pdo->prepare('SELECT reports_to_user_id FROM admin_users WHERE id = :id LIMIT 1');
+        $st->execute(array(':id' => $uid));
+        $cached = (int) $st->fetchColumn();
+    } catch (Exception $e) {
+        $cached = 0;
+    }
+    return $cached;
+}
+
+function account_sas_list_price($name, $sasId)
+{
+    $sasId = (int) $sasId;
+    $want = strtolower(trim((string) $name));
+    $soft = function_exists('card_price_soft_key') ? card_price_soft_key($name) : '';
+    $rows = (isset($_SESSION['sas_profiles_ui']) && is_array($_SESSION['sas_profiles_ui']))
+        ? $_SESSION['sas_profiles_ui']
+        : array();
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $price = isset($row['price']) ? (float) $row['price'] : 0;
+        if ($price <= 0) {
+            continue;
+        }
+        $id = isset($row['id']) ? (int) $row['id'] : 0;
+        $nm = isset($row['name']) ? (string) $row['name'] : '';
+        if ($sasId > 0 && $id === $sasId) {
+            return $price;
+        }
+        if ($want !== '' && strtolower(trim($nm)) === $want) {
+            return $price;
+        }
+        if ($soft !== '' && function_exists('card_price_soft_key') && card_price_soft_key($nm) === $soft) {
+            return $price;
+        }
+    }
+    return 0;
+}
+
+function account_viewer_has_downline($pdo, $userId)
+{
+    static $cache = array();
+    $userId = (int) $userId;
+    if (isset($cache[$userId])) {
+        return $cache[$userId];
+    }
+    $cache[$userId] = false;
+    if ($userId <= 0 || !$pdo) {
+        return false;
+    }
+    try {
+        $st = $pdo->prepare('SELECT id FROM admin_users WHERE reports_to_user_id = :id LIMIT 1');
+        $st->execute(array(':id' => $userId));
+        $cache[$userId] = ((int) $st->fetchColumn() > 0);
+    } catch (Exception $e) {
+        $cache[$userId] = false;
+    }
+    return $cache[$userId];
+}
+
+function account_price_keys($name)
+{
+    $n = strtolower(trim((string) $name));
+    if (strpos($n, 'wifi@') === 0) {
+        $n = substr($n, 5);
+    } elseif (strpos($n, 'wifi') === 0) {
+        $n = substr($n, 4);
+    }
+    $n = preg_replace('/[^a-z0-9]+/', '', $n);
+    $exact = array();
+    $loose = array();
+    if ($n !== '' && strlen($n) >= 3) {
+        $exact[$n] = true;
+        $noy = str_replace('y', '', $n);
+        if ($noy !== '' && strlen($noy) >= 4) {
+            $loose[$noy] = true;
+        }
+    }
+    return array($exact, $loose);
+}
+
+function account_viewer_twin_agent_id($pdo, $userId)
+{
+    static $cands = null;
+    static $found = array();
+    $userId = (int) $userId;
+    if ($userId <= 0 || !$pdo) {
+        return 0;
+    }
+    if (isset($found[$userId])) {
+        return $found[$userId];
+    }
+    $found[$userId] = 0;
+    $me = function_exists('current_admin') ? current_admin() : null;
+    $bag = array();
+    if ($me && !empty($me['username'])) {
+        $bag[] = (string) $me['username'];
+    }
+    if ($me && !empty($me['display_name'])) {
+        $bag[] = (string) $me['display_name'];
+    }
+    $tid = ($me && isset($me['tenant_id'])) ? (int) $me['tenant_id'] : 0;
+    if ($tid > 0) {
+        try {
+            $stT = $pdo->prepare('SELECT name FROM tenants WHERE id = :id LIMIT 1');
+            $stT->execute(array(':id' => $tid));
+            $tn = $stT->fetchColumn();
+            if ($tn) {
+                $bag[] = (string) $tn;
+            }
+        } catch (Exception $e) {
+        }
+    }
+    $exact = array();
+    $loose = array();
+    foreach ($bag as $nm) {
+        list($ex, $lo) = account_price_keys($nm);
+        foreach ($ex as $k => $yes) {
+            $exact[$k] = true;
+        }
+        foreach ($lo as $k => $yes) {
+            $loose[$k] = true;
+        }
+    }
+    if (!$exact && !$loose) {
+        return 0;
+    }
+    if ($cands === null) {
+        $cands = array();
+        try {
+            $st = $pdo->query(
+                'SELECT id, username, display_name, sas_manager_id FROM admin_users
+                 WHERE is_active = 1 AND role IN ("agent", "group_manager") AND reports_to_user_id > 0'
+            );
+            $rows = $st->fetchAll();
+            if (is_array($rows)) {
+                $cands = $rows;
+            }
+        } catch (Exception $e) {
+            $cands = array();
+        }
+    }
+    $bestId = 0;
+    $bestScore = 0;
+    foreach ($cands as $c) {
+        $cid = isset($c['id']) ? (int) $c['id'] : 0;
+        if ($cid <= 0 || $cid === $userId) {
+            continue;
+        }
+        $score = 0;
+        $names = array(
+            isset($c['username']) ? (string) $c['username'] : '',
+            isset($c['display_name']) ? (string) $c['display_name'] : '',
+        );
+        foreach ($names as $nm) {
+            list($ex, $lo) = account_price_keys($nm);
+            foreach ($ex as $k => $yes) {
+                if (isset($exact[$k])) {
+                    $score = 3;
+                } elseif (isset($loose[$k]) && $score < 2) {
+                    $score = 2;
+                }
+            }
+            if ($score < 3) {
+                foreach ($lo as $k => $yes) {
+                    if (isset($exact[$k]) || isset($loose[$k])) {
+                        if ($score < 2) {
+                            $score = 2;
+                        }
+                    }
+                }
+            }
+        }
+        if ($score > $bestScore) {
+            $bestScore = $score;
+            $bestId = $cid;
+        }
+    }
+    if ($bestScore < 2) {
+        $bestId = 0;
+    }
+    $found[$userId] = $bestId;
+    return $bestId;
+}
+
+/** وكالة بدون وكلاء تحتها، وأبوها مسعّرها. مو وكالة رئيسية. */
+function account_viewer_is_leaf_child($pdo)
+{
+    static $v = null;
+    if ($v !== null) {
+        return $v;
+    }
+    $v = false;
+    $me = function_exists('current_admin') ? current_admin() : null;
+    if (!$me || !$pdo) {
+        return false;
+    }
+    $role = isset($me['role']) ? (string) $me['role'] : '';
+    if ($role !== 'admin') {
+        return false;
+    }
+    $uid = (int) $me['id'];
+    if ($uid <= 0 || account_viewer_has_downline($pdo, $uid)) {
+        return false;
+    }
+    if (account_viewer_parent_id($pdo) > 0) {
+        $v = true;
+        return true;
+    }
+    $twin = account_viewer_twin_agent_id($pdo, $uid);
+    if ($twin <= 0) {
+        return false;
+    }
+    try {
+        $st = $pdo->prepare(
+            'SELECT COUNT(*) FROM agent_card_prices
+             WHERE agent_user_id = :a AND agent_price > 0 AND agent_price > wholesale_price'
+        );
+        $st->execute(array(':a' => $twin));
+        $v = ((int) $st->fetchColumn()) > 0;
+    } catch (Exception $e) {
+        $v = false;
+    }
+    return $v;
+}
+
+function account_viewer_sas_scope_id($pdo)
+{
+    static $id = null;
+    if ($id !== null) {
+        return $id;
+    }
+    $id = 0;
+    $me = function_exists('current_admin') ? current_admin() : null;
+    $uid = $me ? (int) $me['id'] : 0;
+    if ($me && !empty($me['sas_manager_id'])) {
+        $id = (int) $me['sas_manager_id'];
+    }
+    if ($id <= 0 && $uid > 0 && $pdo) {
+        try {
+            $st = $pdo->prepare('SELECT sas_manager_id FROM admin_users WHERE id = :id LIMIT 1');
+            $st->execute(array(':id' => $uid));
+            $id = (int) $st->fetchColumn();
+        } catch (Exception $e) {
+            $id = 0;
+        }
+    }
+    if ($id <= 0 && $uid > 0) {
+        $twin = account_viewer_twin_agent_id($pdo, $uid);
+        if ($twin > 0) {
+            try {
+                $st = $pdo->prepare('SELECT sas_manager_id FROM admin_users WHERE id = :id LIMIT 1');
+                $st->execute(array(':id' => $twin));
+                $id = (int) $st->fetchColumn();
+            } catch (Exception $e) {
+                $id = 0;
+            }
+        }
+    }
+    return $id;
+}
+
+/**
+ * سعر الأب المحفوظ على سجل الوكيل المطابق لحساب الوكالة، إذا الباقات انفتحت من حساب ثاني لنفس الشخص.
+ */
+function account_twin_parent_price($pdo, $userId, $name, $sasId)
+{
+    $userId = (int) $userId;
+    if ($userId <= 0 || !$pdo || !function_exists('account_package_rates')) {
+        return 0;
+    }
+    $bestId = account_viewer_twin_agent_id($pdo, $userId);
+    if ($bestId <= 0) {
+        return 0;
+    }
+    $rates = account_package_rates($pdo, $bestId, $name, (int) $sasId);
+    if (!empty($rates['found']) && (float) $rates['cost'] > 0) {
+        return (float) $rates['cost'];
+    }
+    return 0;
+}
+
+function account_viewer_package_retail($pdo, $name, $sasId, $monthly)
+{
+    $monthly = (float) $monthly;
+    $me = function_exists('current_admin') ? current_admin() : null;
+    $uid = $me ? (int) $me['id'] : 0;
+    if ($uid > 0 && function_exists('account_package_rates')) {
+        $rates = account_package_rates($pdo, $uid, $name, (int) $sasId);
+        if (!empty($rates['found']) && (float) $rates['retail'] > 0) {
+            return (float) $rates['retail'];
+        }
+        $twin = account_viewer_twin_agent_id($pdo, $uid);
+        if ($twin > 0) {
+            $rates = account_package_rates($pdo, $twin, $name, (int) $sasId);
+            if (!empty($rates['found']) && (float) $rates['retail'] > 0) {
+                return (float) $rates['retail'];
+            }
+        }
+    }
+    return $monthly;
+}
+
+/**
+ * سعر الباقة للحساب الحالي.
+ * الأدمن اللي عنده وكلاء يشوف سعر باقاته.
+ * الوكيل أو الوكالة اللي أبوها مسعّرها: سعر الأب. إذا ما مسعّر: سعر الساس.
+ */
+function account_viewer_package_price($pdo, $name, $sasId, $catalogCost)
+{
+    $catalogCost = (float) $catalogCost;
+    $me = function_exists('current_admin') ? current_admin() : null;
+    $uid = $me ? (int) $me['id'] : 0;
+    $role = ($me && isset($me['role'])) ? (string) $me['role'] : '';
+    $parentId = account_viewer_parent_id($pdo);
+    $rates = ($uid > 0 && function_exists('account_package_rates'))
+        ? account_package_rates($pdo, $uid, $name, (int) $sasId)
+        : array('found' => false, 'cost' => 0);
+    $own = (!empty($rates['found']) && (float) $rates['cost'] > 0) ? (float) $rates['cost'] : 0;
+    $ownIsList = ($own > 0 && abs($own - $catalogCost) < 0.5);
+
+    if ($parentId > 0) {
+        if ($own > 0) {
+            return $own;
+        }
+        $sas = account_sas_list_price($name, $sasId);
+        if ($sas > 0) {
+            return $sas;
+        }
+        return $catalogCost;
+    }
+
+    if ($role !== 'agent' && $role !== 'group_manager' && account_viewer_has_downline($pdo, $uid)) {
+        return $catalogCost;
+    }
+
+    if ($own > 0 && !$ownIsList) {
+        return $own;
+    }
+
+    $twin = account_twin_parent_price($pdo, $uid, $name, $sasId);
+    if ($twin > 0) {
+        return $twin;
+    }
+
+    if ($own > 0 && ($role === 'agent' || $role === 'group_manager')) {
+        return $own;
+    }
+
+    $sas = account_sas_list_price($name, $sasId);
+    if ($sas > 0) {
+        return $sas;
+    }
+    return $catalogCost;
+}
+
+/** السعر الظاهر للباقة على صفحات الحساب: سعره المحفوظ، مو سعر الوكالة الرئيسية. */
+function account_plan_money($pdo, $plan)
+{
+    $monthly = (is_array($plan) && isset($plan['monthly_price'])) ? (float) $plan['monthly_price'] : 0;
+    $name = (is_array($plan) && isset($plan['name'])) ? (string) $plan['name'] : '';
+    $sas = (is_array($plan) && isset($plan['sas_profile_id'])) ? (int) $plan['sas_profile_id'] : 0;
+    $me = function_exists('current_admin') ? current_admin() : null;
+    $uid = $me ? (int) $me['id'] : 0;
+    if ($uid > 0 && function_exists('account_package_rates')) {
+        $rates = account_package_rates($pdo, $uid, $name, $sas);
+        if (!empty($rates['found'])) {
+            if ((float) $rates['retail'] > 0) {
+                return (float) $rates['retail'];
+            }
+            if ((float) $rates['cost'] > 0) {
+                return (float) $rates['cost'];
+            }
+        }
+    }
+    return $monthly;
+}
+
+function agent_card_price_save($pdo, $agentUserId, $profileId, $profileName, $wholesale, $agentPrice, $retailPrice = null, $subagentPrice = null)
 {
     ensure_agent_card_prices_table($pdo);
     $agentUserId = (int) $agentUserId;
@@ -1219,18 +1699,25 @@ function agent_card_price_save($pdo, $agentUserId, $profileId, $profileName, $wh
         }
     } catch (Exception $e) {
     }
-    if ($retailPrice === null) {
+    $oldRetail = null;
+    if ($retailPrice === null || $subagentPrice === null) {
         $oldRetail = agent_card_price_get($pdo, $agentUserId, $profileId, $profileName);
+    }
+    if ($retailPrice === null) {
         $retailPrice = $oldRetail && isset($oldRetail['retail_price']) ? (float) $oldRetail['retail_price'] : (float) $agentPrice;
+    }
+    if ($subagentPrice === null) {
+        $subagentPrice = $oldRetail && isset($oldRetail['subagent_price']) ? (float) $oldRetail['subagent_price'] : 0;
     }
     $pdo->prepare(
         'INSERT INTO agent_card_prices
-            (tenant_id, agent_user_id, profile_id, profile_name, wholesale_price, agent_price, retail_price, updated_at)
-         VALUES (:tid, :a, :p, :n, :w, :ap, :rp, NOW())
+            (tenant_id, agent_user_id, profile_id, profile_name, wholesale_price, agent_price, retail_price, subagent_price, updated_at)
+         VALUES (:tid, :a, :p, :n, :w, :ap, :rp, :sp, NOW())
          ON DUPLICATE KEY UPDATE
             wholesale_price = VALUES(wholesale_price),
             agent_price = VALUES(agent_price),
             retail_price = VALUES(retail_price),
+            subagent_price = VALUES(subagent_price),
             updated_at = NOW()'
     )->execute(array(
         ':tid' => $tenantId,
@@ -1240,6 +1727,7 @@ function agent_card_price_save($pdo, $agentUserId, $profileId, $profileName, $wh
         ':w' => (float) $wholesale,
         ':ap' => (float) $agentPrice,
         ':rp' => (float) $retailPrice,
+        ':sp' => (float) $subagentPrice,
     ));
     return true;
 }

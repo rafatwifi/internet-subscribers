@@ -59,7 +59,7 @@ $brandSrc = ($brandIconUrl !== '') ? $brandIconUrl : 'assets/favicon.svg?v=2';
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="assets/style.css?v=login2">
+    <link rel="stylesheet" href="assets/style.css?v=login3">
     <style>
         html, body.login-page {
             min-height: 100%;
@@ -138,10 +138,11 @@ $brandSrc = ($brandIconUrl !== '') ? $brandIconUrl : 'assets/favicon.svg?v=2';
         }
         .login-card input[type="text"],
         .login-card input[type="password"] {
+            width: 100%;
             height: 48px;
             font-size: 16px;
             border-radius: 14px;
-            background: #fff;
+            background: #fff !important;
             margin-bottom: 14px;
         }
         .login-pass-wrap {
@@ -169,11 +170,12 @@ $brandSrc = ($brandIconUrl !== '') ? $brandIconUrl : 'assets/favicon.svg?v=2';
         .login-card .actions {
             margin-top: 6px;
         }
+        .login-card .actions { display: block; }
         .login-card .btn {
-            width: 100%;
+            width: 100% !important;
             height: 48px;
             border-radius: 14px;
-            background: #2b6c9a;
+            background: #2b6c9a !important;
             box-shadow: 0 10px 22px rgba(43, 108, 154, 0.28);
             font-size: 16px;
         }

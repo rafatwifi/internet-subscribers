@@ -7,6 +7,15 @@ require_perm('settings');
 
 $isEn = ($lang === 'en');
 $s = settings_load();
+$schedTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+if ($schedTid <= 0) {
+    $schedTid = 1;
+}
+if (function_exists('schedule_settings_for_tenant') && function_exists('schedule_config_with_tenant')) {
+    $schedRow = schedule_settings_for_tenant($pdo, $schedTid);
+    $s = array_merge($s, $schedRow);
+    $config = schedule_config_with_tenant($config, $schedRow);
+}
 $sysGrace = function_exists('subscriber_default_grace_days')
     ? subscriber_default_grace_days($config)
     : (int) (isset($s['grace_days']) ? $s['grace_days'] : 3);
@@ -14,7 +23,7 @@ $sysGrace = function_exists('subscriber_default_grace_days')
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf(post('csrf'))) {
         flash('error', $isEn ? 'Invalid request' : 'طلب غير صالح');
-        redirect('schedule.php');
+        redirect('messages.php?mode=schedule');
     }
     $section = post('section', '');
     if ($section === 'schedule_run') {
@@ -29,7 +38,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             flash('error', $isEn ? 'Enable auto-cut first' : 'فعّل القطع التلقائي أولاً');
         }
-        redirect('schedule.php');
+        redirect('messages.php?mode=schedule');
     }
     if ($section === 'expiry_run') {
         if (empty($s['expiry_auto_remind_enabled'])) {
@@ -47,7 +56,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 . ($isEn ? ' — skipped ' : ' — تخطي ')
                 . (int) $run['skipped']);
         }
-        redirect('schedule.php');
+        redirect('messages.php?mode=schedule');
     }
     if ($section === 'card_debt_run') {
         if (!function_exists('run_card_debt_reminders')) {
@@ -61,7 +70,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 . ($isEn ? ' — failed ' : ' — فشل ')
                 . (int) $run['failed']);
         }
-        redirect('schedule.php');
+        redirect('messages.php?mode=schedule');
     }
     if ($section === 'schedule') {
         $expDays = (int) post('expiry_auto_remind_days', '1');
@@ -97,13 +106,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $data['wa_case_' . $ck] = $v;
             }
         }
-        if (settings_save($data)) {
+        $savedOk = function_exists('schedule_settings_save')
+            ? schedule_settings_save($pdo, $schedTid, $data)
+            : settings_save($data);
+        if ($savedOk) {
             flash('success', t('saved'));
         } else {
-            flash('error', 'Cannot write settings.json');
+            flash('error', $isEn ? 'Could not save this agency schedule' : 'ما انحفظ جدول هالوكالة');
         }
-        redirect('schedule.php');
+        redirect('messages.php?mode=schedule');
     }
+}
+
+$scheduleEmbed = !empty($GLOBALS['schedule_embed']);
+if (!$scheduleEmbed) {
+    redirect('messages.php?mode=schedule');
 }
 
 $preview = function_exists('schedule_debtors_list')
@@ -160,10 +177,6 @@ $selCut = $sched_sel('schedule_cut');
 $selUnpaid = $sched_sel('unpaid_overdue');
 $chooseTpl = $isEn ? '— Choose template —' : '— اختر قالباً —';
 
-$topTools = '<button type="button" class="btn ghost sm" id="schedSettingsBtn" title="'
-    . e($isEn ? 'Schedule settings' : 'إعدادات الجدول الدوري') . '">⚙</button>';
-
-render_header($isEn ? 'Periodic jobs' : 'الجدول الدوري', 'schedule', '', '', $topTools);
 ?>
 <style>
 .sched-page { max-width: 1200px; margin: 0 auto; }
@@ -290,7 +303,10 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
 
 <div class="sched-page">
   <div class="sched-hero">
-    <h2><?php echo e($isEn ? 'Periodic schedule' : 'الجدول الدوري'); ?></h2>
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+      <h2><?php echo e($isEn ? 'Periodic schedule' : 'الجدول الدوري'); ?></h2>
+      <button type="button" class="btn sm" id="schedSettingsBtn" style="background:#fff;color:#0f172a;border:0;font-weight:800;flex:0 0 auto"><?php echo e($isEn ? 'Settings' : 'الإعدادات'); ?></button>
+    </div>
     <p><?php echo e($isEn
         ? 'Track unpaid debtors against grace days — who stays online, who will be cut, and WhatsApp notices.'
         : 'متابعة المدينين غير المسددين مقابل أيام السماح — من ضمن السماح، من راح ينقطع، وإشعار واتساب.'); ?></p>
@@ -449,7 +465,7 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
     <p class="meta" style="margin:0 0 12px"><?php echo e($isEn
         ? 'One save for all options below. Templates are chosen from Messages → Templates.'
         : 'حفظ واحد لكل الخيارات أدناه. القوالب تُختار من الرسائل → القوالب.'); ?></p>
-    <form method="post" id="schedSettingsForm">
+    <form method="post" action="schedule.php" id="schedSettingsForm">
       <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
       <input type="hidden" name="section" value="schedule">
 
@@ -540,21 +556,21 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
           : 'فعّل الخيارات فوق واحفظ. النظام يرسل واتساب ويعمل القطع لحاله أثناء استخدامك للوحة — بدون كرون وبدون cPanel.'); ?></p>
       <div style="display:flex;flex-wrap:wrap;gap:8px">
       <?php if ($enabled && function_exists('run_schedule_debt_cuts')): ?>
-        <form method="post" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Run auto-cut once now?' : 'تشغّل القطع مرة الآن؟'); ?>);">
+        <form method="post" action="schedule.php" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Run auto-cut once now?' : 'تشغّل القطع مرة الآن؟'); ?>);">
           <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
           <input type="hidden" name="section" value="schedule_run">
           <button class="btn ghost sm" type="submit"><?php echo e($isEn ? 'Test cut now' : 'تجربة القطع الآن'); ?></button>
         </form>
       <?php endif; ?>
       <?php if ($expiryAutoOn && function_exists('run_expiry_soon_reminders')): ?>
-        <form method="post" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Send expiry reminders once now?' : 'ترسل تذكير الانتهاء مرة الآن؟'); ?>);">
+        <form method="post" action="schedule.php" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Send expiry reminders once now?' : 'ترسل تذكير الانتهاء مرة الآن؟'); ?>);">
           <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
           <input type="hidden" name="section" value="expiry_run">
           <button class="btn ghost sm" type="submit"><?php echo e($isEn ? 'Test expiry now' : 'تجربة تذكير الانتهاء الآن'); ?></button>
         </form>
       <?php endif; ?>
       <?php if (function_exists('run_card_debt_reminders')): ?>
-        <form method="post" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Send card debt reminders once now?' : 'ترسل تذكير ديون الكروت مرة الآن؟'); ?>);">
+        <form method="post" action="schedule.php" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Send card debt reminders once now?' : 'ترسل تذكير ديون الكروت مرة الآن؟'); ?>);">
           <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
           <input type="hidden" name="section" value="card_debt_run">
           <button class="btn ghost sm" type="submit"><?php echo e($isEn ? 'Test card debt remind' : 'تجربة تذكير ديون الكروت'); ?></button>
@@ -727,4 +743,4 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
   applyFilter();
 })();
 </script>
-<?php render_footer(); ?>
+
