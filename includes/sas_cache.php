@@ -3694,9 +3694,16 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
         $ex = $pdo->prepare('SELECT 1 FROM sas_users_cache WHERE tenant_id = :t AND username = :u LIMIT 1');
         $ex->execute(array(':t' => $tenantId, ':u' => $username));
         $exists = (bool) $ex->fetchColumn();
-        if (!$exists && function_exists('sas_cache_skip_owned_elsewhere')
+        if (function_exists('sas_cache_skip_owned_elsewhere')
             && sas_cache_skip_owned_elsewhere($pdo, $tenantId, $username, isset($params[':parent_name']) ? $params[':parent_name'] : '')
         ) {
+            if ($exists) {
+                try {
+                    $pdo->prepare('DELETE FROM sas_users_cache WHERE tenant_id = :t AND username = :u')
+                        ->execute(array(':t' => $tenantId, ':u' => $username));
+                } catch (Exception $eDel) {
+                }
+            }
             return false;
         }
         if ($exists) {
@@ -4003,6 +4010,9 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
     }
 
     $tenantIdEarly = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if (function_exists('sas_ownership_drop_copied_cache')) {
+        sas_ownership_drop_copied_cache($pdo, $tenantIdEarly);
+    }
     // مزامنة كل حسابات الريسيلر دفعة واحدة (بدون تكرار متداخل)
     if (empty($GLOBALS['sas_sync_multi_lock'])
         && function_exists('tenant_sas_accounts_ready')

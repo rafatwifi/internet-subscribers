@@ -23,6 +23,9 @@ if (isset($_SERVER['REQUEST_METHOD']) && strtoupper((string) $_SERVER['REQUEST_M
 }
 ensure_agent_card_prices_table($pdo);
 $GLOBALS['portal_sas_tree_no_fetch'] = true;
+if (function_exists('portal_drop_duplicate_agents')) {
+    portal_drop_duplicate_agents($pdo);
+}
 
 function agent_price_people_under($pdo, $rootId, $pool)
 {
@@ -383,8 +386,17 @@ function agent_price_tree_model($pdo, $pool, $homeId)
         return strcasecmp($an, $bn);
     };
     foreach ($kids as $p => $list) {
+        $list = array_values(array_unique($list));
         usort($list, $sortKids);
         $kids[$p] = $list;
+    }
+    if (isset($rows[-1]) && empty($kids[-1])) {
+        unset($rows[-1], $parentOf[-1], $kids[-1]);
+        if (isset($kids[0])) {
+            $kids[0] = array_values(array_filter($kids[0], function ($rid) {
+                return (int) $rid !== -1;
+            }));
+        }
     }
     $roots = isset($kids[0]) ? $kids[0] : array();
     $realRoots = array();

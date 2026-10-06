@@ -688,7 +688,21 @@ if ($sasReady && $canEditAgents && function_exists('sas_page_connector') && !emp
                 if (isset($bySas[$mid])) {
                     continue;
                 }
-                $username = preg_replace('/[^A-Za-z0-9._\-]/', '', $rawName);
+                if (function_exists('portal_find_existing_member')) {
+                    $already = portal_find_existing_member($pdo, $mid, $rawName);
+                    if ($already) {
+                        if ((int) $already['tenant_id'] === $tidPull && (empty($already['sas_manager_id']) || (int) $already['sas_manager_id'] !== $mid)) {
+                            try {
+                                $pdo->prepare('UPDATE admin_users SET sas_manager_id = :m WHERE id = :id AND tenant_id = :t')
+                                    ->execute(array(':m' => $mid, ':id' => (int) $already['id'], ':t' => $tidPull));
+                            } catch (Exception $e) {
+                            }
+                        }
+                        $bySas[$mid] = (int) $already['id'];
+                        continue;
+                    }
+                }
+                $username = preg_replace('/[^A-Za-z0-9._@\-]/', '', $rawName);
                 if (strlen($username) < 2) {
                     $username = 'mgr' . $mid;
                 }
