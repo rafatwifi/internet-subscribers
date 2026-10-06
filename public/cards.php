@@ -3,6 +3,9 @@
 require_once __DIR__ . '/../includes/bootstrap.php';
 require_once __DIR__ . '/../includes/layout.php';
 require_login();
+if (isset($_SERVER['REQUEST_METHOD']) && strtoupper((string) $_SERVER['REQUEST_METHOD']) === 'GET' && function_exists('app_session_close')) {
+    app_session_close();
+}
 if (function_exists('account_viewer_is_leaf_child') && account_viewer_is_leaf_child($pdo)) {
     redirect('index.php');
 }
@@ -759,15 +762,30 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'agent_price') {
 }
 
 $groups = array();
+$cardsLazy = false;
 $err = '';
 $fromCache = false;
+if (isset($_SERVER['REQUEST_METHOD']) && strtoupper((string) $_SERVER['REQUEST_METHOD']) === 'GET' && function_exists('app_session_close')) {
+    app_session_close();
+}
 if ($sasReady) {
-    // عرض فوري من كاش السيرفر — بدون انتظار SAS
-    if (function_exists('sas_cards_inventory_load_persisted')) {
-        $cached = sas_cards_inventory_load_persisted(0); // حتى لو قديم، اعرضه فوراً
-        if ($cached && !empty($cached['groups'])) {
-            $groups = $cached['groups'];
+    // فتح الصفحة من ملخص الكروت المحفوظ فقط. ملف كل الأرقام والساس ما يدخلون بهالطلب.
+    if (function_exists('sas_dash_cards_load_persisted')) {
+        $dashBig = sas_dash_cards_load_persisted();
+        if ($dashBig && !empty($dashBig['groups'])) {
+            foreach ($dashBig['groups'] as $g) {
+                $n = isset($g['count']) ? (int) $g['count'] : (isset($g['unused']) ? (int) $g['unused'] : 0);
+                $groups[] = array(
+                    'name' => isset($g['name']) ? $g['name'] : '',
+                    'profile_id' => isset($g['profile_id']) ? (int) $g['profile_id'] : 0,
+                    'total' => $n,
+                    'used' => 0,
+                    'unused' => $n,
+                    'cards' => array(),
+                );
+            }
             $fromCache = true;
+            $cardsLazy = true;
         }
     }
     if (!$groups && function_exists('sas_dash_cards_load_persisted')) {
@@ -789,7 +807,55 @@ if ($sasReady) {
     }
 }
 
-$groups = cards_filter_groups_scope($pdo, cards_enrich_used_by_links($pdo, $groups));
+$cardsPinCount = 0;
+foreach ($groups as $gPin) {
+    if (!empty($gPin['cards']) && is_array($gPin['cards'])) {
+        $cardsPinCount += count($gPin['cards']);
+    }
+}
+$cardsLazy = $cardsLazy || ($cardsPinCount > 800);
+
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'cat') {
+    header('Content-Type: application/json; charset=utf-8');
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
+    $giCat = isset($_GET['i']) ? (int) $_GET['i'] : -1;
+    $oneCat = ($giCat >= 0 && isset($groups[$giCat])) ? $groups[$giCat] : null;
+    $catOut = array('ok' => false, 'group' => null);
+    if ($oneCat && (empty($oneCat['cards']) || !is_array($oneCat['cards'])) && function_exists('sas_cards_inventory_load_persisted')) {
+        $fullInv = sas_cards_inventory_load_persisted(0);
+        $wantName = isset($oneCat['name']) ? (string) $oneCat['name'] : '';
+        if ($fullInv && !empty($fullInv['groups']) && is_array($fullInv['groups'])) {
+            foreach ($fullInv['groups'] as $fullG) {
+                $fullName = isset($fullG['name']) ? (string) $fullG['name'] : '';
+                if ($wantName !== '' && $fullName === $wantName) {
+                    $oneCat = $fullG;
+                    break;
+                }
+            }
+        }
+    }
+    if ($oneCat) {
+        $catPack = cards_filter_groups_scope($pdo, cards_enrich_used_by_links($pdo, array($oneCat)));
+        $catOut['ok'] = true;
+        $catOut['group'] = ($catPack && isset($catPack[0])) ? $catPack[0] : $oneCat;
+    }
+    echo json_encode($catOut);
+    exit;
+}
+
+if ($cardsLazy) {
+    $slimGroups = array();
+    foreach ($groups as $gPin) {
+        $gCopy = $gPin;
+        $gCopy['cards'] = array();
+        $slimGroups[] = $gCopy;
+    }
+    $groups = $slimGroups;
+} else {
+    $groups = cards_filter_groups_scope($pdo, cards_enrich_used_by_links($pdo, $groups));
+}
 
 $sumTotal = 0;
 $sumUsed = 0;
@@ -1386,9 +1452,9 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
                     $freeCards[] = $c;
                 }
             }
-            $openFirst = ($gi === 0 && $unused > 0);
+            $openFirst = (!$cardsLazy && $gi === 0 && $unused > 0);
             ?>
-            <div class="cat-block<?php echo $openFirst ? ' is-open' : ''; ?>" data-cat data-wid="<?php echo (int) $gi; ?>" data-has-free="<?php echo $unused > 0 ? '1' : '0'; ?>">
+            <div class="cat-block<?php echo $openFirst ? ' is-open' : ''; ?>" data-cat data-wid="<?php echo (int) $gi; ?>" data-gi="<?php echo (int) $gi; ?>" data-lazy="<?php echo $cardsLazy ? '1' : '0'; ?>" data-has-free="<?php echo $unused > 0 ? '1' : '0'; ?>">
                 <button type="button" class="cat-head" data-toggle-cat>
                     <h3>
                         <span class="cat-chevron">›</span>
@@ -1401,7 +1467,9 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
                     </div>
                 </button>
                 <div class="cat-body">
-                    <?php if (!$freeCards && !$usedCards): ?>
+                    <?php if ($cardsLazy): ?>
+                        <div class="empty-cat" data-lazy-slot><?php echo e($isEn ? 'Open to load cards' : 'افتح الفئة لعرض الكروت'); ?></div>
+                    <?php elseif (!$freeCards && !$usedCards): ?>
                         <div class="empty-cat"><?php echo e($isEn ? 'Details load on sync…' : 'التفاصيل تكتمل مع المزامنة…'); ?></div>
                     <?php else: ?>
                         <?php if ($freeCards): ?>
@@ -1581,59 +1649,98 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
     bindUi();
   }
 
-  function bindUi() {
-    var list = document.getElementById('cardsList') || root;
-    if (!list) return;
-    list.querySelectorAll('[data-toggle-cat]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var block = btn.closest('[data-cat]');
-        if (block) block.classList.toggle('is-open');
+  function catBodyHtml(g) {
+    g = g || {};
+    var free = [], used = [];
+    (g.cards || []).forEach(function (c) { (c.used ? used : free).push(c); });
+    var html = '';
+    if (!free.length && !used.length) {
+      return '<div class="empty-cat">' + (isEn ? 'No cards in this package' : 'لا توجد كروت لهذه الباقة') + '</div>';
+    }
+    if (free.length) {
+      html += '<div class="chip-grid" data-free-grid>';
+      free.forEach(function (c) {
+        var pin = c.pin || '';
+        html += '<div class="chip free" data-used="0" data-search="' + esc(String(pin).toLowerCase()) + '" data-copy="' + esc(pin) + '">';
+        html += '<div class="chip-top"><div class="chip-main"><div class="pin-row"><span class="pin">' + esc(pin) + '</span></div></div>';
+        html += '<button type="button" class="chip-copy" data-copy-btn>' + (isEn ? 'Copy' : 'نسخ') + '</button></div>';
+        html += '<span class="st free">' + (isEn ? 'Available' : 'شاغر') + '</span></div>';
       });
-    });
-    list.querySelectorAll('[data-toggle-used]').forEach(function (btn) {
+      html += '</div>';
+    } else {
+      html += '<div class="empty-cat">' + (isEn ? 'No free cards' : 'ماكو كروت شاغرة') + '</div>';
+    }
+    if (used.length) {
+      html += '<div class="used-fold" data-used-fold><button type="button" class="used-fold-btn" data-toggle-used><span>' + (isEn ? 'Used cards' : 'الكروت المستخدمة') + ' (' + used.length + ')</span><span class="used-fold-chevron">›</span></button><div class="used-fold-body"><div class="chip-grid chip-grid-used">';
+      used.forEach(function (c) {
+        var pin = c.pin || '';
+        var by = c.used_by || '';
+        var href = c.user_href || '';
+        var copyTxt = String(pin) + (by ? (' ' + by) : '');
+        html += '<div class="chip used" data-used="1" data-search="' + esc((pin + ' ' + by + ' ' + (c.used_at || '')).toLowerCase()) + '" data-copy="' + esc(copyTxt) + '">';
+        html += '<div class="chip-top"><div class="chip-main"><div class="pin-row"><span class="pin">' + esc(pin) + '</span>';
+        if (by && href) {
+          html += '<span class="by-line"><a class="by-link" href="' + esc(href) + '">' + esc(by) + '</a></span>';
+        } else {
+          html += '<span class="by-line">' + esc(by || '—') + '</span>';
+        }
+        html += '</div></div>';
+        html += '<button type="button" class="chip-copy" data-copy-btn>' + (isEn ? 'Copy' : 'نسخ') + '</button></div>';
+        if (c.used_at) html += '<div class="st">' + esc(c.used_at) + '</div>';
+        html += '</div>';
+      });
+      html += '</div></div></div>';
+    }
+    return html;
+  }
+
+  function copyText(txt, btn) {
+    txt = String(txt || '');
+    if (!txt) return;
+    var done = function () {
+      if (!btn) return;
+      var old = btn.textContent;
+      btn.textContent = isEn ? 'Copied' : 'تم';
+      btn.classList.add('is-ok');
+      setTimeout(function () {
+        btn.textContent = old;
+        btn.classList.remove('is-ok');
+      }, 1200);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(txt).then(done).catch(function () {
+        try {
+          var ta = document.createElement('textarea');
+          ta.value = txt;
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+          done();
+        } catch (e) {}
+      });
+    } else {
+      try {
+        var ta2 = document.createElement('textarea');
+        ta2.value = txt;
+        document.body.appendChild(ta2);
+        ta2.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta2);
+        done();
+      } catch (e2) {}
+    }
+  }
+
+  function bindCatBits(scope) {
+    if (!scope) return;
+    scope.querySelectorAll('[data-toggle-used]').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var fold = btn.closest('[data-used-fold]');
         if (fold) fold.classList.toggle('is-open');
       });
     });
-    function copyText(txt, btn) {
-      txt = String(txt || '');
-      if (!txt) return;
-      var done = function () {
-        if (!btn) return;
-        var old = btn.textContent;
-        btn.textContent = isEn ? 'Copied' : 'تم';
-        btn.classList.add('is-ok');
-        setTimeout(function () {
-          btn.textContent = old;
-          btn.classList.remove('is-ok');
-        }, 1200);
-      };
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(txt).then(done).catch(function () {
-          try {
-            var ta = document.createElement('textarea');
-            ta.value = txt;
-            document.body.appendChild(ta);
-            ta.select();
-            document.execCommand('copy');
-            document.body.removeChild(ta);
-            done();
-          } catch (e) {}
-        });
-      } else {
-        try {
-          var ta2 = document.createElement('textarea');
-          ta2.value = txt;
-          document.body.appendChild(ta2);
-          ta2.select();
-          document.execCommand('copy');
-          document.body.removeChild(ta2);
-          done();
-        } catch (e2) {}
-      }
-    }
-    list.querySelectorAll('[data-copy-btn]').forEach(function (btn) {
+    scope.querySelectorAll('[data-copy-btn]').forEach(function (btn) {
       btn.addEventListener('click', function (e) {
         e.preventDefault();
         e.stopPropagation();
@@ -1641,7 +1748,7 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
         copyText(chip ? chip.getAttribute('data-copy') : '', btn);
       });
     });
-    list.querySelectorAll('.chip .pin').forEach(function (el) {
+    scope.querySelectorAll('.chip .pin').forEach(function (el) {
       el.addEventListener('click', function (e) {
         if (e.target && e.target.closest && e.target.closest('a')) return;
         e.stopPropagation();
@@ -1654,6 +1761,44 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
         } catch (err) {}
       });
     });
+  }
+
+  function ensureCat(block) {
+    if (!block || block.getAttribute('data-lazy') !== '1' || block.getAttribute('data-loaded') === '1' || block.getAttribute('data-loading') === '1') {
+      return;
+    }
+    block.setAttribute('data-loading', '1');
+    var slot = block.querySelector('[data-lazy-slot]');
+    if (slot) slot.textContent = isEn ? 'Loading…' : 'جاري التحميل…';
+    var i = block.getAttribute('data-gi') || '0';
+    fetch('cards.php?ajax=cat&i=' + encodeURIComponent(i), { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        block.setAttribute('data-loaded', '1');
+        block.removeAttribute('data-loading');
+        var body = block.querySelector('.cat-body');
+        if (!body) return;
+        body.innerHTML = catBodyHtml((d && d.group) ? d.group : { cards: [] });
+        bindCatBits(body);
+      })
+      .catch(function () {
+        block.removeAttribute('data-loading');
+        if (slot) slot.textContent = isEn ? 'Failed to load' : 'تعذر التحميل';
+      });
+  }
+
+  function bindUi() {
+    var list = document.getElementById('cardsList') || root;
+    if (!list) return;
+    list.querySelectorAll('[data-toggle-cat]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var block = btn.closest('[data-cat]');
+        if (!block) return;
+        block.classList.toggle('is-open');
+        if (block.classList.contains('is-open')) ensureCat(block);
+      });
+    });
+    bindCatBits(list);
     var wids = document.getElementById('cardsWids');
     if (wids) {
       wids.addEventListener('click', function (e) {
@@ -1697,7 +1842,10 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
         setSum('used', b.getAttribute('data-used') || '0');
         setSum('unused', b.getAttribute('data-unused') || '0');
         var target = list.querySelector('[data-cat][data-wid="' + id + '"]');
-        if (target && target.scrollIntoView) target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        if (target) {
+          ensureCat(target);
+          if (target.scrollIntoView) target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
       });
     }
     var filter = document.getElementById('cardsFilter');
@@ -1708,7 +1856,10 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
         var f = b.getAttribute('data-f');
         if (f === 'refresh') { sync(true); return; }
         if (f === 'expand') {
-          list.querySelectorAll('[data-cat]').forEach(function (el) { el.classList.add('is-open'); });
+          list.querySelectorAll('[data-cat]').forEach(function (el) {
+            el.classList.add('is-open');
+            ensureCat(el);
+          });
           return;
         }
         if (f === 'collapse') {
@@ -1794,9 +1945,7 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
   if (!ownStockOnly && sasReady) {
     bindUi();
     var hasCards = root && root.querySelector('[data-cat]');
-    if (!hasCards) {
-      setTimeout(function () { sync(false); }, 200);
-    } else if (syncEl) {
+    if (syncEl) {
       syncEl.textContent = '';
       syncEl.classList.remove('is-busy');
     }

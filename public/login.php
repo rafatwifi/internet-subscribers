@@ -56,10 +56,7 @@ $brandSrc = ($brandIconUrl !== '') ? $brandIconUrl : 'assets/favicon.svg?v=2';
     <link rel="icon" href="assets/favicon.svg?v=2" type="image/svg+xml">
     <link rel="icon" href="assets/favicon.png?v=2" type="image/png" sizes="32x32">
     <link rel="apple-touch-icon" href="assets/apple-touch-icon.png?v=2">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="assets/style.css?v=login3">
+    <link rel="stylesheet" href="assets/style.css?v=login4">
     <style>
         html, body.login-page {
             min-height: 100%;

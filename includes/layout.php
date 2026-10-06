@@ -44,11 +44,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     <link rel="icon" href="assets/favicon.png?v=2" type="image/png" sizes="32x32">
     <?php endif; ?>
     <link rel="apple-touch-icon" href="<?php echo e($brandIcon !== '' ? $brandIcon : 'assets/apple-touch-icon.png?v=2'); ?>">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
-    <noscript><link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet"></noscript>
-    <link rel="stylesheet" href="assets/style.css?v=ui13">
+    <link rel="stylesheet" href="assets/style.css?v=ui14">
     <style>
         <?php if ($bgMode === 'image' && $bgUrl !== ''): ?>
         body.app-bg-image {
@@ -505,41 +501,77 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
         <?php endif; ?>
         <main class="container">
             <?php if ($flash): ?>
-                <div class="alert alert-<?php echo e($flash['type']); ?>"><?php echo e($flash['message']); ?></div>
-                <div class="sas-toast sas-toast-<?php echo e($flash['type']); ?>" role="status"><?php echo e($flash['message']); ?></div>
+                <?php $flashStay = !empty($flash['sticky']); ?>
+                <div class="sas-toast sas-toast-<?php echo e($flash['type']); ?><?php echo $flashStay ? ' sas-toast-stay' : ''; ?>" role="status">
+                    <span class="sas-toast-text"><?php echo e($flash['message']); ?></span>
+                    <?php if ($flashStay): ?>
+                        <button type="button" class="sas-toast-x" aria-label="<?php echo e($isEn ? 'Close' : 'إغلاق'); ?>">×</button>
+                    <?php endif; ?>
+                </div>
             <?php endif; ?>
             <style>
-            #sasBusy[hidden] { display: none !important; }
-            #sasBusy {
-                position: fixed; inset: 0; z-index: 100000;
-                background: rgba(15, 23, 42, .55);
+            #appVeil[hidden], #appRing[hidden] { display: none !important; }
+            #appVeil {
+                position: fixed; inset: 0; z-index: 99999;
+                background: rgba(255,255,255,.22);
+                backdrop-filter: blur(2.5px);
+                -webkit-backdrop-filter: blur(2.5px);
+                pointer-events: none;
+            }
+            #appRing {
+                position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+                z-index: 100000; width: 72px; height: 72px; border-radius: 50%;
+                background: #fff; box-shadow: 0 10px 28px rgba(15, 23, 42, .16);
                 display: flex; align-items: center; justify-content: center;
+                pointer-events: none;
             }
-            #sasBusy .sas-busy-card {
-                background: #fff; color: #0f172a; border-radius: 16px;
-                padding: 22px 26px; display: flex; align-items: center; gap: 12px;
-                font-weight: 800; box-shadow: 0 16px 48px rgba(15, 23, 42, .28);
+            #appRing svg { width: 46px; height: 46px; transform: rotate(-90deg); }
+            #appRing .ring-track { fill: none; stroke: #e8eef5; stroke-width: 3.5; }
+            #appRing .ring-fill {
+                fill: none; stroke: #2563eb; stroke-width: 3.5; stroke-linecap: round;
+                stroke-dasharray: 100; stroke-dashoffset: 100;
             }
-            #sasBusy .sas-busy-spin {
-                width: 22px; height: 22px; border-radius: 50%;
-                border: 3px solid #dbe3ee; border-top-color: #2563eb;
-                animation: sasSpin .7s linear infinite;
+            #appRing.is-on .ring-fill {
+                stroke-dashoffset: 16;
+                transition: stroke-dashoffset 7s cubic-bezier(.12, .7, .2, 1);
+            }
+            #appRing.is-done .ring-fill {
+                stroke-dashoffset: 0;
+                transition: stroke-dashoffset .22s ease;
             }
             .sas-toast {
-                position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
-                z-index: 100001; min-width: 240px; max-width: min(520px, 92vw);
-                padding: 14px 18px; border-radius: 14px; font-weight: 800; text-align: center;
+                position: fixed; top: 16px; inset-inline-end: 16px; z-index: 100001;
+                width: min(340px, calc(100vw - 24px));
+                padding: 12px 14px; border-radius: 14px; font-weight: 700; text-align: start;
                 box-shadow: 0 14px 40px rgba(15, 23, 42, .22);
+                display: flex; align-items: flex-start; gap: 10px;
+                opacity: 1; transform: translateY(0);
+                transition: opacity .45s ease, transform .45s ease;
+            }
+            .sas-toast.is-out { opacity: 0; transform: translateY(-10px); }
+            .sas-toast-text { flex: 1; line-height: 1.45; }
+            .sas-toast-x {
+                border: 0; background: transparent; color: inherit; font-size: 20px;
+                line-height: 1; cursor: pointer; padding: 0 2px;
+            }
+            @media (max-width: 640px) {
+                .sas-toast {
+                    top: auto; bottom: 16px; inset-inline-start: 12px; inset-inline-end: 12px;
+                    width: auto;
+                }
+                .sas-toast.is-out { transform: translateY(10px); }
             }
             .sas-toast-success { background: #146c43; color: #fff; }
             .sas-toast-error { background: #9b2331; color: #fff; }
             .sas-toast-info { background: #0b5e78; color: #fff; }
             </style>
-            <div id="sasBusy" hidden>
-                <div class="sas-busy-card">
-                    <span class="sas-busy-spin" aria-hidden="true"></span>
-                    <span><?php echo e($isEn ? 'Working…' : 'جاري التنفيذ…'); ?></span>
-                </div>
+            <!-- دائرة الانتظار: وسط الشاشة، مع ضباب خفيف، فقط إذا الطلب تأخر -->
+            <div id="appVeil" hidden aria-hidden="true"></div>
+            <div id="appRing" hidden aria-hidden="true">
+                <svg viewBox="0 0 36 36">
+                    <circle class="ring-track" cx="18" cy="18" r="15" pathLength="100"></circle>
+                    <circle class="ring-fill" cx="18" cy="18" r="15" pathLength="100"></circle>
+                </svg>
             </div>
 <?php
     // بعد رسم الهيدر: حرّر قفل الجلسة لطلبات GET حتى لا يتوقف التنقّل على أجاكس خلفي
@@ -673,22 +705,6 @@ body.nav-pending .nav-progress { display: block; }
     }
   });
 
-  // إحساس تنقّل فوري — بدون انتظار انتهاء طلبات ثقيلة في الصفحة الحالية
-  document.addEventListener('click', function (e) {
-    var a = e.target.closest ? e.target.closest('a') : null;
-    if (!a) return;
-    var href = a.getAttribute('href') || '';
-    if (!href || href.charAt(0) === '#' || href.indexOf('javascript:') === 0) return;
-    if (a.target && a.target !== '_self') return;
-    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-    if (href.indexOf('logout.php') >= 0) return;
-    try {
-      var u = new URL(href, window.location.href);
-      if (u.origin !== window.location.origin) return;
-      if (u.pathname === window.location.pathname && u.search === window.location.search) return;
-    } catch (err) { return; }
-    document.body.classList.add('nav-pending');
-  }, true);
   window.addEventListener('pageshow', function () {
     document.body.classList.remove('nav-pending');
   });
@@ -761,7 +777,7 @@ body.nav-pending .nav-progress { display: block; }
   }
 
   // لا تفحص واتساب فور فتح الصفحة — يقلل صفنة التنقل
-  setTimeout(check, 2500);
+  setTimeout(check, 12000);
   setInterval(check, 60000);
 })();
 
@@ -779,8 +795,8 @@ body.nav-pending .nav-progress { display: block; }
       x.send();
     } catch (e) {}
   }
-  setTimeout(fireTick, 2500);
-  setInterval(fireTick, 120000);
+  setTimeout(fireTick, 6000);
+  setInterval(fireTick, 40000);
 })();
 
 (function () {
@@ -842,6 +858,10 @@ body.nav-pending .nav-progress { display: block; }
       b.className = 'login-as-item';
       b.textContent = a.label || a.display_name || a.username;
       b.addEventListener('click', function () {
+        var picks = results.querySelectorAll('.login-as-item');
+        for (var i = 0; i < picks.length; i++) picks[i].classList.remove('is-picked');
+        b.classList.add('is-picked');
+        if (window.appBusySet) window.appBusySet({ force: true });
         var csrfEl = form ? form.querySelector('input[name="csrf"]') : null;
         var body = new FormData();
         body.append('csrf', csrfEl ? csrfEl.value : '');
@@ -864,50 +884,132 @@ body.nav-pending .nav-progress { display: block; }
     });
   }
 
+  var searchXhr = null;
   if (qInput) {
     qInput.addEventListener('input', function () {
       clearTimeout(timer);
       var q = (qInput.value || '').trim();
       timer = setTimeout(function () {
+        if (searchXhr) { try { searchXhr.abort(); } catch (e) {} searchXhr = null; }
         if (q.length < 1) {
           renderAgents([]);
+          if (window.appBusyDone) window.appBusyDone();
           return;
         }
+        if (window.appBusySet) window.appBusySet({});
         var xhr = new XMLHttpRequest();
+        searchXhr = xhr;
         var kind = qInput.getAttribute('data-kind') || 'system';
         xhr.open('GET', 'impersonate.php?action=search&ajax=1&kind=' + encodeURIComponent(kind) + '&q=' + encodeURIComponent(q), true);
         xhr.onload = function () {
+          if (searchXhr !== xhr) return;
+          if (window.appBusyDone) window.appBusyDone();
           var data = null;
           try { data = JSON.parse(xhr.responseText); } catch (e) {}
           renderAgents(data && data.agents ? data.agents : []);
         };
+        xhr.onerror = function () { if (window.appBusyDone) window.appBusyDone(); };
         xhr.send();
-      }, 220);
+      }, 280);
     });
   }
 })();
 </script>
 <script>
 (function () {
-  var busy = document.getElementById('sasBusy');
-  var toast = document.querySelector('.sas-toast');
-  if (toast) {
-    setTimeout(function () {
-      toast.style.opacity = '0';
-      toast.style.transition = 'opacity .35s ease';
-      setTimeout(function () {
-        if (toast.parentNode) toast.parentNode.removeChild(toast);
-      }, 400);
-    }, 6500);
+  var ring = document.getElementById('appRing');
+  var veil = document.getElementById('appVeil');
+  var arm = null;
+
+  function showWait(on) {
+    if (veil) veil.hidden = !on;
   }
+  function showRing() {
+    if (!ring) return;
+    ring.style.top = '';
+    ring.style.left = '';
+    showWait(true);
+    ring.hidden = false;
+    ring.classList.remove('is-done');
+    void ring.offsetWidth;
+    ring.classList.add('is-on');
+  }
+  function hideRing() {
+    if (arm) { clearTimeout(arm); arm = null; }
+    showWait(false);
+    if (!ring) return;
+    ring.classList.remove('is-on', 'is-done');
+    ring.hidden = true;
+  }
+  function finishRing() {
+    if (arm) { clearTimeout(arm); arm = null; }
+    if (!ring || ring.hidden) {
+      showWait(false);
+      return;
+    }
+    ring.classList.remove('is-on');
+    ring.classList.add('is-done');
+    setTimeout(function () {
+      showWait(false);
+      if (!ring) return;
+      ring.hidden = true;
+      ring.classList.remove('is-done');
+    }, 280);
+  }
+  function armRing() {
+    if (arm || (ring && !ring.hidden)) return;
+    arm = setTimeout(function () {
+      arm = null;
+      showRing();
+    }, 450);
+  }
+  window.appBusySet = function (opt) {
+    opt = opt || {};
+    if (opt.force) { showRing(); return; }
+    if (opt.soft || opt.mode === 'sync' || opt.mode === 'nav') return;
+    armRing();
+  };
+  window.appBusyDone = function () { finishRing(); };
+
+  document.addEventListener('click', function (e) {
+    var a = e.target && e.target.closest ? e.target.closest('a') : null;
+    if (!a) return;
+    var href = a.getAttribute('href') || '';
+    if (!href || href.charAt(0) === '#' || href.indexOf('javascript:') === 0) return;
+    if (a.target && a.target !== '_self') return;
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button === 1) return;
+    if (href.indexOf('logout.php') >= 0) return;
+    try {
+      var u = new URL(href, window.location.href);
+      if (u.origin !== window.location.origin) return;
+      if (u.pathname === window.location.pathname && u.search === window.location.search) return;
+    } catch (err) { return; }
+    armRing();
+  }, true);
   document.addEventListener('submit', function (ev) {
     if (ev.defaultPrevented) return;
     var form = ev.target;
     if (!form || !form.getAttribute) return;
     if (form.getAttribute('data-no-wait') === '1') return;
-    document.body.classList.add('nav-pending');
-    if (busy) busy.hidden = false;
+    armRing();
   });
+  window.addEventListener('pagehide', finishRing);
+  window.addEventListener('pageshow', hideRing);
+
+  var toast = document.querySelector('.sas-toast');
+  if (toast) {
+    var closeToast = function () {
+      toast.classList.add('is-out');
+      setTimeout(function () {
+        if (toast.parentNode) toast.parentNode.removeChild(toast);
+      }, 480);
+    };
+    var xbtn = toast.querySelector('.sas-toast-x');
+    if (xbtn) xbtn.addEventListener('click', closeToast);
+    if (!toast.classList.contains('sas-toast-stay')) {
+      setTimeout(closeToast, 3000);
+    }
+  }
 })();
 </script>
 </body>

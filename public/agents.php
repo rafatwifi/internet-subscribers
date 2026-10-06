@@ -19,9 +19,9 @@ if ($agentsAjaxStock) {
     if (function_exists('csrf_token')) {
         csrf_token();
     }
-    if (function_exists('app_session_close')) {
-        app_session_close();
-    }
+}
+if (isset($_SERVER['REQUEST_METHOD']) && strtoupper((string) $_SERVER['REQUEST_METHOD']) === 'GET' && function_exists('app_session_close')) {
+    app_session_close();
 }
 $agencyLogin = '';
 try {
@@ -801,9 +801,13 @@ if (function_exists('is_group_manager_user') && is_group_manager_user()) {
 $accountants = list_accountant_users($pdo, false);
 $counts = array();
 try {
-    $st = $pdo->query(
-        'SELECT agent_user_id, COUNT(*) AS c FROM subscribers WHERE agent_user_id IS NOT NULL GROUP BY agent_user_id'
+    $countTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    $st = $pdo->prepare(
+        'SELECT agent_user_id, COUNT(*) AS c FROM subscribers
+         WHERE tenant_id = :t AND agent_user_id IS NOT NULL
+         GROUP BY agent_user_id'
     );
+    $st->execute(array(':t' => $countTid));
     foreach ($st->fetchAll() as $r) {
         $counts[(int) $r['agent_user_id']] = (int) $r['c'];
     }
@@ -930,7 +934,7 @@ if (!empty($agentsAjaxStock)) {
     echo json_encode(array('ok' => true, 'cells' => $cells));
     exit;
 }
-$agentsStockScript = '<script>(function(){var nodes=document.querySelectorAll("[data-ag-cards]");if(!nodes.length)return;fetch("agents.php?ajax=card_stock",{credentials:"same-origin"}).then(function(r){return r.json();}).then(function(d){if(!d||!d.cells)return;for(var id in d.cells){var el=document.querySelector(\'[data-ag-cards="\'+id+\'"]\');if(el)el.innerHTML=d.cells[id];}}).catch(function(){});})();</script>';
+$agentsStockScript = '<script>(function(){var nodes=document.querySelectorAll("[data-ag-cards]");if(!nodes.length)return;setTimeout(function(){fetch("agents.php?ajax=card_stock",{credentials:"same-origin"}).then(function(r){return r.json();}).then(function(d){if(!d||!d.cells)return;for(var id in d.cells){var el=document.querySelector(\'[data-ag-cards="\'+id+\'"]\');if(el)el.innerHTML=d.cells[id];}}).catch(function(){});},6000);})();</script>';
 
 $accOnly = (isset($_GET['view']) && $_GET['view'] === 'accountant');
 $childAgents = function_exists('admin_user_child_count')
@@ -1035,9 +1039,8 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
         <h2><?php echo e($isEn ? 'Agents' : 'الوكلاء'); ?></h2>
         <button class="btn" type="button" id="agentAddToggle"><?php echo e($isEn ? 'Add agent' : 'إضافة وكيل'); ?></button>
     </div>
-    <form method="get" class="sys-search">
-        <input type="search" name="q" value="<?php echo e($agentQ); ?>" placeholder="<?php echo e($isEn ? 'Search name or username…' : 'بحث بالاسم أو الدخول…'); ?>">
-        <button class="btn" type="submit"><?php echo e($isEn ? 'Search' : 'بحث'); ?></button>
+    <form method="get" class="sys-search" id="agentSearchForm" action="agents.php">
+        <input type="search" name="q" id="agentLiveQ" value="<?php echo e($agentQ); ?>" placeholder="<?php echo e($isEn ? 'Search name or username…' : 'بحث بالاسم أو الدخول…'); ?>" autocomplete="off">
     </form>
     <form method="post" id="agentAddBox" class="form-grid" hidden style="margin-bottom:16px">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
@@ -1073,7 +1076,7 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
     </form>
 
     <div class="table-wrap">
-    <table class="table-compact">
+    <table class="table-compact" id="agentTable">
         <thead>
         <tr>
             <th>#</th>
@@ -1089,9 +1092,7 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
         </tr>
         </thead>
         <tbody>
-        <?php if (!$agentShown): ?>
-            <tr><td colspan="<?php echo (function_exists('is_admin_user') && is_admin_user()) ? 8 : 7; ?>" class="msg-empty"><?php echo e($agentQ !== '' ? ($isEn ? 'No matches' : 'ماكو نتيجة') : ($isEn ? 'No agents yet.' : 'ماكو وكلاء بعد.')); ?></td></tr>
-        <?php endif; ?>
+        <tr id="agentNone"<?php echo $agentShown ? ' hidden' : ''; ?>><td colspan="<?php echo (function_exists('is_admin_user') && is_admin_user()) ? 8 : 7; ?>" class="msg-empty"><?php echo e($isEn ? 'No matches' : 'ماكو نتيجة'); ?></td></tr>
         <?php
         $allowMap = array();
         try {
@@ -1121,8 +1122,8 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
             $rowAllow = !isset($allowMap[$aid]) || !empty($allowMap[$aid]);
             $span = (function_exists('is_admin_user') && is_admin_user()) ? 8 : 7;
             ?>
-        <tr>
-            <td><?php echo (int) $agNo; ?></td>
+        <tr class="agent-main" data-find="<?php echo e(strtolower((string) $a['username'] . ' ' . (string) $a['display_name'] . ' ' . (isset($a['phone']) ? $a['phone'] : ''))); ?>">
+            <td class="agent-no"><?php echo (int) $agNo; ?></td>
             <td class="ltr"><?php echo e($a['username']); ?></td>
             <td><?php echo e($a['display_name']); ?></td>
             <td><?php echo isset($counts[$aid]) ? (int) $counts[$aid] : 0; ?></td>
@@ -1170,7 +1171,7 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
                 <?php endif; ?>
             </td>
         </tr>
-        <tr class="del-row" id="delRow<?php echo $aid; ?>" hidden>
+        <tr class="del-row agent-extra" id="delRow<?php echo $aid; ?>" hidden>
             <td colspan="<?php echo (int) $span; ?>">
                 <form method="post" class="ag-del-form">
                     <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
@@ -1204,7 +1205,7 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
                 </form>
             </td>
         </tr>
-        <tr class="edit-row" id="editRow<?php echo $aid; ?>" hidden>
+        <tr class="edit-row agent-extra" id="editRow<?php echo $aid; ?>" hidden>
             <td colspan="<?php echo (int) $span; ?>">
             <form method="post" id="agentEdit<?php echo $aid; ?>" class="ag-del-form">
                 <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
@@ -1241,6 +1242,82 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
         </tbody>
     </table>
     </div>
+    <div class="ag-pager" id="agentPager" hidden></div>
+    <script>
+    (function () {
+      var table = document.getElementById('agentTable');
+      var input = document.getElementById('agentLiveQ');
+      var pager = document.getElementById('agentPager');
+      var form = document.getElementById('agentSearchForm');
+      if (!table || !input || !pager) return;
+      if (form) form.addEventListener('submit', function (e) { e.preventDefault(); });
+      var per = 10;
+      var page = 1;
+      var mains = [];
+      var rows = table.querySelectorAll('tbody tr.agent-main');
+      for (var i = 0; i < rows.length; i++) mains.push(rows[i]);
+      var emptyRow = document.getElementById('agentNone');
+      function blockOf(main) {
+        var list = [main];
+        var n = main.nextElementSibling;
+        if (n && n.classList.contains('agent-extra')) list.push(n);
+        n = list[list.length - 1].nextElementSibling;
+        if (n && n.classList.contains('agent-extra')) list.push(n);
+        return list;
+      }
+      function paint(list, on) {
+        for (var i = 0; i < list.length; i++) {
+          if (list[i].classList.contains('agent-extra')) {
+            if (!on) list[i].hidden = true;
+            continue;
+          }
+          if (on) list[i].classList.add('is-on');
+          else list[i].classList.remove('is-on');
+        }
+      }
+      function draw() {
+        var q = (input.value || '').replace(/^\s+|\s+$/g, '').toLowerCase();
+        var hit = [];
+        for (var i = 0; i < mains.length; i++) {
+          var hay = (mains[i].getAttribute('data-find') || '').toLowerCase();
+          if (!q || hay.indexOf(q) !== -1) hit.push(mains[i]);
+        }
+        var pages = Math.max(1, Math.ceil(hit.length / per));
+        if (page > pages) page = 1;
+        var start = (page - 1) * per;
+        for (var j = 0; j < mains.length; j++) paint(blockOf(mains[j]), false);
+        for (var k = start; k < start + per && k < hit.length; k++) {
+          paint(blockOf(hit[k]), true);
+          var num = hit[k].querySelector('.agent-no');
+          if (num) num.textContent = String(k + 1);
+        }
+        if (emptyRow) emptyRow.hidden = hit.length > 0;
+        pager.innerHTML = '';
+        if (hit.length <= per) {
+          pager.hidden = true;
+          return;
+        }
+        pager.hidden = false;
+        function btn(label, go, on) {
+          var b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'btn ghost sm' + (on ? ' is-on' : '');
+          b.textContent = label;
+          b.disabled = go < 1 || go > pages;
+          b.addEventListener('click', function () { page = go; draw(); });
+          pager.appendChild(b);
+        }
+        btn('‹', page - 1, false);
+        var from = Math.max(1, page - 2);
+        var to = Math.min(pages, from + 4);
+        from = Math.max(1, to - 4);
+        for (var p = from; p <= to; p++) btn(String(p), p, p === page);
+        btn('›', page + 1, false);
+      }
+      input.addEventListener('input', function () { page = 1; draw(); });
+      draw();
+    })();
+    </script>
     <?php endif; ?>
 
     <?php if (!$accOnly): ?>
@@ -1299,37 +1376,71 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
         }
         $cashOverride = array();
         $cashSum = array();
-        try {
-            $pdo->exec(
-                'CREATE TABLE IF NOT EXISTS accountant_cash (
-                    user_id INT UNSIGNED NOT NULL PRIMARY KEY,
-                    tenant_id INT UNSIGNED NOT NULL DEFAULT 1,
-                    amount DECIMAL(14,2) NOT NULL DEFAULT 0,
-                    updated_at TIMESTAMP NULL DEFAULT NULL
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
-            );
-            $cashTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
-            $stCash = $pdo->prepare('SELECT user_id, amount FROM accountant_cash WHERE tenant_id = :t');
-            $stCash->execute(array(':t' => $cashTid));
-            foreach ($stCash->fetchAll() as $cr) {
-                $cashOverride[(int) $cr['user_id']] = (float) $cr['amount'];
+        $cashTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        $cashFile = dirname(__DIR__) . '/storage/cache/acc_cash_t' . $cashTid . '.json';
+        $cashHit = null;
+        if (is_file($cashFile) && (time() - (int) @filemtime($cashFile)) < 180) {
+            $cashHit = json_decode((string) @file_get_contents($cashFile), true);
+        }
+        if (is_array($cashHit) && isset($cashHit['sum']) && isset($cashHit['over'])) {
+            $cashSum = $cashHit['sum'];
+            $cashOverride = $cashHit['over'];
+        } else {
+            try {
+                if (!function_exists('app_schema_fresh') || !app_schema_fresh('acc_cash', 86400)) {
+                    $pdo->exec(
+                        'CREATE TABLE IF NOT EXISTS accountant_cash (
+                            user_id INT UNSIGNED NOT NULL PRIMARY KEY,
+                            tenant_id INT UNSIGNED NOT NULL DEFAULT 1,
+                            amount DECIMAL(14,2) NOT NULL DEFAULT 0,
+                            updated_at TIMESTAMP NULL DEFAULT NULL
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+                    );
+                    $colPay = $pdo->query("SHOW COLUMNS FROM invoices LIKE 'collected_by'")->fetch();
+                    if (!$colPay) {
+                        $pdo->exec('ALTER TABLE invoices ADD COLUMN collected_by INT UNSIGNED NULL DEFAULT NULL');
+                    }
+                    if (function_exists('app_schema_touch')) {
+                        app_schema_touch('acc_cash');
+                    }
+                }
+                $stCash = $pdo->prepare('SELECT user_id, amount FROM accountant_cash WHERE tenant_id = :t');
+                $stCash->execute(array(':t' => $cashTid));
+                foreach ($stCash->fetchAll() as $cr) {
+                    $cashOverride[(int) $cr['user_id']] = (float) $cr['amount'];
+                }
+                $stSum = $pdo->prepare(
+                    'SELECT i.collected_by AS uid, COALESCE(SUM(i.amount),0) AS t
+                     FROM invoices i
+                     WHERE i.status = "paid" AND i.collected_by IS NOT NULL AND i.tenant_id = :t
+                     GROUP BY i.collected_by'
+                );
+                $stSum->execute(array(':t' => $cashTid));
+                foreach ($stSum->fetchAll() as $sr) {
+                    $cashSum[(string) (int) $sr['uid']] = (float) $sr['t'];
+                }
+                $dirCash = dirname($cashFile);
+                if (!is_dir($dirCash)) {
+                    @mkdir($dirCash, 0775, true);
+                }
+                @file_put_contents($cashFile, json_encode(array('sum' => $cashSum, 'over' => $cashOverride)));
+            } catch (Exception $e) {
+                try {
+                    $stSum = $pdo->prepare(
+                        'SELECT i.collected_by AS uid, COALESCE(SUM(i.amount),0) AS t
+                         FROM invoices i
+                         JOIN subscribers s ON s.id = i.subscriber_id
+                         WHERE i.status = "paid" AND i.collected_by IS NOT NULL AND s.tenant_id = :t
+                         GROUP BY i.collected_by'
+                    );
+                    $stSum->execute(array(':t' => $cashTid));
+                    foreach ($stSum->fetchAll() as $sr) {
+                        $cashSum[(int) $sr['uid']] = (float) $sr['t'];
+                    }
+                    @file_put_contents($cashFile, json_encode(array('sum' => $cashSum, 'over' => $cashOverride)));
+                } catch (Exception $e2) {
+                }
             }
-            $colPay = $pdo->query("SHOW COLUMNS FROM invoices LIKE 'collected_by'")->fetch();
-            if (!$colPay) {
-                $pdo->exec('ALTER TABLE invoices ADD COLUMN collected_by INT UNSIGNED NULL DEFAULT NULL');
-            }
-            $stSum = $pdo->prepare(
-                'SELECT i.collected_by AS uid, COALESCE(SUM(i.amount),0) AS t
-                 FROM invoices i
-                 JOIN subscribers s ON s.id = i.subscriber_id
-                 WHERE i.status = "paid" AND i.collected_by IS NOT NULL AND s.tenant_id = :t
-                 GROUP BY i.collected_by'
-            );
-            $stSum->execute(array(':t' => $cashTid));
-            foreach ($stSum->fetchAll() as $sr) {
-                $cashSum[(int) $sr['uid']] = (float) $sr['t'];
-            }
-        } catch (Exception $e) {
         }
         $accReportId = isset($_GET['acc']) ? (int) $_GET['acc'] : 0;
         $accReportRows = array();
@@ -1606,7 +1717,11 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
     .sys-head { display:flex; align-items:center; justify-content:flex-end; direction:ltr; gap:12px; margin:0 0 12px; }
     .sys-head h2 { margin:0; }
     .sys-search { display:flex; gap:8px; margin:0 0 14px; }
-    .sys-search input[type="search"] { max-width:320px; }
+    .sys-search input[type="search"] { max-width:320px; width:100%; }
+    #agentTable tbody tr.agent-main { display: none; }
+    #agentTable tbody tr.agent-main.is-on { display: table-row; }
+    .ag-pager { display:flex; flex-wrap:wrap; gap:6px; justify-content:center; margin:14px 0 4px; }
+    .ag-pager .btn.is-on { background:#0f172a; color:#fff; border-color:#0f172a; }
     .ag-actions { display:flex; gap:6px; align-items:center; justify-content:flex-end; flex-wrap:wrap; }
     .ag-cards-cell { min-width: 240px; }
     .ag-cards { display:flex; flex-direction:column; gap:6px; }

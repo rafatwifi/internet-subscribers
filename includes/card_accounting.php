@@ -10,6 +10,10 @@ function ensure_card_accounting_tables($pdo)
     if ($ready) {
         return;
     }
+    if (function_exists('app_schema_fresh') && app_schema_fresh('card_acc')) {
+        $ready = true;
+        return;
+    }
     try {
         $pdo->exec(
             'CREATE TABLE IF NOT EXISTS agent_card_stock (
@@ -66,6 +70,9 @@ function ensure_card_accounting_tables($pdo)
         }
 
         $ready = true;
+        if (function_exists('app_schema_touch')) {
+            app_schema_touch('card_acc');
+        }
     } catch (Exception $e) {
         $ready = false;
         throw $e;
@@ -620,12 +627,12 @@ function card_sas_stock_map($pdo, $config, $homeId, $allowLive = true)
         return $map;
     }
     if (method_exists($api, 'setTimeout')) {
-        $api->setTimeout(40);
+        $api->setTimeout(8);
     }
     if (function_exists('app_session_close')) {
         app_session_close();
     }
-    $rows = $api->listSeriesStock();
+    $rows = $api->listSeriesStock(4);
     if (!is_array($rows)) {
         return $map;
     }
@@ -649,6 +656,7 @@ function card_sas_stock_map($pdo, $config, $homeId, $allowLive = true)
     }
     $portalByManager = array();
     $pinlessDone = array();
+    $pinlessLeft = 2;
     $homeTenant = 0;
     $sameTenant = array();
     try {
@@ -669,9 +677,10 @@ function card_sas_stock_map($pdo, $config, $homeId, $allowLive = true)
             if ($uid <= 0 || $uid === $homeId || $mid <= 0) {
                 continue;
             }
-            if (empty($byOwner[$mid]) && empty($pinlessDone[$mid]) && $homeTenant > 0 && isset($sameTenant[$uid])
+            if ($pinlessLeft > 0 && empty($byOwner[$mid]) && empty($pinlessDone[$mid]) && $homeTenant > 0 && isset($sameTenant[$uid])
                 && method_exists($api, 'listPinlessOwnerSeries')) {
                 $pinlessDone[$mid] = true;
+                $pinlessLeft--;
                 $extra = $api->listPinlessOwnerSeries($mid);
                 if (is_array($extra)) {
                     foreach ($extra as $er) {
@@ -1184,6 +1193,9 @@ function card_transfer_error_message($code, $lang = 'ar')
 
 function ensure_agent_card_prices_table($pdo)
 {
+    if (function_exists('app_schema_fresh') && app_schema_fresh('agent_prices')) {
+        return;
+    }
     if (function_exists('ensure_tenants_schema')) {
         try {
             ensure_tenants_schema($pdo);
@@ -1209,6 +1221,9 @@ function ensure_agent_card_prices_table($pdo)
         if (function_exists('tenants_ensure_column')) {
             tenants_ensure_column($pdo, 'agent_card_prices', 'retail_price', 'DECIMAL(12,2) NOT NULL DEFAULT 0');
             tenants_ensure_column($pdo, 'agent_card_prices', 'subagent_price', 'DECIMAL(12,2) NOT NULL DEFAULT 0');
+        }
+        if (function_exists('app_schema_touch')) {
+            app_schema_touch('agent_prices');
         }
     } catch (Exception $e) {
     }

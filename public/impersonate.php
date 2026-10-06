@@ -20,6 +20,10 @@ function impersonate_json($ok, $message, $extra = array())
 $action = isset($_POST['action']) ? (string) $_POST['action'] : (isset($_GET['action']) ? (string) $_GET['action'] : '');
 
 if ($action === 'search') {
+    $GLOBALS['portal_sas_tree_no_fetch'] = true;
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
     $mode = function_exists('impersonate_actor_mode') ? impersonate_actor_mode($pdo) : '';
     $q = trim((string) (isset($_GET['q']) ? $_GET['q'] : (isset($_POST['q']) ? $_POST['q'] : '')));
     $rows = array();
@@ -100,10 +104,16 @@ if ($action === 'search') {
                 foreach ($rows as $haveRow) {
                     $have[(int) $haveRow['id']] = true;
                 }
-                foreach (portal_agencies_under_current($pdo, $q) as $sib) {
-                    if (!isset($have[(int) $sib['id']])) {
-                        $rows[] = $sib;
+                $qLow = strtolower($q);
+                foreach (portal_agencies_under_current($pdo, '') as $sib) {
+                    if (isset($have[(int) $sib['id']])) {
+                        continue;
                     }
+                    $blob = strtolower(trim((string) $sib['username'] . ' ' . (isset($sib['display_name']) ? $sib['display_name'] : '')));
+                    if ($qLow !== '' && strpos($blob, $qLow) === false) {
+                        continue;
+                    }
+                    $rows[] = $sib;
                 }
             }
             if ($kind === 'child' && function_exists('portal_unlicensed_managers')) {

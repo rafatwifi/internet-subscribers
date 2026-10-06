@@ -38,6 +38,10 @@ function plans_price_floors($pdo)
 {
     $byName = array();
     $byPid = array();
+    // أعلى حساب بالبوابة ما فوقه أحد: يسعّر لنفسه وينزل بالسعر. الحد للأدنى يطبق على من أبوه مسعّره.
+    if (!function_exists('account_viewer_parent_id') || account_viewer_parent_id($pdo) <= 0) {
+        return array($byName, $byPid);
+    }
     $uid = plans_priced_user_id($pdo);
     if ($uid <= 0 || !$pdo || !function_exists('agent_card_prices_list')) {
         return array($byName, $byPid);
@@ -187,7 +191,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         $priceBook = plans_account_book($pdo);
-        $keepSharedCost = !empty($priceBook[1]) || empty($priceBook[2]);
+        // الحساب الأعلى يكتب السعر على الباقة نفسها. الوكيل اللي فوقه أحد يحفظ سعره عنده وما يغيّر سعر الباقة العام.
+        $keepSharedCost = empty($priceBook[2]);
         $globalCost = $cost;
         if ($keepSharedCost && $action === 'update' && $id > 0) {
             try {
@@ -239,7 +244,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 ':sas_profile' => $sasProfile > 0 ? $sasProfile : null,
                 ':sort' => $sort,
             ));
-            if ($keepSharedCost && (int) $priceBook[0] > 0 && function_exists('agent_card_price_save')) {
+            if ((int) $priceBook[0] > 0 && function_exists('agent_card_price_save')) {
                 agent_card_price_save($pdo, (int) $priceBook[0], $sasProfile, $name, $cost, $cost, $cost);
             }
             flash('success', 'تمت إضافة الباقة');
@@ -262,7 +267,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 ':sas_profile' => $sasProfile > 0 ? $sasProfile : null,
                 ':sort' => $sort,
             ));
-            if ($keepSharedCost && (int) $priceBook[0] > 0 && function_exists('agent_card_price_save')) {
+            if ((int) $priceBook[0] > 0 && function_exists('agent_card_price_save')) {
                 agent_card_price_save($pdo, (int) $priceBook[0], $sasProfile, $name, $cost, $cost, null);
             }
             flash('success', 'تم تعديل الباقة');

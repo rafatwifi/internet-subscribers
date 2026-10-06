@@ -351,20 +351,17 @@ if (is_file($archivesFile)) {
 }
 
 try {
-    ensure_admin_users_table($pdo, $config);
-} catch (Exception $e) {
-    // لا توقف الموقع إذا فشل إنشاء جدول المستخدمين
-} catch (Throwable $e) {
-}
-try {
-    ensure_activity_logs_table($pdo);
-} catch (Exception $e) {
-} catch (Throwable $e) {
-}
-try {
     // فحص المخطط مرة كل ساعة لكل جلسة — لا تكرّر SHOW COLUMNS بكل طلب
     $needSchema = empty($_SESSION['_schema_ok_at']) || (time() - (int) $_SESSION['_schema_ok_at']) > 3600;
     if ($needSchema) {
+        try {
+            ensure_admin_users_table($pdo, $config);
+        } catch (Exception $e) {
+        }
+        try {
+            ensure_activity_logs_table($pdo);
+        } catch (Exception $e) {
+        }
         if (function_exists('ensure_monthly_archives_table')) {
             ensure_monthly_archives_table($pdo);
         }

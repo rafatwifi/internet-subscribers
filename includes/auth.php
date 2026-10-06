@@ -416,6 +416,10 @@ function ensure_subscriber_agent_column($pdo)
     if ($ready) {
         return;
     }
+    if (function_exists('app_schema_fresh') && app_schema_fresh('sub_agent')) {
+        $ready = true;
+        return;
+    }
     try {
         ensure_admin_users_table($pdo);
         $col = $pdo->query("SHOW COLUMNS FROM subscribers LIKE 'agent_user_id'")->fetch();
@@ -426,15 +430,10 @@ function ensure_subscriber_agent_column($pdo)
             } catch (Exception $e) {
             }
         }
-        $adminId = (int) $pdo->query(
-            "SELECT id FROM admin_users WHERE role = 'admin' AND is_active = 1 ORDER BY id ASC LIMIT 1"
-        )->fetchColumn();
-        if ($adminId > 0) {
-            $pdo->exec(
-                'UPDATE subscribers SET agent_user_id = ' . $adminId . ' WHERE agent_user_id IS NULL'
-            );
-        }
         $ready = true;
+        if (function_exists('app_schema_touch')) {
+            app_schema_touch('sub_agent');
+        }
     } catch (Exception $e) {
         $ready = false;
     }
@@ -972,6 +971,10 @@ function ensure_admin_users_table($pdo, $config = null)
     if ($ready) {
         return;
     }
+    if (function_exists('app_schema_fresh') && app_schema_fresh('admin_users')) {
+        $ready = true;
+        return;
+    }
     try {
         $pdo->exec(
             'CREATE TABLE IF NOT EXISTS admin_users (
@@ -1111,6 +1114,9 @@ function ensure_admin_users_table($pdo, $config = null)
             }
         }
         $ready = true;
+        if (function_exists('app_schema_touch')) {
+            app_schema_touch('admin_users');
+        }
     } catch (Exception $e) {
         $ready = false;
         throw $e;
@@ -1127,7 +1133,7 @@ function require_login()
     $allowWhenExpired = array('billing.php', 'zaincash_callback.php', 'logout.php', 'login.php');
     if (!empty($_SESSION['saas_force_billing']) && !in_array($page, $allowWhenExpired, true)) {
         if (function_exists('flash')) {
-            flash('error', 'انتهى الاشتراك — جدّد من صفحة الفوترة');
+            flash('error', 'انتهى الاشتراك — جدّد من صفحة الفوترة', true);
         }
         redirect('billing.php');
     }
@@ -1161,7 +1167,7 @@ function require_login()
                         app_session_close();
                     }
                     if (function_exists('flash')) {
-                        flash('error', $code === 'pending' ? 'بانتظار موافقة الإدارة' : 'الحساب معلّق');
+                        flash('error', $code === 'pending' ? 'بانتظار موافقة الإدارة' : 'الحساب معلّق', true);
                     }
                     redirect('login.php');
                 }
@@ -1224,6 +1230,8 @@ function sas_agent_scope_sql($alias = 'c')
     if (function_exists('current_tenant_id')) {
         $tenantSql = ' AND ' . $a . '.tenant_id = ' . (int) current_tenant_id();
     }
+    $hideSql = function_exists('sas_ownership_hide_sql') ? sas_ownership_hide_sql($a) : '';
+    $tenantSql .= $hideSql;
     if (!is_agent_user() && !is_group_manager_user()) {
         global $pdo;
         if ($pdo && function_exists('account_viewer_is_leaf_child') && account_viewer_is_leaf_child($pdo)) {
@@ -1431,7 +1439,7 @@ function portal_sas_manager_tree($pdo)
             $age = time() - (isset($raw['at']) ? (int) $raw['at'] : 0);
         }
     }
-    if ($saved && $age >= 0 && $age < 86400) {
+    if (($saved && $age >= 0 && $age < 86400) || !empty($GLOBALS['portal_sas_tree_no_fetch'])) {
         $memo = $saved;
         return $memo;
     }
@@ -1696,6 +1704,15 @@ function portal_agencies_under_current($pdo, $q = '')
         $myTid = 1;
     }
     $q = trim((string) $q);
+    $meCache = current_admin();
+    $cacheId = $meCache ? (int) $meCache['id'] : 0;
+    $cacheFile = dirname(__DIR__) . '/storage/cache/agencies_under_' . $cacheId . '.json';
+    if ($q === '' && $cacheId > 0 && is_file($cacheFile) && (time() - (int) @filemtime($cacheFile)) < 120) {
+        $cached = json_decode((string) @file_get_contents($cacheFile), true);
+        if (is_array($cached)) {
+            return $cached;
+        }
+    }
     try {
         $sql = 'SELECT u.id, u.username, u.display_name, u.role, u.is_active, u.created_at, u.updated_at,
                        u.sas_manager_id, u.tenant_id, u.phone, t.sas_host, t.sas_username, t.owner_user_id, t.name AS tenant_name
@@ -1744,6 +1761,13 @@ function portal_agencies_under_current($pdo, $q = '')
     $out = array();
     foreach ($best as $item) {
         $out[] = $item['row'];
+    }
+    if ($q === '' && $cacheId > 0) {
+        $dir = dirname($cacheFile);
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0775, true);
+        }
+        @file_put_contents($cacheFile, json_encode($out));
     }
     return $out;
 }
@@ -1840,6 +1864,13 @@ function portal_unlicensed_managers($pdo, $q = '')
     if ($q === '') {
         return array();
     }
+    $unlicFile = dirname(__DIR__) . '/storage/cache/unlic_' . (int) $me['id'] . '_' . md5(strtolower($q)) . '.json';
+    if (is_file($unlicFile) && (time() - (int) @filemtime($unlicFile)) < 90) {
+        $unlicHit = json_decode((string) @file_get_contents($unlicFile), true);
+        if (is_array($unlicHit)) {
+            return $unlicHit;
+        }
+    }
     $like = '%' . $q . '%';
     try {
         $st = $pdo->prepare(
@@ -1925,6 +1956,13 @@ function portal_unlicensed_managers($pdo, $q = '')
         if (count($out) >= 20) {
             break;
         }
+    }
+    if (isset($unlicFile)) {
+        $unlicDir = dirname($unlicFile);
+        if (!is_dir($unlicDir)) {
+            @mkdir($unlicDir, 0775, true);
+        }
+        @file_put_contents($unlicFile, json_encode($out));
     }
     return $out;
 }

@@ -12,6 +12,10 @@ function ensure_tenants_schema($pdo, $config = null)
         return;
     }
     $done = true;
+    $stamp = dirname(__DIR__) . '/storage/cache/schema_tenants.txt';
+    if (is_file($stamp) && (time() - (int) @filemtime($stamp)) < 3600) {
+        return true;
+    }
 
     $pdo->exec(
         'CREATE TABLE IF NOT EXISTS tenants (
@@ -252,6 +256,13 @@ function tenants_migrate_sas_cache_pk($pdo)
     }
     $pkOk = tenants_sas_cache_pk_is_ok($pdo);
     $pkDone = $pkOk;
+    if ($pkOk) {
+        $stampDir = dirname(__DIR__) . '/storage/cache';
+        if (!is_dir($stampDir)) {
+            @mkdir($stampDir, 0775, true);
+        }
+        @touch($stampDir . '/schema_tenants.txt');
+    }
     return $pkOk;
 }
 
@@ -278,6 +289,9 @@ function tenants_migrate_sync_meta($pdo)
 
 function current_tenant_id()
 {
+    if (!empty($GLOBALS['portal_warm_tenant_id'])) {
+        return max(1, (int) $GLOBALS['portal_warm_tenant_id']);
+    }
     if (!empty($_SESSION['admin_tenant_id'])) {
         $t = (int) $_SESSION['admin_tenant_id'];
         if ($t > 0) {

@@ -2132,7 +2132,7 @@ class SASConnector
      * سلاسل الكروت كما يراها دخول الساس: المالك، الفئة، الشاغر (qty - used).
      * null إذا الدخول فشل.
      */
-    public function listSeriesStock()
+    public function listSeriesStock($maxPages = 20)
     {
         if (!$this->token && !$this->login()) {
             return null;
@@ -2144,7 +2144,8 @@ class SASConnector
             'direction' => 'desc',
             'search' => '',
         );
-        $series = $this->sasCardFetchPaged(array('index/series'), $payload, 20);
+        $maxPages = max(1, (int) $maxPages);
+        $series = $this->sasCardFetchPaged(array('index/series'), $payload, $maxPages);
         $me = $this->loggedManagerId();
         $out = array();
         $seenSeries = array();

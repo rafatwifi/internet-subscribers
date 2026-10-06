@@ -1,0 +1,12 @@
+---
+description: Unified wait ring and corner toasts for the portal
+alwaysApply: true
+---
+
+# دائرة الانتظار والإشعار
+
+The loading indicator is named **دائرة الانتظار** (`#appRing`). It sits in the center of the screen, fills, then disappears. Show it only when a request is actually slow, or immediately when the user picks an agent to log in as. Do not add a seconds counter, and do not disable the activation submit button.
+
+System messages use **one** corner toast (`.sas-toast`): top corner on desktop, bottom on a phone, fade out after 3 seconds. Do not also render the same message as an inline `.alert`.
+
+Notices that must stay until the problem is fixed use the same toast with `sticky` (close button, no auto-hide): subscription ended, account suspended, and the SAS-offline status. Do not show the same notice twice.

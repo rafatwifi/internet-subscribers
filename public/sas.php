@@ -107,7 +107,7 @@ if (isset($_GET['ajax']) && ($_GET['ajax'] === 'profiles' || $_GET['ajax'] === '
         sas_json_out(true, '', array('managers' => $_SESSION['sas_managers_ui']));
     }
     if ($ajaxKind === 'cards' && !$forceCards && function_exists('sas_cards_inventory_load_persisted')) {
-        $invHit = sas_cards_inventory_load_persisted(600);
+        $invHit = sas_cards_inventory_load_persisted(0);
         if ($invHit && isset($invHit['groups']) && is_array($invHit['groups']) && function_exists('sas_unused_pins_from_inventory_cache')) {
             $pins = sas_unused_pins_from_inventory_cache();
             sas_json_out(true, '', array(
@@ -775,20 +775,8 @@ if (strlen($parentFilter) > 80) {
 $cacheCount = 0;
 $sasAjaxEarly = isset($_GET['ajax']) ? (string) $_GET['ajax'] : '';
 try {
-    if ($sasAjaxEarly === '') {
-        if (function_exists('shop_restore_sep22_if_empty')) {
-            shop_restore_sep22_if_empty($pdo);
-        }
-        if (function_exists('sas_cache_fill_from_subscribers')) {
-            sas_cache_fill_from_subscribers($pdo);
-        }
-        $relinkTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
-        $relinkFile = dirname(__DIR__) . '/storage/cache/relink_t' . $relinkTid . '.txt';
-        $relinkAge = is_file($relinkFile) ? (time() - (int) trim((string) @file_get_contents($relinkFile))) : 99999;
-        if ($relinkAge > 600 && function_exists('sas_relink_ledger_rows')) {
-            sas_relink_ledger_rows($pdo);
-            @file_put_contents($relinkFile, (string) time());
-        }
+    if ($sasAjaxEarly === '' && isset($_SERVER['REQUEST_METHOD']) && strtoupper((string) $_SERVER['REQUEST_METHOD']) === 'GET' && function_exists('app_session_close')) {
+        app_session_close();
     }
     $tidCnt = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
     $stCnt = $pdo->prepare('SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = :t');
@@ -904,8 +892,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'refresh_now') {
         if (is_file($outsideFile)) {
             require_once $outsideFile;
         }
-        // أول شيء: أونلاين + IP من الساس (مصدر الحقيقة للـ IP)
-        if (function_exists('sas_refresh_online_flags')) {
+        if (!$wantUsers && function_exists('sas_refresh_online_flags')) {
             sas_refresh_online_flags($pdo, $config);
         }
         if ($wantUsers && function_exists('sas_outside_refresh_users')) {
@@ -926,13 +913,6 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'refresh_now') {
                         }
                     }
                 }
-            }
-        }
-        // بعد upsert المستخدمين: أعد قراءة الأونلاين حتى لا يبقى IP قديم
-        if (function_exists('sas_refresh_online_flags')) {
-            $nOnline = sas_refresh_online_flags($pdo, $config);
-            if ($nOnline > $n) {
-                $n = $nOnline;
             }
         }
         echo json_encode(array('ok' => true, 'count' => $n, 'mode' => 'synced', 'ready' => true));
@@ -1078,7 +1058,7 @@ if ($showAll) {
 $sql = '';
 try {
     // لا ننتظر SAS هنا — الصفحة تفتح من الكاش فوراً، والأونلاين/IP يتحدثون بعد الرسم عبر ajax=live_table
-    $sql = sas_cache_list_select_sql() . $fromSql . '
+    $sql = sas_cache_list_select_sql(true) . $fromSql . '
      WHERE ' . $where . '
      ORDER BY ' . $orderSql;
     if (!$showAll) {
@@ -4049,7 +4029,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
         hint.className = 'sas-sync-note';
         hint.textContent = <?php echo json_encode($lang === 'en' ? 'Loading unused cards…' : 'جاري جلب الكروت الشاغرة…'); ?>;
       }
-      prefetchCards(true).then(function () { refreshActCardsIfOpen(); });
+      prefetchCards(false).then(function () { refreshActCardsIfOpen(); });
     }
     syncActWa();
   }
@@ -5031,8 +5011,8 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
       })
       .catch(function () { outsideBusy = false; });
   }
-  setInterval(pullOutsideExpire, 8000);
-  setTimeout(pullOutsideExpire, 1500);
+  setInterval(pullOutsideExpire, 120000);
+  setTimeout(pullOutsideExpire, 20000);
   function runQuickRefresh() {
     if (!sasReadyJs) {
       showAppToast(<?php echo json_encode($lang === 'en' ? 'SAS not linked yet' : 'الساس غير مربوط بعد'); ?>, 'error');
@@ -5067,10 +5047,14 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
       if (d.last_error && !d.ok) {
         setOfflineBanner(true);
         showSyncNote(d.last_error);
+        if (window.appBusyDone) window.appBusyDone('sync');
         return d;
       }
       if (d.mode === 'progress') {
-        showSyncNote((<?php echo json_encode($lang === 'en' ? 'Loading from SAS…' : 'جاري الجلب من الساس…'); ?>) + ' ' + (d.count || 0) + (d.expected ? (' / ' + d.expected) : ''));
+        var syncLabel = <?php echo json_encode($lang === 'en' ? 'Loading from SAS' : 'جاري الجلب من الساس'); ?>;
+        var syncCur = d.count || 0;
+        var syncAll = d.expected || 0;
+        showSyncNote(syncLabel + ' ' + syncCur + (syncAll ? (' / ' + syncAll) : ''));
         return runSync(false);
       }
       if (sasReadyJs && d.ok && (d.mode === 'synced' || d.mode === 'cache') && (d.count > 0 || d.mode === 'cache')) {
@@ -5084,6 +5068,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     }).catch(function (err) {
       setOfflineBanner(true);
       showSyncNote(err && err.message ? err.message : 'فشل الاتصال بالصفحة');
+      if (window.appBusyDone) window.appBusyDone('sync');
       return null;
     });
   }
@@ -5494,13 +5479,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     }
   })();
 
-  prefetchCards(false).then(function () {
-    loadProfiles();
-    if (stale && sasReadyJs) runDiagThenSync();
-  }).catch(function () {
-    loadProfiles();
-    if (stale && sasReadyJs) runDiagThenSync();
-  });
+  setTimeout(function () { loadProfiles(); }, 8000);
   setInterval(function () {
     softRefreshCards(false).then(function () { refreshActCardsIfOpen(); });
   }, 90000);

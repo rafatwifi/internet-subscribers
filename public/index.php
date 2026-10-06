@@ -297,7 +297,16 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
     exit;
 }
 
-$pdo->exec("UPDATE subscriptions SET status = 'expired' WHERE status = 'active' AND end_date < CURDATE()");
+$expDir = dirname(__DIR__) . '/storage/cache';
+if (!is_dir($expDir)) {
+    @mkdir($expDir, 0775, true);
+}
+$expTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+$expLock = $expDir . '/sub_expire_t' . $expTid . '.txt';
+if (!is_file($expLock) || (time() - (int) @filemtime($expLock)) > 900) {
+    $pdo->exec("UPDATE subscriptions SET status = 'expired' WHERE status = 'active' AND end_date < CURDATE()");
+    @file_put_contents($expLock, (string) time());
+}
 if (empty($_SESSION['archive_months_at']) || (time() - (int) $_SESSION['archive_months_at']) > 3600) {
     archive_closed_months($pdo);
     $_SESSION['archive_months_at'] = time();
@@ -305,10 +314,21 @@ if (empty($_SESSION['archive_months_at']) || (time() - (int) $_SESSION['archive_
         app_session_touch();
     }
 }
+if (function_exists('app_session_close')) {
+    app_session_close();
+}
 
 /* لا تنقل دفتر أو مشتركين وكالة ثانية عند فتح اللوحة */
 $agentScope = function_exists('subscriber_agent_scope_sql') ? subscriber_agent_scope_sql('s') : '';
-$totalSubscribers = (int) $pdo->query('SELECT COUNT(*) FROM subscribers s WHERE 1=1' . $agentScope)->fetchColumn();
+$sasReadyDash = function_exists('sas_is_ready') && sas_is_ready($config);
+$keepScopedCounts = function_exists('is_accountant_user') && is_accountant_user();
+$useSasCounts = $sasReadyDash && !$keepScopedCounts && function_exists('sas_dash_user_counts');
+$monthStart = date('Y-m-01 00:00:00');
+$monthEnd = date('Y-m-01 00:00:00', strtotime(date('Y-m-01') . ' +1 month'));
+$totalSubscribers = 0;
+if (!$useSasCounts) {
+    $totalSubscribers = (int) $pdo->query('SELECT COUNT(*) FROM subscribers s WHERE 1=1' . $agentScope)->fetchColumn();
+}
 $totalDebt = (float) $pdo->query(
     "SELECT COALESCE(SUM(i.amount),0) FROM invoices i
      JOIN subscribers s ON s.id = i.subscriber_id
@@ -317,22 +337,22 @@ $totalDebt = (float) $pdo->query(
 $receivedMonth = (float) $pdo->query(
     "SELECT COALESCE(SUM(i.amount),0) FROM invoices i
      JOIN subscribers s ON s.id = i.subscriber_id
-     WHERE i.status = 'paid' AND DATE_FORMAT(i.paid_at, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')" . $agentScope
+     WHERE i.status = 'paid' AND i.paid_at >= " . $pdo->quote($monthStart) . " AND i.paid_at < " . $pdo->quote($monthEnd) . $agentScope
 )->fetchColumn();
 $profitMonth = (float) $pdo->query(
     "SELECT COALESCE(SUM(i.profit),0) FROM invoices i
      JOIN subscribers s ON s.id = i.subscriber_id
-     WHERE i.status = 'paid' AND DATE_FORMAT(i.paid_at, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')" . $agentScope
+     WHERE i.status = 'paid' AND i.paid_at >= " . $pdo->quote($monthStart) . " AND i.paid_at < " . $pdo->quote($monthEnd) . $agentScope
 )->fetchColumn();
 $salesMonth = (float) $pdo->query(
     "SELECT COALESCE(SUM(sub.monthly_price),0) FROM subscriptions sub
      JOIN subscribers s ON s.id = sub.subscriber_id
-     WHERE DATE_FORMAT(sub.created_at, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')" . $agentScope
+     WHERE sub.created_at >= " . $pdo->quote($monthStart) . " AND sub.created_at < " . $pdo->quote($monthEnd) . $agentScope
 )->fetchColumn();
 $activatedMonth = (int) $pdo->query(
     "SELECT COUNT(*) FROM subscriptions sub
      JOIN subscribers s ON s.id = sub.subscriber_id
-     WHERE DATE_FORMAT(sub.created_at, '%Y-%m') = DATE_FORMAT(CURDATE(), '%Y-%m')" . $agentScope
+     WHERE sub.created_at >= " . $pdo->quote($monthStart) . " AND sub.created_at < " . $pdo->quote($monthEnd) . $agentScope
 )->fetchColumn();
 $dashGrowth = '0%';
 $dashGrowthSub = '';
@@ -377,6 +397,17 @@ $rentalFrom = ' FROM subscribers s
               )
          )
        )' . $agentScope;
+$rentalTotalCount = 0;
+$rentalActiveCount = 0;
+$rentalProbe = 0;
+try {
+    $rentalProbe = (int) $pdo->query(
+        'SELECT COUNT(*) FROM subscribers s WHERE (s.rental_enabled = 1 OR s.rental_enabled = "1") AND s.tenant_id = ' . $tidRent . $agentScope
+    )->fetchColumn();
+} catch (Exception $e) {
+    $rentalProbe = 1;
+}
+if ($rentalProbe > 0) {
 $rentalTotalCount = (int) $pdo->query('SELECT COUNT(DISTINCT s.id)' . $rentalFrom)->fetchColumn();
 $rentalActiveCount = (int) $pdo->query(
     'SELECT COUNT(DISTINCT s.id)' . $rentalFrom . ' AND (
@@ -401,8 +432,14 @@ $rentalActiveCount = (int) $pdo->query(
         )
     )'
 )->fetchColumn();
+}
 
-// حالة الاشتراكات (مشتركين)
+// حالة الاشتراكات (مشتركين) — تُستبدل بأعداد كاش الساس عندما الساس مربوط
+$activeOnlineCount = 0;
+$expiredSubsCount = 0;
+$expireTodayCount = 0;
+$expireSoonCount = 0;
+if (!$useSasCounts) {
 $activeOnlineCount = (int) $pdo->query(
     'SELECT COUNT(*) FROM subscribers s
      WHERE EXISTS (
@@ -423,9 +460,6 @@ $expireTodayCount = (int) $pdo->query(
      WHERE sub.status = "active" AND sub.end_date = CURDATE()' . $agentScope
 )->fetchColumn();
 
-$sasPointsOk = false;
-$sasPointsVal = null;
-$sasPointsDisp = '—';
 $expireSoonCount = (int) $pdo->query(
     'SELECT COUNT(DISTINCT sub.subscriber_id) FROM subscriptions sub
      JOIN subscribers s ON s.id = sub.subscriber_id
@@ -433,6 +467,11 @@ $expireSoonCount = (int) $pdo->query(
        AND sub.end_date > CURDATE()
        AND sub.end_date <= DATE_ADD(CURDATE(), INTERVAL 3 DAY)' . $agentScope
 )->fetchColumn();
+}
+
+$sasPointsOk = false;
+$sasPointsVal = null;
+$sasPointsDisp = '—';
 
 $chartMonths = array();
 $chartValues = array();
@@ -440,17 +479,31 @@ $chartYear = (int) date('Y');
 for ($m = 1; $m <= 12; $m++) {
     $ym = sprintf('%04d-%02d', $chartYear, $m);
     $chartMonths[] = month_short_label($ym, true);
-    $stmt = $pdo->prepare(
-        "SELECT COALESCE(SUM(i.amount),0) FROM invoices i
+    $chartValues[] = 0.0;
+}
+try {
+    $chartStmt = $pdo->prepare(
+        "SELECT MONTH(i.paid_at) AS m, COALESCE(SUM(i.amount),0) AS amt
+         FROM invoices i
          JOIN subscribers s ON s.id = i.subscriber_id
-         WHERE i.status = 'paid' AND DATE_FORMAT(i.paid_at, '%Y-%m') = :ym" . $agentScope
+         WHERE i.status = 'paid'
+           AND i.paid_at >= :a AND i.paid_at < :b" . $agentScope . "
+         GROUP BY MONTH(i.paid_at)"
     );
-    $stmt->execute(array(':ym' => $ym));
-    $chartValues[] = (float) $stmt->fetchColumn();
+    $chartStmt->execute(array(
+        ':a' => sprintf('%04d-01-01 00:00:00', $chartYear),
+        ':b' => sprintf('%04d-01-01 00:00:00', $chartYear + 1),
+    ));
+    while ($chartRow = $chartStmt->fetch()) {
+        $chartMi = (int) $chartRow['m'];
+        if ($chartMi >= 1 && $chartMi <= 12) {
+            $chartValues[$chartMi - 1] = (float) $chartRow['amt'];
+        }
+    }
+} catch (Exception $e) {
 }
 $yearTotal = array_sum($chartValues);
 
-$sasReadyDash = function_exists('sas_is_ready') && sas_is_ready($config);
 $sasCounts = array(
     'total' => $totalSubscribers,
     'active' => $activeOnlineCount,
@@ -463,8 +516,7 @@ $sasCounts = array(
 $sasCardGroups = array();
 $sasBalanceDisp = '—';
 if ($sasReadyDash) {
-    $keepScopedCounts = function_exists('is_accountant_user') && is_accountant_user();
-    if (!$keepScopedCounts && function_exists('sas_dash_user_counts')) {
+    if ($useSasCounts) {
         $sasCounts = sas_dash_user_counts($pdo);
     }
     // أولاً: كاش السيرفر الأدق (جرد الكروت) — بدون انتظار SAS

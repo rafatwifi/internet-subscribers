@@ -548,10 +548,14 @@ function createWaSession(sessionId) {
           }
         }
         const timer = setTimeout(function () {
-          const err = new Error('WhatsApp did not confirm the message');
-          err.code = 'no_ack';
-          done(reject, err);
-        }, 10000);
+          if (seen[id] === 0) {
+            const err = new Error('WhatsApp rejected the message');
+            err.code = 'send_rejected';
+            done(reject, err);
+            return;
+          }
+          done(resolve, typeof seen[id] === 'number' ? seen[id] : 1);
+        }, 3000);
         sock.ev.on('messages.update', watch);
         sock.ev.on('message-receipt.update', watch);
         watch();

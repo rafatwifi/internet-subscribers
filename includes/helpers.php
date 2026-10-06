@@ -11,9 +11,13 @@ function redirect($path)
     exit;
 }
 
-function flash($type, $message)
+function flash($type, $message, $sticky = false)
 {
-    $_SESSION['flash'] = array('type' => $type, 'message' => $message);
+    $_SESSION['flash'] = array(
+        'type' => $type,
+        'message' => $message,
+        'sticky' => $sticky ? 1 : 0,
+    );
     if (session_status() !== PHP_SESSION_ACTIVE && function_exists('app_session_touch')) {
         app_session_touch();
     }
@@ -37,6 +41,29 @@ function get_flash()
 }
 
 /** حرّر قفل جلسة PHP حتى لا تنتظر صفحات التنقّل طلبات أجاكس طويلة */
+function app_schema_fresh($name, $seconds = 3600)
+{
+    $name = preg_replace('/[^a-z0-9_]/', '', (string) $name);
+    if ($name === '') {
+        return false;
+    }
+    $path = dirname(__DIR__) . '/storage/cache/schema_' . $name . '.txt';
+    return is_file($path) && (time() - (int) @filemtime($path)) < (int) $seconds;
+}
+
+function app_schema_touch($name)
+{
+    $name = preg_replace('/[^a-z0-9_]/', '', (string) $name);
+    if ($name === '') {
+        return;
+    }
+    $dir = dirname(__DIR__) . '/storage/cache';
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0775, true);
+    }
+    @touch($dir . '/schema_' . $name . '.txt');
+}
+
 function app_session_close()
 {
     if (session_status() === PHP_SESSION_ACTIVE) {

@@ -4,9 +4,16 @@
  * يُستدعى من الواجهة كل دقيقتين تقريباً — بدون كرون.
  */
 require_once __DIR__ . '/../includes/bootstrap.php';
+require_once __DIR__ . '/../includes/portal_warm.php';
 require_login();
 if (function_exists('app_session_close')) {
     app_session_close();
+}
+if (function_exists('portal_warm_kick')) {
+    try {
+        portal_warm_kick();
+    } catch (Exception $e) {
+    }
 }
 
 header('Content-Type: application/json; charset=utf-8');

@@ -14,6 +14,9 @@ function ensure_sas_users_cache_table($pdo)
         return;
     }
     $done = true;
+    if (function_exists('app_schema_fresh') && app_schema_fresh('sas_cache')) {
+        return;
+    }
 
     $pdo->exec(
         'CREATE TABLE IF NOT EXISTS sas_users_cache (
@@ -101,6 +104,9 @@ function ensure_sas_users_cache_table($pdo)
     try {
         $pdo->exec('ALTER TABLE sas_users_cache ADD INDEX idx_sas_online (is_online)');
     } catch (Exception $e) {
+    }
+    if (function_exists('app_schema_touch')) {
+        app_schema_touch('sas_cache');
     }
 }
 
@@ -735,11 +741,27 @@ function sas_cache_username_match_keys($username)
 
 function sas_online_flags_throttle_file()
 {
-    return rtrim(sys_get_temp_dir(), '\\/') . DIRECTORY_SEPARATOR . 'isp_sas_online_flags_at.txt';
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tid <= 0) {
+        $tid = 1;
+    }
+    return rtrim(sys_get_temp_dir(), '\\/') . DIRECTORY_SEPARATOR . 'isp_sas_online_flags_t' . $tid . '.txt';
 }
 
 function sas_refresh_online_flags($pdo, $config)
 {
+    $throttleFile = sas_online_flags_throttle_file();
+    $throttleAge = is_file($throttleFile) ? (time() - (int) @filemtime($throttleFile)) : 99999;
+    if ($throttleAge < 25) {
+        return 0;
+    }
+    $lockPath = dirname($throttleFile) . DIRECTORY_SEPARATOR . 'isp_sas_online_flags_' . md5($throttleFile) . '.lock';
+    $lockFh = @fopen($lockPath, 'c');
+    if ($lockFh && !@flock($lockFh, LOCK_EX | LOCK_NB)) {
+        @fclose($lockFh);
+        return 0;
+    }
+    @touch($throttleFile);
     ensure_sas_users_cache_table($pdo);
     $api = function_exists('sas_page_connector') ? sas_page_connector($config) : null;
     if (!$api || !method_exists($api, 'listOnlineUsers')) {
@@ -796,42 +818,54 @@ function sas_refresh_online_flags($pdo, $config)
         if ($tidOnline <= 0) {
             $tidOnline = 1;
         }
-        $pdo->exec('UPDATE sas_users_cache SET is_online = 0, framed_ip = NULL WHERE tenant_id = ' . $tidOnline);
+        $pdo->exec('UPDATE sas_users_cache SET is_online = 0 WHERE tenant_id = ' . $tidOnline . ' AND is_online = 1');
         if ($names) {
-            $stExact = $pdo->prepare(
-                'UPDATE sas_users_cache SET is_online = 1, last_online = NOW(), framed_ip = :ip
-                 WHERE tenant_id = ' . $tidOnline . ' AND LOWER(username) = :u'
-            );
-            $stBase = $pdo->prepare(
-                'UPDATE sas_users_cache SET is_online = 1, last_online = NOW(), framed_ip = :ip
-                 WHERE tenant_id = ' . $tidOnline . ' AND (LOWER(username) = :u1
-                    OR LOWER(SUBSTRING_INDEX(username, "@", 1)) = :u2)'
-            );
-            $stTrafExact = $pdo->prepare(
-                'UPDATE sas_users_cache SET daily_traffic = :t WHERE tenant_id = ' . $tidOnline . ' AND LOWER(username) = :u'
-            );
-            $stTrafBase = $pdo->prepare(
-                'UPDATE sas_users_cache SET daily_traffic = :t
-                 WHERE tenant_id = ' . $tidOnline . ' AND (LOWER(username) = :u1
-                    OR LOWER(SUBSTRING_INDEX(username, "@", 1)) = :u2)'
-            );
-            foreach ($names as $key => $u) {
-                $ipVal = isset($ipMap[$key]) ? $ipMap[$key] : null;
-                if (strpos($key, '@') !== false) {
-                    $stExact->execute(array(':u' => $key, ':ip' => $ipVal));
-                } else {
-                    $stBase->execute(array(':u1' => $key, ':u2' => $key, ':ip' => $ipVal));
-                }
-                if (isset($trafMap[$key])) {
-                    if (strpos($key, '@') !== false) {
-                        $stTrafExact->execute(array(':u' => $key, ':t' => $trafMap[$key]));
-                    } else {
-                        $stTrafBase->execute(array(':u1' => $key, ':u2' => $key, ':t' => $trafMap[$key]));
+            $onlineKeys = array_keys($names);
+            $chunks = array_chunk($onlineKeys, 40);
+            foreach ($chunks as $chunk) {
+                $in = array();
+                $bind = array();
+                $caseIp = 'CASE LOWER(username)';
+                $caseTr = 'CASE LOWER(username)';
+                $hasIp = false;
+                $hasTr = false;
+                $i = 0;
+                foreach ($chunk as $key) {
+                    $in[] = ':in' . $i;
+                    $bind[':in' . $i] = $key;
+                    if (isset($ipMap[$key]) && $ipMap[$key] !== '') {
+                        $caseIp .= ' WHEN :ik' . $i . ' THEN :ip' . $i;
+                        $bind[':ik' . $i] = $key;
+                        $bind[':ip' . $i] = $ipMap[$key];
+                        $hasIp = true;
                     }
+                    if (isset($trafMap[$key]) && $trafMap[$key] !== '') {
+                        $caseTr .= ' WHEN :tk' . $i . ' THEN :tr' . $i;
+                        $bind[':tk' . $i] = $key;
+                        $bind[':tr' . $i] = $trafMap[$key];
+                        $hasTr = true;
+                    }
+                    $i++;
                 }
+                $set = 'is_online = 1, last_online = NOW()';
+                if ($hasIp) {
+                    $set .= ', framed_ip = ' . $caseIp . ' ELSE framed_ip END';
+                }
+                if ($hasTr) {
+                    $set .= ', daily_traffic = ' . $caseTr . ' ELSE daily_traffic END';
+                }
+                $sqlUp = 'UPDATE sas_users_cache SET ' . $set
+                    . ' WHERE tenant_id = ' . $tidOnline
+                    . ' AND LOWER(username) IN (' . implode(',', $in) . ')';
+                $pdo->prepare($sqlUp)->execute($bind);
             }
         }
-        @file_put_contents(sas_online_flags_throttle_file(), (string) time());
+        @file_put_contents($throttleFile, (string) time());
+        if ($lockFh) {
+            @flock($lockFh, LOCK_UN);
+            @fclose($lockFh);
+            $lockFh = null;
+        }
         if (session_status() === PHP_SESSION_ACTIVE) {
             $_SESSION['sas_online_flags_at'] = time();
         }
@@ -1773,6 +1807,10 @@ function sas_dash_cards_load_persisted()
  */
 function sas_dash_cards_preferred_persisted()
 {
+    $cur = sas_dash_cards_load_persisted();
+    if ($cur && !empty($cur['groups']) && is_array($cur['groups'])) {
+        return $cur;
+    }
     $inv = function_exists('sas_cards_inventory_load_persisted')
         ? sas_cards_inventory_load_persisted(0)
         : null;
@@ -2316,83 +2354,27 @@ function sas_relink_ledger_rows($pdo)
     if ($tid <= 0) {
         $tid = 1;
     }
-    $rows = array();
+    // جملة واحدة للصفوف غير المربوطة. الربط صفّاً صفّاً مع عدّ الفواتير كان يعلّق اللوحة عند آلاف المشتركين.
     try {
         $st = $pdo->prepare(
-            'SELECT s.id, s.sas_username, s.name, s.phone, s.tenant_id,
-                    (SELECT COUNT(*) FROM invoices i WHERE i.subscriber_id = s.id) AS inv_n
-             FROM subscribers s
-             WHERE s.sas_username IS NOT NULL AND s.sas_username <> ""
-               AND (
-                    s.tenant_id IS NULL OR s.tenant_id = 0 OR s.tenant_id = 1 OR s.tenant_id = :t
-                    OR CONVERT(s.sas_username USING utf8mb4) COLLATE utf8mb4_unicode_ci IN (
-                        SELECT CONVERT(c.username USING utf8mb4) COLLATE utf8mb4_unicode_ci
-                        FROM sas_users_cache c WHERE c.tenant_id = :t2
-                    )
-               )
-             ORDER BY inv_n DESC, s.id ASC'
+            'UPDATE sas_users_cache c
+             INNER JOIN subscribers s
+               ON s.tenant_id = c.tenant_id
+              AND CONVERT(s.sas_username USING utf8mb4) COLLATE utf8mb4_unicode_ci
+                  = CONVERT(c.username USING utf8mb4) COLLATE utf8mb4_unicode_ci
+             SET c.local_subscriber_id = s.id,
+                 c.display_name = CASE
+                     WHEN s.name IS NOT NULL AND s.name <> "" THEN s.name
+                     ELSE c.display_name
+                 END
+             WHERE c.tenant_id = :t
+               AND (c.local_subscriber_id IS NULL OR c.local_subscriber_id = 0)'
         );
-        $st->execute(array(':t' => $tid, ':t2' => $tid));
-        $rows = $st->fetchAll();
+        $st->execute(array(':t' => $tid));
+        return (int) $st->rowCount();
     } catch (Exception $e) {
-        try {
-            $rows = $pdo->query(
-                'SELECT s.id, s.sas_username, s.name, s.phone, s.tenant_id,
-                        (SELECT COUNT(*) FROM invoices i WHERE i.subscriber_id = s.id) AS inv_n
-                 FROM subscribers s
-                 WHERE s.sas_username IS NOT NULL AND s.sas_username <> ""
-                 ORDER BY inv_n DESC, s.id ASC'
-            )->fetchAll();
-        } catch (Exception $e2) {
-            return 0;
-        }
+        return 0;
     }
-    $best = array();
-    foreach ($rows as $s) {
-        $u = trim((string) $s['sas_username']);
-        if ($u === '' || isset($best[$u])) {
-            continue;
-        }
-        $best[$u] = $s;
-    }
-    $n = 0;
-    foreach ($best as $u => $s) {
-        $rowTid = isset($s['tenant_id']) ? (int) $s['tenant_id'] : 0;
-        if ($rowTid !== $tid) {
-            continue;
-        }
-        $phone = (string) $s['phone'];
-        $setPhone = ($phone !== '' && (!function_exists('phone_is_placeholder') || !phone_is_placeholder($phone)));
-        try {
-            if ($setPhone) {
-                $pdo->prepare(
-                    'UPDATE sas_users_cache
-                     SET local_subscriber_id = :lid, display_name = :n, phone = :p
-                     WHERE username = :u AND tenant_id = :t'
-                )->execute(array(
-                    ':lid' => (int) $s['id'],
-                    ':n' => (string) $s['name'],
-                    ':p' => $phone,
-                    ':u' => $u,
-                    ':t' => $tid,
-                ));
-            } else {
-                $pdo->prepare(
-                    'UPDATE sas_users_cache
-                     SET local_subscriber_id = :lid, display_name = :n
-                     WHERE username = :u AND tenant_id = :t'
-                )->execute(array(
-                    ':lid' => (int) $s['id'],
-                    ':n' => (string) $s['name'],
-                    ':u' => $u,
-                    ':t' => $tid,
-                ));
-            }
-            $n++;
-        } catch (Exception $e) {
-        }
-    }
-    return $n;
 }
 
 function shop_tenant_unpaid_sum($pdo, $tid)
@@ -2491,12 +2473,6 @@ function shop_restore_sep22_if_empty($pdo)
 
 function sas_dash_user_counts($pdo)
 {
-    if (function_exists('sas_cache_fill_from_subscribers')) {
-        sas_cache_fill_from_subscribers($pdo);
-    }
-    if (function_exists('sas_relink_ledger_rows')) {
-        sas_relink_ledger_rows($pdo);
-    }
     ensure_sas_users_cache_table($pdo);
     $out = array(
         'total' => 0,
@@ -4151,7 +4127,7 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
     ));
 
     try {
-        $api->setTimeout(45);
+        $api->setTimeout(!empty($GLOBALS['sas_warm_pages']) ? 12 : 20);
         if (!$api->login()) {
             $err = $api->getLastError();
             if (function_exists('sas_mark_connection')) {
@@ -4188,6 +4164,16 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
             $tenantId = 1;
         }
 
+        $warmBurst = isset($GLOBALS['sas_warm_pages']) ? (int) $GLOBALS['sas_warm_pages'] : 1;
+        if ($warmBurst < 1) {
+            $warmBurst = 1;
+        }
+        if ($warmBurst > 8) {
+            $warmBurst = 8;
+        }
+        $burstStep = 0;
+        sas_warm_next_page:
+        $burstStep++;
         $page = $api->listUsersPage($start, $pageSize, '');
         $sasPer = isset($page['per_page']) ? (int) $page['per_page'] : 0;
         if ($sasPer >= 10 && $sasPer !== $pageSize) {
@@ -4298,6 +4284,11 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
             return array(true, $totalNow, 'synced', sas_sync_meta($pdo));
         }
 
+        if ($burstStep < $warmBurst) {
+            $pageNum = $nextPage;
+            $start = ($pageNum - 1) * $pageSize;
+            goto sas_warm_next_page;
+        }
         sas_sync_meta_save($pdo, array(
             'syncing_at' => date('Y-m-d H:i:s'),
             'sync_offset' => $nextPage,
@@ -4430,12 +4421,8 @@ function sas_sql_username_eq($leftExpr, $rightExpr)
 
 function sas_cache_list_from_sql()
 {
-    $userEq = sas_sql_username_eq('s.sas_username', 'c.username');
     return ' FROM sas_users_cache c
-     LEFT JOIN subscribers s ON (
-        s.id = c.local_subscriber_id
-        OR (c.local_subscriber_id IS NULL AND ' . $userEq . ')
-     )';
+     LEFT JOIN subscribers s ON s.id = c.local_subscriber_id';
 }
 
 function sas_cache_list_select_sql($light = false)

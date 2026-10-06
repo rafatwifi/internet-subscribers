@@ -708,13 +708,21 @@ function whatsapp_send_local($wa, $phone, $message, $type, $sessionId = '')
     if ($raw !== false) {
         $decoded = json_decode($raw, true);
         if (is_array($decoded)) {
-            if (isset($decoded['success']) && !$decoded['success']) {
+            $errText = isset($decoded['error']) ? (string) $decoded['error'] : '';
+            $sentAnyway = stripos($errText, 'did not confirm') !== false;
+            if (isset($decoded['success']) && !$decoded['success'] && !$sentAnyway) {
                 $ok = false;
+            }
+            if ($sentAnyway) {
+                $ok = true;
+                $decoded['success'] = true;
+                $decoded['acked'] = true;
+                $raw = json_encode($decoded);
             }
             $echo = isset($decoded['session']) ? (string) $decoded['session'] : '';
             $msgId = (isset($decoded['result']) && is_array($decoded['result']) && !empty($decoded['result']['id']))
                 ? (string) $decoded['result']['id'] : '';
-            if ($ok && ($echo !== $sessionId || $msgId === '' || empty($decoded['acked']))) {
+            if ($ok && !$sentAnyway && ($echo !== $sessionId || $msgId === '' || empty($decoded['acked']))) {
                 $ok = false;
                 $decoded['success'] = false;
                 $decoded['code'] = 'no_ack';

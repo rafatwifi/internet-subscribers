@@ -1,3 +1,51 @@
+@font-face {
+  font-family: "Tajawal";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/tajawal-400-ar.woff2") format("woff2");
+  unicode-range: U+0600-06FF, U+0750-077F, U+0870-0891, U+0897-08E1, U+08E3-08FF, U+200C-200E, U+2010-2011, U+204F, U+2E41, U+FB50-FDFF, U+FE70-FEFC, U+10E60-10E7E, U+1EE00-1EEFF;
+}
+@font-face {
+  font-family: "Tajawal";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/tajawal-400-lat.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Tajawal";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/tajawal-500-ar.woff2") format("woff2");
+  unicode-range: U+0600-06FF, U+0750-077F, U+0870-0891, U+0897-08E1, U+08E3-08FF, U+200C-200E, U+2010-2011, U+204F, U+2E41, U+FB50-FDFF, U+FE70-FEFC, U+10E60-10E7E, U+1EE00-1EEFF;
+}
+@font-face {
+  font-family: "Tajawal";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/tajawal-500-lat.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Tajawal";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/tajawal-700-ar.woff2") format("woff2");
+  unicode-range: U+0600-06FF, U+0750-077F, U+0870-0891, U+0897-08E1, U+08E3-08FF, U+200C-200E, U+2010-2011, U+204F, U+2E41, U+FB50-FDFF, U+FE70-FEFC, U+10E60-10E7E, U+1EE00-1EEFF;
+}
+@font-face {
+  font-family: "Tajawal";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/tajawal-700-lat.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
 :root {
   --sidebar: rgba(47, 56, 68, 0.94);
   --bg: #f3f0ea;
@@ -41,9 +89,9 @@ body {
   -webkit-font-smoothing: antialiased;
   position: relative;
 }
-button, input, select, textarea, .btn, label, table, th, td,
+button, input, select, textarea, summary, .btn, label, table, th, td,
 .ops-item, .ops-top-btn, .meta, .alert, .modal-card, .panel {
-  font-family: inherit;
+  font-family: var(--font);
 }
 
 .bg-bubbles {
@@ -354,6 +402,11 @@ body.ltr .main-top-tools .header-search { order: 3; margin: 0; max-width: 300px;
   font-weight: 700;
 }
 .login-as-item:hover { background: #e2e8f0; }
+.login-as-item.is-picked {
+  background: #146c43;
+  color: #fff;
+  border-color: #0f5132;
+}
 .msg-filter-chips {
   display: flex;
   flex-wrap: wrap;
@@ -2049,6 +2102,7 @@ tr.dragging {
   input[type="email"],
   select,
   textarea {
+    font-family: var(--font);
     font-size: 16px;
   }
 }
