@@ -1499,7 +1499,7 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
         <div class="panel" style="margin-bottom:12px">
             <h3 style="margin:0 0 8px"><?php echo e($accReportName); ?></h3>
             <div class="table-wrap">
-            <table class="table-compact">
+            <table class="table-compact acc-report">
                 <thead>
                 <tr>
                     <th><?php echo e($isEn ? 'Subscriber' : 'المشترك'); ?></th>
@@ -1510,14 +1510,14 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
                 </thead>
                 <tbody>
                 <?php if (!$accReportRows): ?>
-                    <tr><td colspan="4"><?php echo e($isEn ? 'No collections yet' : 'ماكو استلام بعد'); ?></td></tr>
+                    <tr class="acc-empty"><td colspan="4"><?php echo e($isEn ? 'No collections yet' : 'ماكو استلام بعد'); ?></td></tr>
                 <?php endif; ?>
                 <?php foreach ($accReportRows as $rr): ?>
                 <tr>
-                    <td><?php echo e($rr['name']); ?></td>
-                    <td><?php echo e(function_exists('money_format_iqd') ? money_format_iqd($rr['amount'], isset($config['currency']) ? $config['currency'] : '') : $rr['amount']); ?></td>
-                    <td><?php echo e($rr['month_label']); ?></td>
-                    <td class="nowrap"><?php echo e($rr['paid_at']); ?></td>
+                    <td data-label="<?php echo e($isEn ? 'Subscriber' : 'المشترك'); ?>"><?php echo e($rr['name']); ?></td>
+                    <td data-label="<?php echo e($isEn ? 'Amount' : 'المبلغ'); ?>"><?php echo e(function_exists('money_format_iqd') ? money_format_iqd($rr['amount'], isset($config['currency']) ? $config['currency'] : '') : $rr['amount']); ?></td>
+                    <td data-label="<?php echo e($isEn ? 'Subscription / purpose' : 'الاشتراك أو الغرض'); ?>"><?php echo e($rr['month_label']); ?></td>
+                    <td data-label="<?php echo e($isEn ? 'When' : 'الوقت'); ?>"><?php echo e($rr['paid_at']); ?></td>
                 </tr>
                 <?php endforeach; ?>
                 </tbody>
@@ -1577,7 +1577,7 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
             </div>
         </form>
         <div class="table-wrap">
-        <table class="table-compact">
+        <table class="table-compact acc-table">
             <thead>
             <tr>
                 <th>#</th>
@@ -1591,18 +1591,18 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
             </thead>
             <tbody>
             <?php if (!$accShown): ?>
-                <tr><td colspan="7" class="msg-empty"><?php echo e($accQ !== '' ? ($isEn ? 'No matches' : 'ماكو نتيجة') : ($isEn ? 'No accountants' : 'ماكو محاسبين')); ?></td></tr>
+                <tr class="acc-empty"><td colspan="7" class="msg-empty"><?php echo e($accQ !== '' ? ($isEn ? 'No matches' : 'ماكو نتيجة') : ($isEn ? 'No accountants' : 'ماكو محاسبين')); ?></td></tr>
             <?php endif; ?>
             <?php $accNo = 0; foreach ($accShown as $ac):
                 $accNo++;
                 $acid = (int) $ac['id'];
                 $canAct = !empty($ac['can_activate']);
                 ?>
-            <tr>
-                <td><?php echo (int) $accNo; ?></td>
-                <td class="ltr"><a href="agents.php?view=accountant&amp;acc=<?php echo $acid; ?>"><?php echo e($ac['username']); ?></a></td>
-                <td><input form="accForm<?php echo $acid; ?>" name="display_name" value="<?php echo e($ac['display_name']); ?>" required></td>
-                <td>
+            <tr class="acc-main">
+                <td data-label="#"><?php echo (int) $accNo; ?></td>
+                <td class="ltr" data-label="<?php echo e($isEn ? 'Username' : 'اسم الدخول'); ?>"><a href="agents.php?view=accountant&amp;acc=<?php echo $acid; ?>"><?php echo e($ac['username']); ?></a></td>
+                <td data-label="<?php echo e($isEn ? 'Name' : 'الاسم'); ?>"><input form="accForm<?php echo $acid; ?>" name="display_name" value="<?php echo e($ac['display_name']); ?>" required></td>
+                <td data-label="<?php echo e($isEn ? 'Activate' : 'تفعيل'); ?>">
                     <label class="toggle" style="margin:0">
                         <input form="accForm<?php echo $acid; ?>" type="checkbox" name="can_activate" value="1" <?php echo $canAct ? 'checked' : ''; ?>>
                         <span class="toggle-ui" aria-hidden="true"></span>
@@ -1621,7 +1621,7 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
                     </label>
                     <?php endif; ?>
                 </td>
-                <td>
+                <td data-label="<?php echo e($isEn ? 'Collected' : 'المستلم'); ?>">
                     <?php
                     $shownCash = isset($cashOverride[$acid]) ? $cashOverride[$acid] : (isset($cashSum[$acid]) ? $cashSum[$acid] : 0);
                     ?>
@@ -1631,8 +1631,8 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
                     <?php echo e((string) (int) round($shownCash)); ?>
                     <?php endif; ?>
                 </td>
-                <td><input form="accForm<?php echo $acid; ?>" name="password" type="password" minlength="4" placeholder="<?php echo e($isEn ? 'Optional' : 'اختياري'); ?>"></td>
-                <td>
+                <td data-label="<?php echo e($isEn ? 'Password' : 'الرمز'); ?>"><input form="accForm<?php echo $acid; ?>" name="password" type="password" minlength="4" placeholder="<?php echo e($isEn ? 'Optional' : 'اختياري'); ?>"></td>
+                <td class="acc-actions">
                     <form method="post" id="accForm<?php echo $acid; ?>" class="inline-form">
                         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                         <input type="hidden" name="action" value="save_accountant">
@@ -1778,6 +1778,36 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
     .sas-acc-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
     .sas-logged { background:#dcfce7; color:#166534; font-weight:800; border-radius:999px; padding:4px 10px; font-size:13px; }
     .sas-logged-off { background:#f1f5f9; color:#64748b; font-weight:700; border-radius:999px; padding:4px 10px; font-size:13px; }
+    @media (max-width: 900px) {
+      #agentAccBox .sys-head { flex-wrap: wrap; align-items: stretch; }
+      #agentAccBox .sys-head h2, #agentAccBox .sys-head .btn { flex: 1 1 100%; width: 100%; }
+      #agentAccBox .sys-search { flex-wrap: wrap; }
+      #agentAccBox .sys-search input { max-width: none !important; flex: 1 1 100%; }
+      #agentAccBox .sys-search .btn { width: 100%; }
+      #agentAccBox .table-wrap { overflow: visible; }
+      #agentAccBox .acc-table thead, #agentAccBox .acc-report thead { display: none; }
+      #agentAccBox .acc-table, #agentAccBox .acc-table tbody, #agentAccBox .acc-table tr, #agentAccBox .acc-table td,
+      #agentAccBox .acc-report, #agentAccBox .acc-report tbody, #agentAccBox .acc-report tr, #agentAccBox .acc-report td {
+        display: block; width: 100%; box-sizing: border-box;
+      }
+      #agentAccBox .acc-table tr.acc-main, #agentAccBox .acc-report tbody tr:not(.acc-empty) {
+        border: 1px solid #e2e8f0; border-radius: 14px; margin: 0 0 12px; padding: 8px 12px 10px; background: #fff;
+      }
+      #agentAccBox .acc-table td, #agentAccBox .acc-report td {
+        display: flex; justify-content: space-between; align-items: center; gap: 10px; border: 0; padding: 7px 0; white-space: normal;
+      }
+      #agentAccBox .acc-table td::before, #agentAccBox .acc-report td::before {
+        content: attr(data-label); font-weight: 800; color: #64748b; flex: 0 0 auto;
+      }
+      #agentAccBox .acc-table td.acc-actions { flex-wrap: wrap; }
+      #agentAccBox .acc-table td.acc-actions::before { content: none; }
+      #agentAccBox .acc-table td.acc-actions .btn, #agentAccBox .acc-table td.acc-actions form { flex: 1 1 100%; margin: 0; }
+      #agentAccBox .acc-table td input { width: 100%; max-width: 190px; }
+      #agentAccBox .acc-table tr.acc-empty td::before, #agentAccBox .acc-report tr.acc-empty td::before { content: none; }
+      #agentAccBox .acc-table tr.acc-wid-row { border: 0; background: transparent; padding: 0; margin: 0; }
+      #agentAccBox .acc-table tr.acc-wid-row td::before { content: none; }
+      #agentAccBox .acc-table tr.acc-wid-row[hidden] { display: none !important; }
+    }
     </style>
     <script>
     (function () {

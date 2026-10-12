@@ -44,4 +44,7 @@ try {
 }
 @flock($lockFh, LOCK_UN);
 @fclose($lockFh);
-portal_warm_schedule($soon ? 3 : 45);
+$delay = $soon ? 3 : 45;
+if (!portal_warm_schedule($delay) && function_exists('portal_warm_stay')) {
+    portal_warm_stay($pdo, $config, $delay);
+}

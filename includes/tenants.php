@@ -949,6 +949,150 @@ function tenant_apply_wa_templates_to_config(&$config, $pdo = null)
     }
 }
 
+/** قوالب واتساب لهذا الحساب فقط، ما تنزل على وكيل ثاني. */
+function user_wa_pack_uid()
+{
+    if (!function_exists('current_admin')) {
+        return 0;
+    }
+    $me = current_admin();
+    return ($me && !empty($me['id'])) ? (int) $me['id'] : 0;
+}
+
+function user_wa_pack_ensure($pdo)
+{
+    static $done = false;
+    if ($done || !$pdo) {
+        return;
+    }
+    $done = true;
+    tenants_ensure_column($pdo, 'admin_users', 'wa_pack', 'LONGTEXT NULL');
+}
+
+function user_wa_pack_get($pdo, $userId = 0)
+{
+    user_wa_pack_ensure($pdo);
+    if ((int) $userId <= 0) {
+        $userId = user_wa_pack_uid();
+    }
+    $userId = (int) $userId;
+    if ($userId <= 0 || !$pdo) {
+        return array();
+    }
+    try {
+        $st = $pdo->prepare('SELECT wa_pack FROM admin_users WHERE id = :id LIMIT 1');
+        $st->execute(array(':id' => $userId));
+        $raw = $st->fetchColumn();
+    } catch (Exception $e) {
+        return array();
+    }
+    if ($raw === false || $raw === null || $raw === '') {
+        return array();
+    }
+    $decoded = json_decode((string) $raw, true);
+    return is_array($decoded) ? $decoded : array();
+}
+
+function user_wa_pack_save($pdo, $pack, $userId = 0)
+{
+    user_wa_pack_ensure($pdo);
+    if ((int) $userId <= 0) {
+        $userId = user_wa_pack_uid();
+    }
+    $userId = (int) $userId;
+    if ($userId <= 0 || !$pdo) {
+        return false;
+    }
+    if (!is_array($pack)) {
+        $pack = array();
+    }
+    $json = json_encode($pack, JSON_UNESCAPED_UNICODE);
+    if ($json === false) {
+        return false;
+    }
+    try {
+        $st = $pdo->prepare('UPDATE admin_users SET wa_pack = :p WHERE id = :id');
+        return $st->execute(array(':p' => $json, ':id' => $userId));
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+function user_apply_wa_pack_to_config(&$config, $pdo = null)
+{
+    if (!$pdo && isset($GLOBALS['pdo'])) {
+        $pdo = $GLOBALS['pdo'];
+    }
+    $pack = user_wa_pack_get($pdo);
+    if (!$pack) {
+        return;
+    }
+    $catalog = (isset($pack['templates']) && is_array($pack['templates'])) ? $pack['templates'] : array();
+    if ($catalog) {
+        $config['templates'] = array();
+        $config['template_labels'] = array();
+        $config['wa_templates'] = array();
+        foreach ($catalog as $tKey => $tRow) {
+            if (!is_array($tRow)) {
+                continue;
+            }
+            $body = isset($tRow['body']) ? (string) $tRow['body'] : '';
+            $label = isset($tRow['label']) ? (string) $tRow['label'] : (string) $tKey;
+            $config['templates'][$tKey] = $body;
+            $config['template_labels'][$tKey] = $label;
+            $config['wa_templates'][$tKey] = array(
+                'label' => $label,
+                'body' => $body,
+                'builtin' => !empty($tRow['builtin']),
+            );
+        }
+    }
+    $cases = (isset($pack['cases']) && is_array($pack['cases'])) ? $pack['cases'] : array();
+    if (!$cases || empty($config['templates']) || !is_array($config['templates'])) {
+        return;
+    }
+    $tplKeys = array_keys($config['templates']);
+    $caseDefaults = array(
+        'activation_cash' => 'activation',
+        'activation_credit' => 'activation_credit',
+        'activation_debts' => 'activation_debts',
+        'activation_credit_debts' => 'activation_credit_debts',
+        'debt_created' => 'debt_created',
+        'payment_ok' => 'payment_ok',
+        'debt_remind' => 'debt_remind',
+        'days_left' => 'days_left',
+        'expiry_soon' => 'expiry_soon',
+        'unpaid_overdue' => 'unpaid_overdue',
+        'reminder_auto' => 'debt_remind',
+        'schedule_cut' => 'schedule_cut',
+    );
+    $config['wa_cases'] = array();
+    $config['wa_case_issues'] = array();
+    foreach ($caseDefaults as $case => $def) {
+        $raw = isset($cases[$case]) ? trim((string) $cases[$case]) : $def;
+        if ($raw === '__none__') {
+            $raw = '';
+        }
+        if ($raw !== '' && !in_array($raw, $tplKeys, true)) {
+            $config['wa_case_issues'][$case] = 'missing_template';
+            $raw = in_array($def, $tplKeys, true) ? $def : (isset($tplKeys[0]) ? $tplKeys[0] : '');
+        }
+        if ($raw === '') {
+            $config['wa_case_issues'][$case] = 'unassigned';
+            $raw = in_array($def, $tplKeys, true) ? $def : (isset($tplKeys[0]) ? $tplKeys[0] : '');
+        } elseif (isset($config['templates'][$raw]) && trim((string) $config['templates'][$raw]) === '') {
+            $config['wa_case_issues'][$case] = 'empty_body';
+        }
+        $config['wa_cases'][$case] = $raw;
+    }
+    $config['wa_cases']['activation'] = isset($config['wa_cases']['activation_cash'])
+        ? $config['wa_cases']['activation_cash']
+        : 'activation';
+    if (isset($config['wa_case_issues']['activation_cash'])) {
+        $config['wa_case_issues']['activation'] = $config['wa_case_issues']['activation_cash'];
+    }
+}
+
 function saas_settings($settings = null)
 {
     if ($settings === null && function_exists('settings_load')) {

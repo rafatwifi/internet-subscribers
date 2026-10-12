@@ -47,21 +47,10 @@ $where = '(s.rental_enabled = 1 OR s.rental_enabled = "1")
  AND s.rental_device_id IS NOT NULL
  AND TRIM(s.rental_device_id) <> ""';
 $tidJoin = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
-$where .= ' AND (
-    s.tenant_id = ' . (int) $tidJoin . '
-    OR EXISTS (
-        SELECT 1 FROM sas_users_cache c2
-        WHERE c2.tenant_id = ' . (int) $tidJoin . '
-          AND (
-            c2.local_subscriber_id = s.id
-            OR (
-                s.sas_username IS NOT NULL AND s.sas_username <> ""
-                AND CONVERT(c2.username USING utf8mb4) COLLATE utf8mb4_unicode_ci
-                    = CONVERT(s.sas_username USING utf8mb4) COLLATE utf8mb4_unicode_ci
-            )
-          )
-    )
-)';
+$where .= ' AND s.tenant_id = ' . (int) $tidJoin;
+if (function_exists('subscriber_ledger_owner_sql')) {
+    $where .= subscriber_ledger_owner_sql('s');
+}
 if (function_exists('subscriber_agent_scope_sql')) {
     $where .= subscriber_agent_scope_sql('s');
 }

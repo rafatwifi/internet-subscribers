@@ -93,17 +93,76 @@ function portal_warm_schedule($delaySec)
     $delaySec = max(0, (int) $delaySec);
     $inner = 'sleep ' . $delaySec . '; curl -fsS -k --max-time 8 ' . escapeshellarg($url) . ' >/dev/null 2>&1';
     $cmd = 'sh -c ' . escapeshellarg($inner) . ' >/dev/null 2>&1 &';
-    if (function_exists('popen') && function_exists('pclose')) {
+    if (portal_warm_fn_on('popen') && function_exists('pclose')) {
         $h = @popen($cmd, 'r');
         if (is_resource($h)) {
             @pclose($h);
             return true;
         }
     }
+    if (portal_warm_fn_on('exec')) {
+        @exec($cmd);
+        return true;
+    }
     if ($delaySec === 0) {
         return portal_warm_fsock($url);
     }
     return false;
+}
+
+function portal_warm_fn_on($name)
+{
+    if (!function_exists($name)) {
+        return false;
+    }
+    $raw = (string) ini_get('disable_functions');
+    if ($raw === '') {
+        return true;
+    }
+    $parts = explode(',', $raw);
+    foreach ($parts as $p) {
+        if (strcasecmp(trim($p), $name) === 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function portal_warm_stay($pdo, $config, $delaySec)
+{
+    $path = portal_warm_cache_dir() . '/warm_stay.lock';
+    $fh = @fopen($path, 'c');
+    if (!$fh || !@flock($fh, LOCK_EX | LOCK_NB)) {
+        if (is_resource($fh)) {
+            @fclose($fh);
+        }
+        return;
+    }
+    $until = time() + (6 * 3600);
+    $delaySec = max(3, (int) $delaySec);
+    $lockPath = portal_warm_cache_dir() . '/warm.lock';
+    while (time() < $until) {
+        @sleep($delaySec);
+        $runFh = @fopen($lockPath, 'c');
+        $got = ($runFh && @flock($runFh, LOCK_EX | LOCK_NB));
+        $soon = false;
+        if ($got) {
+            try {
+                $soon = portal_warm_run($pdo, $config);
+            } catch (Exception $e) {
+            }
+            @flock($runFh, LOCK_UN);
+        }
+        if (is_resource($runFh)) {
+            @fclose($runFh);
+        }
+        $delaySec = $soon ? 3 : 45;
+        if (portal_warm_schedule($delaySec)) {
+            break;
+        }
+    }
+    @flock($fh, LOCK_UN);
+    @fclose($fh);
 }
 
 function portal_warm_sas_tenants($pdo, $config)
@@ -147,7 +206,7 @@ function portal_warm_cards($pdo, $config, $tenantId)
     $GLOBALS['portal_warm_tenant_id'] = $tenantId;
     $path = function_exists('sas_cards_inventory_cache_path') ? sas_cards_inventory_cache_path() : '';
     $age = ($path !== '' && is_file($path)) ? (time() - (int) @filemtime($path)) : 999999;
-    if ($age < 180) {
+    if ($age < 45) {
         if ($prev === null) {
             unset($GLOBALS['portal_warm_tenant_id']);
         } else {
@@ -160,7 +219,7 @@ function portal_warm_cards($pdo, $config, $tenantId)
         $api->setTimeout(18);
     }
     if ($api && method_exists($api, 'login') && $api->login() && method_exists($api, 'listCardsInventory')) {
-        $inv = $api->listCardsInventory(10);
+        $inv = $api->listCardsInventory(14);
         if (is_array($inv)) {
             if (function_exists('sas_cards_inventory_save_persisted')) {
                 sas_cards_inventory_save_persisted($inv);
@@ -181,24 +240,57 @@ function portal_warm_run($pdo, $config)
 {
     @file_put_contents(portal_warm_cache_dir() . '/warm_beat.txt', (string) time());
     $tenants = portal_warm_sas_tenants($pdo, $config);
-    $soon = false;
+    $cardTid = 0;
+    $cardAge = -1;
     foreach ($tenants as $tid) {
+        $GLOBALS['portal_warm_tenant_id'] = $tid;
+        $path = function_exists('sas_cards_inventory_cache_path') ? sas_cards_inventory_cache_path() : '';
+        $age = ($path !== '' && is_file($path)) ? (time() - (int) @filemtime($path)) : 999999;
+        if ($age > $cardAge) {
+            $cardAge = $age;
+            $cardTid = $tid;
+        }
+    }
+    if ($cardTid > 0 && $cardAge >= 45) {
+        try {
+            portal_warm_cards($pdo, $config, $cardTid);
+        } catch (Exception $e) {
+        }
+    }
+    $soon = false;
+    $pullFirst = array();
+    foreach ($tenants as $tid) {
+        if (is_file(portal_warm_cache_dir() . '/sas_pull_now_t' . (int) $tid . '.txt')) {
+            $pullFirst[] = $tid;
+        }
+    }
+    $scan = array_merge($pullFirst, $tenants);
+    $seenTid = array();
+    foreach ($scan as $tid) {
+        if (isset($seenTid[(int) $tid])) {
+            continue;
+        }
+        $seenTid[(int) $tid] = 1;
         $GLOBALS['portal_warm_tenant_id'] = $tid;
         $meta = function_exists('sas_sync_meta') ? sas_sync_meta($pdo, $tid) : array();
         $offset = isset($meta['sync_offset']) ? (int) $meta['sync_offset'] : 0;
         $last = !empty($meta['last_ok_at']) ? strtotime((string) $meta['last_ok_at']) : 0;
         $age = $last ? (time() - $last) : 999999;
-        if ($offset > 0 || $age > 180) {
-            $GLOBALS['sas_warm_pages'] = 2;
+        $pullFile = portal_warm_cache_dir() . '/sas_pull_now_t' . (int) $tid . '.txt';
+        $pullNow = is_file($pullFile);
+        if ($pullNow || $offset > 0 || $age > 180) {
+            $GLOBALS['sas_warm_pages'] = $pullNow ? 8 : 2;
             $mode = 'error';
             try {
-                list($ok, $n, $mode, $meta2) = sas_sync_users_from_api($pdo, $config, false, false);
+                list($ok, $n, $mode, $meta2) = sas_sync_users_from_api($pdo, $config, $pullNow, false);
             } catch (Exception $e) {
                 $mode = 'error';
             }
             unset($GLOBALS['sas_warm_pages']);
             if ($mode === 'progress') {
                 $soon = true;
+            } elseif ($pullNow) {
+                @unlink($pullFile);
             }
             break;
         }
@@ -218,26 +310,21 @@ function portal_warm_run($pdo, $config)
         }
         break;
     }
-    $cardTid = 0;
-    $cardAge = -1;
-    foreach ($tenants as $tid) {
-        $GLOBALS['portal_warm_tenant_id'] = $tid;
-        $path = function_exists('sas_cards_inventory_cache_path') ? sas_cards_inventory_cache_path() : '';
-        $age = ($path !== '' && is_file($path)) ? (time() - (int) @filemtime($path)) : 999999;
-        if ($age > $cardAge) {
-            $cardAge = $age;
-            $cardTid = $tid;
-        }
-    }
-    if ($cardTid > 0 && $cardAge >= 600 && !$soon) {
-        try {
-            portal_warm_cards($pdo, $config, $cardTid);
-        } catch (Exception $e) {
-        }
-    }
     unset($GLOBALS['portal_warm_tenant_id'], $GLOBALS['sas_warm_pages']);
     @file_put_contents(portal_warm_cache_dir() . '/warm_beat.txt', (string) time());
     return $soon;
+}
+
+function sas_sync_request_now($tenantId)
+{
+    $tenantId = (int) $tenantId;
+    if ($tenantId <= 0) {
+        return false;
+    }
+    $path = portal_warm_cache_dir() . '/sas_pull_now_t' . $tenantId . '.txt';
+    @file_put_contents($path, (string) time());
+    portal_warm_remember_base();
+    return portal_warm_schedule(0);
 }
 
 function portal_warm_kick()

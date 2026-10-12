@@ -294,9 +294,21 @@ if (!empty($_SESSION['admin_logged_in']) && function_exists('tenant_apply_wa_tem
     } catch (Exception $e) {
     }
 }
+if (!empty($_SESSION['admin_logged_in']) && function_exists('user_apply_wa_pack_to_config')) {
+    try {
+        user_apply_wa_pack_to_config($config, $pdo);
+    } catch (Exception $e) {
+    }
+}
 if (!empty($_SESSION['admin_logged_in']) && function_exists('tenant_attach_owner_data_if_empty')) {
     try {
         tenant_attach_owner_data_if_empty($pdo, $config);
+    } catch (Exception $e) {
+    }
+}
+if (!empty($_SESSION['admin_logged_in']) && function_exists('subscriber_restore_foreign_ledger')) {
+    try {
+        subscriber_restore_foreign_ledger($pdo);
     } catch (Exception $e) {
     }
 }

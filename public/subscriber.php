@@ -766,7 +766,7 @@ $isActiveSub = !empty($activeSubCard);
     <a class="btn ghost" href="<?php echo e((!empty($subscriber['sas_username']) && function_exists('sas_user_url')) ? sas_user_url($subscriber['sas_username']) : 'subscribers.php'); ?>"><?php echo e($lang === 'en' ? 'Back' : 'رجوع'); ?></a>
     <a class="btn" href="subscriber.php?id=<?php echo (int) $id; ?>&edit=1"><?php echo e(t('edit')); ?></a>
     <a class="btn secondary" href="activate.php?subscriber_id=<?php echo (int) $id; ?>"><?php echo e(t('activate')); ?></a>
-    <form method="post" style="display:inline" onsubmit="return confirm(<?php echo json_encode(t('confirm_give_test')); ?>);">
+    <form method="post" style="display:inline" onsubmit="if(!confirm(<?php echo json_encode(t('confirm_give_test')); ?>))return false;if(window.appBusySet)window.appBusySet({force:true});return true;">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="action" value="give_test">
         <button class="btn ghost" type="submit"><?php echo e(t('give_test')); ?></button>

@@ -106,8 +106,9 @@ if (isset($_GET['ajax']) && ($_GET['ajax'] === 'profiles' || $_GET['ajax'] === '
         && $_SESSION['sas_managers_ui']) {
         sas_json_out(true, '', array('managers' => $_SESSION['sas_managers_ui']));
     }
-    if ($ajaxKind === 'cards' && !$forceCards && function_exists('sas_cards_inventory_load_persisted')) {
-        $invHit = sas_cards_inventory_load_persisted(0);
+    if ($ajaxKind === 'cards' && function_exists('sas_cards_inventory_load_persisted')) {
+        $cardMaxAge = $forceCards ? 8 : 0;
+        $invHit = sas_cards_inventory_load_persisted($cardMaxAge);
         if ($invHit && isset($invHit['groups']) && is_array($invHit['groups']) && function_exists('sas_unused_pins_from_inventory_cache')) {
             $pins = sas_unused_pins_from_inventory_cache();
             sas_json_out(true, '', array(
@@ -2316,26 +2317,38 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   border-radius: 6px; padding: 10px 14px; font-weight: 700; margin: 0 0 12px;
   background: #fff7ed; color: #9a3412; border: 1px solid #fdba74;
 }
-.sas-toast {
-  position: fixed;
-  top: 18px;
-  left: 50%;
-  transform: translateX(-50%);
+#sasSyncOkBanner {
+  position: fixed !important;
+  top: 72px !important;
+  bottom: auto !important;
+  left: auto !important;
+  right: auto !important;
+  inset-inline-start: 16px !important;
+  inset-inline-end: auto !important;
+  transform: none;
   z-index: 10050;
-  background: #166534;
-  color: #fff;
-  padding: 14px 22px;
-  border-radius: 12px;
-  font-weight: 800;
-  font-size: 15px;
-  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.28);
   cursor: pointer;
-  max-width: min(520px, calc(100% - 24px));
-  text-align: center;
-  line-height: 1.45;
+  max-height: 140px;
+  overflow: hidden;
+  width: min(340px, calc(100vw - 24px));
+  transition: opacity .8s ease, transform .8s ease;
 }
-.sas-toast.is-ok { background: #166534; }
-.sas-toast.is-error { background: #b91c1c; }
+#sasSyncOkBanner.is-out {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+@media (max-width: 640px) {
+  #sasSyncOkBanner {
+    top: auto !important;
+    bottom: 16px !important;
+    inset-inline-start: 12px !important;
+    inset-inline-end: 12px !important;
+    width: auto !important;
+  }
+  #sasSyncOkBanner.is-out { transform: translateY(8px); }
+}
+#sasSyncOkBanner.is-ok { background: #146c43; color: #fff; }
+#sasSyncOkBanner.is-error { background: #9b2331; color: #fff; }
 .sas-radius-page #subsTable tbody tr:nth-child(even) td { background: #fcfcfc; }
 .sas-radius-page #subsTable tbody tr:hover td { background: #eef7fb; }
 .sas-radius-page #subsTable tbody tr.row-status-expired td { background: #fff8dc !important; }
@@ -2569,9 +2582,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     <?php else: ?>
         <div class="sas-offline-banner" id="sasOfflineBanner" role="status" hidden></div>
     <?php endif; ?>
-    <div class="sas-toast" id="sasSyncOkBanner" role="status" hidden>
-        <?php echo e($lang === 'en' ? 'Synced successfully' : 'تمت المزامنة بنجاح'); ?>
-    </div>
+    <div class="sas-toast" id="sasSyncOkBanner" role="status" hidden></div>
     <?php if ($pageError !== ''): ?>
         <p style="color:#dd4b39;font-weight:700"><?php echo e($pageError); ?></p>
     <?php endif; ?>
@@ -3537,15 +3548,18 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     }
     if (action === 'give_test' && one) {
       if (!window.confirm(confirmTest)) return;
+      if (window.appBusySet) window.appBusySet({ force: true });
       postSas('give_test', { id: one.id }).then(function (d) {
+        if (window.appBusyDone) window.appBusyDone();
         if (d && d.ok) {
           rememberActFlash((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Test given' : 'تم إعطاء التست'); ?>, 'ok');
           window.location.reload();
         } else {
-          alert((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Request failed' : 'فشل الطلب'); ?>);
+          showAppToast((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Request failed' : 'فشل الطلب'); ?>, 'error');
         }
       }).catch(function () {
-        alert(<?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>);
+        if (window.appBusyDone) window.appBusyDone();
+        showAppToast(<?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>, 'error');
       });
       return;
     }
@@ -3694,19 +3708,24 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 
   function showAppToast(msg, kind) {
     var b = document.getElementById('sasSyncOkBanner');
-    var text = String(msg || '');
-    if (!b) {
-      if (text) window.alert(text);
-      return;
-    }
+    var text = String(msg || '').replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '');
+    if (text.length > 280) text = text.slice(0, 277) + '…';
+    if (!b || !text) return;
+    if (b.parentNode !== document.body) document.body.appendChild(b);
     b.textContent = text;
-    b.classList.remove('is-error', 'is-ok');
-    b.classList.add(kind === 'error' ? 'is-error' : 'is-ok');
+    b.classList.remove('is-error', 'is-ok', 'sas-toast-success', 'sas-toast-error', 'is-out');
+    var ok = kind !== 'error';
+    b.classList.add(ok ? 'is-ok' : 'is-error');
+    b.classList.add(ok ? 'sas-toast-success' : 'sas-toast-error');
     b.hidden = false;
     if (window._sasToastT) clearTimeout(window._sasToastT);
     window._sasToastT = setTimeout(function () {
-      b.hidden = true;
-    }, kind === 'error' ? 8000 : 5000);
+      b.classList.add('is-out');
+      window._sasToastT = setTimeout(function () {
+        b.hidden = true;
+        b.classList.remove('is-out');
+      }, 800);
+    }, 3000);
   }
   function rememberActFlash(msg, kind) {
     try {
@@ -4022,15 +4041,13 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     }).catch(function () {
       renderCards(cardsForProfile(row.profileId, row.profileName));
     });
-    if (Array.isArray(cardsCacheAll) && cardsCacheAll.length) {
-      softRefreshCards(false).then(function () { refreshActCardsIfOpen(); });
-    } else {
+    if (!Array.isArray(cardsCacheAll) || !cardsCacheAll.length) {
       if (hint) {
         hint.className = 'sas-sync-note';
         hint.textContent = <?php echo json_encode($lang === 'en' ? 'Loading unused cards…' : 'جاري جلب الكروت الشاغرة…'); ?>;
       }
-      prefetchCards(false).then(function () { refreshActCardsIfOpen(); });
     }
+    softRefreshCards(true).then(function () { refreshActCardsIfOpen(); });
     syncActWa();
   }
   function paintRowStatus(tr, d) {
@@ -5481,7 +5498,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 
   setTimeout(function () { loadProfiles(); }, 8000);
   setInterval(function () {
-    softRefreshCards(false).then(function () { refreshActCardsIfOpen(); });
+    softRefreshCards(true).then(function () { refreshActCardsIfOpen(); });
   }, 90000);
   if (window.location.hash) {
     var hid = window.location.hash.replace(/^#/, '');

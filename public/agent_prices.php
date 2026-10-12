@@ -851,6 +851,10 @@ if ($homeId > 0 && function_exists('agent_card_prices_list')) {
         if ($hv <= 0) {
             $hv = (float) $hp0['wholesale_price'];
         }
+        $subSell = isset($hp0['subagent_price']) ? (float) $hp0['subagent_price'] : 0;
+        if ($subSell > $hv) {
+            $hv = $subSell;
+        }
         if ($hv > 0) {
             $mySell[$hk] = $hv;
         }
@@ -1136,7 +1140,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $saveKey = strtolower($profileName);
                     $knownW = 0;
                     $mineSave = isset($mySell[$saveKey]) ? (float) $mySell[$saveKey] : 0;
-                    if (!$viewerIsTop && $mineSave > 0) {
+                    if ($mineSave > 0) {
                         $knownW = $mineSave;
                     } elseif (isset($baseByName[$saveKey]) && (float) $baseByName[$saveKey] > 0) {
                         $knownW = (float) $baseByName[$saveKey];
@@ -1732,9 +1736,10 @@ foreach ($picker as $downOpt) {
                         $floorR = $mine;
                     }
                     $knownW = 0;
+                    $savedMine = isset($mySell[$key]) ? (float) $mySell[$key] : 0;
                     if (!$isSelf) {
-                        if (!$viewerIsTop && $mine > 0) {
-                            $knownW = $mine;
+                        if ($savedMine > 0) {
+                            $knownW = $savedMine;
                         } elseif (!empty($line['from_plan']) && $sasPrice > 0) {
                             $knownW = $sasPrice;
                         } elseif (isset($baseByName[$key]) && (float) $baseByName[$key] > 0) {

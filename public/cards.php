@@ -124,6 +124,37 @@ $xferTargetIds = array();
 foreach ($xferTargets as $ag) {
     $xferTargetIds[(int) $ag['id']] = true;
 }
+$pageParentId = 0;
+$pageParentRow = null;
+if (function_exists('account_user_boss_id')) {
+    $pageParentId = (int) account_user_boss_id($pdo, $meId);
+    if (($pageParentId <= 0 || $pageParentId === (int) $homeId) && (int) $homeId > 0 && (int) $homeId !== $meId) {
+        $pageParentId = (int) account_user_boss_id($pdo, (int) $homeId);
+    }
+}
+if ($pageParentId === $meId || $pageParentId === (int) $homeId) {
+    $pageParentId = 0;
+}
+if ($pageParentId > 0 && function_exists('get_admin_user')) {
+    $pageParentRow = get_admin_user($pdo, $pageParentId);
+}
+if (!$pageParentRow) {
+    $pageParentId = 0;
+}
+$cardsHasDown = false;
+if (function_exists('account_has_card_downline')) {
+    $cardsHasDown = account_has_card_downline($pdo, $meId);
+    if (!$cardsHasDown && (int) $homeId > 0 && (int) $homeId !== $meId) {
+        $cardsHasDown = account_has_card_downline($pdo, (int) $homeId);
+    }
+}
+$pageParentLabel = '';
+if ($pageParentRow) {
+    $pageParentLabel = trim((string) $pageParentRow['display_name']);
+    if ($pageParentLabel === '') {
+        $pageParentLabel = (string) $pageParentRow['username'];
+    }
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
     if (!verify_csrf(post('csrf'))) {
@@ -200,9 +231,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
             redirect('cards.php#card-transfer');
         }
         if ($fromAgentId === $homeId) {
-            $okTo = !empty($xferTargetIds[$toAgentId]);
+            $okTo = !empty($xferTargetIds[$toAgentId]) || ($pageParentId > 0 && $toAgentId === $pageParentId);
         } else {
-            $okTo = ($toAgentId === $homeId);
+            $upId = $homeId;
+            foreach ($xferTargets as $agUp) {
+                if ((int) $agUp['id'] !== $fromAgentId) {
+                    continue;
+                }
+                $upId = isset($agUp['reports_to_user_id']) ? (int) $agUp['reports_to_user_id'] : 0;
+                if ($upId <= 0) {
+                    $upId = $homeId;
+                }
+                break;
+            }
+            $okTo = ($toAgentId === $homeId || $toAgentId === $upId);
         }
         $toRow = function_exists('get_admin_user') ? get_admin_user($pdo, $toAgentId) : null;
         if ($fromAgentId !== $homeId && $toAgentId === $homeId && !$toRow && $homeRow) {
@@ -368,6 +410,53 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
             card_sas_stock_forget();
         }
         if ($ok) {
+            $notifyOn = post('notify_parent') === '1';
+            $parentId = 0;
+            $fromUser = null;
+            if ($fromAgentId === $homeId && $pageParentId > 0 && $toAgentId === $pageParentId) {
+                $fromUser = $homeRow;
+                $parentId = $pageParentId;
+            } elseif ($fromAgentId > 0 && $fromAgentId !== $homeId) {
+                try {
+                    $stFrom = $pdo->prepare('SELECT id, username, display_name, role, tenant_id, phone, reports_to_user_id FROM admin_users WHERE id = :id LIMIT 1');
+                    $stFrom->execute(array(':id' => $fromAgentId));
+                    $fromUser = $stFrom->fetch();
+                    $parentId = $fromUser ? (int) $fromUser['reports_to_user_id'] : 0;
+                } catch (Exception $eFrom) {
+                    $parentId = 0;
+                }
+                if ($parentId <= 0) {
+                    $parentId = $homeId;
+                }
+            }
+            $waNote = '';
+            if ($notifyOn && $parentId > 0 && $toAgentId === $parentId && function_exists('whatsapp_send')) {
+                $parentPhone = '';
+                try {
+                    $stPh = $pdo->prepare('SELECT phone FROM admin_users WHERE id = :id LIMIT 1');
+                    $stPh->execute(array(':id' => $parentId));
+                    $parentPhone = trim((string) $stPh->fetchColumn());
+                } catch (Exception $ePh) {
+                    $parentPhone = '';
+                }
+                $unitNote = $agentPrice > 0 ? $agentPrice : $wholesale;
+                $sumNote = $unitNote * (int) $qty;
+                $noteMsg = 'تم استرجاع كارتات فئة ' . $profileName
+                    . ' بسعر ' . number_format((float) $unitNote, 0, '.', ',')
+                    . ' بمجموع ' . number_format((float) $sumNote, 0, '.', ',');
+                $waSess = ($fromUser && function_exists('whatsapp_session_for_user_row'))
+                    ? whatsapp_session_for_user_row($fromUser, $pdo)
+                    : null;
+                if ($parentPhone === '') {
+                    $waNote = $isEn ? ' Notice was not sent — the agent above has no phone.' : ' الإشعار ما انرسل — الوكيل الأعلى بلا هاتف.';
+                } else {
+                    $waRes = whatsapp_send($config, $parentPhone, $noteMsg, 'card_return', $waSess);
+                    $waOk = is_array($waRes) && !empty($waRes['success']);
+                    if (!$waOk) {
+                        $waNote = $isEn ? ' The return is saved. The WhatsApp notice was not sent.' : ' الاسترجاع تم. إشعار الواتساب ما انرسل.';
+                    }
+                }
+            }
             if (function_exists('activity_log')) {
                 $toName = $toRow && !empty($toRow['display_name']) ? $toRow['display_name'] : ('#' . $toAgentId);
                 $fromRowLog = ($fromAgentId === $homeId) ? $homeRow : (function_exists('get_admin_user') ? get_admin_user($pdo, $fromAgentId) : null);
@@ -382,7 +471,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
                     $note
                 );
             }
-            flash('success', $isEn ? 'Transferred — the cards moved in SAS' : 'تم التحويل — الكروت انتقلت بالساس');
+            $returnedUp = ($fromAgentId !== $homeId && $toAgentId === $parentId && $parentId > 0);
+            flash('success', $returnedUp
+                ? ($isEn ? 'This category was returned.' : 'تم استرجاع هذه الفئة.') . $waNote
+                : ($isEn ? 'Transferred — the cards moved in SAS' : 'تم التحويل — الكروت انتقلت بالساس'));
         } else {
             flash('error', card_transfer_error_message($code, $lang));
         }
@@ -714,6 +806,96 @@ function cards_page_xfer_stock($homeId, $groups, $xferTargets, $sasMap)
     return $xferStock;
 }
 
+function cards_page_with_all_categories($pdo, $groups)
+{
+    if (!is_array($groups)) {
+        $groups = array();
+    }
+    $byName = array();
+    $byPid = array();
+    foreach ($groups as $i => $g) {
+        if (!is_array($g)) {
+            continue;
+        }
+        $name = isset($g['name']) ? strtolower(trim((string) $g['name'])) : '';
+        $pid = isset($g['profile_id']) ? (int) $g['profile_id'] : 0;
+        if ($name !== '') {
+            $byName[$name] = $i;
+        }
+        if ($pid > 0) {
+            $byPid[$pid] = $i;
+        }
+    }
+    $catalog = array();
+    if (function_exists('sas_cards_inventory_load_persisted')) {
+        $inv = sas_cards_inventory_load_persisted(0);
+        if ($inv && !empty($inv['groups']) && is_array($inv['groups'])) {
+            foreach ($inv['groups'] as $g) {
+                if (is_array($g)) {
+                    $catalog[] = $g;
+                }
+            }
+        }
+    }
+    if (!empty($_SESSION['sas_profiles_ui']) && is_array($_SESSION['sas_profiles_ui'])) {
+        foreach ($_SESSION['sas_profiles_ui'] as $pr) {
+            if (!is_array($pr)) {
+                continue;
+            }
+            $catalog[] = array(
+                'name' => isset($pr['name']) ? (string) $pr['name'] : '',
+                'profile_id' => isset($pr['id']) ? (int) $pr['id'] : 0,
+                'unused' => 0,
+            );
+        }
+    }
+    if ($pdo) {
+        try {
+            $st = $pdo->query('SELECT name, sas_profile_id FROM service_plans ORDER BY sort_order ASC, id ASC');
+            if ($st) {
+                foreach ($st->fetchAll() as $p) {
+                    $catalog[] = array(
+                        'name' => isset($p['name']) ? (string) $p['name'] : '',
+                        'profile_id' => isset($p['sas_profile_id']) ? (int) $p['sas_profile_id'] : 0,
+                        'unused' => 0,
+                    );
+                }
+            }
+        } catch (Exception $e) {
+        }
+    }
+    foreach ($catalog as $g) {
+        $name = isset($g['name']) ? trim((string) $g['name']) : '';
+        $key = strtolower($name);
+        $pid = isset($g['profile_id']) ? (int) $g['profile_id'] : 0;
+        if ($key === '' && $pid <= 0) {
+            continue;
+        }
+        if (($key !== '' && isset($byName[$key])) || ($pid > 0 && isset($byPid[$pid]))) {
+            continue;
+        }
+        $unused = isset($g['unused']) ? (int) $g['unused'] : 0;
+        $row = array(
+            'name' => $name !== '' ? $name : ('#' . $pid),
+            'profile_id' => $pid,
+            'total' => isset($g['total']) ? (int) $g['total'] : $unused,
+            'used' => isset($g['used']) ? (int) $g['used'] : 0,
+            'unused' => $unused,
+            'cards' => array(),
+        );
+        $groups[] = $row;
+        $idx = count($groups) - 1;
+        $rowKey = strtolower($row['name']);
+        if ($rowKey !== '') {
+            $byName[$rowKey] = $idx;
+        }
+        if ($pid > 0) {
+            $byPid[$pid] = $idx;
+        }
+    }
+    return $groups;
+}
+
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'inventory') {
     header('Content-Type: application/json; charset=utf-8');
     $force = (isset($_GET['refresh']) && $_GET['refresh'] === '1');
@@ -733,7 +915,10 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'inventory') {
     }
     try {
         list($groups, $fromCache) = cards_page_fetch_inventory($config, $force);
-        $out['groups'] = cards_filter_groups_scope($pdo, cards_enrich_used_by_links($pdo, $groups));
+        $out['groups'] = cards_page_with_all_categories(
+            $pdo,
+            cards_filter_groups_scope($pdo, cards_enrich_used_by_links($pdo, $groups))
+        );
         $out['from_cache'] = $fromCache;
     } catch (Exception $e) {
         $out['ok'] = false;
@@ -806,6 +991,7 @@ if ($sasReady) {
         }
     }
 }
+$groups = cards_page_with_all_categories($pdo, $groups);
 
 $cardsPinCount = 0;
 foreach ($groups as $gPin) {
@@ -1119,10 +1305,12 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 <div class="cards-page">
     <?php if ($canTransfer): ?>
     <div class="xfer-panel" id="card-transfer">
-        <h2><?php echo e($isEn ? 'Card transfer' : 'تحويل كروت'); ?></h2>
-        <p class="meta" style="margin:0 0 10px"><?php echo e($isEn
-            ? 'Available is the unused count in SAS. Transfer changes the card owner there.'
-            : 'المتوفر هو الشاغر بالساس، والتحويل يغيّر مالك الكروت هناك.'); ?></p>
+        <h2><?php echo e($cardsHasDown
+            ? ($isEn ? 'Card transfer' : 'تحويل كروت')
+            : ($isEn ? 'Return cards' : 'ارجاع الكروت')); ?></h2>
+        <p class="meta" style="margin:0 0 10px"><?php echo e($cardsHasDown
+            ? ($isEn ? 'Transfer a category to an agent under you.' : 'تحويل فئة لوكيل تحته.')
+            : ($isEn ? 'Each category goes back on its own to the parent of this page.' : 'كل فئة ترجع لحالها لأب هذه الصفحة.')); ?></p>
         <?php
         $xferOpt = function ($ag) use ($isEn) {
             $opt = trim((string) $ag['display_name']) !== '' ? $ag['display_name'] : $ag['username'];
@@ -1139,16 +1327,24 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
                 <div>
                     <label><?php echo e($isEn ? 'From' : 'من'); ?></label>
                     <select name="from_agent_id" id="xferFrom" required>
-                        <option value="<?php echo (int) $homeId; ?>"><?php echo e($homeLabel); ?></option>
-                        <?php foreach ($xferTargets as $ag): ?>
-                            <option value="<?php echo (int) $ag['id']; ?>"><?php echo e($xferOpt($ag)); ?></option>
+                        <option value="<?php echo (int) $homeId; ?>" data-up="<?php echo (int) $pageParentId; ?>"><?php echo e($homeLabel); ?></option>
+                        <?php foreach ($xferTargets as $ag):
+                            $upId = isset($ag['reports_to_user_id']) ? (int) $ag['reports_to_user_id'] : 0;
+                            if ($upId <= 0) {
+                                $upId = (int) $homeId;
+                            }
+                            ?>
+                            <option value="<?php echo (int) $ag['id']; ?>" data-up="<?php echo (int) $upId; ?>"><?php echo e($xferOpt($ag)); ?></option>
                         <?php endforeach; ?>
                     </select>
                 </div>
                 <div>
-                    <label><?php echo e($isEn ? 'To agent' : 'إلى'); ?></label>
+                    <label><?php echo e($cardsHasDown ? ($isEn ? 'To' : 'إلى') : ($isEn ? 'To the parent' : 'إلى الأب')); ?></label>
                     <select name="to_agent_id" id="xferTo" required>
                         <option value=""><?php echo e($isEn ? '— select —' : '— اختر الوكيل —'); ?></option>
+                        <?php if ($pageParentId > 0): ?>
+                        <option value="<?php echo (int) $pageParentId; ?>" data-parent="1"><?php echo e($pageParentLabel); ?></option>
+                        <?php endif; ?>
                         <option value="<?php echo (int) $homeId; ?>" data-home="1"><?php echo e($homeLabel); ?></option>
                         <?php foreach ($xferTargets as $ag): ?>
                             <option value="<?php echo (int) $ag['id']; ?>" data-down="1"><?php echo e($xferOpt($ag)); ?></option>
@@ -1179,6 +1375,11 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
                     <input name="note" maxlength="255" placeholder="<?php echo e($isEn ? 'Note…' : 'ملاحظات…'); ?>">
                 </div>
             </div>
+            <label class="toggle" style="display:flex;align-items:center;gap:8px;margin-top:12px">
+                <input type="checkbox" name="notify_parent" value="1" checked>
+                <span class="toggle-ui" aria-hidden="true"></span>
+                <span><?php echo e($isEn ? 'WhatsApp notice to the agent above' : 'إشعار واتساب للوكيل الأعلى'); ?></span>
+            </label>
             <div class="actions" style="margin-top:12px">
                 <button class="btn" type="submit" id="xferSubmit"><?php echo e($isEn ? 'Record transfer' : 'تسجيل التحويل'); ?></button>
             </div>
@@ -1193,6 +1394,8 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
           var qty = document.getElementById('xferQty');
           var availEl = document.getElementById('xferAvail');
           var homeId = <?php echo (int) $homeId; ?>;
+          var pageParent = <?php echo (int) $pageParentId; ?>;
+          var hasDown = <?php echo $cardsHasDown ? 'true' : 'false'; ?>;
           var stock = <?php echo json_encode($xferStock); ?> || {};
           var stockPending = <?php echo $xferStockPending ? 'true' : 'false'; ?>;
           var availWord = <?php echo json_encode($isEn ? 'Available: ' : 'المتوفر: '); ?>;
@@ -1207,23 +1410,49 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
           }
           function paintEnds() {
             var pulling = String(fromSel.value) !== String(homeId);
+            var fromOpt = fromSel.options[fromSel.selectedIndex];
+            var upId = fromOpt ? (fromOpt.getAttribute('data-up') || '') : '';
+            if (!hasDown && pageParent > 0) upId = String(pageParent);
+            if (!upId) upId = String(homeId);
             var i;
+            var hasUp = false;
+            for (i = 0; i < toSel.options.length; i++) {
+              if (String(toSel.options[i].value) === String(upId)) hasUp = true;
+            }
+            if (!hasUp) upId = hasDown ? String(homeId) : String(pageParent || homeId);
             for (i = 0; i < toSel.options.length; i++) {
               var opt = toSel.options[i];
               if (!opt.value) {
-                opt.hidden = pulling;
+                opt.hidden = pulling || !hasDown;
                 continue;
               }
-              if (opt.getAttribute('data-home') === '1') {
-                opt.hidden = !pulling;
+              if (!hasDown) {
+                opt.hidden = String(opt.value) !== String(pageParent);
+              } else if (pulling) {
+                opt.hidden = String(opt.value) !== String(upId);
+              } else if (opt.getAttribute('data-parent') === '1') {
+                opt.hidden = false;
+              } else if (opt.getAttribute('data-home') === '1') {
+                opt.hidden = true;
               } else if (opt.getAttribute('data-down') === '1') {
-                opt.hidden = pulling || String(opt.value) === String(fromSel.value);
+                opt.hidden = String(opt.value) === String(fromSel.value);
               }
             }
-            if (pulling) {
-              toSel.value = String(homeId);
-            } else if (toSel.value === String(homeId) || toSel.value === String(fromSel.value)) {
+            if (!hasDown && pageParent > 0) {
+              toSel.value = String(pageParent);
+            } else if (pulling) {
+              toSel.value = String(upId);
+            } else if (toSel.value === String(homeId) || toSel.value === String(fromSel.value) || toSel.value === String(upId)) {
               toSel.value = '';
+            }
+            var notifyBox = form.querySelector('input[name="notify_parent"]');
+            var notifyLabel = notifyBox ? notifyBox.closest('label') : null;
+            if (notifyLabel) notifyLabel.style.display = (!hasDown || pulling) ? '' : 'none';
+            var submitBtn = document.getElementById('xferSubmit');
+            if (submitBtn) {
+              submitBtn.textContent = (!hasDown || pulling)
+                ? <?php echo json_encode($isEn ? 'Return this category' : 'ارجاع هذه الفئة'); ?>
+                : <?php echo json_encode($isEn ? 'Record transfer' : 'تسجيل التحويل'); ?>;
             }
           }
           function paintQty() {

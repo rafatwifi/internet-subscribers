@@ -6,6 +6,9 @@ require_login();
 require_perm('subscriptions');
 
 $movScope = function_exists('subscriber_agent_scope_sql') ? subscriber_agent_scope_sql('s') : '';
+if (function_exists('subscriber_ledger_owner_sql')) {
+    $movScope .= subscriber_ledger_owner_sql('s');
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf(post('csrf'))) {

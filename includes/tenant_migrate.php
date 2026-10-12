@@ -197,9 +197,64 @@ function tenant_migrate_owner_to_agency($pdo, $config, $username, $displayName, 
 }
 
 /**
- * إذا دخلت وكالة فاضية (مثل wifi@office) والبيانات لسه على الشركة 1،
- * انقل الصفوف إليها بدون حذف مشترك أو دين.
+ * مشترك انسحب لوكالة جديدة وهو أصلاً لوكيل بوكالة ثانية، وما ربطه كاش الساس مالتها.
+ * نرجّع صفّه لوكالته. ما نمسح اشتراك ولا فاتورة.
  */
+function subscriber_restore_foreign_ledger($pdo)
+{
+    if (!$pdo) {
+        return 0;
+    }
+    $dir = dirname(__DIR__) . '/storage/cache';
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0775, true);
+    }
+    $stamp = $dir . '/ledger_home_stamp.txt';
+    $age = is_file($stamp) ? (time() - (int) @filemtime($stamp)) : 999999;
+    if ($age < 90) {
+        return 0;
+    }
+    @touch($stamp);
+    try {
+        $sql = 'UPDATE subscribers s
+            INNER JOIN admin_users au ON au.id = s.agent_user_id AND au.tenant_id <> s.tenant_id
+            INNER JOIN (
+                SELECT tenant_id, MIN(created_at) AS born
+                FROM admin_users
+                WHERE role = "admin"
+                GROUP BY tenant_id
+            ) owner ON owner.tenant_id = s.tenant_id AND s.created_at < owner.born
+            LEFT JOIN sas_users_cache here
+              ON here.local_subscriber_id = s.id AND here.tenant_id = s.tenant_id
+            SET s.tenant_id = au.tenant_id
+            WHERE here.local_subscriber_id IS NULL';
+        $n = $pdo->exec($sql);
+        return (int) $n;
+    } catch (Exception $e) {
+        return 0;
+    }
+}
+
+/** وكالة جديدة ما تعرض حركات أقدم من حسابها إلا إذا المشترك إلها بالكاش أو بوكيلها */
+function subscriber_ledger_owner_sql($alias = 's')
+{
+    $a = preg_replace('/[^a-zA-Z0-9_]/', '', (string) $alias);
+    if ($a === '') {
+        $a = 's';
+    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tid <= 1) {
+        return '';
+    }
+    return ' AND ('
+        . 'EXISTS (SELECT 1 FROM sas_users_cache hc WHERE hc.tenant_id = ' . $tid
+        . ' AND hc.local_subscriber_id = ' . $a . '.id)'
+        . ' OR ' . $a . '.agent_user_id IN (SELECT id FROM admin_users WHERE tenant_id = ' . $tid . ')'
+        . ' OR ' . $a . '.created_at >= IFNULL((SELECT MIN(created_at) FROM admin_users WHERE tenant_id = ' . $tid
+        . ' AND role = "admin"), "1970-01-01")'
+        . ')';
+}
+
 function tenant_attach_owner_data_if_empty($pdo, $config)
 {
     if (empty($_SESSION['admin_logged_in']) || !function_exists('current_tenant_id')) {

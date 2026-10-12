@@ -176,56 +176,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         $allowedKeys = array_keys($catalog);
-        $payload = array(
-            'wa_templates' => $catalog,
-        );
-
-        // Mirror legacy tpl_* for schedule/settings pages that still edit those fields.
-        $legacyMap = function_exists('wa_legacy_tpl_field_map') ? wa_legacy_tpl_field_map() : array();
-        foreach ($legacyMap as $legacyField => $tplKey) {
-            if (isset($catalog[$tplKey]['body'])) {
-                $payload[$legacyField] = (string) $catalog[$tplKey]['body'];
-            }
-        }
-        // Case bindings from form (optional)
-        foreach ($caseKeys as $ck) {
-            $v = trim((string) post('wa_case_' . $ck, ''));
-            $v = function_exists('wa_sanitize_tpl_key') ? wa_sanitize_tpl_key($v) : $v;
-            if ($v !== '') {
-                $payload['wa_case_' . $ck] = $v;
-            }
-        }
-
-        $tidTpl = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
-        if ($tidTpl > 1 && function_exists('tenant_wa_templates_save')) {
-            $okSave = tenant_wa_templates_save($pdo, $catalog, $tidTpl);
-            if ($okSave && function_exists('tenant_apply_wa_templates_to_config')) {
-                tenant_apply_wa_templates_to_config($config, $pdo);
-            }
-            flash($okSave ? 'success' : 'error', $okSave ? t('saved') : ($lang === 'en' ? 'Save failed' : 'فشل الحفظ'));
-            redirect('messages.php?mode=templates');
-        }
-
-        foreach ($legacyMap as $tKey => $field) {
-            $payload[$field] = isset($catalog[$tKey]['body']) ? $catalog[$tKey]['body'] : '';
-        }
-
+        $cases = array();
         foreach ($caseKeys as $ck) {
             $v = trim((string) post('wa_case_' . $ck, ''));
             if ($v === '' || $v === '__none__') {
-                $payload['wa_case_' . $ck] = '__none__';
+                $cases[$ck] = '__none__';
                 continue;
             }
             $v = function_exists('wa_sanitize_tpl_key') ? wa_sanitize_tpl_key($v) : $v;
             if (!in_array($v, $allowedKeys, true)) {
-                $payload['wa_case_' . $ck] = '__none__';
+                $cases[$ck] = '__none__';
                 continue;
             }
-            $payload['wa_case_' . $ck] = $v;
+            $cases[$ck] = $v;
         }
 
-        $okSave = settings_save($payload);
-        flash($okSave ? 'success' : 'error', $okSave ? t('saved') : 'Cannot write settings.json');
+        $okSave = function_exists('user_wa_pack_save') && user_wa_pack_save($pdo, array(
+            'templates' => $catalog,
+            'cases' => $cases,
+        ));
+        if ($okSave && function_exists('user_apply_wa_pack_to_config')) {
+            user_apply_wa_pack_to_config($config, $pdo);
+        }
+        flash(
+            $okSave ? 'success' : 'error',
+            $okSave
+                ? ($lang === 'en' ? 'Saved for this account only' : 'تم الحفظ لهذا الحساب فقط')
+                : ($lang === 'en' ? 'Save failed' : 'فشل الحفظ')
+        );
         redirect('messages.php?mode=templates');
     }
 
@@ -242,6 +220,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $filter = $filterPost;
     $msgTpl = (string) post('msg', '');
     $ids = isset($_POST['ids']) && is_array($_POST['ids']) ? $_POST['ids'] : array();
+
+    if ($action === 'save_msg') {
+        $keyMap = array(
+            'debt' => 'debt_remind',
+            'days' => 'days_left',
+            'overdue' => 'unpaid_overdue',
+        );
+        $tKey = isset($keyMap[$filterPost]) ? $keyMap[$filterPost] : 'unpaid_overdue';
+        $pack = function_exists('user_wa_pack_get') ? user_wa_pack_get($pdo) : array();
+        if (empty($pack['templates']) || !is_array($pack['templates'])) {
+            $pack['templates'] = array();
+            if (!empty($config['wa_templates']) && is_array($config['wa_templates'])) {
+                foreach ($config['wa_templates'] as $k => $row) {
+                    if (!is_array($row)) {
+                        continue;
+                    }
+                    $pack['templates'][$k] = array(
+                        'label' => isset($row['label']) ? (string) $row['label'] : (string) $k,
+                        'body' => isset($row['body']) ? (string) $row['body'] : '',
+                    );
+                }
+            }
+        }
+        if (empty($pack['cases']) || !is_array($pack['cases'])) {
+            $pack['cases'] = (isset($config['wa_cases']) && is_array($config['wa_cases'])) ? $config['wa_cases'] : array();
+        }
+        if (!isset($pack['templates'][$tKey]) || !is_array($pack['templates'][$tKey])) {
+            $pack['templates'][$tKey] = array('label' => $tKey, 'body' => '');
+        }
+        $pack['templates'][$tKey]['body'] = $msgTpl;
+        $okSave = function_exists('user_wa_pack_save') && user_wa_pack_save($pdo, $pack);
+        flash(
+            $okSave ? 'success' : 'error',
+            $okSave
+                ? ($lang === 'en' ? 'Message text saved for this account' : 'تم حفظ نص الرسالة لهذا الحساب')
+                : ($lang === 'en' ? 'Save failed' : 'فشل الحفظ')
+        );
+        $back = 'messages.php?mode=send&filter=' . rawurlencode($filterPost);
+        if ($filterPost === 'days') {
+            $back .= '&days=' . (int) post('days', '7');
+        }
+        redirect($back);
+    }
 
     if ($action === 'retry_log') {
         $logId = (int) post('log_id', '0');
@@ -1036,6 +1057,8 @@ $sendFilters = array(
     $catalog = isset($config['wa_templates']) && is_array($config['wa_templates'])
         ? $config['wa_templates']
         : (function_exists('wa_build_templates_catalog') ? wa_build_templates_catalog($sTpl, $lang) : array());
+    $packView = function_exists('user_wa_pack_get') ? user_wa_pack_get($pdo) : array();
+    $packCases = (isset($packView['cases']) && is_array($packView['cases'])) ? $packView['cases'] : null;
     $caseLabels = function_exists('wa_case_labels') ? wa_case_labels($lang) : array();
     $sysGroups = function_exists('wa_system_cases') ? wa_system_cases($lang) : array();
     $caseIssues = isset($config['wa_case_issues']) && is_array($config['wa_case_issues']) ? $config['wa_case_issues'] : array();
@@ -1044,7 +1067,11 @@ $sendFilters = array(
     foreach ($sysGroups as $g) {
         foreach ($g['cases'] as $c) {
             $ck = $c['key'];
-            $stored = isset($sTpl['wa_case_' . $ck]) ? trim((string) $sTpl['wa_case_' . $ck]) : null;
+            if (is_array($packCases) && array_key_exists($ck, $packCases)) {
+                $stored = trim((string) $packCases[$ck]);
+            } else {
+                $stored = isset($sTpl['wa_case_' . $ck]) ? trim((string) $sTpl['wa_case_' . $ck]) : null;
+            }
             $issue = null;
             if ($stored === '__none__') {
                 $issue = 'unassigned';
@@ -1088,7 +1115,7 @@ $sendFilters = array(
     <p class="meta tpl-lead">
         <?php echo e($isEnMsg
             ? 'Edit templates below, add or delete freely, then assign each system action to a template.'
-            : 'عدّل القوالب بالأسفل، أضف أو احذف كما تريد، ثم خصّص كل حركة بالنظام لقالب.'); ?>
+            : 'عدّل القوالب بالأسفل، أضف أو احذف كما تريد، ثم خصّص كل حركة بالنظام لقالب. الحفظ لهذا الحساب فقط.'); ?>
     </p>
 
     <?php if ($warnMsgs): ?>
@@ -1124,7 +1151,11 @@ $sendFilters = array(
                                 <?php
                                 $caseKey = $c['key'];
                                 $caseLab = $c['label'];
-                                $stored = isset($sTpl['wa_case_' . $caseKey]) ? trim((string) $sTpl['wa_case_' . $caseKey]) : null;
+                                if (is_array($packCases) && array_key_exists($caseKey, $packCases)) {
+                                    $stored = trim((string) $packCases[$caseKey]);
+                                } else {
+                                    $stored = isset($sTpl['wa_case_' . $caseKey]) ? trim((string) $sTpl['wa_case_' . $caseKey]) : null;
+                                }
                                 if ($stored === '__none__') {
                                     $sel = '__none__';
                                 } elseif ($stored !== null && $stored !== '' && isset($catalog[$stored])) {
@@ -1226,7 +1257,7 @@ $sendFilters = array(
 
         <div class="tpl-save is-sticky">
             <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
-            <span class="meta"><?php echo e($isEnMsg ? 'Saves templates and action mapping together.' : 'يحفظ القوالب وتخصيص الحركات معاً.'); ?></span>
+            <span class="meta"><?php echo e($isEnMsg ? 'Saves text and choices for this account only.' : 'يحفظ النص والاختيارات لهذا الحساب فقط.'); ?></span>
         </div>
     </form>
 
@@ -1762,6 +1793,8 @@ $sendFilters = array(
             </label>
             <textarea name="msg" rows="4" class="msg-textarea-compact" id="bulkMsgText"><?php echo e($previewMsg); ?></textarea>
             <div class="msg-compose-bar">
+                <button class="btn sm" type="submit"
+                    onclick="document.getElementById('bulkMsgAction').value='save_msg';"><?php echo e($isEnMsg ? 'Save text' : 'حفظ النص'); ?></button>
                 <button class="btn ghost sm" type="button" id="selAllMsg"><?php echo e(t('select_all')); ?></button>
                 <button class="btn ghost sm" type="button" id="selNoneMsg"><?php echo e(t('select_none')); ?></button>
                 <button class="btn secondary sm" type="submit" id="sendBulkBtn"

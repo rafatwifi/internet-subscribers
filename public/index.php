@@ -378,25 +378,12 @@ $dashVersion = function_exists('app_version') ? (string) app_version() : '1.4.0'
 $capitalMonth = $profitMonth + $totalDebt;
 // نفس مشتركي جدول الإيجار، بدون تكرار صفوف الساس
 $tidRent = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+$rentOwn = function_exists('subscriber_ledger_owner_sql') ? subscriber_ledger_owner_sql('s') : '';
 $rentalFrom = ' FROM subscribers s
      WHERE (s.rental_enabled = 1 OR s.rental_enabled = "1")
        AND s.rental_device_id IS NOT NULL
        AND TRIM(s.rental_device_id) <> ""
-       AND (
-         s.tenant_id = ' . $tidRent . '
-         OR EXISTS (
-            SELECT 1 FROM sas_users_cache c2
-            WHERE c2.tenant_id = ' . $tidRent . '
-              AND (
-                c2.local_subscriber_id = s.id
-                OR (
-                    s.sas_username IS NOT NULL AND s.sas_username <> ""
-                    AND CONVERT(c2.username USING utf8mb4) COLLATE utf8mb4_unicode_ci
-                        = CONVERT(s.sas_username USING utf8mb4) COLLATE utf8mb4_unicode_ci
-                )
-              )
-         )
-       )' . $agentScope;
+       AND s.tenant_id = ' . $tidRent . $rentOwn . $agentScope;
 $rentalTotalCount = 0;
 $rentalActiveCount = 0;
 $rentalProbe = 0;
@@ -634,7 +621,7 @@ if ($isPlatformDash && function_exists('platform_admin_dashboard_stats')):
   width: 100%;
 }
 @media (max-width: 1100px) { .sas-dash .sas-boxes { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 560px) { .sas-dash .sas-boxes { grid-template-columns: 1fr; gap: 11px; } }
+@media (max-width: 900px) { .sas-dash .sas-boxes { grid-template-columns: 1fr; gap: 11px; } }
 .sas-box {
   --c1: #0f766e; --c2: #115e59; --ink: #ffffff;
   position: relative; overflow: hidden; display: flex; flex-direction: column; justify-content: space-between;
@@ -689,7 +676,7 @@ endif;
   width: 100%;
 }
 @media (max-width: 1100px) { .sas-dash .sas-boxes { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 560px) {
+@media (max-width: 900px) {
   .sas-dash .sas-boxes { grid-template-columns: 1fr; gap: 11px; }
 }
 body:has(.sas-dash) .container {

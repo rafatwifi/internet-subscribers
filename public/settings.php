@@ -803,11 +803,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     } catch (Exception $eMark) {
                     }
                 }
+                if ($okT) {
+                    if (!function_exists('sas_sync_request_now')) {
+                        $warmFile = dirname(__DIR__) . '/includes/portal_warm.php';
+                        if (is_file($warmFile)) {
+                            require_once $warmFile;
+                        }
+                    }
+                    if (function_exists('sas_sync_request_now')) {
+                        sas_sync_request_now($tidSas);
+                    }
+                }
                 if ($accAction === 'test' || post('sas_test') === '1') {
-                    flash($okT ? 'success' : 'error', $msgT);
+                    flash($okT ? 'success' : 'error', $okT
+                        ? (($lang === 'en' ? 'Connected — subscribers are downloading' : 'متصل — المشتركين يبدون ينزلون') . ($msgT !== '' ? ': ' . $msgT : ''))
+                        : $msgT);
                 } else {
                     flash($okT ? 'success' : 'error', $okT
-                        ? (($lang === 'en' ? 'Saved — connected' : 'تم الحفظ — متصل') . ($msgT !== '' ? ': ' . $msgT : ''))
+                        ? (($lang === 'en' ? 'Saved — connected. Subscribers are downloading' : 'تم الحفظ — متصل. المشتركين يبدون ينزلون') . ($msgT !== '' ? ': ' . $msgT : ''))
                         : (($lang === 'en' ? 'Saved but not connected: ' : 'تم الحفظ لكن غير متصل: ') . $msgT));
                 }
             } else {
@@ -864,8 +877,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (function_exists('sas_mark_connection')) {
                     sas_mark_connection($pdo, $config, $okT, $msgT, $tidSas);
                 }
+                if ($okT) {
+                    if (!function_exists('sas_sync_request_now')) {
+                        $warmFile = dirname(__DIR__) . '/includes/portal_warm.php';
+                        if (is_file($warmFile)) {
+                            require_once $warmFile;
+                        }
+                    }
+                    if (function_exists('sas_sync_request_now')) {
+                        sas_sync_request_now($tidSas);
+                    }
+                }
                 flash($okT ? 'success' : 'error', $okT
-                    ? (($lang === 'en' ? 'Saved — logged in' : 'تم الحفظ — تم تسجيل الدخول') . ($msgT !== '' ? ': ' . $msgT : ''))
+                    ? (($lang === 'en' ? 'Saved — connected. Subscribers are downloading' : 'تم الحفظ — متصل. المشتركين يبدون ينزلون') . ($msgT !== '' ? ': ' . $msgT : ''))
                     : (($lang === 'en' ? 'Saved but not connected: ' : 'تم الحفظ لكن غير متصل: ') . $msgT));
             } else {
                 flash('error', $lang === 'en' ? 'Save failed' : 'فشل الحفظ');

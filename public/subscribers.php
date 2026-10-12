@@ -1321,6 +1321,21 @@ function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
   background: rgba(255,255,255,0.10);
   color: #fff;
 }
+@media (max-width: 760px) {
+  .subs-sas-bar { align-items: stretch; }
+  .subs-left-tools {
+    flex: 1 1 100%;
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+  }
+  .subs-left-tools > .btn {
+    flex: 1 1 calc(50% - 8px);
+    justify-content: center;
+    min-height: 40px;
+  }
+  .subs-tool-icons { margin-inline-start: auto; }
+}
 .ops-item.is-on {
   background: rgba(37, 99, 235, 0.10);
   font-weight: 800;
@@ -2067,6 +2082,7 @@ window.DEBT_ENTRY = {
     }
     if (action === 'give_test' && one) {
       if (!window.confirm(confirmTest)) return;
+      if (window.appBusySet) window.appBusySet({ force: true });
       var ft = document.getElementById('opsGiveTestForm');
       var tid = ft && ft.querySelector('input[name="id"]');
       if (tid) tid.value = one.id;

@@ -44,7 +44,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     <link rel="icon" href="assets/favicon.png?v=2" type="image/png" sizes="32x32">
     <?php endif; ?>
     <link rel="apple-touch-icon" href="<?php echo e($brandIcon !== '' ? $brandIcon : 'assets/apple-touch-icon.png?v=2'); ?>">
-    <link rel="stylesheet" href="assets/style.css?v=ui14">
+    <link rel="stylesheet" href="assets/style.css?v=ui15">
     <style>
         <?php if ($bgMode === 'image' && $bgUrl !== ''): ?>
         body.app-bg-image {
@@ -540,14 +540,15 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
                 transition: stroke-dashoffset .22s ease;
             }
             .sas-toast {
-                position: fixed; top: 16px; inset-inline-end: 16px; z-index: 100001;
+                position: fixed; top: 72px; inset-inline-start: 16px; inset-inline-end: auto; z-index: 100001;
                 width: min(340px, calc(100vw - 24px));
                 padding: 12px 14px; border-radius: 14px; font-weight: 700; text-align: start;
                 box-shadow: 0 14px 40px rgba(15, 23, 42, .22);
                 display: flex; align-items: flex-start; gap: 10px;
                 opacity: 1; transform: translateY(0);
-                transition: opacity .45s ease, transform .45s ease;
+                transition: opacity .8s ease, transform .8s ease;
             }
+            .sas-toast[hidden] { display: none !important; }
             .sas-toast.is-out { opacity: 0; transform: translateY(-10px); }
             .sas-toast-text { flex: 1; line-height: 1.45; }
             .sas-toast-x {
@@ -996,13 +997,13 @@ body.nav-pending .nav-progress { display: block; }
   window.addEventListener('pagehide', finishRing);
   window.addEventListener('pageshow', hideRing);
 
-  var toast = document.querySelector('.sas-toast');
+  var toast = document.querySelector('.sas-toast:not(#sasSyncOkBanner)');
   if (toast) {
     var closeToast = function () {
       toast.classList.add('is-out');
       setTimeout(function () {
         if (toast.parentNode) toast.parentNode.removeChild(toast);
-      }, 480);
+      }, 820);
     };
     var xbtn = toast.querySelector('.sas-toast-x');
     if (xbtn) xbtn.addEventListener('click', closeToast);

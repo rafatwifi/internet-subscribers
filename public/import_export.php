@@ -165,11 +165,20 @@ if ($canReports && isset($_GET['export']) && $_GET['export'] === 'report') {
 $pageTitle = $lang === 'en' ? 'Import & Export' : 'استيراد وتصدير';
 render_header($pageTitle, 'import_export', $lang === 'en' ? 'CSV import/export tools' : 'أدوات الاستيراد والتصدير');
 ?>
-<div class="panel" style="margin-bottom:12px">
-    <a class="btn" href="import_map.php"><?php echo e($lang === 'en' ? 'Import Excel with column mapping' : 'استيراد Excel مع مطابقة الأعمدة'); ?></a>
-    <a class="btn ghost" href="profit_report.php"><?php echo e($lang === 'en' ? 'Profit report' : 'تقرير الأرباح'); ?></a>
-    <a class="btn secondary" href="import_export.php?export=agents"><?php echo e($lang === 'en' ? 'Export agents pack' : 'تصدير حزمة الوكلاء'); ?></a>
-    <a class="btn ghost" href="backup.php"><?php echo e($lang === 'en' ? 'Backup & Google Drive' : 'نسخ وكوكل درايف'); ?></a>
+<style>
+.ie-tools { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.ie-tools .btn { gap: 8px; }
+.ie-tools svg { flex: 0 0 auto; }
+@media (max-width: 760px) {
+  .ie-tools { flex-direction: column; align-items: stretch; }
+  .ie-tools .btn { width: 100%; justify-content: flex-start; height: 48px; }
+}
+</style>
+<div class="panel ie-tools">
+    <a class="btn" href="import_map.php"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M11 4h2v8h4l-5 5-5-5h4V4zm-6 14h14v2H5v-2z"/></svg><?php echo e($lang === 'en' ? 'Import Excel with column mapping' : 'استيراد Excel مع مطابقة الأعمدة'); ?></a>
+    <a class="btn ghost" href="profit_report.php"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M4 19h16v2H4v-2zm2-4h3v4H6v-4zm5-6h3v10h-3V9zm5-4h3v14h-3V5z"/></svg><?php echo e($lang === 'en' ? 'Profit report' : 'تقرير الأرباح'); ?></a>
+    <a class="btn secondary" href="import_export.php?export=agents"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M11 16h2V8h4l-5-5-5 5h4v8zm-6 2h14v2H5v-2z"/></svg><?php echo e($lang === 'en' ? 'Export agents pack' : 'تصدير حزمة الوكلاء'); ?></a>
+    <a class="btn ghost" href="backup.php"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M6 18c-2.2 0-4-1.8-4-4 0-1.8 1.2-3.4 2.9-3.8C5.4 7.4 7.6 5.5 10.2 5.5c2.2 0 4.1 1.2 5.1 3 2.4.2 4.2 2.2 4.2 4.6 0 2.5-2 4.6-4.5 4.6H6z"/></svg><?php echo e($lang === 'en' ? 'Backup & Google Drive' : 'نسخ وكوكل درايف'); ?></a>
 </div>
 <div class="panel">
     <h2><?php echo e($lang === 'en' ? 'Import subscribers' : 'استيراد مشتركين'); ?></h2>

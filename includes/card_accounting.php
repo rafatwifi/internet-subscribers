@@ -1269,7 +1269,7 @@ function account_package_rates($pdo, $userId, $serviceName, $sasProfileId = 0)
 {
     static $cache = array();
     $userId = (int) $userId;
-    $out = array('found' => false, 'cost' => 0.0, 'retail' => 0.0);
+    $out = array('found' => false, 'cost' => 0.0, 'retail' => 0.0, 'subagent' => 0.0);
     if ($userId <= 0 || !$pdo) {
         return $out;
     }
@@ -1292,13 +1292,15 @@ function account_package_rates($pdo, $userId, $serviceName, $sasProfileId = 0)
             continue;
         }
         $cost = isset($row['agent_price']) ? (float) $row['agent_price'] : 0;
-        if ($cost <= 0) {
+        $subagent = isset($row['subagent_price']) ? (float) $row['subagent_price'] : 0;
+        if ($cost <= 0 && $subagent <= 0) {
             continue;
         }
         $retail = isset($row['retail_price']) ? (float) $row['retail_price'] : 0;
         $out['found'] = true;
         $out['cost'] = $cost;
-        $out['retail'] = $retail > 0 ? $retail : $cost;
+        $out['subagent'] = $subagent;
+        $out['retail'] = $retail > 0 ? $retail : ($cost > 0 ? $cost : $subagent);
         return $out;
     }
     return $out;
@@ -1324,6 +1326,135 @@ function account_viewer_parent_id($pdo)
         $cached = 0;
     }
     return $cached;
+}
+
+function account_manager_parent_user_id($pdo, $sasName, $selfId)
+{
+    $sasName = strtolower(trim((string) $sasName));
+    $selfId = (int) $selfId;
+    if ($sasName === '' || !$pdo) {
+        return 0;
+    }
+    $dir = dirname(__DIR__) . '/storage/cache';
+    $files = glob($dir . '/sas_managers_t*.json');
+    if (!is_array($files)) {
+        return 0;
+    }
+    $mgrId = 0;
+    $ownerTid = 0;
+    foreach ($files as $file) {
+        if (!preg_match('/sas_managers_t(\d+)\.json$/', basename($file), $m)) {
+            continue;
+        }
+        $list = json_decode((string) @file_get_contents($file), true);
+        if (!is_array($list)) {
+            continue;
+        }
+        foreach ($list as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            $name = isset($item['name']) ? strtolower(trim((string) $item['name'])) : '';
+            if ($name !== $sasName) {
+                continue;
+            }
+            $mgrId = isset($item['id']) ? (int) $item['id'] : 0;
+            $ownerTid = (int) $m[1];
+            break 2;
+        }
+    }
+    if ($mgrId <= 0 || $ownerTid <= 0) {
+        return 0;
+    }
+    $memo = $dir . '/mgr_parent_' . $mgrId . '.txt';
+    $parentSas = 0;
+    if (is_file($memo) && (time() - (int) @filemtime($memo)) < 3600) {
+        $parentSas = (int) trim((string) @file_get_contents($memo));
+    }
+    if ($parentSas <= 0 && function_exists('sas_make_connector_for_tenant')) {
+        global $config;
+        $api = sas_make_connector_for_tenant($pdo, isset($config) ? $config : array(), $ownerTid);
+        if ($api && method_exists($api, 'getManagerById')) {
+            $one = $api->getManagerById($mgrId);
+            if (is_array($one) && isset($one['parent_id'])) {
+                $parentSas = (int) $one['parent_id'];
+            }
+            if ($parentSas > 0) {
+                @file_put_contents($memo, (string) $parentSas);
+            }
+        }
+    }
+    if ($parentSas <= 0) {
+        return 0;
+    }
+    try {
+        $st = $pdo->prepare('SELECT id FROM admin_users WHERE sas_manager_id = :m AND id <> :me AND role IN ("agent","admin","group_manager") ORDER BY id ASC LIMIT 1');
+        $st->execute(array(':m' => $parentSas, ':me' => $selfId));
+        return (int) $st->fetchColumn();
+    } catch (Exception $e) {
+        return 0;
+    }
+}
+
+function account_user_boss_id($pdo, $userId)
+{
+    $userId = (int) $userId;
+    if ($userId <= 0 || !$pdo) {
+        return 0;
+    }
+    $row = null;
+    try {
+        $st = $pdo->prepare('SELECT id, username, display_name, role, tenant_id, reports_to_user_id, created_by_user_id FROM admin_users WHERE id = :id LIMIT 1');
+        $st->execute(array(':id' => $userId));
+        $row = $st->fetch();
+    } catch (Exception $e) {
+        $row = null;
+    }
+    if (!$row) {
+        return 0;
+    }
+    $rep = isset($row['reports_to_user_id']) ? (int) $row['reports_to_user_id'] : 0;
+    if ($rep > 0 && $rep !== $userId) {
+        return $rep;
+    }
+    $sasName = '';
+    $tid = isset($row['tenant_id']) ? (int) $row['tenant_id'] : 0;
+    if ($tid > 1) {
+        try {
+            $stT = $pdo->prepare('SELECT sas_username FROM tenants WHERE id = :id LIMIT 1');
+            $stT->execute(array(':id' => $tid));
+            $sasName = trim((string) $stT->fetchColumn());
+        } catch (Exception $e) {
+            $sasName = '';
+        }
+    }
+    if ($sasName === '' && !empty($row['username'])) {
+        $sasName = trim((string) $row['username']);
+    }
+    $boss = account_manager_parent_user_id($pdo, $sasName, $userId);
+    if ($boss > 0 && $boss !== $userId) {
+        return $boss;
+    }
+    $by = isset($row['created_by_user_id']) ? (int) $row['created_by_user_id'] : 0;
+    if ($by > 0 && $by !== $userId) {
+        return $by;
+    }
+    return 0;
+}
+
+function account_has_card_downline($pdo, $userId)
+{
+    $userId = (int) $userId;
+    if ($userId <= 0 || !$pdo) {
+        return false;
+    }
+    try {
+        $st = $pdo->prepare('SELECT id FROM admin_users WHERE reports_to_user_id = :id AND role IN ("agent","group_manager","admin") LIMIT 1');
+        $st->execute(array(':id' => $userId));
+        return (int) $st->fetchColumn() > 0;
+    } catch (Exception $e) {
+        return false;
+    }
 }
 
 function account_sas_list_price($name, $sasId)
@@ -1621,9 +1752,20 @@ function account_viewer_package_retail($pdo, $name, $sasId, $monthly)
     return $monthly;
 }
 
+/** أعلى سعر محفوظ للحساب: سعر الوكيل أو سعر البيع للوكيل الفرعي. */
+function account_priced_charge($rates)
+{
+    $cost = (is_array($rates) && isset($rates['cost'])) ? (float) $rates['cost'] : 0;
+    $sub = (is_array($rates) && isset($rates['subagent'])) ? (float) $rates['subagent'] : 0;
+    if ($sub > $cost) {
+        return $sub;
+    }
+    return $cost > 0 ? $cost : 0;
+}
+
 /**
  * سعر الباقة للحساب الحالي.
- * الأدمن اللي عنده وكلاء يشوف سعر باقاته.
+ * الأدمن اللي عنده وكلاء يشوف سعره المحفوظ إذا كان أعلى من سعر الساس.
  * الوكيل أو الوكالة اللي أبوها مسعّرها: سعر الأب. إذا ما مسعّر: سعر الساس.
  */
 function account_viewer_package_price($pdo, $name, $sasId, $catalogCost)
@@ -1640,6 +1782,11 @@ function account_viewer_package_price($pdo, $name, $sasId, $catalogCost)
     $ownIsList = ($own > 0 && abs($own - $catalogCost) < 0.5);
 
     if ($parentId > 0) {
+        $parentRates = account_package_rates($pdo, $parentId, $name, (int) $sasId);
+        $charge = account_priced_charge($parentRates);
+        if ($charge > 0 && $charge > $own + 0.5) {
+            return $charge;
+        }
         if ($own > 0) {
             return $own;
         }
@@ -1651,6 +1798,10 @@ function account_viewer_package_price($pdo, $name, $sasId, $catalogCost)
     }
 
     if ($role !== 'agent' && $role !== 'group_manager' && account_viewer_has_downline($pdo, $uid)) {
+        $mine = account_priced_charge($rates);
+        if ($mine > $catalogCost + 0.5) {
+            return $mine;
+        }
         return $catalogCost;
     }
 

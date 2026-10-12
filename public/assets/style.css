@@ -278,7 +278,7 @@ body.ltr .main-top-tools .header-search { order: 3; margin: 0; max-width: 300px;
   border-radius: 10px;
   box-shadow: 0 12px 28px rgba(15, 23, 42, .12);
   padding: 6px;
-  z-index: 80;
+  z-index: 100002;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -1231,17 +1231,36 @@ th {
 
 .sas-toast {
   position: fixed;
-  top: 16px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 90;
-  min-width: 240px;
-  max-width: min(520px, 92vw);
-  padding: 14px 18px;
+  top: 72px;
+  inset-inline-start: 16px;
+  inset-inline-end: auto;
+  left: auto;
+  right: auto;
+  transform: none;
+  z-index: 100001;
+  width: min(340px, calc(100vw - 24px));
+  padding: 12px 14px;
   border-radius: 14px;
-  font-weight: 800;
-  text-align: center;
+  font-weight: 700;
+  text-align: start;
   box-shadow: 0 14px 40px rgba(15, 23, 42, .22);
+  opacity: 1;
+  transition: opacity .8s ease, transform .8s ease;
+}
+.sas-toast[hidden] { display: none !important; }
+.sas-toast.is-out {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+@media (max-width: 640px) {
+  .sas-toast {
+    top: auto;
+    bottom: 16px;
+    inset-inline-start: 12px;
+    inset-inline-end: 12px;
+    width: auto;
+  }
+  .sas-toast.is-out { transform: translateY(8px); }
 }
 .sas-toast-success { background: #146c43; color: #fff; }
 .sas-toast-error { background: #9b2331; color: #fff; }
@@ -2129,6 +2148,8 @@ body.ltr .side-links a.active {
   align-items: center;
   gap: 10px;
   padding: 10px 16px;
+  position: relative;
+  z-index: 100002;
 }
 .main-title {
   font-size: 18px;

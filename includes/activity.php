@@ -250,8 +250,10 @@ function fetch_activity_filtered($pdo, $limit, $q, $scope)
     $logPlatform = function_exists('is_super_admin_user') && is_super_admin_user();
     if (!$logPlatform && function_exists('current_tenant_id')) {
         $logTid = (int) current_tenant_id();
-        $where .= ' AND (s.tenant_id = ' . $logTid
-            . ' OR a.actor_user_id IN (SELECT id FROM admin_users WHERE tenant_id = ' . $logTid . '))';
+        $where .= ' AND ('
+            . '(a.subscriber_id IS NOT NULL AND a.subscriber_id > 0 AND s.tenant_id = ' . $logTid . ')'
+            . ' OR ((a.subscriber_id IS NULL OR a.subscriber_id = 0) AND a.actor_user_id IN (SELECT id FROM admin_users WHERE tenant_id = ' . $logTid . '))'
+            . ')';
         if (function_exists('is_accountant_user') && is_accountant_user() && function_exists('current_admin')) {
             $logMe = current_admin();
             $logId = $logMe ? (int) $logMe['id'] : 0;

@@ -441,6 +441,20 @@ function ensure_subscriber_agent_column($pdo)
 
 function default_admin_user_id($pdo)
 {
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+    if ($tid > 0) {
+        try {
+            $st = $pdo->prepare(
+                "SELECT id FROM admin_users WHERE role = 'admin' AND is_active = 1 AND tenant_id = :t ORDER BY id ASC LIMIT 1"
+            );
+            $st->execute(array(':t' => $tid));
+            $id = (int) $st->fetchColumn();
+            if ($id > 0) {
+                return $id;
+            }
+        } catch (Exception $e) {
+        }
+    }
     try {
         return (int) $pdo->query(
             "SELECT id FROM admin_users WHERE role = 'admin' AND is_active = 1 ORDER BY id ASC LIMIT 1"

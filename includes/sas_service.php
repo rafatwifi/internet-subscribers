@@ -180,6 +180,51 @@ function sas_response_is_error($res)
         || isset($res['__auth_error']) || isset($res['__curl_error']) || isset($res['__decrypt_error']);
 }
 
+function sas_extend_fail_text($res)
+{
+    if (!is_array($res)) {
+        return '';
+    }
+    $bits = array();
+    foreach (array('message', 'msg', 'error_message', 'reason', 'error') as $k) {
+        if (!isset($res[$k]) || $res[$k] === '' || $res[$k] === null) {
+            continue;
+        }
+        $bits[] = is_string($res[$k]) ? $res[$k] : json_encode($res[$k]);
+    }
+    if (isset($res['data']) && is_array($res['data'])) {
+        foreach (array('message', 'msg', 'error', 'reason') as $k) {
+            if (!empty($res['data'][$k])) {
+                $bits[] = is_string($res['data'][$k]) ? $res['data'][$k] : json_encode($res['data'][$k]);
+            }
+        }
+    }
+    if (isset($res['errors'])) {
+        if (is_string($res['errors']) && $res['errors'] !== '') {
+            $bits[] = $res['errors'];
+        } elseif (is_array($res['errors'])) {
+            foreach ($res['errors'] as $err) {
+                if (is_string($err) && $err !== '') {
+                    $bits[] = $err;
+                } elseif (is_array($err) && !empty($err['message'])) {
+                    $bits[] = (string) $err['message'];
+                }
+            }
+        }
+    }
+    $text = trim(implode(' — ', $bits));
+    $cut = strpos($text, 'extend method=');
+    if ($cut !== false) {
+        $text = trim(substr($text, 0, $cut), " \t\n\r\0\x0B—-");
+    }
+    if (function_exists('mb_substr')) {
+        $text = mb_substr($text, 0, 240, 'UTF-8');
+    } else {
+        $text = substr($text, 0, 240);
+    }
+    return trim($text);
+}
+
 function sas_response_message($res)
 {
     if (!is_array($res)) {
@@ -722,9 +767,17 @@ function sas_extend_one_day($pdo, $config, $username, $sendWa = true)
             }
         }
         if ($afterTs <= $beforeTs) {
-            $hint = function_exists('sas_response_message') ? sas_response_message(is_array($testRes) ? $testRes : array()) : '';
+            $hint = function_exists('sas_extend_fail_text')
+                ? sas_extend_fail_text(is_array($testRes) ? $testRes : array())
+                : '';
+            if ($hint === '' && function_exists('sas_response_message')) {
+                $hint = trim(sas_response_message(is_array($testRes) ? $testRes : array()));
+            }
             $st = (is_array($testRes) && isset($testRes['status'])) ? (int) $testRes['status'] : 0;
             $low = strtolower($hint);
+            if ($hint !== '' && $hint !== 'خطأ SAS غير معروف' && $hint !== 'استجابة SAS غير متوقعة') {
+                return array(false, $hint);
+            }
             if ($ptsOk && $ptsVal !== null && (float) $ptsVal < 1) {
                 return array(false, 'النقاط التشجيعية غير كافية (المتوفر: ' . $ptsVal . ')');
             }
@@ -735,7 +788,7 @@ function sas_extend_one_day($pdo, $config, $username, $sendWa = true)
                 $have = ($ptsOk && $ptsVal !== null) ? (' (المتوفر: ' . $ptsVal . ')') : '';
                 return array(false, 'النقاط التشجيعية غير كافية أو التمديد غير مسموح' . $have);
             }
-            return array(false, 'SAS: التمديد ما تغيّر تاريخ الانتهاء' . ($hint !== '' ? (' — ' . $hint) : ''));
+            return array(false, 'SAS: التمديد ما تغيّر تاريخ الانتهاء');
         }
         if (function_exists('sas_cache_upsert_row') && is_array($after) && !empty($after)) {
             if (empty($after['username'])) {

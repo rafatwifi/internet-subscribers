@@ -6,6 +6,12 @@ require_once __DIR__ . '/../includes/settings_tabs.php';
 require_login();
 require_perm('plans');
 $plansLeaf = function_exists('account_viewer_is_leaf_child') && account_viewer_is_leaf_child($pdo);
+$plansMe = function_exists('current_admin') ? current_admin() : null;
+$plansParent = ($plansMe && function_exists('account_user_boss_id')) ? (int) account_user_boss_id($pdo, (int) $plansMe['id']) : 0;
+if ($plansParent <= 0 && function_exists('account_viewer_parent_id')) {
+    $plansParent = (int) account_viewer_parent_id($pdo);
+}
+$plansCanToggle = ($plansParent <= 0);
 
 function plans_priced_user_id($pdo)
 {
@@ -167,6 +173,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = post('action');
 
     if ($action === 'create' || $action === 'update') {
+        if ($action === 'update' && !$plansCanToggle) {
+            flash('error', 'تعديل الباقة من الحساب اللي ما عنده أب');
+            redirect('plans.php');
+        }
         $id = (int) post('id', '0');
         $name = trim((string) post('name', ''));
         $cost = (float) post('cost_price', '0');
@@ -292,6 +302,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if ($action === 'toggle') {
+        if (!$plansCanToggle) {
+            flash('error', 'التفعيل والإيقاف من الحساب الأعلى');
+            redirect('plans.php');
+        }
         $id = (int) post('id', '0');
         $pdo->prepare('UPDATE service_plans SET is_active = IF(is_active=1,0,1) WHERE id = :id')
             ->execute(array(':id' => $id));
@@ -299,7 +313,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('plans.php');
     }
 
+    if ($action === 'import_sas') {
+        flash('error', 'الاستيراد من الساس مو متاح');
+        redirect('plans.php');
+    }
+
     if ($action === 'delete') {
+        if (!$plansCanToggle) {
+            flash('error', 'حذف الباقة من الحساب اللي ما عنده أب');
+            redirect('plans.php');
+        }
         $id = (int) post('id', '0');
         if ($id <= 0) {
             flash('error', 'باقة غير موجودة');
@@ -307,76 +330,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         $pdo->prepare('DELETE FROM service_plans WHERE id = :id')->execute(array(':id' => $id));
         flash('success', 'تم حذف الباقة');
-        redirect('plans.php');
-    }
-
-    if ($action === 'import_sas') {
-        if (!function_exists('sas_is_ready') || !sas_is_ready($config)) {
-            flash('error', 'فعّل ربط SAS من الإعدادات أولاً');
-            redirect('plans.php');
-        }
-        $api = function_exists('sas_page_connector') ? sas_page_connector($config) : null;
-        if (!$api) {
-            flash('error', 'ماكو اتصال بالساس — تعذر استيراد الباقات');
-            redirect('plans.php');
-        }
-        unset($_SESSION['sas_profiles_ui'], $_SESSION['sas_profiles_ui_at']);
-        $profiles = function_exists('sas_profiles_for_ui') ? sas_profiles_for_ui($api) : array();
-        if (!$profiles) {
-            flash('error', 'ماكو باقات راجعة من الساس');
-            redirect('plans.php');
-        }
-        $existing = $pdo->query('SELECT id, name, sas_profile_id FROM service_plans')->fetchAll();
-        $byPid = array();
-        $byName = array();
-        foreach ($existing as $er) {
-            if (!empty($er['sas_profile_id'])) {
-                $byPid[(int) $er['sas_profile_id']] = (int) $er['id'];
-            }
-            $nm = function_exists('mb_strtolower')
-                ? mb_strtolower(trim((string) $er['name']), 'UTF-8')
-                : strtolower(trim((string) $er['name']));
-            if ($nm !== '') {
-                $byName[$nm] = (int) $er['id'];
-            }
-        }
-        $added = 0;
-        $linked = 0;
-        $sort = $nextSortPreview = 1;
-        try {
-            $maxSort = (int) $pdo->query('SELECT COALESCE(MAX(sort_order),0) FROM service_plans')->fetchColumn();
-            $sort = $maxSort + 1;
-        } catch (Exception $e) {
-        }
-        $ins = $pdo->prepare(
-            'INSERT INTO service_plans (name, monthly_price, cost_price, sas_profile_id, sort_order, is_active)
-             VALUES (:name, 0, 0, :pid, :sort, 1)'
-        );
-        $link = $pdo->prepare('UPDATE service_plans SET sas_profile_id = :pid WHERE id = :id AND (sas_profile_id IS NULL OR sas_profile_id = 0)');
-        foreach ($profiles as $pr) {
-            $pid = isset($pr['id']) ? (int) $pr['id'] : 0;
-            $pname = isset($pr['name']) ? trim((string) $pr['name']) : '';
-            if ($pid <= 0 || $pname === '') {
-                continue;
-            }
-            if (isset($byPid[$pid])) {
-                continue;
-            }
-            $key = function_exists('mb_strtolower') ? mb_strtolower($pname, 'UTF-8') : strtolower($pname);
-            if (isset($byName[$key])) {
-                $link->execute(array(':pid' => $pid, ':id' => $byName[$key]));
-                $byPid[$pid] = $byName[$key];
-                $linked++;
-                continue;
-            }
-            $ins->execute(array(':name' => $pname, ':pid' => $pid, ':sort' => $sort));
-            $newId = (int) $pdo->lastInsertId();
-            $byPid[$pid] = $newId;
-            $byName[$key] = $newId;
-            $sort++;
-            $added++;
-        }
-        flash('success', 'تم الاستيراد من الساس: ' . $added . ' باقة جديدة' . ($linked > 0 ? ('، وربط ' . $linked) : '') . '.');
         redirect('plans.php');
     }
 }
@@ -388,58 +341,6 @@ if ($editId > 0) {
     if (!$editPlan) {
         flash('error', 'الباقة غير موجودة');
         redirect('plans.php');
-    }
-}
-
-if ($plansLeaf && $_SERVER['REQUEST_METHOD'] !== 'POST') {
-    $pullProfiles = array();
-    if (isset($_SESSION['sas_profiles_ui']) && is_array($_SESSION['sas_profiles_ui'])) {
-        $pullProfiles = $_SESSION['sas_profiles_ui'];
-    }
-    if (!$pullProfiles && function_exists('sas_is_ready') && sas_is_ready($config) && function_exists('sas_page_connector') && function_exists('sas_profiles_for_ui')) {
-        $pullApi = sas_page_connector($config);
-        if ($pullApi) {
-            $pullProfiles = sas_profiles_for_ui($pullApi);
-        }
-    }
-    if ($pullProfiles) {
-        try {
-            $existingPull = $pdo->query('SELECT id, name, sas_profile_id FROM service_plans')->fetchAll();
-            $byPidPull = array();
-            $byNamePull = array();
-            foreach ($existingPull as $er) {
-                if (!empty($er['sas_profile_id'])) {
-                    $byPidPull[(int) $er['sas_profile_id']] = (int) $er['id'];
-                }
-                $nmPull = function_exists('mb_strtolower')
-                    ? mb_strtolower(trim((string) $er['name']), 'UTF-8')
-                    : strtolower(trim((string) $er['name']));
-                if ($nmPull !== '') {
-                    $byNamePull[$nmPull] = (int) $er['id'];
-                }
-            }
-            $sortPull = (int) $pdo->query('SELECT COALESCE(MAX(sort_order),0) FROM service_plans')->fetchColumn() + 1;
-            $insPull = $pdo->prepare(
-                'INSERT INTO service_plans (name, monthly_price, cost_price, sas_profile_id, sort_order, is_active)
-                 VALUES (:name, 0, 0, :pid, :sort, 1)'
-            );
-            foreach ($pullProfiles as $pr) {
-                $pidPull = isset($pr['id']) ? (int) $pr['id'] : 0;
-                $pnamePull = isset($pr['name']) ? trim((string) $pr['name']) : '';
-                if ($pidPull <= 0 || $pnamePull === '' || isset($byPidPull[$pidPull])) {
-                    continue;
-                }
-                $keyPull = function_exists('mb_strtolower') ? mb_strtolower($pnamePull, 'UTF-8') : strtolower($pnamePull);
-                if (isset($byNamePull[$keyPull])) {
-                    continue;
-                }
-                $insPull->execute(array(':name' => $pnamePull, ':pid' => $pidPull, ':sort' => $sortPull));
-                $byPidPull[$pidPull] = (int) $pdo->lastInsertId();
-                $byNamePull[$keyPull] = $byPidPull[$pidPull];
-                $sortPull++;
-            }
-        } catch (Exception $e) {
-        }
     }
 }
 
@@ -471,6 +372,9 @@ if ($plans) {
     $nextSort = $maxSort + 1;
 }
 
+if (!$plansCanToggle) {
+    $editPlan = null;
+}
 $showAdd = $editPlan || (isset($_GET['add']) && (string) $_GET['add'] === '1');
 
 render_header(t('plans'), 'plans');
@@ -504,11 +408,6 @@ render_settings_tabs('plans');
         <?php if (!$plansLeaf): ?>
         <div class="actions" style="margin:0;gap:8px;align-items:center">
             <a class="btn secondary sm" href="agent_prices.php"><?php echo e($lang === 'en' ? 'Price table' : 'جدول الأسعار'); ?></a>
-            <form method="post" style="margin:0">
-                <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
-                <input type="hidden" name="action" value="import_sas">
-                <button class="btn secondary sm" type="submit"><?php echo e($lang === 'en' ? 'Import from SAS' : 'استيراد من الساس'); ?></button>
-            </form>
             <a class="plans-add-btn" href="plans.php?add=1" title="<?php echo e($lang === 'en' ? 'Add package' : 'إضافة باقة'); ?>" aria-label="<?php echo e($lang === 'en' ? 'Add package' : 'إضافة باقة'); ?>">+</a>
         </div>
         <?php endif; ?>
@@ -575,13 +474,13 @@ render_settings_tabs('plans');
                 <th>السعر</th>
                 <th>SAS</th>
                 <th>الحالة</th>
-                <th>إجراءات</th>
+                <?php if ($plansCanToggle): ?><th>إجراءات</th><?php endif; ?>
             </tr>
             <?php endif; ?>
             </thead>
             <tbody id="plansBody">
             <?php if (!$plans): ?>
-                <tr><td colspan="<?php echo $plansLeaf ? 3 : 8; ?>"><?php echo e($lang === 'en' ? 'No packages yet' : 'لا توجد باقات بعد'); ?></td></tr>
+                <tr><td colspan="<?php echo $plansLeaf ? 3 : ($plansCanToggle ? 8 : 7); ?>"><?php echo e($lang === 'en' ? 'No packages yet' : 'لا توجد باقات بعد'); ?></td></tr>
             <?php endif; ?>
             <?php foreach ($plans as $p): ?>
                 <?php
@@ -628,6 +527,7 @@ render_settings_tabs('plans');
                             <?php echo ((int) $p['is_active'] === 1) ? 'مفعّلة' : 'موقوفة'; ?>
                         </span>
                     </td>
+                    <?php if ($plansCanToggle): ?>
                     <td>
                         <div class="row-actions">
                             <a class="btn sm secondary" href="plans.php?edit=<?php echo (int) $p['id']; ?>">تعديل</a>
@@ -645,6 +545,7 @@ render_settings_tabs('plans');
                             </form>
                         </div>
                     </td>
+                    <?php endif; ?>
                 </tr>
                 <?php endif; ?>
             <?php endforeach; ?>
