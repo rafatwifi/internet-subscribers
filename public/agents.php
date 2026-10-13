@@ -374,6 +374,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $canAct = post('can_activate') === '1' ? 1 : 0;
         $canXfer = (function_exists('creator_can_grant_card_tools') && creator_can_grant_card_tools($pdo) && post('can_transfer_cards') === '1') ? 1 : 0;
         $canPrice = (function_exists('creator_can_grant_card_tools') && creator_can_grant_card_tools($pdo) && post('can_price_cards') === '1') ? 1 : 0;
+        $seeSubs = post('see_subscribers') === '1' ? 1 : 0;
+        if (function_exists('accountant_set_sees_subscribers')) {
+            accountant_set_sees_subscribers($pdo, $uid, $seeSubs);
+        }
         update_admin_user_meta($pdo, $uid, $display !== '' ? $display : $row['display_name'], 'accountant', $linked);
         $pdo->prepare('UPDATE admin_users SET is_active = :a, can_activate = :c, can_transfer_cards = :x, can_price_cards = :p, updated_at = NOW() WHERE id = :id AND role = "accountant"')
             ->execute(array(':a' => $active, ':c' => $canAct, ':x' => $canXfer, ':p' => $canPrice, ':id' => $uid));
@@ -382,6 +386,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             change_user_password($pdo, $uid, $newPass);
         }
         flash('success', $isEn ? 'Accountant updated' : 'تم تعديل المحاسب');
+        redirect('agents.php?view=accountant');
+    }
+
+    if ($action === 'accountant_password') {
+        $uid = (int) post('user_id', '0');
+        $row = get_admin_user($pdo, $uid);
+        if (!$row || normalize_admin_role($row['role']) !== 'accountant') {
+            flash('error', $isEn ? 'Accountant not found' : 'المحاسب غير موجود');
+            redirect('agents.php?view=accountant');
+        }
+        if (function_exists('admin_user_same_tenant') && !admin_user_same_tenant($pdo, $uid)) {
+            flash('error', $isEn ? 'Wrong company' : 'شركة خاطئة');
+            redirect('agents.php?view=accountant');
+        }
+        $newPass = (string) post('password', '');
+        if (strlen($newPass) < 4) {
+            flash('error', $isEn ? 'Password must be at least 4 characters' : 'الرمز لازم 4 أحرف على الأقل');
+            redirect('agents.php?view=accountant');
+        }
+        change_user_password($pdo, $uid, $newPass);
+        flash('success', $isEn ? 'Password updated' : 'تم تغيير رمز الدخول');
         redirect('agents.php?view=accountant');
     }
 
@@ -447,6 +472,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $canPrice = (function_exists('creator_can_grant_card_tools') && creator_can_grant_card_tools($pdo) && post('can_price_cards') === '1') ? 1 : 0;
                     $pdo->prepare('UPDATE admin_users SET can_activate = :c, can_transfer_cards = :x, can_price_cards = :p, linked_agent_id = :l WHERE id = :id')
                         ->execute(array(':c' => $canAct, ':x' => $canXfer, ':p' => $canPrice, ':l' => $linked, ':id' => $newId));
+                    if (function_exists('accountant_set_sees_subscribers')) {
+                        accountant_set_sees_subscribers($pdo, $newId, post('see_subscribers') === '1');
+                    }
                 }
             } catch (Exception $e) {
             }
@@ -1553,6 +1581,11 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
                     <span class="toggle-ui"></span>
                     <span><?php echo e($isEn ? 'Allow activation' : 'السماح بالتفعيل'); ?></span>
                 </label>
+                <label class="toggle" style="display:flex;align-items:center;gap:8px;margin-top:8px">
+                    <input type="checkbox" name="see_subscribers" value="1" checked>
+                    <span class="toggle-ui"></span>
+                    <span><?php echo e($isEn ? 'Show subscribers' : 'عرض المشتركين'); ?></span>
+                </label>
             </div>
             <?php if (function_exists('creator_can_grant_card_tools') && creator_can_grant_card_tools($pdo)): ?>
             <div>
@@ -1583,55 +1616,68 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
                 <th>#</th>
                 <th><?php echo e($isEn ? 'Username' : 'اسم الدخول'); ?></th>
                 <th><?php echo e($isEn ? 'Name' : 'الاسم'); ?></th>
-                <th><?php echo e($isEn ? 'Activate' : 'تفعيل'); ?></th>
-                <th><?php echo e($isEn ? 'Collected' : 'المستلم'); ?></th>
-                <th><?php echo e($isEn ? 'Password' : 'الرمز'); ?></th>
+                <th><?php echo e($isEn ? 'Permissions' : 'الصلاحيات'); ?></th>
+                <th><?php echo e($isEn ? 'Collected' : 'استلمه'); ?></th>
                 <th></th>
             </tr>
             </thead>
             <tbody>
             <?php if (!$accShown): ?>
-                <tr class="acc-empty"><td colspan="7" class="msg-empty"><?php echo e($accQ !== '' ? ($isEn ? 'No matches' : 'ماكو نتيجة') : ($isEn ? 'No accountants' : 'ماكو محاسبين')); ?></td></tr>
+                <tr class="acc-empty"><td colspan="6" class="msg-empty"><?php echo e($accQ !== '' ? ($isEn ? 'No matches' : 'ماكو نتيجة') : ($isEn ? 'No accountants' : 'ماكو محاسبين')); ?></td></tr>
             <?php endif; ?>
             <?php $accNo = 0; foreach ($accShown as $ac):
                 $accNo++;
                 $acid = (int) $ac['id'];
                 $canAct = !empty($ac['can_activate']);
+                $seeSubs = function_exists('accountant_sees_subscribers') ? accountant_sees_subscribers($pdo, $acid) : true;
                 ?>
             <tr class="acc-main">
                 <td data-label="#"><?php echo (int) $accNo; ?></td>
                 <td class="ltr" data-label="<?php echo e($isEn ? 'Username' : 'اسم الدخول'); ?>"><a href="agents.php?view=accountant&amp;acc=<?php echo $acid; ?>"><?php echo e($ac['username']); ?></a></td>
                 <td data-label="<?php echo e($isEn ? 'Name' : 'الاسم'); ?>"><input form="accForm<?php echo $acid; ?>" name="display_name" value="<?php echo e($ac['display_name']); ?>" required></td>
-                <td data-label="<?php echo e($isEn ? 'Activate' : 'تفعيل'); ?>">
-                    <label class="toggle" style="margin:0">
+                <td class="acc-perms" data-label="<?php echo e($isEn ? 'Permissions' : 'الصلاحيات'); ?>">
+                    <div class="acc-switches">
+                    <label class="toggle acc-sw">
                         <input form="accForm<?php echo $acid; ?>" type="checkbox" name="can_activate" value="1" <?php echo $canAct ? 'checked' : ''; ?>>
                         <span class="toggle-ui" aria-hidden="true"></span>
+                        <span><?php echo e($isEn ? 'Can activate' : 'يفعّل اشتراك'); ?></span>
+                    </label>
+                    <label class="toggle acc-sw" title="<?php echo e($isEn ? 'Off: debts only' : 'إذا طافي يشوف الديون والمطلوبين فقط'); ?>">
+                        <input form="accForm<?php echo $acid; ?>" type="checkbox" name="see_subscribers" value="1" <?php echo $seeSubs ? 'checked' : ''; ?>>
+                        <span class="toggle-ui" aria-hidden="true"></span>
+                        <span><?php echo e($isEn ? 'Sees subscribers' : 'يشوف المشتركين'); ?></span>
                     </label>
                     <?php if (function_exists('creator_can_grant_card_tools') && creator_can_grant_card_tools($pdo)):
                         $canXferRow = !empty($ac['can_transfer_cards']);
                         $canPriceRow = !empty($ac['can_price_cards']);
                         ?>
-                    <label class="toggle" style="margin:6px 0 0" title="<?php echo e($isEn ? 'Card transfer' : 'تحويل الكروت'); ?>">
+                    <label class="toggle acc-sw">
                         <input form="accForm<?php echo $acid; ?>" type="checkbox" name="can_transfer_cards" value="1" <?php echo $canXferRow ? 'checked' : ''; ?>>
                         <span class="toggle-ui" aria-hidden="true"></span>
+                        <span><?php echo e($isEn ? 'Transfers cards' : 'يحوّل كروت'); ?></span>
                     </label>
-                    <label class="toggle" style="margin:6px 0 0" title="<?php echo e($isEn ? 'Pricing' : 'تسعير'); ?>">
+                    <label class="toggle acc-sw">
                         <input form="accForm<?php echo $acid; ?>" type="checkbox" name="can_price_cards" value="1" <?php echo $canPriceRow ? 'checked' : ''; ?>>
                         <span class="toggle-ui" aria-hidden="true"></span>
+                        <span><?php echo e($isEn ? 'Sets prices' : 'يسعّر الباقات'); ?></span>
                     </label>
                     <?php endif; ?>
+                    </div>
                 </td>
-                <td data-label="<?php echo e($isEn ? 'Collected' : 'المستلم'); ?>">
+                <td class="acc-cash-cell" data-label="<?php echo e($isEn ? 'Collected' : 'استلمه'); ?>">
                     <?php
                     $shownCash = isset($cashOverride[$acid]) ? $cashOverride[$acid] : (isset($cashSum[$acid]) ? $cashSum[$acid] : 0);
                     ?>
-                    <?php if ($canEditCash): ?>
-                    <input form="accCash<?php echo $acid; ?>" name="collected" type="number" min="0" step="1" value="<?php echo (int) round($shownCash); ?>" style="max-width:120px">
-                    <?php else: ?>
-                    <?php echo e((string) (int) round($shownCash)); ?>
-                    <?php endif; ?>
+                    <div class="acc-cash">
+                        <span class="acc-cash-hint"><?php echo e($isEn ? 'Cash he collected from subscribers' : 'فلوس استلمها من المشتركين'); ?></span>
+                        <?php if ($canEditCash): ?>
+                        <input form="accCash<?php echo $acid; ?>" name="collected" type="number" min="0" step="1" value="<?php echo (int) round($shownCash); ?>">
+                        <?php else: ?>
+                        <strong><?php echo e((string) (int) round($shownCash)); ?></strong>
+                        <?php endif; ?>
+                        <a class="acc-cash-link" href="agents.php?view=accountant&amp;acc=<?php echo $acid; ?>"><?php echo e($isEn ? 'Collection list' : 'كشف الاستلام'); ?></a>
+                    </div>
                 </td>
-                <td data-label="<?php echo e($isEn ? 'Password' : 'الرمز'); ?>"><input form="accForm<?php echo $acid; ?>" name="password" type="password" minlength="4" placeholder="<?php echo e($isEn ? 'Optional' : 'اختياري'); ?>"></td>
                 <td class="acc-actions">
                     <form method="post" id="accForm<?php echo $acid; ?>" class="inline-form">
                         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
@@ -1645,10 +1691,11 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
                         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                         <input type="hidden" name="action" value="save_collected">
                         <input type="hidden" name="user_id" value="<?php echo $acid; ?>">
-                        <button class="btn ghost sm" type="submit"><?php echo e($isEn ? 'Save cash' : 'حفظ المستلم'); ?></button>
+                        <button class="btn ghost sm" type="submit"><?php echo e($isEn ? 'Save amount' : 'حفظ المبلغ'); ?></button>
                     </form>
                     <?php endif; ?>
-                    <button class="btn ghost sm" type="button" data-acc-wid-open="<?php echo $acid; ?>" style="margin-top:4px"><?php echo e($isEn ? 'Customize dashboard' : 'تخصيص الداشبورد'); ?></button>
+                    <button class="btn ghost sm" type="button" data-acc-pass="<?php echo $acid; ?>" data-acc-name="<?php echo e($ac['display_name']); ?>"><?php echo e($isEn ? 'Change password' : 'تغيير رمز الدخول'); ?></button>
+                    <button class="btn ghost sm" type="button" data-acc-wid-open="<?php echo $acid; ?>"><?php echo e($isEn ? 'Customize dashboard' : 'تخصيص الداشبورد'); ?></button>
                 </td>
             </tr>
             <?php
@@ -1663,7 +1710,7 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
             }
             ?>
             <tr class="acc-wid-row" id="accWid<?php echo $acid; ?>" hidden>
-                <td colspan="7">
+                <td colspan="6">
                     <form method="post" class="acc-wid-form">
                         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                         <input type="hidden" name="action" value="save_acc_widgets">
@@ -1725,6 +1772,20 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
             </tbody>
         </table>
         </div>
+        <div class="modal-backdrop hidden" id="accPassBox">
+            <form method="post" class="modal-card" id="accPassForm">
+                <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                <input type="hidden" name="action" value="accountant_password">
+                <input type="hidden" name="user_id" id="accPassId" value="">
+                <h3><?php echo e($isEn ? 'Change password' : 'تغيير رمز الدخول'); ?></h3>
+                <p class="meta" id="accPassWho" style="margin:0 0 10px"></p>
+                <input type="password" name="password" id="accPassInput" minlength="4" required autocomplete="new-password" placeholder="<?php echo e($isEn ? 'New password' : 'الرمز الجديد'); ?>">
+                <div class="acc-pass-actions">
+                    <button class="btn" type="submit"><?php echo e($isEn ? 'Save' : 'حفظ'); ?></button>
+                    <button class="btn ghost" type="button" id="accPassClose"><?php echo e($isEn ? 'Cancel' : 'إلغاء'); ?></button>
+                </div>
+            </form>
+        </div>
     </div>
     <style>
     #accAddBox[hidden], #agentAddBox[hidden], .del-row[hidden], .edit-row[hidden], .acc-wid-row[hidden] { display:none !important; }
@@ -1751,6 +1812,17 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
     .ag-as i::after { content:""; position:absolute; top:2px; right:2px; width:12px; height:12px; border-radius:50%; background:#fff; transition:right .15s; }
     .ag-as input:checked + i { background:#16a34a; }
     .ag-as input:checked + i::after { right:16px; }
+    .acc-switches { display:flex; flex-direction:column; gap:8px; min-width:168px; }
+    .acc-sw { font-size:13px; font-weight:800; color:#1e293b; }
+    .acc-cash { display:flex; flex-direction:column; align-items:flex-start; gap:4px; }
+    .acc-cash-hint { font-size:11px; line-height:1.35; color:#64748b; font-weight:700; max-width:150px; }
+    .acc-cash input { width:110px; max-width:110px; }
+    .acc-cash-link { font-size:12px; font-weight:800; }
+    .acc-actions { display:flex; flex-direction:column; align-items:stretch; gap:6px; min-width:150px; }
+    .acc-actions form, .acc-actions .btn { margin:0; width:100%; }
+    #accPassBox { z-index:10020; }
+    #accPassForm input[type="password"] { width:100%; height:44px; font-size:16px; }
+    .acc-pass-actions { display:flex; gap:8px; margin-top:12px; }
     .acc-board { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:8px; }
     @media (max-width:700px) { .acc-board { grid-template-columns:1fr; } }
     .acc-board-h { font-size:12px; font-weight:800; color:#475569; margin-bottom:6px; }
@@ -1799,6 +1871,7 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
       #agentAccBox .acc-table td::before, #agentAccBox .acc-report td::before {
         content: attr(data-label); font-weight: 800; color: #64748b; flex: 0 0 auto;
       }
+      #agentAccBox .acc-table td.acc-perms, #agentAccBox .acc-table td.acc-cash-cell { flex-direction: column; align-items: stretch; }
       #agentAccBox .acc-table td.acc-actions { flex-wrap: wrap; }
       #agentAccBox .acc-table td.acc-actions::before { content: none; }
       #agentAccBox .acc-table td.acc-actions .btn, #agentAccBox .acc-table td.acc-actions form { flex: 1 1 100%; margin: 0; }
@@ -1898,6 +1971,29 @@ render_header($accOnly ? ($isEn ? 'Accountant' : 'المحاسب') : ($isEn ? 'A
           });
         })(delForms[d]);
       }
+      var passBox = document.getElementById('accPassBox');
+      var passId = document.getElementById('accPassId');
+      var passWho = document.getElementById('accPassWho');
+      var passInput = document.getElementById('accPassInput');
+      var passClose = document.getElementById('accPassClose');
+      function closePass() {
+        if (!passBox) return;
+        passBox.classList.add('hidden');
+        if (passInput) passInput.value = '';
+      }
+      document.querySelectorAll('[data-acc-pass]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          if (!passBox || !passId) return;
+          passId.value = btn.getAttribute('data-acc-pass') || '';
+          if (passWho) passWho.textContent = btn.getAttribute('data-acc-name') || '';
+          passBox.classList.remove('hidden');
+          if (passInput) passInput.focus();
+        });
+      });
+      if (passClose) passClose.addEventListener('click', closePass);
+      if (passBox) passBox.addEventListener('click', function (ev) {
+        if (ev.target === passBox) closePass();
+      });
       document.querySelectorAll('[data-acc-wid-open]').forEach(function (btn) {
         btn.addEventListener('click', function () {
           var row = document.getElementById('accWid' + btn.getAttribute('data-acc-wid-open'));

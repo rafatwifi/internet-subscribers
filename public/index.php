@@ -574,6 +574,43 @@ if (!function_exists('dash_sas_box')) {
     }
 }
 
+if (!function_exists('dash_ping_box')) {
+    function dash_ping_box($rows, $en, $seedMs = '')
+    {
+        $rows = is_array($rows) ? array_values($rows) : array();
+        $n = count($rows);
+        $showN = $n > 4 ? 4 : $n;
+        $multi = $n > 1 ? ' is-multi' : '';
+        echo '<a class="sas-box tone-navy dash-ping' . $multi . '" id="dashPing" href="settings.php?tab=sas"'
+            . ' data-has="' . ($n > 0 ? '1' : '0') . '" data-count="' . (int) $n . '"'
+            . ' data-empty="' . e($en ? 'Reseller' : 'الريسلر') . '"'
+            . ' data-many="' . e($en ? 'Resellers' : 'الريسلرات') . '">';
+        echo '<span class="sas-box-ico" aria-hidden="true">📡</span>';
+        if ($n <= 0) {
+            echo '<div class="sas-box-title">' . e($en ? 'Reseller' : 'الريسلر') . '</div>';
+            echo '<div class="sas-box-val" id="dashPingVal">-</div>';
+        } elseif ($n === 1) {
+            $name = isset($rows[0]['name']) ? (string) $rows[0]['name'] : '';
+            $ms = $seedMs !== '' ? $seedMs : '…';
+            echo '<div class="sas-box-title ping-name">' . e($name) . '</div>';
+            echo '<div class="sas-box-val ping-ms" id="dashPingVal">' . e($ms) . '</div>';
+        } else {
+            echo '<div class="sas-box-title">' . e($en ? 'Resellers' : 'الريسلرات') . '</div>';
+            echo '<div class="ping-list" id="dashPingVal">';
+            for ($i = 0; $i < $showN; $i++) {
+                $name = isset($rows[$i]['name']) ? (string) $rows[$i]['name'] : '';
+                echo '<div class="ping-line"><b class="ping-name">' . e($name) . '</b>'
+                    . '<span class="ping-ms">…</span></div>';
+            }
+            if ($n > 4) {
+                echo '<div class="ping-more">+' . (int) ($n - 4) . '</div>';
+            }
+            echo '</div>';
+        }
+        echo '</a>';
+    }
+}
+
 $cardDash = null;
 $cardDashPayments = array();
 $cardDashLedger = array();
@@ -655,7 +692,7 @@ if ($isPlatformDash && function_exists('platform_admin_dashboard_stats')):
     dash_sas_box('settings.php', 'tone-navy', $en ? 'System version' : 'إصدار النظام', '', 'v' . (string) $pad['version'], '📦');
     dash_sas_box('settings.php', 'tone-lime', $en ? 'Google bank' : 'البنك على كوكل', $pad['google_ok'] ? ($en ? 'OK' : 'شغال') : ($en ? 'Down' : 'توقف'), $fmtMs($pad['google_ms']), '🌐');
     dash_sas_box('index.php', 'tone-teal', $en ? 'Date & time' : 'الوقت والتاريخ', '', (string) $pad['datetime'], '🕒');
-    dash_sas_box('saas_agents.php', 'tone-purple', $en ? 'Sales' : 'المبيعات', $en ? 'Card transfers' : 'تحويلات الكروت', money_format_iqd($pad['sales'], $config['currency']), '🧾');
+    dash_sas_box('saas_agents.php', 'tone-purple', $en ? 'Sales' : 'المبيعات', $en ? 'Portal membership' : 'عضوية البوابة', money_format_iqd($pad['sales'], $config['currency']), '🧾');
     dash_sas_box('saas_agents.php', 'tone-aqua', $en ? 'Received' : 'المستلم', '', money_format_iqd($pad['received'], $config['currency']), '💵');
     dash_sas_box('saas_agents.php', 'tone-red', $en ? 'Debt' : 'الدين', '', money_format_iqd($pad['debt'], $config['currency']), '📄');
     ?>
@@ -735,9 +772,21 @@ body:has(.sas-dash) .container {
 .sas-box-sub { font-size: 11px; font-weight: 600; opacity: .8; margin-top: 2px; z-index: 1; min-height: 14px; line-height: 1.3; }
 .sas-box-sub:empty { display: none; min-height: 0; }
 .sas-box-val { font-size: 26px; font-weight: 800; margin-top: 6px; z-index: 1; letter-spacing: -0.02em; line-height: 1.1; }
-#dashPing[data-count="2"] .sas-box-val,
-#dashPing[data-count="3"] .sas-box-val,
-#dashPing[data-count="4"] .sas-box-val { font-size: 15px; line-height: 1.35; letter-spacing: 0; }
+.dash-ping[data-count="1"] .ping-name { max-width: calc(100% - 36px); font-size: 13px; font-weight: 800; letter-spacing: 0; opacity: .92; }
+.dash-ping[data-count="1"] .ping-ms { margin-top: 10px; font-size: 34px; font-weight: 800; letter-spacing: -0.04em; line-height: 1; }
+.dash-ping .ping-list { position: relative; z-index: 1; display: flex; flex-direction: column; gap: 0; width: 100%; margin-top: 8px; }
+.dash-ping.is-multi .ping-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,.16); }
+.dash-ping.is-multi .ping-line:last-of-type { border-bottom: 0; padding-bottom: 0; }
+.dash-ping.is-multi .ping-name { font-size: 13px; font-weight: 800; min-width: 0; }
+.dash-ping.is-multi .ping-ms { font-size: 15px; font-weight: 800; }
+.dash-ping .ping-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dash-ping .ping-ms { direction: ltr; unicode-bidi: isolate; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.dash-ping .ping-more { font-size: 12px; font-weight: 800; opacity: .75; margin-top: 4px; }
+@media (max-width: 640px) {
+  .dash-ping[data-count="1"] .ping-ms { font-size: 30px; }
+  .dash-ping.is-multi .ping-name { font-size: 12px; }
+  .dash-ping.is-multi .ping-ms { font-size: 14px; }
+}
 .sas-box-ico { position: absolute; inset-inline-end: 14px; inset-block-start: 12px; font-size: 22px; opacity: .35; }
 .sas-box.tone-blue { --c1: #38bdf8; --c2: #0369a1; }
 .sas-box.tone-green { --c1: #4ade80; --c2: #15803d; }
@@ -862,8 +911,14 @@ foreach ($dashPingRows as $dashPingRow) {
         $dashPingNames[] = (string) $dashPingRow['name'];
     }
 }
-$dashPingSub = $dashPingNames ? implode(' · ', $dashPingNames) : '';
-$dashPingVal = $dashPingCount > 0 ? '…' : '-';
+$dashPingSeed = '';
+if ($dashPingCount === 1 && $dashPingHost !== '') {
+    $cachedLatHost = isset($_SESSION['sas_latency_host']) ? trim((string) $_SESSION['sas_latency_host']) : '';
+    $cachedLatMs = isset($_SESSION['sas_latency_ms']) ? $_SESSION['sas_latency_ms'] : null;
+    if ($cachedLatHost !== '' && strcasecmp($cachedLatHost, $dashPingHost) === 0 && $cachedLatMs !== null && $cachedLatMs !== '') {
+        $dashPingSeed = (int) round((float) $cachedLatMs) . ' ms';
+    }
+}
 if ($isAccDash) {
     $full = function_exists('accountant_widget_catalog_full') ? accountant_widget_catalog_full() : array();
     $order = function_exists('accountant_widgets_effective') ? accountant_widgets_effective($pdo) : null;
@@ -972,7 +1027,7 @@ if ($isAccDash) {
         } elseif ($wid === 'points' && $sasReadyDash) {
             dash_sas_box('sas.php', 'tone-lime', $en ? 'Reward points' : 'نقاط تشجيعية', '', (string) $sasPointsDisp, '🎁', 'dashPoints');
         } elseif ($wid === 'latency' && $sasReadyDash) {
-            dash_sas_box('sas.php', 'tone-navy', $dashBankTitle, $dashBankSub, (string) $sasBalanceDisp, '📡', 'dashBank');
+            dash_ping_box($dashPingRows, $en, $dashPingSeed);
         }
     }
     echo '</div>';
@@ -999,7 +1054,9 @@ if ($isAccDash && $showWid('agents') && $accLocked) {
 }
 if ($sasReadyDash && !$accLocked) {
     dash_sas_box('sas.php', 'tone-lime', $en ? 'Reward points' : 'نقاط تشجيعية', $en ? 'Balance' : 'الرصيد', (string) $sasPointsDisp, '🎁', 'dashPoints');
-    dash_sas_box('sas.php', 'tone-navy', $dashBankTitle, $dashBankSub, (string) $sasBalanceDisp, '📡', 'dashBank');
+}
+if (!$accLocked) {
+    dash_ping_box($dashPingRows, $en, $dashPingSeed);
 }
 if ($showWid('collected')) {
     dash_sas_box('reports.php', 'tone-yellow', $en ? 'Collected' : 'المقبوض', $en ? 'This month' : 'هذا الشهر', money_format_iqd($receivedMonth, $config['currency']), '💵');
@@ -1036,16 +1093,6 @@ if ($sasReadyDash && $showWid('cards')) {
     dash_sas_box('cards.php', 'tone-navy', $en ? 'Cards' : 'الكروت', $cardSub, (string) (int) $cardTotal, '🃏', 'dashCards');
 }
 if (!$accLocked) {
-    dash_sas_box(
-        $dashPingHost !== '' ? 'settings.php?tab=sas' : 'index.php',
-        'tone-navy',
-        'Ping',
-        $dashPingSub,
-        $dashPingVal,
-        '📡',
-        'dashPing',
-        'data-has="' . ($dashPingCount > 0 ? '1' : '0') . '" data-count="' . (int) $dashPingCount . '"'
-    );
     dash_sas_box('settings.php', 'tone-purple', $en ? 'System version' : 'إصدار النظام', $en ? 'Portal' : 'البوابة', 'v' . $dashVersion, '📦');
     dash_sas_box('subscribers.php', 'tone-lime', $en ? 'Subscriber growth' : 'نمو المشتركين', $dashGrowthSub !== '' ? $dashGrowthSub : ($en ? 'This year' : 'هذي السنة'), $dashGrowth, '📈');
 }
@@ -1108,32 +1155,57 @@ if (!$accLocked) {
         if (box) box.classList.remove('is-loading');
       });
   }
-  function loadBank() {
-    var box = document.getElementById('dashBank');
+  function pingText(ms) {
+    if (ms === null || ms === undefined || ms === '' || ms === 0) return '—';
+    return String(ms) + ' ms';
+  }
+  function pingEsc(s) {
+    return String(s || '').replace(/[&<>"]/g, function (c) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c];
+    });
+  }
+  function paintPing(d) {
     var ping = document.getElementById('dashPing');
-    var b = document.getElementById('dashBankVal');
-    var pv = document.getElementById('dashPingVal');
-    var had = (b && String(b.textContent || '').indexOf('ms') >= 0)
-      || (pv && String(pv.textContent || '').indexOf('ms') >= 0);
-    if (box && !had) box.classList.add('is-loading');
+    if (!ping || !d) return;
+    var rows = Array.isArray(d.rows) ? d.rows : [];
+    var n = rows.length;
+    var emptyTitle = ping.getAttribute('data-empty') || 'الريسلر';
+    ping.setAttribute('data-count', String(n));
+    ping.setAttribute('data-has', n ? '1' : '0');
+    ping.classList.toggle('is-multi', n > 1);
+    if (!n) {
+      ping.innerHTML = '<span class="sas-box-ico" aria-hidden="true">📡</span>'
+        + '<div class="sas-box-title">' + pingEsc(emptyTitle) + '</div>'
+        + '<div class="sas-box-val" id="dashPingVal">-</div>';
+      return;
+    }
+    var show = rows.slice(0, 4);
+    var html = '<span class="sas-box-ico" aria-hidden="true">📡</span>';
+    if (n === 1) {
+      html += '<div class="sas-box-title ping-name">' + pingEsc(show[0].name) + '</div>'
+        + '<div class="sas-box-val ping-ms" id="dashPingVal">' + pingEsc(pingText(show[0].ms)) + '</div>';
+    } else {
+      var many = ping.getAttribute('data-many') || emptyTitle;
+      html += '<div class="sas-box-title">' + pingEsc(many) + '</div><div class="ping-list" id="dashPingVal">';
+      for (var i = 0; i < show.length; i++) {
+        html += '<div class="ping-line"><b class="ping-name">' + pingEsc(show[i].name) + '</b>'
+          + '<span class="ping-ms">' + pingEsc(pingText(show[i].ms)) + '</span></div>';
+      }
+      if (n > 4) html += '<div class="ping-more">+' + (n - 4) + '</div>';
+      html += '</div>';
+    }
+    ping.innerHTML = html;
+  }
+  function loadBank() {
+    var ping = document.getElementById('dashPing');
+    var had = ping && ping.querySelector && ping.querySelector('.ping-ms')
+      && String(ping.querySelector('.ping-ms').textContent || '').indexOf('ms') >= 0;
     if (ping && ping.getAttribute('data-has') === '1' && !had) ping.classList.add('is-loading');
     return fetch('index.php?ajax=dash_ping', { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
-      .then(function (d) {
-        if (!d || !d.balance || d.balance === '—') return;
-        if (b && (!d.count || d.count === 1) && d.balance !== '-') b.textContent = d.balance;
-        if (pv && ping && ping.getAttribute('data-has') === '1') {
-          pv.textContent = d.balance;
-          if (d.sub) {
-            var ps = document.getElementById('dashPingSub');
-            if (ps) ps.textContent = d.sub;
-          }
-          if (d.count) ping.setAttribute('data-count', String(d.count));
-        }
-      })
+      .then(paintPing)
       .catch(function () {})
       .then(function () {
-        if (box) box.classList.remove('is-loading');
         if (ping) ping.classList.remove('is-loading');
       });
   }
@@ -1176,20 +1248,49 @@ if (!$accLocked) {
 (function () {
   var ping = document.getElementById('dashPing');
   if (!ping || ping.getAttribute('data-has') !== '1') return;
+  function pingText(ms) {
+    if (ms === null || ms === undefined || ms === '' || ms === 0) return '—';
+    return String(ms) + ' ms';
+  }
+  function pingEsc(s) {
+    return String(s || '').replace(/[&<>"]/g, function (c) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c];
+    });
+  }
   function load() {
-    var pv = document.getElementById('dashPingVal');
-    var had = pv && String(pv.textContent || '').indexOf('ms') >= 0;
+    var had = ping.querySelector('.ping-ms') && String(ping.querySelector('.ping-ms').textContent || '').indexOf('ms') >= 0;
     if (!had) ping.classList.add('is-loading');
     return fetch('index.php?ajax=dash_ping', { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(function (d) {
-        if (!pv || !d || !d.balance || d.balance === '—') return;
-        pv.textContent = d.balance;
-        if (d.sub) {
-          var ps = document.getElementById('dashPingSub');
-          if (ps) ps.textContent = d.sub;
+        if (!d || !Array.isArray(d.rows)) return;
+        var rows = d.rows;
+        var n = rows.length;
+        ping.setAttribute('data-count', String(n));
+        ping.setAttribute('data-has', n ? '1' : '0');
+        ping.classList.toggle('is-multi', n > 1);
+        var emptyTitle = ping.getAttribute('data-empty') || 'الريسلر';
+        if (!n) {
+          ping.innerHTML = '<span class="sas-box-ico" aria-hidden="true">📡</span>'
+            + '<div class="sas-box-title">' + pingEsc(emptyTitle) + '</div><div class="sas-box-val" id="dashPingVal">-</div>';
+          return;
         }
-        if (d.count) ping.setAttribute('data-count', String(d.count));
+        var show = rows.slice(0, 4);
+        var html = '<span class="sas-box-ico" aria-hidden="true">📡</span>';
+        if (n === 1) {
+          html += '<div class="sas-box-title ping-name">' + pingEsc(show[0].name) + '</div>'
+            + '<div class="sas-box-val ping-ms" id="dashPingVal">' + pingEsc(pingText(show[0].ms)) + '</div>';
+        } else {
+          var many = ping.getAttribute('data-many') || emptyTitle;
+          html += '<div class="sas-box-title">' + pingEsc(many) + '</div><div class="ping-list" id="dashPingVal">';
+          for (var i = 0; i < show.length; i++) {
+            html += '<div class="ping-line"><b class="ping-name">' + pingEsc(show[i].name) + '</b>'
+              + '<span class="ping-ms">' + pingEsc(pingText(show[i].ms)) + '</span></div>';
+          }
+          if (n > 4) html += '<div class="ping-more">+' + (n - 4) + '</div>';
+          html += '</div>';
+        }
+        ping.innerHTML = html;
       })
       .catch(function () {})
       .then(function () { ping.classList.remove('is-loading'); });

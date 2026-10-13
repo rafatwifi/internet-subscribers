@@ -167,6 +167,125 @@ function agent_price_copy_down($pdo, $userIds, $lines)
     return $nUsers;
 }
 
+function agent_price_sas_of_row($row, $byUser)
+{
+    $sid = (is_array($row) && !empty($row['sas_manager_id'])) ? (int) $row['sas_manager_id'] : 0;
+    if ($sid > 0) {
+        return $sid;
+    }
+    if (!is_array($row) || !is_array($byUser)) {
+        return 0;
+    }
+    $names = array(
+        isset($row['username']) ? (string) $row['username'] : '',
+        isset($row['display_name']) ? (string) $row['display_name'] : '',
+    );
+    foreach ($names as $nm) {
+        $key = strtolower(trim($nm));
+        if ($key !== '' && isset($byUser[$key])) {
+            return (int) $byUser[$key];
+        }
+    }
+    return 0;
+}
+
+function agent_price_under_pool($sid, $poolSas, $parentOf)
+{
+    $sid = (int) $sid;
+    if ($sid <= 0 || !is_array($poolSas)) {
+        return false;
+    }
+    if (!is_array($parentOf) || !isset($parentOf[$sid])) {
+        return false;
+    }
+    $cur = (int) $parentOf[$sid];
+    for ($i = 0; $i < 12 && $cur > 0; $i++) {
+        if (!empty($poolSas[$cur])) {
+            return true;
+        }
+        if (!isset($parentOf[$cur])) {
+            return false;
+        }
+        $cur = (int) $parentOf[$cur];
+    }
+    return false;
+}
+
+/** وكالات ووكلاء تحت الموجودين بالشجرة، مو بس الأبناء المباشرين */
+function agent_price_add_descendants($pdo, $agents)
+{
+    if (!$pdo || !is_array($agents) || !$agents) {
+        return is_array($agents) ? $agents : array();
+    }
+    $have = array();
+    $tenants = array();
+    foreach ($agents as $a) {
+        $id = isset($a['id']) ? (int) $a['id'] : 0;
+        if ($id > 0) {
+            $have[$id] = true;
+        }
+        $t = isset($a['tenant_id']) ? (int) $a['tenant_id'] : 0;
+        if ($t > 1) {
+            $tenants[$t] = true;
+        }
+    }
+    $byUser = array();
+    $parentOf = array();
+    if (function_exists('portal_sas_tree_maps')) {
+        $maps = portal_sas_tree_maps($pdo);
+        if (is_array($maps)) {
+            $byUser = isset($maps['by_user']) && is_array($maps['by_user']) ? $maps['by_user'] : array();
+            $parentOf = isset($maps['parent_of']) && is_array($maps['parent_of']) ? $maps['parent_of'] : array();
+        }
+    }
+    $cand = array();
+    try {
+        $cand = $pdo->query(
+            'SELECT id, username, display_name, role, is_active, tenant_id, sas_manager_id, reports_to_user_id
+             FROM admin_users
+             WHERE tenant_id > 1 AND role IN ("admin", "agent", "group_manager")'
+        )->fetchAll();
+    } catch (Exception $e) {
+        $cand = array();
+    }
+    $poolSas = array();
+    foreach ($agents as $a) {
+        $sid = agent_price_sas_of_row($a, $byUser);
+        if ($sid > 0) {
+            $poolSas[$sid] = true;
+        }
+    }
+    $guard = 0;
+    $changed = true;
+    while ($changed && $guard < 8) {
+        $changed = false;
+        $guard++;
+        foreach ($cand as $r) {
+            $id = isset($r['id']) ? (int) $r['id'] : 0;
+            if ($id <= 0 || !empty($have[$id])) {
+                continue;
+            }
+            $t = isset($r['tenant_id']) ? (int) $r['tenant_id'] : 0;
+            $sid = agent_price_sas_of_row($r, $byUser);
+            $take = agent_price_under_pool($sid, $poolSas, $parentOf);
+            if (!$take) {
+                continue;
+            }
+            $agents[] = $r;
+            $have[$id] = true;
+            if ($t > 1) {
+                $tenants[$t] = true;
+            }
+            $sidAdd = agent_price_sas_of_row($r, $byUser);
+            if ($sidAdd > 0) {
+                $poolSas[$sidAdd] = true;
+            }
+            $changed = true;
+        }
+    }
+    return $agents;
+}
+
 function agent_price_tree_model($pdo, $pool, $homeId)
 {
     $homeId = (int) $homeId;
@@ -275,30 +394,6 @@ function agent_price_tree_model($pdo, $pool, $homeId)
         if ($nameSid <= 0) {
             $nameSid = agent_price_sas_close_id($names, $byUser);
         }
-        if ($nameSid > 0 && $nameSid !== $sid) {
-            $storedName = ($sid > 0 && isset($sasNameOf[$sid])) ? $sasNameOf[$sid] : '';
-            $same = false;
-            if ($storedName !== '') {
-                $storedKeys = agent_price_sas_name_keys($storedName);
-                foreach ($names as $nm) {
-                    $mine = agent_price_sas_name_keys($nm);
-                    foreach ($mine as $a) {
-                        foreach ($storedKeys as $b) {
-                            if ($a !== '' && $a === $b) {
-                                $same = true;
-                            }
-                        }
-                    }
-                    $plain = strtolower(trim($nm));
-                    if ($plain !== '' && strpos($plain, '@') === false && strtolower($storedName) === ('wifi@' . $plain)) {
-                        $same = true;
-                    }
-                }
-            }
-            if (!$same) {
-                $sid = $nameSid;
-            }
-        }
         if ($sid <= 0) {
             $sid = $nameSid;
         }
@@ -306,8 +401,30 @@ function agent_price_tree_model($pdo, $pool, $homeId)
             $rows[$id]['sas_manager_id'] = $sid;
         }
         $sasOf[$id] = $sid;
-        if ($sid > 0 && !isset($portalBySas[$sid])) {
-            $portalBySas[$sid] = $id;
+        if ($sid > 0) {
+            $sasName = isset($sasNameOf[$sid]) ? strtolower((string) $sasNameOf[$sid]) : '';
+            $mineExact = false;
+            if ($sasName !== '') {
+                foreach ($names as $nm) {
+                    if (strtolower(trim($nm)) === $sasName) {
+                        $mineExact = true;
+                    }
+                }
+            }
+            $prefer = !isset($portalBySas[$sid]);
+            if (!$prefer && $mineExact && isset($rows[$portalBySas[$sid]])) {
+                $old = $rows[$portalBySas[$sid]];
+                $oldNames = array(
+                    isset($old['username']) ? strtolower(trim((string) $old['username'])) : '',
+                    isset($old['display_name']) ? strtolower(trim((string) $old['display_name'])) : '',
+                );
+                if (!in_array($sasName, $oldNames, true)) {
+                    $prefer = true;
+                }
+            }
+            if ($prefer) {
+                $portalBySas[$sid] = $id;
+            }
         }
     }
     $systemId = -1;
@@ -321,7 +438,7 @@ function agent_price_tree_model($pdo, $pool, $homeId)
             $needSystem = true;
         } else {
             $cur = $sid;
-            for ($i = 0; $i < 12 && $cur > 0; $i++) {
+            for ($i = 0; $i < 24 && $cur > 0; $i++) {
                 if (!isset($sasParent[$cur])) {
                     break;
                 }
@@ -686,6 +803,7 @@ if (($isPriceAdmin || $isAccPrice) && function_exists('portal_agencies_under_cur
         } catch (Exception $e) {
         }
     }
+    $agents = agent_price_add_descendants($pdo, $agents);
     usort($agents, function ($a, $b) {
         $an = isset($a['username']) ? (string) $a['username'] : '';
         if ($an === '' && isset($a['display_name'])) {

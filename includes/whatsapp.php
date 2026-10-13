@@ -1273,6 +1273,8 @@ function ensure_message_log_extra($pdo)
         'attempt' => 'TINYINT UNSIGNED NOT NULL DEFAULT 1',
         'next_retry_at' => 'DATETIME NULL DEFAULT NULL',
         'fail_reason' => 'VARCHAR(255) NULL DEFAULT NULL',
+        'queued_at' => 'DATETIME NULL DEFAULT NULL',
+        'retry_hold' => 'VARCHAR(16) NULL DEFAULT NULL',
     );
     foreach ($cols as $name => $def) {
         try {
@@ -1307,6 +1309,81 @@ function message_log_fail_text($row)
     ));
 }
 
+function message_log_hold_kind($result)
+{
+    if (!is_array($result) || !empty($result['success']) || !empty($result['no_whatsapp'])) {
+        return '';
+    }
+    $resp = isset($result['response']) ? (string) $result['response'] : '';
+    $low = strtolower($resp);
+    $phone = isset($result['phone']) ? trim((string) $result['phone']) : '';
+    if ($phone === '' || strpos($resp, 'رقم هاتف') !== false || strpos($low, 'invalid phone') !== false || strpos($low, 'bad_phone') !== false) {
+        return 'no_phone';
+    }
+    if (strpos($resp, 'متوقفة') !== false || strpos($low, 'disabled') !== false) {
+        return 'wait_on';
+    }
+    if (!empty($result['skipped'])
+        || strpos($resp, 'ربط') !== false
+        || strpos($low, 'not ready') !== false
+        || strpos($low, 'scan qr') !== false
+        || strpos($resp, 'جلسة') !== false) {
+        return 'wait_link';
+    }
+    $http = isset($result['http_code']) ? (int) $result['http_code'] : -1;
+    if ($http === 0
+        || strpos($low, 'timed out') !== false
+        || strpos($low, 'timeout') !== false
+        || strpos($low, 'failed to connect') !== false
+        || strpos($low, 'connection closed') !== false
+        || strpos($low, 'connection terminated') !== false
+        || strpos($resp, 'ما وصل') !== false
+        || strpos($resp, 'انقطع') !== false) {
+        return 'wait_net';
+    }
+    return '';
+}
+
+function message_log_hold_from_stored($reason, $response)
+{
+    $blob = trim((string) $reason);
+    $decoded = json_decode((string) $response, true);
+    if (is_array($decoded)) {
+        if (!empty($decoded['no_whatsapp'])) {
+            return '';
+        }
+        if (isset($decoded['response'])) {
+            $blob .= "\n" . (string) $decoded['response'];
+        }
+        if (isset($decoded['error'])) {
+            $blob .= "\n" . (string) $decoded['error'];
+        }
+    }
+    $blob = trim($blob);
+    if ($blob === '') {
+        return '';
+    }
+    $low = strtolower($blob);
+    if (strpos($blob, 'لا يتوفر واتساب') !== false || strpos($low, 'not on whatsapp') !== false || strpos($low, 'no_whatsapp') !== false) {
+        return '';
+    }
+    if (strpos($blob, 'رقم هاتف') !== false || strpos($blob, 'غير صالح أو فارغ') !== false || strpos($low, 'invalid phone') !== false) {
+        return 'no_phone';
+    }
+    if (strpos($blob, 'يرجى ربط') !== false || strpos($low, 'not ready') !== false || strpos($low, 'scan qr') !== false || strpos($blob, 'تأكد أن واتساب متصل') !== false) {
+        return 'wait_link';
+    }
+    if (strpos($blob, 'متوقفة') !== false || strpos($blob, 'غير مفعّل') !== false || strpos($blob, 'غير مفعل') !== false || strpos($low, 'disabled in config') !== false) {
+        return 'wait_on';
+    }
+    if (strpos($low, 'timed out') !== false || strpos($low, 'timeout') !== false || strpos($low, 'failed to connect') !== false
+        || strpos($blob, 'ما وصل لبوابة') !== false || strpos($blob, 'انقطع اتصال') !== false
+        || strpos($low, 'connection closed') !== false || strpos($low, 'connection terminated') !== false) {
+        return 'wait_net';
+    }
+    return '';
+}
+
 function message_log_schedule_retry($result, $attempt)
 {
     $attempt = (int) $attempt;
@@ -1315,6 +1392,9 @@ function message_log_schedule_retry($result, $attempt)
         return null;
     }
     if (!empty($result['success']) || $attempt >= 3) {
+        return null;
+    }
+    if (message_log_hold_kind($result) !== '') {
         return null;
     }
     if (!empty($result['no_whatsapp']) || !empty($result['skipped'])) {
@@ -1340,13 +1420,18 @@ function log_message($pdo, $subscriberId, $result)
     } elseif (strlen($reason) > 250) {
         $reason = substr($reason, 0, 247) . '...';
     }
+    $hold = $ok ? '' : message_log_hold_kind($result);
     $next = message_log_schedule_retry($result, $attempt);
+    if ($hold !== '') {
+        $next = null;
+    }
     $nextSql = ($next === null || $next === '') ? 'NULL' : $pdo->quote($next);
+    $holdSql = ($hold === '') ? 'NULL' : $pdo->quote($hold);
     $stmt = $pdo->prepare(
         'INSERT INTO message_logs
-            (subscriber_id, phone, message_type, body, success, response_json, from_phone, attempt, next_retry_at, fail_reason)
+            (subscriber_id, phone, message_type, body, success, response_json, from_phone, attempt, next_retry_at, fail_reason, retry_hold)
          VALUES
-            (:subscriber_id, :phone, :message_type, :body, :success, :response_json, :from_phone, :attempt, ' . $nextSql . ', :fail_reason)'
+            (:subscriber_id, :phone, :message_type, :body, :success, :response_json, :from_phone, :attempt, ' . $nextSql . ', :fail_reason, ' . $holdSql . ')'
     );
     $stmt->execute(array(
         ':subscriber_id' => $subscriberId,
@@ -1363,7 +1448,7 @@ function log_message($pdo, $subscriberId, $result)
     ));
 }
 
-function message_log_apply_result($pdo, $logId, $result, $attempt)
+function message_log_apply_result($pdo, $logId, $result, $attempt, $schedule = true)
 {
     ensure_message_log_extra($pdo);
     $logId = (int) $logId;
@@ -1381,12 +1466,18 @@ function message_log_apply_result($pdo, $logId, $result, $attempt)
     } elseif (strlen($reason) > 250) {
         $reason = substr($reason, 0, 247) . '...';
     }
-    $next = message_log_schedule_retry($result, $attempt);
+    $hold = $ok ? '' : message_log_hold_kind($result);
+    $next = $schedule ? message_log_schedule_retry($result, $attempt) : null;
+    if ($hold !== '') {
+        $next = null;
+    }
     $nextSql = ($next === null || $next === '') ? 'NULL' : $pdo->quote($next);
+    $holdSql = ($hold === '') ? 'NULL' : $pdo->quote($hold);
     $stmt = $pdo->prepare(
         'UPDATE message_logs
          SET success = :success, response_json = :response_json, phone = :phone,
-             from_phone = :from_phone, attempt = :attempt, next_retry_at = ' . $nextSql . ', fail_reason = :fail_reason
+             from_phone = :from_phone, attempt = :attempt, next_retry_at = ' . $nextSql . ', fail_reason = :fail_reason,
+             retry_hold = ' . $holdSql . ', queued_at = NULL
          WHERE id = :id'
     );
     $stmt->execute(array(
@@ -1617,7 +1708,7 @@ function wa_session_for_subscriber($pdo, $subscriberId)
     return 'u' . $oid;
 }
 
-function retry_failed_message($pdo, $config, $logId, $subscriberId = 0)
+function retry_failed_message($pdo, $config, $logId, $subscriberId = 0, $manual = false, $sessionOverride = '')
 {
     $logId = (int) $logId;
     if ($logId <= 0) {
@@ -1638,6 +1729,9 @@ function retry_failed_message($pdo, $config, $logId, $subscriberId = 0)
     if (!$log) {
         return array(false, 'الرسالة غير موجودة بالسجل. حدّث الصفحة وحاول مرة ثانية.');
     }
+    if (!empty($log['success'])) {
+        return array(true, 'already');
+    }
     $body = trim((string) $log['body']);
     if ($body === '') {
         return array(false, 'نص الرسالة فارغ');
@@ -1656,6 +1750,17 @@ function retry_failed_message($pdo, $config, $logId, $subscriberId = 0)
     if ($phone === '') {
         $phone = !empty($log['phone']) ? (string) $log['phone'] : '';
     }
+    if ($phone === '' || (function_exists('phone_is_placeholder') && phone_is_placeholder($phone))) {
+        message_log_apply_result($pdo, (int) $log['id'], array(
+            'success' => false,
+            'skipped' => true,
+            'phone' => '',
+            'body' => $body,
+            'type' => preg_replace('/_retry$/', '', (string) $log['message_type']),
+            'response' => 'رقم هاتف غير صالح أو فارغ',
+        ), isset($log['attempt']) ? (int) $log['attempt'] : 1, false);
+        return array(false, 'المشترك ما عنده رقم');
+    }
     $type = (string) $log['message_type'];
     if ($type === '') {
         $type = 'text';
@@ -1669,9 +1774,22 @@ function retry_failed_message($pdo, $config, $logId, $subscriberId = 0)
             return array(false, 'هذا المشترك مو تابع لواتساب الحساب المفتوح');
         }
     }
-    $retrySession = function_exists('whatsapp_session_id') ? whatsapp_session_id() : '';
+    $retrySession = trim((string) $sessionOverride);
+    if ($retrySession === '') {
+        $retrySession = function_exists('whatsapp_session_id') ? whatsapp_session_id() : '';
+    }
     if ($retrySession === '') {
         $retrySession = wa_session_for_subscriber($pdo, (int) $log['sid']);
+    }
+    if ($manual && function_exists('wa_recent_same_sent') && wa_recent_same_sent($pdo, (int) $log['sid'], $phone, $body, (int) $log['id'])) {
+        message_log_apply_result($pdo, (int) $log['id'], array(
+            'success' => true,
+            'phone' => $phone,
+            'body' => $body,
+            'type' => preg_replace('/_retry$/', '', (string) $log['message_type']),
+            'response' => 'already_sent',
+        ), 1, false);
+        return array(true, 'already');
     }
     $result = whatsapp_send($config, $phone, $body, $type, $retrySession);
     $result['type'] = preg_replace('/_retry$/', '', (string) $log['message_type']);
@@ -1682,18 +1800,207 @@ function retry_failed_message($pdo, $config, $logId, $subscriberId = 0)
     if ($prevTry < 1) {
         $prevTry = 1;
     }
-    $attempt = $prevTry + 1;
+    $holdNow = message_log_hold_kind($result);
+    if ($holdNow !== '') {
+        $attempt = $prevTry;
+    } else {
+        $attempt = $prevTry + 1;
+    }
     if ($attempt > 3) {
         $attempt = 3;
     }
     if (empty($result['from_phone']) && !empty($log['from_phone'])) {
         $result['from_phone'] = (string) $log['from_phone'];
     }
-    message_log_apply_result($pdo, (int) $log['id'], $result, $attempt);
+    message_log_apply_result($pdo, (int) $log['id'], $result, $attempt, $manual ? false : true);
     if (!empty($result['success'])) {
         return array(true, 'تمت إعادة الإرسال بنجاح');
     }
     return array(false, whatsapp_fail_user_message($result, 'فشلت إعادة الإرسال — تأكد أن واتساب متصل'));
+}
+
+function wa_phone_ready($phone)
+{
+    $phone = trim((string) $phone);
+    if ($phone === '' || (function_exists('phone_is_placeholder') && phone_is_placeholder($phone))) {
+        return false;
+    }
+    if (function_exists('normalize_phone')) {
+        $phone = normalize_phone($phone);
+    }
+    $digits = preg_replace('/\D+/', '', (string) $phone);
+    return $digits !== '' && strlen($digits) >= 10;
+}
+
+function message_log_live_pack($row, $lang = 'ar')
+{
+    $en = ($lang === 'en');
+    $ok = is_array($row) && !empty($row['success']);
+    if ($ok) {
+        return array('kind' => 'ok', 'label' => $en ? 'Sent' : 'تم');
+    }
+    $hold = (is_array($row) && isset($row['retry_hold'])) ? (string) $row['retry_hold'] : '';
+    if ($hold === 'no_phone') {
+        return array('kind' => 'nophone', 'label' => $en ? 'No number' : 'بدون رقم');
+    }
+    if ($hold === 'wait_link' || $hold === 'wait_on') {
+        return array('kind' => 'link', 'label' => $en ? 'Waiting for link' : 'ينتظر الربط');
+    }
+    if ($hold === 'wait_net') {
+        return array('kind' => 'net', 'label' => $en ? 'Waiting for net' : 'ينتظر النت');
+    }
+    if (is_array($row) && !empty($row['queued_at'])) {
+        $queuedTs = strtotime((string) $row['queued_at']);
+        if ($queuedTs && (time() - $queuedTs) < 180) {
+            return array('kind' => 'send', 'label' => $en ? 'Sending' : 'يرسل');
+        }
+    }
+    if (is_array($row) && !empty($row['next_retry_at'])) {
+        return array('kind' => 'wait', 'label' => $en ? 'Waiting' : 'بالانتظار');
+    }
+    return array('kind' => 'fail', 'label' => $en ? 'Failed' : 'فشل');
+}
+
+function message_log_live_html($row, $lang = 'ar')
+{
+    $pack = message_log_live_pack($row, $lang);
+    if ($pack['kind'] === 'ok' || $pack['kind'] === 'fail') {
+        return '';
+    }
+    return '<span class="msg-live is-' . e($pack['kind']) . '">'
+        . '<i class="msg-ring" aria-hidden="true"></i>'
+        . '<b>' . e($pack['label']) . '</b></span>';
+}
+
+/**
+ * يفك انتظار الرسائل لما ينحل السبب: ربط، نت، أو رقم جديد.
+ */
+function wa_retry_release($pdo, $config)
+{
+    if (!$pdo) {
+        return 0;
+    }
+    ensure_message_log_extra($pdo);
+    $released = 0;
+    try {
+        $stale = $pdo->query(
+            "SELECT id FROM message_logs
+             WHERE success = 0 AND queued_at IS NOT NULL
+               AND queued_at < DATE_SUB(NOW(), INTERVAL 3 MINUTE)
+             ORDER BY queued_at ASC
+             LIMIT 40"
+        );
+        $unstick = $pdo->prepare(
+            "UPDATE message_logs
+             SET queued_at = NULL,
+                 attempt = IF(attempt >= 3, 2, attempt),
+                 next_retry_at = IF(retry_hold IS NULL OR retry_hold = '', NOW(), next_retry_at)
+             WHERE id = :id AND success = 0 AND queued_at IS NOT NULL
+               AND queued_at < DATE_SUB(NOW(), INTERVAL 3 MINUTE)"
+        );
+        if ($stale) {
+            while ($stuck = $stale->fetch()) {
+                $unstick->execute(array(':id' => (int) $stuck['id']));
+                if ($unstick->rowCount() > 0) {
+                    $released++;
+                }
+            }
+        }
+    } catch (Exception $e) {
+    }
+    $mark = $pdo->prepare(
+        "UPDATE message_logs
+         SET retry_hold = NULL, next_retry_at = NOW(), queued_at = NULL,
+             attempt = IF(attempt >= 3, 2, attempt)
+         WHERE id = :id AND success = 0"
+    );
+    try {
+        $st = $pdo->query(
+            "SELECT m.id, s.phone AS sub_phone
+             FROM message_logs m
+             INNER JOIN subscribers s ON s.id = m.subscriber_id
+             WHERE m.success = 0 AND m.retry_hold = 'no_phone'
+               AND m.created_at >= DATE_SUB(NOW(), INTERVAL 14 DAY)
+             LIMIT 30"
+        );
+        if ($st) {
+            while ($row = $st->fetch()) {
+                if (!wa_phone_ready(isset($row['sub_phone']) ? $row['sub_phone'] : '')) {
+                    continue;
+                }
+                $mark->execute(array(':id' => (int) $row['id']));
+                $released++;
+            }
+        }
+    } catch (Exception $e) {
+    }
+    try {
+        $stOld = $pdo->query(
+            "SELECT id, phone, fail_reason, response_json
+             FROM message_logs
+             WHERE success = 0
+               AND created_at >= DATE_SUB(NOW(), INTERVAL 14 DAY)
+               AND (retry_hold IS NULL OR retry_hold = '')
+               AND next_retry_at IS NULL
+             LIMIT 20"
+        );
+        $setHold = $pdo->prepare(
+            'UPDATE message_logs SET retry_hold = :h, next_retry_at = NULL, queued_at = NULL WHERE id = :id AND success = 0'
+        );
+        if ($stOld) {
+            while ($row = $stOld->fetch()) {
+                $kind = message_log_hold_from_stored(
+                    isset($row['fail_reason']) ? $row['fail_reason'] : '',
+                    isset($row['response_json']) ? $row['response_json'] : ''
+                );
+                if ($kind === '' && !wa_phone_ready(isset($row['phone']) ? $row['phone'] : '')) {
+                    $kind = 'no_phone';
+                }
+                if ($kind === '') {
+                    continue;
+                }
+                $setHold->execute(array(':h' => $kind, ':id' => (int) $row['id']));
+            }
+        }
+    } catch (Exception $e) {
+    }
+    $readyCache = array();
+    try {
+        $stWait = $pdo->query(
+            "SELECT id, subscriber_id, retry_hold
+             FROM message_logs
+             WHERE success = 0 AND retry_hold IN ('wait_link', 'wait_net', 'wait_on')
+               AND created_at >= DATE_SUB(NOW(), INTERVAL 14 DAY)
+             ORDER BY id ASC
+             LIMIT 24"
+        );
+        $rows = $stWait ? $stWait->fetchAll() : array();
+        foreach ($rows as $row) {
+            $sid = isset($row['subscriber_id']) ? (int) $row['subscriber_id'] : 0;
+            $hold = isset($row['retry_hold']) ? (string) $row['retry_hold'] : '';
+            $sess = ($sid > 0 && function_exists('wa_session_for_subscriber')) ? wa_session_for_subscriber($pdo, $sid) : '';
+            if ($sess === '') {
+                continue;
+            }
+            if (!isset($readyCache[$sess])) {
+                $on = function_exists('whatsapp_notifications_enabled') ? whatsapp_notifications_enabled($pdo, $sess) : true;
+                $linked = false;
+                if ($on && function_exists('whatsapp_gateway_status_for_account')) {
+                    $wa = (is_array($config) && isset($config['whatsapp'])) ? $config['whatsapp'] : array();
+                    $gst = whatsapp_gateway_status_for_account($wa, $sess);
+                    $linked = is_array($gst) && !empty($gst['ready']);
+                }
+                $readyCache[$sess] = array('on' => $on ? 1 : 0, 'linked' => $linked ? 1 : 0);
+            }
+            if (empty($readyCache[$sess]['on']) || empty($readyCache[$sess]['linked'])) {
+                continue;
+            }
+            $mark->execute(array(':id' => (int) $row['id']));
+            $released++;
+        }
+    } catch (Exception $e) {
+    }
+    return $released;
 }
 
 /**
@@ -1714,6 +2021,12 @@ function wa_retry_due_batch($pdo, $config, $limit = 2)
     }
     @file_put_contents($lock, (string) $now);
     ensure_message_log_extra($pdo);
+    if (function_exists('wa_retry_release')) {
+        try {
+            wa_retry_release($pdo, $config);
+        } catch (Exception $e) {
+        }
+    }
     $limit = (int) $limit;
     if ($limit < 1) {
         $limit = 1;
@@ -1730,6 +2043,8 @@ function wa_retry_due_batch($pdo, $config, $limit = 2)
         $sql .= ' INNER JOIN subscribers s ON s.id = m.subscriber_id AND s.tenant_id = ' . $tid;
     }
     $sql .= ' WHERE m.success = 0 AND m.subscriber_id IS NOT NULL
+              AND m.queued_at IS NULL
+              AND (m.retry_hold IS NULL OR m.retry_hold = \'\')
               AND m.next_retry_at IS NOT NULL AND m.next_retry_at <= NOW() AND m.attempt < 3
               ORDER BY m.next_retry_at ASC
               LIMIT ' . $limit;
@@ -1742,8 +2057,9 @@ function wa_retry_due_batch($pdo, $config, $limit = 2)
         return 0;
     }
     $claim = $pdo->prepare(
-        'UPDATE message_logs SET next_retry_at = NULL
-         WHERE id = :id AND success = 0 AND next_retry_at IS NOT NULL AND next_retry_at <= NOW()'
+        "UPDATE message_logs SET next_retry_at = NULL, queued_at = NOW()
+         WHERE id = :id AND success = 0 AND queued_at IS NULL
+           AND next_retry_at IS NOT NULL AND next_retry_at <= NOW()"
     );
     $done = 0;
     foreach ($ids as $id) {
@@ -1763,9 +2079,452 @@ function wa_retry_due_batch($pdo, $config, $limit = 2)
             retry_failed_message($pdo, $config, $id, 0);
             $done++;
         } catch (Exception $e) {
+            try {
+                $pdo->prepare('UPDATE message_logs SET queued_at = NULL, next_retry_at = NOW() WHERE id = :id AND success = 0')
+                    ->execute(array(':id' => $id));
+            } catch (Exception $e2) {
+            }
         }
     }
     return $done;
+}
+
+function wa_recent_same_sent($pdo, $subId, $phone, $body, $exceptId)
+{
+    $body = (string) $body;
+    $subId = (int) $subId;
+    $exceptId = (int) $exceptId;
+    $phone = trim((string) $phone);
+    if (!$pdo || $body === '') {
+        return false;
+    }
+    $parts = array();
+    $params = array(':id' => $exceptId, ':body' => $body);
+    if ($subId > 0) {
+        $parts[] = 'subscriber_id = :sid';
+        $params[':sid'] = $subId;
+    }
+    if ($phone !== '') {
+        $parts[] = 'phone = :phone';
+        $params[':phone'] = $phone;
+    }
+    if (!$parts) {
+        return false;
+    }
+    $sql = 'SELECT id FROM message_logs WHERE success = 1 AND id <> :id AND body = :body'
+        . ' AND created_at >= DATE_SUB(NOW(), INTERVAL 30 MINUTE) AND ('
+        . implode(' OR ', $parts) . ') LIMIT 1';
+    try {
+        $st = $pdo->prepare($sql);
+        $st->execute($params);
+        return (int) $st->fetchColumn() > 0;
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+function wa_resend_queue_file()
+{
+    $dir = dirname(__DIR__) . '/storage/cache';
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0775, true);
+    }
+    return $dir . '/wa_resend_queue.json';
+}
+
+function wa_resend_locked($fn)
+{
+    $path = wa_resend_queue_file();
+    $fh = @fopen($path, 'c+');
+    if (!$fh) {
+        return false;
+    }
+    if (!@flock($fh, LOCK_EX)) {
+        @fclose($fh);
+        return false;
+    }
+    $raw = stream_get_contents($fh);
+    $data = json_decode((string) $raw, true);
+    if (!is_array($data)) {
+        $data = array();
+    }
+    if (!isset($data['items']) || !is_array($data['items'])) {
+        $data['items'] = array();
+    }
+    if (!isset($data['tally']) || !is_array($data['tally'])) {
+        $data['tally'] = array();
+    }
+    $next = $data;
+    try {
+        $got = call_user_func($fn, $data);
+        if (is_array($got)) {
+            $next = $got;
+        }
+        $json = json_encode($next);
+        if ($json === false) {
+            $json = '{"items":[],"tally":{}}';
+        }
+        @ftruncate($fh, 0);
+        @rewind($fh);
+        @fwrite($fh, $json);
+        @fflush($fh);
+    } catch (Exception $e) {
+    }
+    @flock($fh, LOCK_UN);
+    @fclose($fh);
+    return true;
+}
+
+function wa_resend_enqueue($pdo, $logIds, $adminId, $sessionId)
+{
+    $adminId = (int) $adminId;
+    $sessionId = trim((string) $sessionId);
+    $out = array('queued' => 0, 'dup' => 0, 'missing' => 0);
+    if (!$pdo) {
+        return $out;
+    }
+    ensure_message_log_extra($pdo);
+    $ids = array();
+    foreach ($logIds as $raw) {
+        $id = (int) $raw;
+        if ($id > 0 && !isset($ids[$id])) {
+            $ids[$id] = $id;
+        }
+        if (count($ids) >= 80) {
+            break;
+        }
+    }
+    if (!$ids) {
+        return $out;
+    }
+    $box = array('queued' => 0, 'dup' => 0, 'missing' => 0);
+    $okLock = wa_resend_locked(function ($data) use ($pdo, $ids, $adminId, $sessionId, &$box) {
+        $have = array();
+        $seenBody = array();
+        foreach ($data['items'] as $item) {
+            if (!is_array($item) || empty($item['id'])) {
+                continue;
+            }
+            $have[(int) $item['id']] = true;
+            $subKey = (isset($item['sub']) ? (int) $item['sub'] : 0) . '|' . (isset($item['body']) ? (string) $item['body'] : '');
+            $seenBody[$subKey] = true;
+        }
+        $st = $pdo->prepare('SELECT id, subscriber_id, phone, body, success, queued_at, message_type FROM message_logs WHERE id = :id LIMIT 1');
+        $mark = $pdo->prepare('UPDATE message_logs SET queued_at = NOW(), next_retry_at = NULL WHERE id = :id AND success = 0');
+        foreach ($ids as $id) {
+            if (!empty($have[$id])) {
+                $box['dup']++;
+                continue;
+            }
+            try {
+                $st->execute(array(':id' => $id));
+                $row = $st->fetch();
+            } catch (Exception $e) {
+                $row = null;
+            }
+            if (!$row) {
+                $box['missing']++;
+                continue;
+            }
+            if (!empty($row['success'])) {
+                $box['dup']++;
+                continue;
+            }
+            $qat = isset($row['queued_at']) ? (string) $row['queued_at'] : '';
+            if ($qat !== '') {
+                $ts = strtotime($qat);
+                if ($ts && $ts <= (time() + 120) && $ts >= (time() - 180)) {
+                    $box['dup']++;
+                    continue;
+                }
+            }
+            $body = (string) $row['body'];
+            $sub = isset($row['subscriber_id']) ? (int) $row['subscriber_id'] : 0;
+            $key = $sub . '|' . $body;
+            if ($sub > 0 && $body !== '' && isset($seenBody[$key])) {
+                $box['dup']++;
+                continue;
+            }
+            if (wa_recent_same_sent($pdo, $sub, isset($row['phone']) ? (string) $row['phone'] : '', $body, $id)) {
+                message_log_apply_result($pdo, $id, array(
+                    'success' => true,
+                    'phone' => isset($row['phone']) ? (string) $row['phone'] : '',
+                    'body' => $body,
+                    'type' => isset($row['message_type']) ? (string) $row['message_type'] : 'text',
+                    'response' => 'already_sent',
+                ), 1, false);
+                $box['dup']++;
+                continue;
+            }
+            try {
+                $mark->execute(array(':id' => $id));
+                if ($mark->rowCount() < 1) {
+                    $box['dup']++;
+                    continue;
+                }
+            } catch (Exception $e) {
+                $box['missing']++;
+                continue;
+            }
+            $data['items'][] = array(
+                'id' => $id,
+                'admin' => $adminId,
+                'session' => $sessionId,
+                'sub' => $sub,
+                'body' => $body,
+            );
+            $seenBody[$key] = true;
+            $have[$id] = true;
+            $box['queued']++;
+        }
+        if ($box['queued'] > 0 && $adminId > 0) {
+            $k = (string) $adminId;
+            if (!isset($data['tally'][$k]) || !is_array($data['tally'][$k])) {
+                $data['tally'][$k] = array('ok' => 0, 'fail' => 0, 'left' => 0);
+            }
+            $data['tally'][$k]['left'] = (int) $data['tally'][$k]['left'] + (int) $box['queued'];
+        }
+        return $data;
+    });
+    if (!$okLock) {
+        return $out;
+    }
+    if ($box['queued'] > 0) {
+        wa_resend_kick(0);
+    }
+    return $box;
+}
+
+function wa_resend_queue_message($result)
+{
+    global $lang;
+    $en = (isset($lang) && $lang === 'en');
+    $queued = isset($result['queued']) ? (int) $result['queued'] : 0;
+    $dup = isset($result['dup']) ? (int) $result['dup'] : 0;
+    if ($queued > 0) {
+        if (isset($_SESSION) && is_array($_SESSION)) {
+            $_SESSION['wa_resend_wait'] = 1;
+        }
+        $msg = $en
+            ? ('Queued ' . $queued . ' message(s). Sending continues in the background.')
+            : ('تم وضع ' . $queued . ' رسالة في الطابور وستُرسل بالخلفية');
+        if ($dup > 0) {
+            $msg .= $en
+                ? (' Skipped ' . $dup . ' already sent.')
+                : ('، وتُرك ' . $dup . ' مكرر');
+        }
+        return array('success', $msg);
+    }
+    $msg = $en
+        ? 'Nothing new to send. They are already queued or already sent.'
+        : 'ما انرسل جديد: الرسائل بالطابور أو مُرسلة مسبقاً';
+    return array('info', $msg);
+}
+
+function wa_resend_request($pdo, $logIds)
+{
+    $me = function_exists('current_admin') ? current_admin() : null;
+    $aid = ($me && !empty($me['id'])) ? (int) $me['id'] : 0;
+    $sess = function_exists('whatsapp_session_id') ? whatsapp_session_id() : '';
+    return wa_resend_queue_message(wa_resend_enqueue($pdo, $logIds, $aid, $sess));
+}
+
+function wa_resend_pop($limit)
+{
+    $limit = (int) $limit;
+    if ($limit < 1) {
+        $limit = 1;
+    }
+    $popped = array();
+    wa_resend_locked(function ($data) use (&$popped, $limit) {
+        if (count($data['items']) > $limit) {
+            $popped = array_slice($data['items'], 0, $limit);
+            $data['items'] = array_slice($data['items'], $limit);
+        } else {
+            $popped = $data['items'];
+            $data['items'] = array();
+        }
+        return $data;
+    });
+    return $popped;
+}
+
+function wa_resend_finish_one($adminId, $kind)
+{
+    $adminId = (int) $adminId;
+    if ($adminId <= 0) {
+        return;
+    }
+    $notice = null;
+    wa_resend_locked(function ($data) use ($adminId, $kind, &$notice) {
+        $k = (string) $adminId;
+        if (!isset($data['tally'][$k]) || !is_array($data['tally'][$k])) {
+            return $data;
+        }
+        $data['tally'][$k]['left'] = (int) $data['tally'][$k]['left'] - 1;
+        if ($kind === 'ok') {
+            $data['tally'][$k]['ok'] = (int) $data['tally'][$k]['ok'] + 1;
+        } elseif ($kind === 'fail') {
+            $data['tally'][$k]['fail'] = (int) $data['tally'][$k]['fail'] + 1;
+        }
+        if ((int) $data['tally'][$k]['left'] <= 0) {
+            $notice = array(
+                'ok' => (int) $data['tally'][$k]['ok'],
+                'fail' => (int) $data['tally'][$k]['fail'],
+            );
+            unset($data['tally'][$k]);
+        }
+        return $data;
+    });
+    if (!is_array($notice) || ((int) $notice['ok'] < 1 && (int) $notice['fail'] < 1)) {
+        return;
+    }
+    $path = dirname(__DIR__) . '/storage/cache/wa_resend_notice_' . $adminId . '.json';
+    @file_put_contents($path, json_encode($notice));
+}
+
+function wa_resend_run($pdo, $config, $limit = 2)
+{
+    $items = wa_resend_pop($limit);
+    if (!$items) {
+        return wa_resend_has_work();
+    }
+    foreach ($items as $item) {
+        if (!is_array($item)) {
+            continue;
+        }
+        $id = isset($item['id']) ? (int) $item['id'] : 0;
+        $adminId = isset($item['admin']) ? (int) $item['admin'] : 0;
+        $session = isset($item['session']) ? (string) $item['session'] : '';
+        if ($id <= 0) {
+            wa_resend_finish_one($adminId, 'skip');
+            continue;
+        }
+        $claimed = false;
+        try {
+            $claim = $pdo->prepare('UPDATE message_logs SET queued_at = NOW() WHERE id = :id AND success = 0 AND queued_at IS NOT NULL');
+            $claim->execute(array(':id' => $id));
+            $claimed = $claim->rowCount() > 0;
+        } catch (Exception $e) {
+            $claimed = false;
+        }
+        if (!$claimed) {
+            wa_resend_finish_one($adminId, 'skip');
+            continue;
+        }
+        $kind = 'fail';
+        try {
+            list($okOne, $msgOne) = retry_failed_message($pdo, $config, $id, 0, true, $session);
+            if ($okOne && $msgOne !== 'already') {
+                $kind = 'ok';
+            } elseif ($okOne) {
+                $kind = 'skip';
+            }
+        } catch (Exception $e) {
+            $kind = 'fail';
+            try {
+                $pdo->prepare('UPDATE message_logs SET queued_at = NULL WHERE id = :id')->execute(array(':id' => $id));
+            } catch (Exception $e2) {
+            }
+        }
+        wa_resend_finish_one($adminId, $kind);
+    }
+    return wa_resend_has_work();
+}
+
+function wa_resend_has_work()
+{
+    $path = wa_resend_queue_file();
+    if (!is_file($path)) {
+        return false;
+    }
+    $data = json_decode((string) @file_get_contents($path), true);
+    return is_array($data) && !empty($data['items']);
+}
+
+function wa_resend_pending($adminId)
+{
+    $adminId = (int) $adminId;
+    $path = wa_resend_queue_file();
+    if ($adminId <= 0 || !is_file($path)) {
+        return 0;
+    }
+    $fh = @fopen($path, 'r');
+    if (!$fh) {
+        return 0;
+    }
+    @flock($fh, LOCK_SH);
+    $raw = stream_get_contents($fh);
+    @flock($fh, LOCK_UN);
+    @fclose($fh);
+    $data = json_decode((string) $raw, true);
+    $k = (string) $adminId;
+    if (!is_array($data) || empty($data['tally'][$k]['left'])) {
+        return 0;
+    }
+    return (int) $data['tally'][$k]['left'];
+}
+
+function wa_resend_take_notice($adminId)
+{
+    $adminId = (int) $adminId;
+    if ($adminId <= 0) {
+        return null;
+    }
+    $path = dirname(__DIR__) . '/storage/cache/wa_resend_notice_' . $adminId . '.json';
+    if (!is_file($path)) {
+        return null;
+    }
+    $fh = @fopen($path, 'c+');
+    if (!$fh) {
+        return null;
+    }
+    @flock($fh, LOCK_EX);
+    $raw = stream_get_contents($fh);
+    @ftruncate($fh, 0);
+    @rewind($fh);
+    @flock($fh, LOCK_UN);
+    @fclose($fh);
+    @unlink($path);
+    $data = json_decode((string) $raw, true);
+    return is_array($data) ? $data : null;
+}
+
+function wa_resend_kick($delaySec = 0)
+{
+    if (!function_exists('portal_warm_saved_base')) {
+        $warm = __DIR__ . '/portal_warm.php';
+        if (is_file($warm)) {
+            require_once $warm;
+        }
+    }
+    $base = function_exists('portal_warm_saved_base') ? portal_warm_saved_base() : '';
+    if ($base === '' && function_exists('portal_warm_remember_base')) {
+        $base = portal_warm_remember_base();
+    }
+    $secret = function_exists('portal_warm_secret') ? portal_warm_secret() : '';
+    if ($base === '' || $secret === '') {
+        return false;
+    }
+    $url = $base . '/wa_queue.php?key=' . rawurlencode($secret);
+    $delaySec = max(0, (int) $delaySec);
+    $inner = 'sleep ' . $delaySec . '; curl -fsS -k --max-time 8 ' . escapeshellarg($url) . ' >/dev/null 2>&1';
+    $cmd = 'sh -c ' . escapeshellarg($inner) . ' >/dev/null 2>&1 &';
+    if (function_exists('portal_warm_fn_on') && portal_warm_fn_on('popen') && function_exists('pclose')) {
+        $h = @popen($cmd, 'r');
+        if (is_resource($h)) {
+            @pclose($h);
+            return true;
+        }
+    }
+    if (function_exists('portal_warm_fn_on') && portal_warm_fn_on('exec')) {
+        @exec($cmd);
+        return true;
+    }
+    if ($delaySec === 0 && function_exists('portal_warm_fsock')) {
+        return portal_warm_fsock($url);
+    }
+    return false;
 }
 
 function wa_template_choices($lang = 'ar', $cfg = null)

@@ -1104,8 +1104,10 @@ function saas_settings($settings = null)
     $plans = isset($settings['saas_plans']) && is_array($settings['saas_plans'])
         ? $settings['saas_plans']
         : array(
-            'monthly' => array('label' => 'شهري', 'days' => 30, 'amount' => 25000),
-            'yearly' => array('label' => 'سنوي', 'days' => 365, 'amount' => 250000),
+            'monthly' => array('label' => 'شهري', 'days' => 30, 'amount' => 25000, 'discount' => 0),
+            'quarter' => array('label' => '3 أشهر', 'days' => 90, 'amount' => 70000, 'discount' => 0),
+            'half' => array('label' => '6 أشهر', 'days' => 180, 'amount' => 130000, 'discount' => 0),
+            'yearly' => array('label' => 'سنوي', 'days' => 365, 'amount' => 250000, 'discount' => 0),
         );
     return array(
         'registration_enabled' => !isset($settings['saas_registration_enabled']) || !empty($settings['saas_registration_enabled']),
@@ -1274,6 +1276,9 @@ function saas_extend_subscription($pdo, $tenantId, $periodDays, $planCode = null
         $pdo->prepare('UPDATE admin_users SET is_active = 1 WHERE tenant_id = :t AND role = "admin"')
             ->execute(array(':t' => $tenantId));
     } catch (Exception $e) {
+    }
+    if ($planCode !== null && $planCode !== '' && $planCode !== 'manual' && function_exists('platform_sale_record')) {
+        platform_sale_record($pdo, $tenantId, (string) $planCode);
     }
     return true;
 }

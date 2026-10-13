@@ -421,8 +421,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if ($action === 'retry_message') {
         $logId = (int) post('log_id', '0');
-        list($ok, $msg) = retry_failed_message($pdo, $config, $logId, $id);
-        flash($ok ? 'success' : 'error', $msg);
+        list($flashKind, $flashMsg) = wa_resend_request($pdo, array($logId));
+        flash($flashKind, $flashMsg);
         redirect('subscriber.php?id=' . $id . '#messages');
     }
 
@@ -962,7 +962,7 @@ if ($activeSubCard) {
             <div class="msg-short" style="margin-top:4px"><?php echo e(message_short_summary($lastMsg['message_type'], $lastMsg['body'], false)); ?></div>
             <?php endif; ?>
         </div>
-        <form method="post">
+        <form method="post" data-no-wait="1">
             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
             <input type="hidden" name="action" value="retry_message">
             <input type="hidden" name="log_id" value="<?php echo (int) $lastMsg['id']; ?>">
@@ -1362,7 +1362,7 @@ if ($activeSubCard) {
                         <pre class="msg-full-body"><?php echo e($log['body']); ?></pre>
                     </details>
                     <?php if (!$ok && !$resolved): ?>
-                        <form method="post" class="msg-retry-form">
+                        <form method="post" class="msg-retry-form" data-no-wait="1">
                             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                             <input type="hidden" name="action" value="retry_message">
                             <input type="hidden" name="log_id" value="<?php echo (int) $log['id']; ?>">

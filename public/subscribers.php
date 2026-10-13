@@ -551,8 +551,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'retry_message') {
         $logId = (int) post('log_id', '0');
         $sid = (int) post('id', '0');
-        list($ok, $msg) = retry_failed_message($pdo, $config, $logId, $sid);
-        flash($ok ? 'success' : 'error', $msg);
+        list($flashKind, $flashMsg) = wa_resend_request($pdo, array($logId));
+        flash($flashKind, $flashMsg);
         if ($sid > 0) {
             redirect('subscriber.php?id=' . $sid . '#messages');
         }
@@ -1839,7 +1839,7 @@ window.DEBT_ENTRY = {
     <input type="hidden" name="action" value="remind_days">
     <input type="hidden" name="id" value="">
 </form>
-<form method="post" id="opsRetryForm" class="hidden" hidden>
+<form method="post" id="opsRetryForm" class="hidden" hidden data-no-wait="1">
     <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
     <input type="hidden" name="action" value="retry_message">
     <input type="hidden" name="id" value="">

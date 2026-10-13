@@ -90,6 +90,12 @@ $cardDebt = array('checked' => 0, 'sent' => 0, 'failed' => 0);
 if (function_exists('run_card_debt_reminders')) {
     $cardDebt = run_card_debt_reminders($pdo, $config, 40);
 }
+if (is_file(__DIR__ . '/../includes/portal_warm.php')) {
+    require_once __DIR__ . '/../includes/portal_warm.php';
+    if (function_exists('portal_warm_schedule')) {
+        @portal_warm_schedule(0);
+    }
+}
 $waRetry = 0;
 if (function_exists('wa_retry_due_batch')) {
     try {

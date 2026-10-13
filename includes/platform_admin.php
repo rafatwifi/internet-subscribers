@@ -47,13 +47,121 @@ function platform_admin_dashboard_stats($pdo, $config)
             $out['google_ok'] = !empty($g['ok']);
         }
     }
-    if (function_exists('platform_card_summary')) {
-        $plat = platform_card_summary($pdo);
-        $out['sales'] = isset($plat['sold_amount']) ? (float) $plat['sold_amount'] : 0.0;
+    if (function_exists('platform_sales_summary')) {
+        $plat = platform_sales_summary($pdo);
+        $out['sales'] = isset($plat['sales']) ? (float) $plat['sales'] : 0.0;
         $out['received'] = isset($plat['received']) ? (float) $plat['received'] : 0.0;
-        $out['debt'] = isset($plat['remaining']) ? (float) $plat['remaining'] : 0.0;
+        $out['debt'] = isset($plat['debt']) ? (float) $plat['debt'] : 0.0;
+        $out['sales_count'] = isset($plat['count']) ? (int) $plat['count'] : 0;
     }
     return $out;
+}
+
+function ensure_platform_sales_schema($pdo)
+{
+    static $done = false;
+    if ($done || !$pdo) {
+        return;
+    }
+    $done = true;
+    try {
+        $pdo->exec(
+            'CREATE TABLE IF NOT EXISTS platform_membership_sales (
+                id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                tenant_id INT UNSIGNED NOT NULL,
+                plan_code VARCHAR(40) NOT NULL DEFAULT "",
+                plan_label VARCHAR(80) NOT NULL DEFAULT "",
+                days INT NOT NULL DEFAULT 0,
+                price DECIMAL(14,2) NOT NULL DEFAULT 0,
+                discount DECIMAL(14,2) NOT NULL DEFAULT 0,
+                net DECIMAL(14,2) NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                KEY idx_pms_tenant (tenant_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
+        );
+    } catch (Exception $e) {
+    }
+}
+
+function platform_sale_record($pdo, $tenantId, $planCode)
+{
+    $tenantId = (int) $tenantId;
+    $planCode = trim((string) $planCode);
+    if ($tenantId <= 1 || $planCode === '' || $planCode === 'manual') {
+        return false;
+    }
+    $saas = function_exists('saas_settings') ? saas_settings() : array('plans' => array());
+    $plans = isset($saas['plans']) && is_array($saas['plans']) ? $saas['plans'] : array();
+    if (!isset($plans[$planCode]) || !is_array($plans[$planCode])) {
+        return false;
+    }
+    $p = $plans[$planCode];
+    $price = isset($p['amount']) ? (float) $p['amount'] : 0;
+    $discount = isset($p['discount']) ? (float) $p['discount'] : 0;
+    if ($discount < 0) {
+        $discount = 0;
+    }
+    if ($discount > $price) {
+        $discount = $price;
+    }
+    $net = $price - $discount;
+    $label = isset($p['label']) ? (string) $p['label'] : $planCode;
+    $days = isset($p['days']) ? (int) $p['days'] : 0;
+    ensure_platform_sales_schema($pdo);
+    try {
+        $st = $pdo->prepare(
+            'INSERT INTO platform_membership_sales
+                (tenant_id, plan_code, plan_label, days, price, discount, net)
+             VALUES (:t, :c, :l, :d, :p, :dis, :n)'
+        );
+        $st->execute(array(
+            ':t' => $tenantId,
+            ':c' => $planCode,
+            ':l' => $label,
+            ':d' => $days,
+            ':p' => $price,
+            ':dis' => $discount,
+            ':n' => $net,
+        ));
+        return true;
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+function platform_sales_summary($pdo)
+{
+    ensure_platform_sales_schema($pdo);
+    $out = array('sales' => 0.0, 'received' => 0.0, 'debt' => 0.0, 'count' => 0);
+    try {
+        $row = $pdo->query(
+            'SELECT COALESCE(SUM(net),0) AS net, COALESCE(SUM(price),0) AS price, COUNT(*) AS n
+             FROM platform_membership_sales'
+        )->fetch();
+        if ($row) {
+            $out['sales'] = (float) $row['net'];
+            $out['received'] = (float) $row['net'];
+            $out['count'] = (int) $row['n'];
+        }
+    } catch (Exception $e) {
+    }
+    return $out;
+}
+
+function platform_tenant_last_sale($pdo, $tenantId)
+{
+    ensure_platform_sales_schema($pdo);
+    try {
+        $st = $pdo->prepare(
+            'SELECT plan_code, plan_label, price, discount, net, days, created_at
+             FROM platform_membership_sales WHERE tenant_id = :t ORDER BY id DESC LIMIT 1'
+        );
+        $st->execute(array(':t' => (int) $tenantId));
+        $row = $st->fetch();
+        return $row ? $row : null;
+    } catch (Exception $e) {
+        return null;
+    }
 }
 
 /**

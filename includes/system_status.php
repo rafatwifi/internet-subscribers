@@ -700,21 +700,33 @@ function dash_reseller_pings($config)
     }
     $bits = array();
     $names = array();
+    $outRows = array();
+    $n = 0;
     foreach ($rows as $row) {
+        $n++;
+        if ($n > 8) {
+            break;
+        }
         $names[] = $row['name'];
         $lat = function_exists('system_latency_to_host') ? system_latency_to_host($row['host']) : array('ms' => null);
-        $ms = isset($lat['ms']) ? $lat['ms'] : null;
-        if ($ms !== null && $ms !== '') {
-            $bits[] = number_format((float) $ms, 0) . ' ms';
+        $ms = (isset($lat['ms']) && $lat['ms'] !== null && $lat['ms'] !== '') ? (int) round((float) $lat['ms']) : null;
+        if ($ms !== null && $ms > 0) {
+            $bits[] = $ms . ' ms';
         } else {
-            $bits[] = 'فشل';
+            $bits[] = '—';
+            $ms = null;
         }
+        $outRows[] = array(
+            'name' => (string) $row['name'],
+            'ms' => $ms,
+        );
     }
     return array(
         'ok' => true,
         'balance' => implode(' · ', $bits),
         'sub' => implode(' · ', $names),
-        'count' => count($rows),
+        'count' => count($outRows),
+        'rows' => $outRows,
     );
 }
 

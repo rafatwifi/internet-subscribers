@@ -1231,14 +1231,15 @@ th {
 
 .sas-toast {
   position: fixed;
-  top: 72px;
-  inset-inline-start: 16px;
-  inset-inline-end: auto;
+  top: 12px;
+  bottom: auto;
+  inset-inline-end: 220px;
+  inset-inline-start: auto;
   left: auto;
   right: auto;
   transform: none;
-  z-index: 100001;
-  width: min(340px, calc(100vw - 24px));
+  z-index: 100003;
+  width: min(320px, 42vw);
   padding: 12px 14px;
   border-radius: 14px;
   font-weight: 700;
@@ -1254,13 +1255,13 @@ th {
 }
 @media (max-width: 640px) {
   .sas-toast {
-    top: auto;
-    bottom: 16px;
+    top: 10px;
+    bottom: auto;
     inset-inline-start: 12px;
     inset-inline-end: 12px;
     width: auto;
+    max-width: none;
   }
-  .sas-toast.is-out { transform: translateY(8px); }
 }
 .sas-toast-success { background: #146c43; color: #fff; }
 .sas-toast-error { background: #9b2331; color: #fff; }

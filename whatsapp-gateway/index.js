@@ -207,6 +207,8 @@ function createWaSession(sessionId) {
   let qrHoldUntil = 0;
   let pairingQuietUntil = 0;
   let lastWipeAt = 0;
+  let savedLogin = false;
+  let qrWhileSaved = 0;
   let sendChain = Promise.resolve();
 
   function log(msg) {
@@ -266,6 +268,7 @@ function createWaSession(sessionId) {
 
       ensureAuthDir();
       const { state, saveCreds } = await useMultiFileAuthState(authDir);
+      savedLogin = !!(state.creds && state.creds.registered);
       const version = await resolveWaVersion();
 
       const sockOpts = {
@@ -273,7 +276,7 @@ function createWaSession(sessionId) {
         logger: pino({ level: 'silent' }),
         printQRInTerminal: false,
         syncFullHistory: false,
-        markOnlineOnConnect: true,
+        markOnlineOnConnect: false,
         generateHighQualityLinkPreview: false,
         connectTimeoutMs: 60000,
         keepAliveIntervalMs: 20000,
@@ -287,24 +290,40 @@ function createWaSession(sessionId) {
 
       sock = makeWASocket(sockOpts);
 
-      sock.ev.on('creds.update', saveCreds);
+      sock.ev.on('creds.update', function () {
+        saveCreds();
+        savedLogin = !!(state.creds && state.creds.registered);
+      });
 
       sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-          ready = false;
           const now = Date.now();
-          if (lastQrDataUrl && lastQrAt > 0 && (now - lastQrAt) < 60000) {
-            lastStatusMsg = 'qr_ready';
-            pairingQuietUntil = Math.max(pairingQuietUntil, now + 120000);
-            return;
+          if (savedLogin) {
+            if (reconnectTimer) {
+              return;
+            }
+            qrWhileSaved += 1;
+            if (qrWhileSaved < 2) {
+              lastQr = null;
+              lastQrDataUrl = null;
+              lastQrAt = 0;
+              lastStatusMsg = 'reconnecting';
+              log('QR ignored — saved login stays, reconnecting');
+              scheduleReconnect(2000, false);
+              return;
+            }
           }
+          savedLogin = false;
+          qrWhileSaved = 0;
+          ready = false;
           lastQr = qr;
           lastQrAt = now;
-          qrHoldUntil = now + 180000;
-          pairingQuietUntil = now + 180000;
+          qrHoldUntil = now + 12000;
+          pairingQuietUntil = now + 12000;
           lastStatusMsg = 'qr_ready';
+          lastQrDataUrl = null;
           try {
             lastQrDataUrl = await QRCode.toDataURL(qr, { width: 360, margin: 2 });
           } catch (e) {
@@ -316,6 +335,8 @@ function createWaSession(sessionId) {
 
         if (connection === 'open') {
           ready = true;
+          savedLogin = true;
+          qrWhileSaved = 0;
           lastQr = null;
           lastQrDataUrl = null;
           lastQrAt = 0;
@@ -346,9 +367,20 @@ function createWaSession(sessionId) {
 
           if (ignoreReconnect || loggedOut) {
             if (loggedOut) {
+              savedLogin = false;
+              qrWhileSaved = 0;
               wipeAuthDir();
-              log('Logged out. Wipe auth and wait for new QR after restart.');
+              log('Logged out from the phone. Waiting for a new QR.');
             }
+            return;
+          }
+          if (savedLogin) {
+            lastQr = null;
+            lastQrDataUrl = null;
+            lastQrAt = 0;
+            lastStatusMsg = 'reconnecting';
+            failCount += 1;
+            scheduleReconnect(Math.min(45000, 4000 * failCount), false);
             return;
           }
 
@@ -403,12 +435,11 @@ function createWaSession(sessionId) {
           }
 
           failCount += 1;
-          let waitMs = Math.min(180000, 20000 * failCount);
+          let waitMs = Math.min(60000, 8000 * failCount);
           if (code === 408 || code === 428 || code === 440) {
-            waitMs = Math.min(300000, 30000 * failCount);
+            waitMs = Math.min(90000, 12000 * failCount);
           }
-          const wipe = failCount >= 40;
-          scheduleReconnect(waitMs, wipe);
+          scheduleReconnect(waitMs, false);
         }
       });
     } catch (e) {
@@ -431,6 +462,8 @@ function createWaSession(sessionId) {
     pairingQuietUntil = Date.now() + 20000;
     connectedPhone = null;
     failCount = 0;
+    savedLogin = false;
+    qrWhileSaved = 0;
     lastStatusMsg = 'logout_cooldown';
 
     if (sock) {
@@ -607,30 +640,61 @@ function createWaSession(sessionId) {
     return run;
   }
 
+  function qrAgeMs() {
+    return lastQrAt > 0 ? (Date.now() - lastQrAt) : 0;
+  }
+
   function getStatus() {
+    const age = qrAgeMs();
+    const fresh = !savedLogin && !!(lastQr || lastQrDataUrl) && age > 0 && age <= 45000;
     return {
       success: true,
       session: sessionId,
       ready: ready,
-      has_qr: !!(lastQr || lastQrDataUrl),
+      has_qr: fresh,
       phone: connectedPhone,
-      status: lastStatusMsg,
+      status: (savedLogin && !ready) ? 'reconnecting' : lastStatusMsg,
+      registered: !!savedLogin,
+      qr_age_ms: age,
       tls_insecure: !!useInsecureTls
     };
   }
 
   async function getQr() {
     if (ready) {
-      return { success: true, session: sessionId, ready: true, phone: connectedPhone, qr_data_url: null };
+      return { success: true, session: sessionId, ready: true, phone: connectedPhone, qr_data_url: null, registered: true, qr_age_ms: 0 };
     }
-    if (!lastQr) {
+    if (savedLogin) {
       return {
         success: true,
         session: sessionId,
         ready: false,
         qr_data_url: null,
-        message: 'Waiting for QR...',
-        status: lastStatusMsg
+        registered: true,
+        status: 'reconnecting',
+        qr_age_ms: 0
+      };
+    }
+    const age = qrAgeMs();
+    if (!lastQr || age > 45000) {
+      if (lastQr) {
+        lastQr = null;
+        lastQrDataUrl = null;
+        lastQrAt = 0;
+        lastStatusMsg = 'qr_wait';
+        log('Dropped expired QR');
+      }
+      if (!starting && !reconnectTimer) {
+        scheduleReconnect(800, false);
+      }
+      return {
+        success: true,
+        session: sessionId,
+        ready: false,
+        qr_data_url: null,
+        registered: false,
+        status: 'qr_wait',
+        qr_age_ms: age
       };
     }
     let dataUrl = lastQrDataUrl;
@@ -638,7 +702,15 @@ function createWaSession(sessionId) {
       dataUrl = await QRCode.toDataURL(lastQr, { width: 360, margin: 2 });
       lastQrDataUrl = dataUrl;
     }
-    return { success: true, session: sessionId, ready: false, qr_data_url: dataUrl };
+    return {
+      success: true,
+      session: sessionId,
+      ready: false,
+      qr_data_url: dataUrl,
+      registered: false,
+      status: 'qr_ready',
+      qr_age_ms: age
+    };
   }
 
   function renderLinkPage() {

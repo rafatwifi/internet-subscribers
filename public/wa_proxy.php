@@ -88,7 +88,7 @@ function wa_proxy_down()
 function wa_proxy_status_name($raw)
 {
     $raw = trim((string) $raw);
-    $ok = array('starting', 'connecting', 'qr_ready', 'connected', 'logout_cooldown', 'cert_expired', 'tls_retry');
+    $ok = array('starting', 'connecting', 'qr_ready', 'qr_wait', 'reconnecting', 'connected', 'logout_cooldown', 'cert_expired', 'tls_retry');
     if (in_array($raw, $ok, true)) {
         return $raw;
     }
@@ -145,6 +145,8 @@ if ($action === 'logout') {
     ), 200);
 }
 
+$registered = !empty($decoded['registered']);
+$qrAge = isset($decoded['qr_age_ms']) ? (int) $decoded['qr_age_ms'] : 0;
 if (!empty($decoded['ready'])) {
     wa_proxy_emit(array(
         'success' => true,
@@ -153,6 +155,21 @@ if (!empty($decoded['ready'])) {
         'phone' => isset($decoded['phone']) ? (string) $decoded['phone'] : '',
         'session' => $sessionId,
         'status' => 'connected',
+        'registered' => true,
+        'qr_age_ms' => 0,
+        'qr_data_url' => null,
+    ), 200);
+}
+if ($registered) {
+    wa_proxy_emit(array(
+        'success' => true,
+        'ready' => false,
+        'has_qr' => false,
+        'phone' => '',
+        'session' => $sessionId,
+        'status' => 'reconnecting',
+        'registered' => true,
+        'qr_age_ms' => 0,
         'qr_data_url' => null,
     ), 200);
 }
@@ -172,6 +189,12 @@ if ($action === 'qr') {
     if (is_array($qr)) {
         $qEcho = isset($qr['session']) ? (string) $qr['session'] : '';
         if ($qEcho === (string) $sessionId) {
+            if (!empty($qr['registered'])) {
+                $registered = true;
+            }
+            if (isset($qr['qr_age_ms'])) {
+                $qrAge = (int) $qr['qr_age_ms'];
+            }
             if (!empty($qr['ready'])) {
                 wa_proxy_emit(array(
                     'success' => true,
@@ -180,15 +203,34 @@ if ($action === 'qr') {
                     'phone' => isset($qr['phone']) ? (string) $qr['phone'] : '',
                     'session' => $sessionId,
                     'status' => 'connected',
+                    'registered' => true,
+                    'qr_age_ms' => 0,
                     'qr_data_url' => null,
                 ), 200);
             }
-            if (!empty($qr['qr_data_url'])) {
+            if (!empty($qr['registered'])) {
+                wa_proxy_emit(array(
+                    'success' => true,
+                    'ready' => false,
+                    'has_qr' => false,
+                    'phone' => '',
+                    'session' => $sessionId,
+                    'status' => 'reconnecting',
+                    'registered' => true,
+                    'qr_age_ms' => 0,
+                    'qr_data_url' => null,
+                ), 200);
+            }
+            $qrFresh = !empty($qr['qr_data_url']) && ($qrAge <= 0 || $qrAge <= 45000);
+            if ($qrFresh) {
                 $qrImage = $qr['qr_data_url'];
                 $hasQr = true;
                 $gwStatus = 'qr_ready';
             } elseif (isset($qr['status'])) {
                 $gwStatus = wa_proxy_status_name($qr['status']);
+                if ($gwStatus === 'qr_ready') {
+                    $gwStatus = 'qr_wait';
+                }
             }
         }
     }
@@ -201,5 +243,7 @@ wa_proxy_emit(array(
     'phone' => '',
     'session' => $sessionId,
     'status' => $gwStatus,
+    'registered' => $registered ? true : false,
+    'qr_age_ms' => $qrAge,
     'qr_data_url' => $qrImage,
 ), 200);

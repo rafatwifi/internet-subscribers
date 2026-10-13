@@ -4,6 +4,80 @@ require_once __DIR__ . '/../includes/bootstrap.php';
 require_once __DIR__ . '/../includes/layout.php';
 require_login();
 
+if (isset($_GET['ajax']) && (string) $_GET['ajax'] === 'wa_notice') {
+    $meNotice = function_exists('current_admin') ? current_admin() : null;
+    $aidNotice = ($meNotice && !empty($meNotice['id'])) ? (int) $meNotice['id'] : 0;
+    $notice = function_exists('wa_resend_take_notice') ? wa_resend_take_notice($aidNotice) : null;
+    $pending = function_exists('wa_resend_pending') ? wa_resend_pending($aidNotice) : 0;
+    if (is_array($notice) && isset($_SESSION['wa_resend_wait'])) {
+        unset($_SESSION['wa_resend_wait']);
+    }
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    $out = array('ok' => true, 'pending' => (int) $pending);
+    if (is_array($notice)) {
+        $out['notice'] = $notice;
+    }
+    echo json_encode($out);
+    exit;
+}
+
+if (isset($_GET['ajax']) && (string) $_GET['ajax'] === 'log_ring') {
+    $rawIds = isset($_GET['ids']) ? (string) $_GET['ids'] : '';
+    $ids = array();
+    foreach (explode(',', $rawIds) as $part) {
+        $id = (int) $part;
+        if ($id > 0) {
+            $ids[$id] = $id;
+        }
+        if (count($ids) >= 40) {
+            break;
+        }
+    }
+    $whereRing = '1=0';
+    if ($ids) {
+        $whereRing = 'm.id IN (' . implode(',', array_map('intval', $ids)) . ')';
+        $mineSess = function_exists('whatsapp_session_id') ? whatsapp_session_id() : '';
+        $scopeRing = ($mineSess !== '' && $mineSess !== 'default' && function_exists('whatsapp_log_scope_sql'))
+            ? whatsapp_log_scope_sql('s')
+            : '';
+        if ($scopeRing !== '') {
+            $whereRing .= ' AND m.subscriber_id IS NOT NULL' . $scopeRing;
+        }
+    }
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    $out = array('ok' => true, 'rows' => array());
+    if ($ids && isset($pdo)) {
+        if (function_exists('ensure_message_log_extra')) {
+            ensure_message_log_extra($pdo);
+        }
+        try {
+            $q = $pdo->query(
+                'SELECT m.id, m.success, m.queued_at, m.next_retry_at, m.retry_hold
+                 FROM message_logs m
+                 LEFT JOIN subscribers s ON s.id = m.subscriber_id
+                 WHERE ' . $whereRing
+            );
+            if ($q) {
+                while ($row = $q->fetch()) {
+                    $pack = function_exists('message_log_live_pack') ? message_log_live_pack($row, 'ar') : array('kind' => 'fail', 'label' => 'فشل');
+                    $out['rows'][(string) (int) $row['id']] = $pack;
+                }
+            }
+        } catch (Exception $e) {
+        }
+    }
+    echo json_encode($out);
+    exit;
+}
+
 $mode = isset($_GET['mode']) ? (string) $_GET['mode'] : 'send';
 $filter = isset($_GET['filter']) ? (string) $_GET['filter'] : 'overdue';
 // توافق مع الروابط القديمة: ?mode=debt|days|overdue
@@ -264,10 +338,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect($back);
     }
 
-    if ($action === 'retry_log') {
-        $logId = (int) post('log_id', '0');
-        list($ok, $msg) = retry_failed_message($pdo, $config, $logId, 0);
-        flash($ok ? 'success' : 'error', $msg);
+    if ($action === 'retry_log' || $action === 'retry_log_bulk') {
+        $picked = array();
+        if ($action === 'retry_log') {
+            $oneId = (int) post('log_id', '0');
+            if ($oneId > 0) {
+                $picked[] = $oneId;
+            }
+        } else {
+            foreach ($ids as $idRaw) {
+                $id = (int) $idRaw;
+                if ($id > 0 && !in_array($id, $picked, true)) {
+                    $picked[] = $id;
+                }
+            }
+        }
+        if (!$picked) {
+            flash('error', $lang === 'en' ? 'Select messages first.' : 'حدد رسائل أولاً.');
+            redirect(messages_log_back_url());
+        }
+        list($flashKind, $flashMsg) = wa_resend_request($pdo, $picked);
+        flash($flashKind, $flashMsg);
         redirect(messages_log_back_url());
     }
 
@@ -280,7 +371,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect(messages_log_back_url());
     }
 
-    if ($action === 'retry_log_bulk' || $action === 'delete_log_bulk') {
+    if ($action === 'delete_log_bulk') {
         $picked = array();
         foreach ($ids as $idRaw) {
             $id = (int) $idRaw;
@@ -298,27 +389,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             redirect(messages_log_back_url());
         }
         foreach ($picked as $logId) {
-            if ($action === 'delete_log_bulk') {
-                list($okOne, $msgOne) = function_exists('delete_failed_message_log')
-                    ? delete_failed_message_log($pdo, $logId)
-                    : array(false, '');
-            } else {
-                list($okOne, $msgOne) = retry_failed_message($pdo, $config, $logId, 0);
-                usleep(350000);
-            }
+            list($okOne, $msgOne) = function_exists('delete_failed_message_log')
+                ? delete_failed_message_log($pdo, $logId)
+                : array(false, '');
             if ($okOne) {
                 $okN++;
             } else {
                 $failN++;
             }
         }
-        if ($action === 'delete_log_bulk') {
-            $msg = ($lang === 'en' ? 'Deleted: ' : 'تم الحذف: ') . $okN
-                . ($lang === 'en' ? ' / Failed: ' : ' / فشل: ') . $failN;
-        } else {
-            $msg = ($lang === 'en' ? 'Resent: ' : 'تمت إعادة الإرسال: ') . $okN
-                . ($lang === 'en' ? ' / Failed: ' : ' / فشل: ') . $failN;
-        }
+        $msg = ($lang === 'en' ? 'Deleted: ' : 'تم الحذف: ') . $okN
+            . ($lang === 'en' ? ' / Failed: ' : ' / فشل: ') . $failN;
         flash($failN > 0 && $okN === 0 ? 'error' : 'success', $msg);
         redirect(messages_log_back_url());
     }
@@ -1467,8 +1548,11 @@ $sendFilters = array(
         <input type="hidden" name="type" value="<?php echo e($logType); ?>">
         <input type="hidden" name="status" value="<?php echo e($logStatus); ?>">
         <input type="hidden" name="page" value="<?php echo (int) $logPage; ?>">
+        <p class="msg-live-note"><?php echo e($isEnMsg
+            ? 'Failed messages send themselves in the background when WhatsApp links again, the internet returns, or the subscriber gets a number. No number means no tries.'
+            : 'الرسائل الفاشلة تنرسل وحدها بالخلفية إذا رجع ربط الواتساب، أو رجع النت، أو صار للمشترك رقم. إذا ما عنده رقم ما نحاول.'); ?></p>
         <div class="msg-bulk-bar">
-            <button class="btn secondary sm" type="submit" data-wait-label="<?php echo e($isEnMsg ? 'Resending…' : 'جاري إعادة الإرسال…'); ?>" onclick="return logBulkGo('retry_log_bulk')"><?php echo e($isEnMsg ? 'Resend selected' : 'إعادة إرسال المحدد'); ?></button>
+            <button class="btn secondary sm" type="submit" onclick="return logBulkGo('retry_log_bulk')"><?php echo e($isEnMsg ? 'Resend selected' : 'إعادة إرسال المحدد'); ?></button>
             <button class="btn danger sm" type="submit" data-wait-label="<?php echo e($isEnMsg ? 'Deleting…' : 'جاري الحذف…'); ?>" onclick="return logBulkGo('delete_log_bulk')"><?php echo e($isEnMsg ? 'Delete selected' : 'حذف المحدد'); ?></button>
             <span class="meta" id="logBulkCount">0 <?php echo e($isEnMsg ? 'selected' : 'محدد'); ?></span>
         </div>
@@ -1527,7 +1611,7 @@ $sendFilters = array(
                         <?php endif; ?>
                     </td>
                     <td><small><?php echo e(message_type_title($row['message_type'])); ?></small></td>
-                    <td class="msg-status-log">
+                    <td class="msg-status-log" data-log-live="<?php echo (int) $row['id']; ?>">
                         <?php
                         $tryN = isset($row['attempt']) ? (int) $row['attempt'] : 0;
                         if ($tryN < 1) {
@@ -1537,6 +1621,7 @@ $sendFilters = array(
                             $tryN = 3;
                         }
                         $tryWaiting = !$ok && !empty($row['next_retry_at']);
+                        $inQueue = !$ok && !empty($row['queued_at']);
                         $showTry = !$ok && ($tryWaiting || $tryN > 1);
                         $failText = (!$ok && function_exists('message_log_fail_text')) ? message_log_fail_text($row) : '';
                         ?>
@@ -1549,10 +1634,17 @@ $sendFilters = array(
                             <span class="msg-resolved-arrow">→</span>
                             <span class="msg-resolved-ok" title="<?php echo e($failText !== '' ? $failText : ($isEnMsg ? 'Failure reason is not stored' : 'ماكو سبب محفوظ')); ?>"><?php echo e($isEnMsg ? 'Processed' : 'تمت المعالجة'); ?></span>
                         <?php else: ?>
+                            <?php
+                            $liveHtml = function_exists('message_log_live_html') ? message_log_live_html($row, $isEnMsg ? 'en' : 'ar') : '';
+                            ?>
+                            <?php if ($liveHtml !== ''): ?>
+                                <?php echo $liveHtml; ?>
+                            <?php else: ?>
                             <span class="dot-msg fail"></span>
-                            <?php echo e($tryWaiting ? ($isEnMsg ? 'Retry' : 'إعادة') : ($isEnMsg ? 'Fail' : 'فشل')); ?>
+                            <?php echo e($isEnMsg ? 'Fail' : 'فشل'); ?>
                             <?php if ($showTry): ?>
                                 <span class="msg-try"><?php echo (int) $tryN; ?>/3</span>
+                            <?php endif; ?>
                             <?php endif; ?>
                         <?php endif; ?>
                         <?php if ($failText !== '' && !$ok && !$resolved): ?>
@@ -1570,7 +1662,7 @@ $sendFilters = array(
                     </td>
                     <td class="acts-cell">
                         <?php if (!empty($row['subscriber_id'])): ?>
-                            <button class="link-act" type="submit" value="<?php echo (int) $row['id']; ?>" data-wait-label="<?php echo e($isEnMsg ? 'Resending…' : 'جاري إعادة الإرسال…'); ?>" onclick="document.getElementById('logBulkAction').value='retry_log'; document.getElementById('logRetryId').value=this.value;" title="<?php echo e($isEnMsg ? 'Resend' : 'إعادة إرسال'); ?>">↻</button>
+                            <button class="link-act" type="submit" value="<?php echo (int) $row['id']; ?>" onclick="document.getElementById('logBulkAction').value='retry_log'; document.getElementById('logRetryId').value=this.value; var bf=document.getElementById('msgLogBulkForm'); if(bf) bf.setAttribute('data-no-wait','1');" title="<?php echo e($isEnMsg ? 'Resend' : 'إعادة إرسال'); ?>">↻</button>
                         <?php elseif ($resolved): ?>
                             <span class="msg-resolved-arrow acts-resolved" title="<?php echo e($failText !== '' ? $failText : ($isEnMsg ? 'Failure reason is not stored' : 'ماكو سبب محفوظ')); ?>">→</span>
                         <?php endif; ?>
@@ -1630,22 +1722,46 @@ $sendFilters = array(
       .msg-from-line { margin-top: 3px; font-size: 11px; font-weight: 700; color: #0f766e; direction: ltr; text-align: start; }
       .msg-fail-why { margin-top: 4px; max-width: 220px; font-size: 11px; font-weight: 700; color: #9f1239; line-height: 1.35; }
       .msg-try { display: inline-block; margin-inline-start: 6px; padding: 1px 6px; border-radius: 999px; background: #ffedd5; color: #9a3412; font-size: 11px; font-weight: 800; }
+      .msg-live-note { margin: 0 0 10px; color: #475569; font-size: 13px; font-weight: 700; line-height: 1.6; }
+      .msg-live { display: inline-flex; align-items: center; gap: 6px; font-weight: 800; font-size: 12px; color: #0f766e; }
+      .msg-live b { font-weight: 800; }
+      .msg-ring {
+        width: 18px; height: 18px; border-radius: 50%; box-sizing: border-box; flex: 0 0 auto;
+        border: 2px solid #d1fae5; border-top-color: #0f766e;
+        animation: msgRingSpin .8s linear infinite;
+      }
+      .msg-live.is-wait { color: #b45309; }
+      .msg-live.is-wait .msg-ring { border-color: #fde68a; border-top-color: #d97706; animation-duration: 1.4s; }
+      .msg-live.is-link, .msg-live.is-net { color: #1d4ed8; }
+      .msg-live.is-link .msg-ring, .msg-live.is-net .msg-ring { border-color: #dbeafe; border-top-color: #2563eb; animation-duration: 1.5s; }
+      .msg-live.is-nophone { color: #64748b; }
+      .msg-live.is-nophone .msg-ring { border-color: #e2e8f0; border-top-color: #e2e8f0; animation: none; }
+      @keyframes msgRingSpin { to { transform: rotate(360deg); } }
+      @media (max-width: 640px) {
+        .msg-live { font-size: 11px; gap: 4px; }
+        .msg-ring { width: 16px; height: 16px; }
+        #msgLogTable .msg-status-log { white-space: normal; }
+        .msg-live-note { font-size: 12px; }
+      }
       .msg-resolved-ok { cursor: help; }
     </style>
     <script>
     function logBulkGo(action) {
       var boxes = document.querySelectorAll('#msgLogBulkForm .log-check:checked');
+      var form = document.getElementById('msgLogBulkForm');
       if (!boxes.length) {
-        alert(<?php echo json_encode($isEnMsg ? 'Select messages first.' : 'حدد رسائل أولاً.'); ?>);
+        var emptyMsg = <?php echo json_encode($isEnMsg ? 'Select messages first.' : 'حدد رسائل أولاً.'); ?>;
+        if (window.showCornerToast) window.showCornerToast(emptyMsg, 'error');
         return false;
       }
       var n = boxes.length;
       if (action === 'delete_log_bulk') {
+        if (form) form.removeAttribute('data-no-wait');
         if (!confirm(<?php echo json_encode($isEnMsg ? 'Delete the selected messages from the log?' : 'تحذف الرسائل المحددة من السجل؟'); ?> + ' (' + n + ')')) {
           return false;
         }
-      } else if (!confirm(<?php echo json_encode($isEnMsg ? 'Resend the selected messages?' : 'تعيد إرسال الرسائل المحددة؟'); ?> + ' (' + n + ')')) {
-        return false;
+      } else if (form) {
+        form.setAttribute('data-no-wait', '1');
       }
       var act = document.getElementById('logBulkAction');
       if (act) act.value = action;
@@ -1718,6 +1834,59 @@ $sendFilters = array(
           form.submit();
         });
       }
+    })();
+    </script>
+    <script>
+    (function () {
+      var cells = document.querySelectorAll('[data-log-live]');
+      if (!cells.length) return;
+      var ids = [];
+      for (var i = 0; i < cells.length; i++) {
+        var id = parseInt(cells[i].getAttribute('data-log-live') || '0', 10) || 0;
+        if (id > 0) ids.push(id);
+      }
+      if (!ids.length) return;
+      var labels = {
+        ok: <?php echo json_encode($isEnMsg ? 'Sent' : 'تم'); ?>,
+        fail: <?php echo json_encode($isEnMsg ? 'Failed' : 'فشل'); ?>
+      };
+      function paint(id, kind, label) {
+        var cell = document.querySelector('[data-log-live="' + id + '"]');
+        if (!cell) return;
+        if (kind === 'ok') {
+          cell.innerHTML = '<span class="dot-msg ok"></span> ' + labels.ok;
+          return;
+        }
+        if (kind === 'fail') {
+          var live = cell.querySelector('.msg-live');
+          if (live) live.remove();
+          if (!cell.querySelector('.dot-msg')) {
+            cell.insertAdjacentHTML('afterbegin', '<span class="dot-msg fail"></span> ' + labels.fail + ' ');
+          }
+          return;
+        }
+        var box = cell.querySelector('.msg-live');
+        if (!box) {
+          cell.insertAdjacentHTML('afterbegin', '<span class="msg-live"><i class="msg-ring" aria-hidden="true"></i><b></b></span>');
+          box = cell.querySelector('.msg-live');
+        }
+        box.className = 'msg-live is-' + kind;
+        var b = box.querySelector('b');
+        if (b) b.textContent = label || '';
+      }
+      function tick() {
+        fetch('messages.php?ajax=log_ring&ids=' + ids.join(',') + '&_=' + Date.now(), { credentials: 'same-origin' })
+          .then(function (r) { return r.json(); })
+          .then(function (data) {
+            if (!data || !data.rows) return;
+            Object.keys(data.rows).forEach(function (id) {
+              var row = data.rows[id];
+              if (row && row.kind) paint(id, row.kind, row.label);
+            });
+          })
+          .catch(function () {});
+      }
+      setInterval(tick, 4000);
     })();
     </script>
 

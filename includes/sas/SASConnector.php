@@ -347,16 +347,27 @@ class SASConnector
         return $this->parseApiResponse($this->get('list/profile/0', true));
     }
 
-    public function getManagers()
+    public function getManagers($start = 0, $length = 1000)
     {
         if (!$this->token && !$this->login()) {
             return array();
         }
+        $start = (int) $start;
+        if ($start < 0) {
+            $start = 0;
+        }
+        $length = (int) $length;
+        if ($length < 1) {
+            $length = 1000;
+        }
+        if ($length > 1000) {
+            $length = 1000;
+        }
 
         $dtParams = array(
             'draw' => 1,
-            'start' => 0,
-            'length' => 1000,
+            'start' => $start,
+            'length' => $length,
             'search' => array('value' => '', 'regex' => false),
         );
 
@@ -1069,6 +1080,128 @@ class SASConnector
             }
         }
         return is_array($last) ? $last : array('message' => 'disconnect failed', 'status' => -1);
+    }
+
+    /**
+     * بينغ جلسة أونلاين من سيرفر الساس (نفس زر Ping في لوحة الساس).
+     * $pairs: قائمة من array('username','radacctid') — يرجع username الصغير => ملي ثانية.
+     */
+    public function pingOnlineUsers($pairs)
+    {
+        $out = array();
+        if (!is_array($pairs) || !$pairs) {
+            return $out;
+        }
+        if (!$this->token && !$this->login()) {
+            return $out;
+        }
+        if (!function_exists('curl_multi_init') || !function_exists('curl_init')) {
+            return $out;
+        }
+        $origin = 'https://' . $this->host;
+        $headers = array(
+            'Accept: application/json, text/plain, */*',
+            'Content-Type: application/json',
+            'Accept-Language: en-US,en;q=0.9',
+            'Origin: ' . $origin,
+            'Referer: ' . $origin . '/',
+            'User-Agent: Mozilla/5.0 (compatible; WiFi-Net-SALES/1.0)',
+            'Authorization: Bearer ' . $this->token,
+        );
+        $mh = curl_multi_init();
+        $handles = array();
+        $n = 0;
+        foreach ($pairs as $pair) {
+            if ($n >= 12) {
+                break;
+            }
+            if (!is_array($pair)) {
+                continue;
+            }
+            $username = isset($pair['username']) ? trim((string) $pair['username']) : '';
+            $rad = isset($pair['radacctid']) ? trim((string) $pair['radacctid']) : '';
+            if ($username === '' || $rad === '' || $rad === '0') {
+                continue;
+            }
+            $json = json_encode(
+                array('username' => $username, 'radacctid' => $rad),
+                JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+            );
+            if ($json === false) {
+                continue;
+            }
+            $enc = $this->aes->encrypt($json, $this->secretKey);
+            $body = json_encode(array('payload' => $enc));
+            $ch = curl_init($this->base_url . 'user/ping');
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 4);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 8);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $body);
+            curl_multi_add_handle($mh, $ch);
+            $handles[] = array('ch' => $ch, 'user' => strtolower($username));
+            $n++;
+        }
+        $deadline = microtime(true) + 9;
+        $active = null;
+        do {
+            $status = curl_multi_exec($mh, $active);
+            if ($active) {
+                curl_multi_select($mh, 0.2);
+            }
+        } while ($active && $status === CURLM_OK && microtime(true) < $deadline);
+        foreach ($handles as $h) {
+            $body = curl_multi_getcontent($h['ch']);
+            $code = (int) curl_getinfo($h['ch'], CURLINFO_HTTP_CODE);
+            curl_multi_remove_handle($mh, $h['ch']);
+            curl_close($h['ch']);
+            if ($code < 200 || $code >= 400 || !is_string($body) || $body === '') {
+                continue;
+            }
+            $decoded = $this->decodeApiBody($body, false);
+            $ms = $this->pingMsFromApi($decoded);
+            if ($ms !== null) {
+                $out[$h['user']] = $ms;
+            }
+        }
+        curl_multi_close($mh);
+        return $out;
+    }
+
+    private function pingMsFromApi($decoded)
+    {
+        if (!is_array($decoded) || isset($decoded['__http_error']) || isset($decoded['__auth_error'])
+            || isset($decoded['__curl_error']) || isset($decoded['__decrypt_error'])) {
+            return null;
+        }
+        if (isset($decoded['status']) && is_numeric($decoded['status']) && (int) $decoded['status'] !== 200) {
+            return null;
+        }
+        $block = $decoded;
+        if (isset($decoded['data']) && is_array($decoded['data'])) {
+            $block = $decoded['data'];
+        }
+        if (isset($block['packet-loss'])) {
+            $loss = (int) preg_replace('/\D+/', '', (string) $block['packet-loss']);
+            if ($loss >= 100) {
+                return null;
+            }
+        }
+        foreach (array('avg', 'min-rtt', 'max-rtt') as $k) {
+            if (!isset($block[$k]) || is_array($block[$k])) {
+                continue;
+            }
+            if (function_exists('sas_cache_ping_number')) {
+                $n = sas_cache_ping_number($block[$k]);
+                if ($n !== null) {
+                    return $n;
+                }
+            }
+        }
+        return null;
     }
 
     public function changeUserProfile($userId, $profileId)
@@ -1888,12 +2021,18 @@ class SASConnector
             'search' => '',
         );
         $series = $this->sasCardFetchPaged(array('index/series', 'index/card', 'index/cards', 'index/cardSeries'), $payload, 20);
+        $me = $this->loggedManagerId();
+        $ownUnused = array();
         $tried = 0;
         foreach ($series as $srow) {
             if (!is_array($srow)) {
                 continue;
             }
             if (!empty($srow['suspended']) && (string) $srow['suspended'] === '1') {
+                continue;
+            }
+            $owner = $this->sasSeriesOwnerId($srow);
+            if ($me > 0 && $owner > 0 && $owner !== $me) {
                 continue;
             }
             $name = $this->sasRowProfileName($srow);
@@ -1907,6 +2046,15 @@ class SASConnector
             if ($name === '') {
                 $name = 'كروت';
             }
+            $ownKey = strtolower($name);
+            $hint = $this->sasCardSeriesUnusedCount($srow);
+            if ($hint < 0) {
+                $hint = 0;
+            }
+            if (!isset($ownUnused[$ownKey])) {
+                $ownUnused[$ownKey] = array('name' => $name, 'n' => 0);
+            }
+            $ownUnused[$ownKey]['n'] += $hint;
             $sid = (isset($srow['id']) && is_numeric($srow['id'])) ? (int) $srow['id'] : 0;
             $scode = $this->sasCardSeriesCode($srow);
             $sPid = $this->sasCardSeriesProfileId($srow);
@@ -1974,6 +2122,11 @@ class SASConnector
                 }
             }
             $g['used'] = $u;
+            $exactKey = strtolower(isset($g['name']) ? (string) $g['name'] : '');
+            if ($exactKey !== '' && isset($ownUnused[$exactKey])) {
+                $nu = (int) $ownUnused[$exactKey]['n'];
+                unset($ownUnused[$exactKey]);
+            }
             $g['unused'] = $nu;
             $g['total'] = $u + $nu;
             usort($g['cards'], function ($a, $b) {
@@ -1984,6 +2137,26 @@ class SASConnector
             });
         }
         unset($g);
+        foreach ($ownUnused as $leftKey => $leftRow) {
+            $leftN = is_array($leftRow) ? (int) $leftRow['n'] : (int) $leftRow;
+            $leftName = (is_array($leftRow) && !empty($leftRow['name'])) ? (string) $leftRow['name'] : $leftKey;
+            if ($leftKey === '') {
+                continue;
+            }
+            if (!isset($groups[$leftKey])) {
+                $groups[$leftKey] = array(
+                    'name' => $leftName,
+                    'profile_id' => 0,
+                    'total' => $leftN,
+                    'used' => 0,
+                    'unused' => $leftN,
+                    'cards' => array(),
+                );
+                continue;
+            }
+            $groups[$leftKey]['unused'] = $leftN;
+            $groups[$leftKey]['total'] = (int) $groups[$leftKey]['used'] + $leftN;
+        }
         $out = array_values($groups);
         usort($out, function ($a, $b) {
             if ($a['total'] !== $b['total']) {
@@ -2084,6 +2257,87 @@ class SASConnector
             }
         }
         return 0;
+    }
+
+    /**
+     * رقم مدير الساس من اسم الدخول أو الاسم الظاهر. تطابق واحد فقط، بدون تخمين.
+     */
+    public function findManagerIdByNames($names)
+    {
+        if (!$this->token && !$this->login()) {
+            return 0;
+        }
+        $exact = array();
+        $norm = array();
+        if (!is_array($names)) {
+            $names = array($names);
+        }
+        foreach ($names as $name) {
+            $key = strtolower(trim((string) $name));
+            if ($key === '') {
+                continue;
+            }
+            $exact[$key] = true;
+            $n = preg_replace('/[^a-z0-9]/', '', $key);
+            if ($n !== '') {
+                $norm[$n] = true;
+            }
+        }
+        if (!$exact) {
+            return 0;
+        }
+        $bestId = 0;
+        $bestScore = 0;
+        $tie = false;
+        foreach (array_keys($exact) as $key) {
+            $payload = array(
+                'page' => 1,
+                'count' => 30,
+                'sortBy' => 'username',
+                'direction' => 'asc',
+                'search' => $key,
+            );
+            $full = $this->decodeApiBody($this->post('index/manager', $payload, true), false);
+            $data = (is_array($full) && isset($full['data']) && is_array($full['data'])) ? $full['data'] : array();
+            if (isset($data['data']) && is_array($data['data'])) {
+                $data = $data['data'];
+            }
+            foreach ($data as $row) {
+                if (!is_array($row) || empty($row['username']) || !isset($row['id']) || !is_numeric($row['id'])) {
+                    continue;
+                }
+                $id = (int) $row['id'];
+                if ($id <= 0) {
+                    continue;
+                }
+                $uname = strtolower(trim((string) $row['username']));
+                $score = 0;
+                if (isset($exact[$uname])) {
+                    $score = 3;
+                } else {
+                    $un = preg_replace('/[^a-z0-9]/', '', $uname);
+                    if ($un !== '' && isset($norm[$un])) {
+                        $score = 2;
+                    }
+                }
+                if ($score < 2 || $score < $bestScore) {
+                    continue;
+                }
+                if ($score === $bestScore && $bestId > 0 && $bestId !== $id) {
+                    $tie = true;
+                    continue;
+                }
+                if ($score > $bestScore) {
+                    $tie = false;
+                    $bestId = $id;
+                    $bestScore = $score;
+                }
+            }
+        }
+        if ($tie || $bestId <= 0) {
+            return 0;
+        }
+        return $bestId;
     }
 
     private function sasLoginManagerId($row)

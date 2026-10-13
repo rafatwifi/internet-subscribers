@@ -206,7 +206,7 @@ function portal_warm_cards($pdo, $config, $tenantId)
     $GLOBALS['portal_warm_tenant_id'] = $tenantId;
     $path = function_exists('sas_cards_inventory_cache_path') ? sas_cards_inventory_cache_path() : '';
     $age = ($path !== '' && is_file($path)) ? (time() - (int) @filemtime($path)) : 999999;
-    if ($age < 45) {
+    if ($age < 12) {
         if ($prev === null) {
             unset($GLOBALS['portal_warm_tenant_id']);
         } else {
@@ -240,20 +240,20 @@ function portal_warm_run($pdo, $config)
 {
     @file_put_contents(portal_warm_cache_dir() . '/warm_beat.txt', (string) time());
     $tenants = portal_warm_sas_tenants($pdo, $config);
-    $cardTid = 0;
-    $cardAge = -1;
+    $cardLeft = 2;
     foreach ($tenants as $tid) {
+        if ($cardLeft <= 0) {
+            break;
+        }
         $GLOBALS['portal_warm_tenant_id'] = $tid;
         $path = function_exists('sas_cards_inventory_cache_path') ? sas_cards_inventory_cache_path() : '';
         $age = ($path !== '' && is_file($path)) ? (time() - (int) @filemtime($path)) : 999999;
-        if ($age > $cardAge) {
-            $cardAge = $age;
-            $cardTid = $tid;
+        if ($age < 12) {
+            continue;
         }
-    }
-    if ($cardTid > 0 && $cardAge >= 45) {
+        $cardLeft--;
         try {
-            portal_warm_cards($pdo, $config, $cardTid);
+            portal_warm_cards($pdo, $config, $tid);
         } catch (Exception $e) {
         }
     }

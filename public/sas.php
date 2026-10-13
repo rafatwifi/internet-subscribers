@@ -295,7 +295,7 @@ if (isset($_GET['prepare']) && (string) $_GET['prepare'] !== '') {
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf(post('csrf'))) {
-        if (in_array(post('action'), array('sas_inline', 'sas_enable', 'sas_disconnect', 'sas_activate_card', 'sas_activate_credit', 'sas_activate_reward', 'sas_change_profile', 'give_test', 'sas_update_rental', 'sas_update_debt', 'sas_update_grace', 'sas_save_cols', 'bulk_disconnect', 'sas_add_debt', 'sas_list_debts', 'sas_delete_debt'), true)) {
+        if (in_array(post('action'), array('sas_inline', 'sas_enable', 'sas_disconnect', 'sas_activate_card', 'sas_activate_credit', 'sas_activate_reward', 'sas_change_profile', 'give_test', 'sas_update_rental', 'sas_update_debt', 'sas_update_grace', 'sas_save_cols', 'sas_ping_mode', 'bulk_disconnect', 'sas_add_debt', 'sas_list_debts', 'sas_delete_debt'), true)) {
             sas_json_out(false, 'طلب غير صالح');
         }
         flash('error', 'طلب غير صالح');
@@ -326,6 +326,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['ui_prefs']['sas_refresh_sec'] = $refreshSec;
         }
         sas_json_out(true, 'ok');
+    }
+
+    if ($action === 'sas_ping_mode') {
+        $mode = function_exists('sas_ping_mode_normalize')
+            ? sas_ping_mode_normalize(post('sub_ping_mode', 'off'))
+            : 'off';
+        if (function_exists('admin_ui_prefs_save')) {
+            admin_ui_prefs_save($pdo, 'sub_ping_mode', $mode);
+        }
+        sas_json_out(true, 'ok', array('mode' => $mode));
     }
 
     if ($action === 'sas_inline' || $action === 'sas_enable' || $action === 'sas_disconnect' || $action === 'sas_activate_card'
@@ -754,8 +764,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $logId = (int) post('log_id', '0');
         $username = trim((string) post('id', ''));
         list($localId) = sas_resolve_local_from_username($pdo, $config, $username);
-        list($ok, $msg) = retry_failed_message($pdo, $config, $logId, $localId);
-        flash($ok ? 'success' : 'error', $msg);
+        list($flashKind, $flashMsg) = wa_resend_request($pdo, array($logId));
+        flash($flashKind, $flashMsg);
         sas_page_redirect();
     }
 
@@ -930,7 +940,7 @@ if (isset($_GET['live']) && $_GET['live'] === '1') {
     if (function_exists('app_session_close')) {
         app_session_close();
     }
-    $html = '<tr><td colspan="17">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
+    $html = '<tr><td colspan="19">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
     $liveCount = 0;
     try {
         $fromSql = function_exists('sas_cache_list_from_sql')
@@ -964,6 +974,9 @@ if (isset($_GET['live']) && $_GET['live'] === '1') {
         $stLive = $pdo->prepare($sqlLive);
         $stLive->execute($params);
         $liveRows = $stLive->fetchAll();
+        if (function_exists('sas_fill_online_pings')) {
+            $liveRows = sas_fill_online_pings($pdo, $liveRows);
+        }
         if (function_exists('phones_known_register_from_rows')) {
             phones_known_register_from_rows($liveRows, $pdo);
         }
@@ -974,12 +987,12 @@ if (isset($_GET['live']) && $_GET['live'] === '1') {
         }
         $liveCount = count($liveRows);
         if ($html === '') {
-            $html = '<tr><td colspan="17">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
+            $html = '<tr><td colspan="19">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
         }
     } catch (Exception $e) {
-        $html = '<tr><td colspan="17">' . e($e->getMessage()) . '</td></tr>';
+        $html = '<tr><td colspan="19">' . e($e->getMessage()) . '</td></tr>';
     } catch (Error $e) {
-        $html = '<tr><td colspan="17">' . e($e->getMessage()) . '</td></tr>';
+        $html = '<tr><td colspan="19">' . e($e->getMessage()) . '</td></tr>';
     }
     echo json_encode(array(
         'html' => $html,
@@ -1098,13 +1111,16 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'live_table') {
         $stmt = $pdo->prepare($sql);
         $stmt->execute($params);
         $rows = $stmt->fetchAll();
+        if (function_exists('sas_fill_online_pings')) {
+            $rows = sas_fill_online_pings($pdo, $rows);
+        }
         $html = '';
         $nLive = $offset + 1;
         foreach ($rows as $liveRow) {
             $html .= sas_render_table_row($liveRow, $nLive++, $config, $lang);
         }
         if ($html === '') {
-            $html = '<tr><td colspan="17">' . e($lang === 'en' ? 'No SAS users in cache yet' : 'ماكو مشتركين من الساس بعد') . '</td></tr>';
+            $html = '<tr><td colspan="19">' . e($lang === 'en' ? 'No SAS users in cache yet' : 'ماكو مشتركين من الساس بعد') . '</td></tr>';
         }
         echo json_encode(array('ok' => true, 'html' => $html, 'count' => count($rows)));
     } catch (Exception $e) {
@@ -2279,6 +2295,44 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+.sas-radius-page #subsTable th.col-ping,
+.sas-radius-page #subsTable td.col-ping,
+.sas-radius-page #subsTable th.col-seen,
+.sas-radius-page #subsTable td.col-seen {
+  width: 1%;
+  white-space: nowrap;
+  text-align: center;
+  padding-left: 3px;
+  padding-right: 3px;
+}
+.sas-radius-page #subsTable .sub-ping {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+  direction: ltr;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.3;
+  color: #0f766e;
+  background: #ecfdf5;
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-variant-numeric: tabular-nums;
+}
+.sas-radius-page #subsTable .sub-ping small {
+  font-size: 9px;
+  font-weight: 700;
+  opacity: .7;
+}
+.sas-radius-page .sas-legend .ping-mode { margin-inline-start: auto; }
+.sas-radius-page #subsTable .sub-ping.is-mid { color: #b45309; background: #fffbeb; }
+.sas-radius-page #subsTable .sub-ping.is-slow { color: #be123c; background: #fff1f2; }
+.sas-radius-page #subsTable .sub-ago {
+  font-size: 12px;
+  font-weight: 800;
+  color: #64748b;
+  letter-spacing: 0;
+}
 .sas-radius-page #subsTable .sas-fn-wrap {
   display: inline-flex;
   align-items: center;
@@ -2319,18 +2373,18 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 }
 #sasSyncOkBanner {
   position: fixed !important;
-  top: 72px !important;
+  top: 12px !important;
   bottom: auto !important;
   left: auto !important;
   right: auto !important;
-  inset-inline-start: 16px !important;
-  inset-inline-end: auto !important;
+  inset-inline-start: auto !important;
+  inset-inline-end: 220px !important;
   transform: none;
-  z-index: 10050;
+  z-index: 100003;
   cursor: pointer;
   max-height: 140px;
   overflow: hidden;
-  width: min(340px, calc(100vw - 24px));
+  width: min(320px, 42vw);
   transition: opacity .8s ease, transform .8s ease;
 }
 #sasSyncOkBanner.is-out {
@@ -2339,13 +2393,12 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 }
 @media (max-width: 640px) {
   #sasSyncOkBanner {
-    top: auto !important;
-    bottom: 16px !important;
+    top: 10px !important;
+    bottom: auto !important;
     inset-inline-start: 12px !important;
     inset-inline-end: 12px !important;
     width: auto !important;
   }
-  #sasSyncOkBanner.is-out { transform: translateY(8px); }
 }
 #sasSyncOkBanner.is-ok { background: #146c43; color: #fff; }
 #sasSyncOkBanner.is-error { background: #9b2331; color: #fff; }
@@ -2604,6 +2657,15 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     <?php endif; ?>
 
     <div class="sas-legend">
+        <?php
+        $pingModeNow = function_exists('sas_ping_mode') ? sas_ping_mode($pdo) : 'off';
+        if (function_exists('sas_ping_mode_style')) {
+            echo sas_ping_mode_style();
+        }
+        if (function_exists('sas_ping_mode_buttons')) {
+            echo sas_ping_mode_buttons($lang === 'en', $pingModeNow);
+        }
+        ?>
         <span><i class="status-sq status-online"></i> <?php echo e($lang === 'en' ? 'Active + connected' : 'فعال ومتصل'); ?></span>
         <span><i class="status-sq status-active"></i> <?php echo e($lang === 'en' ? 'Active' : 'فعال غير متصل'); ?></span>
         <span><i class="status-sq status-expired"></i> <?php echo e($lang === 'en' ? 'Expired' : 'منتهي'); ?></span>
@@ -2670,6 +2732,8 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
                 <th class="sub-check-cell"><label class="th-check-only"><input type="checkbox" id="subCheckAll"></label></th>
                 <th class="col-num">#</th>
                 <th class="status-cell col-status"><?php echo e($lang === 'en' ? 'Status' : 'الحالة'); ?></th>
+                <th class="col-ping" title="<?php echo e($lang === 'en' ? 'Ping between SAS and the subscriber' : 'البينغ بين الساس والمشترك'); ?>"><?php echo e($lang === 'en' ? 'Ping' : 'بينغ'); ?></th>
+                <th class="col-seen" title="<?php echo e($lang === 'en' ? 'Last connection' : 'آخر اتصال'); ?>"><?php echo e($lang === 'en' ? 'Ago' : 'آخر'); ?></th>
                 <th class="col-user"><?php echo sas_sort_link('username', $lang === 'en' ? 'Username' : 'اسم الدخول', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
                 <th class="col-ip"><?php echo sas_sort_link('ip', 'IP Address', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
                 <th class="col-fn"><?php echo sas_sort_link('firstname', $lang === 'en' ? 'First Name' : 'الاسم الأول', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
@@ -2700,7 +2764,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
                 } else {
                     $emptyMsg = ($lang === 'en') ? 'No SAS users in cache yet' : 'ماكو مشتركين من الساس بعد';
                 }
-                echo '<tr><td colspan="17">' . e($emptyMsg) . '</td></tr>';
+                echo '<tr><td colspan="19">' . e($emptyMsg) . '</td></tr>';
             }
             if (function_exists('phones_known_register_from_rows')) {
                 phones_known_register_from_rows($rows, $pdo);
@@ -2802,6 +2866,18 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     <div class="cols-check ops-item" data-col-row="status">
         <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
         <label><input type="checkbox" data-col="status" checked> <?php echo e($lang === 'en' ? 'Status' : 'الحالة'); ?></label>
+        <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
+        <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
+    </div>
+    <div class="cols-check ops-item" data-col-row="ping">
+        <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
+        <label><input type="checkbox" data-col="ping" checked> <?php echo e($lang === 'en' ? 'Ping' : 'البينغ'); ?></label>
+        <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
+        <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
+    </div>
+    <div class="cols-check ops-item" data-col-row="seen">
+        <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
+        <label><input type="checkbox" data-col="seen" checked> <?php echo e($lang === 'en' ? 'Last connection' : 'آخر اتصال'); ?></label>
         <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
         <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
     </div>
@@ -2967,7 +3043,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     <input type="hidden" name="action" value="remind_days">
     <input type="hidden" name="id" value="">
 </form>
-<form method="post" id="opsRetryForm" class="hidden" hidden>
+<form method="post" id="opsRetryForm" class="hidden" hidden data-no-wait="1">
     <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
     <input type="hidden" name="action" value="retry_message">
     <input type="hidden" name="id" value="">
@@ -3213,7 +3289,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   var liveBusy = false;
   var COLS_KEY = 'sas_table_cols_v1';
   var ORDER_KEY = 'sas_table_col_order_v1';
-  var DEFAULT_COL_ORDER = ['num','status','user','ip','fn','ln','phone','exp','parent','pkg','rent','debt','traf','grace','days','msg'];
+  var DEFAULT_COL_ORDER = ['num','status','ping','seen','user','ip','fn','ln','phone','exp','parent','pkg','rent','debt','traf','grace','days','msg'];
   function loadLocalCols() {
     try {
       var raw = localStorage.getItem(COLS_KEY);
@@ -3236,8 +3312,16 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
         }
       });
     }
-    DEFAULT_COL_ORDER.forEach(function (k) {
-      if (!seen[k]) out.push(k);
+    DEFAULT_COL_ORDER.forEach(function (k, idx) {
+      if (seen[k]) return;
+      var at = out.length;
+      var p;
+      for (p = idx - 1; p >= 0; p--) {
+        var prev = out.indexOf(DEFAULT_COL_ORDER[p]);
+        if (prev !== -1) { at = prev + 1; break; }
+      }
+      out.splice(at, 0, k);
+      seen[k] = 1;
     });
     return out;
   }
@@ -3718,6 +3802,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     b.classList.add(ok ? 'is-ok' : 'is-error');
     b.classList.add(ok ? 'sas-toast-success' : 'sas-toast-error');
     b.hidden = false;
+    if (window.placeCornerToast) window.placeCornerToast(b);
     if (window._sasToastT) clearTimeout(window._sasToastT);
     window._sasToastT = setTimeout(function () {
       b.classList.add('is-out');
@@ -4781,6 +4866,38 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     }
     if (window.scrollTo) window.scrollTo(0, y);
   }
+  var pingModeBox = document.getElementById('subPingMode');
+  if (pingModeBox) {
+    pingModeBox.addEventListener('click', function (e) {
+      var btn = e.target && e.target.closest ? e.target.closest('[data-ping-mode]') : null;
+      if (!btn || !pingModeBox.contains(btn)) return;
+      var mode = btn.getAttribute('data-ping-mode') || 'off';
+      if (pingModeBox.getAttribute('data-mode') === mode) return;
+      var all = pingModeBox.querySelectorAll('[data-ping-mode]');
+      for (var i = 0; i < all.length; i++) all[i].classList.remove('is-on');
+      btn.classList.add('is-on');
+      pingModeBox.setAttribute('data-mode', mode);
+      var body = new FormData();
+      body.append('csrf', csrf);
+      body.append('action', 'sas_ping_mode');
+      body.append('sub_ping_mode', mode);
+      if (mode !== 'off' && window.appBusySet) window.appBusySet({ force: true });
+      fetch('sas.php', { method: 'POST', credentials: 'same-origin', body: body })
+        .then(function () {
+          function go(left) {
+            if (liveBusy && left > 0) {
+              setTimeout(function () { go(left - 1); }, 250);
+              return;
+            }
+            refreshTableLive().then(function () {
+              if (window.appBusyDone) window.appBusyDone();
+            });
+          }
+          go(16);
+        })
+        .catch(function () { if (window.appBusyDone) window.appBusyDone(); });
+    });
+  }
   function refreshTableLive() {
     if (liveBusy || liveSearchBusy || tableIsBusy() || document.hidden) return Promise.resolve(null);
     if (Date.now() < colsSkipUntil) return Promise.resolve(null);
@@ -4789,15 +4906,22 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     // أثناء الكتابة بالبحث الحي لا تستبدل الجدول بتحديث الأونلاين
     if (typed !== locked) return Promise.resolve(null);
     liveBusy = true;
+    var pingModeNow = pingModeBox ? (pingModeBox.getAttribute('data-mode') || 'off') : 'off';
+    var pingWait = false;
+    if (pingModeNow !== 'off' && window.appBusySet) {
+      window.appBusySet();
+      pingWait = true;
+    }
     return fetch(liveTableUrl(), { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(function (d) {
         liveBusy = false;
+        if (pingWait && window.appBusyDone) window.appBusyDone();
         if (filter && filter.value.trim() !== String((liveQs && liveQs.q) || '')) return null;
         if (d && d.ok && d.html && !tableIsBusy()) replaceTableHtml(d.html);
         return d;
       })
-      .catch(function () { liveBusy = false; return null; });
+      .catch(function () { liveBusy = false; if (pingWait && window.appBusyDone) window.appBusyDone(); return null; });
   }
   function applyAutoRefresh(sec, skipSave) {
     refreshSec = parseInt(sec, 10) || 0;
@@ -4901,7 +5025,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
         if (d && typeof d.html === 'string') {
           applyLiveRows(d.html, typeof d.count === 'number' ? d.count : null);
         } else if (force) {
-          applyLiveRows('<tr><td colspan="17">' + noMatchLabel + '</td></tr>', 0);
+          applyLiveRows('<tr><td colspan="19">' + noMatchLabel + '</td></tr>', 0);
         }
       })
       .catch(function (err) {

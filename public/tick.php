@@ -39,6 +39,12 @@ if (function_exists('backup_auto_tick')) {
     } catch (Exception $e) {
     }
 }
+if (function_exists('wa_resend_has_work') && wa_resend_has_work() && function_exists('wa_resend_kick')) {
+    try {
+        @wa_resend_kick(0);
+    } catch (Exception $e) {
+    }
+}
 if (function_exists('wa_retry_due_batch')) {
     try {
         @wa_retry_due_batch($pdo, $config, 1);

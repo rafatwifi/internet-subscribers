@@ -679,11 +679,85 @@ function normalize_admin_role($role)
     return $role;
 }
 
+function accountant_sees_subscribers($pdo = null, $userId = 0)
+{
+    $u = function_exists('current_admin') ? current_admin() : null;
+    if ($userId <= 0 && $u) {
+        $userId = (int) $u['id'];
+    }
+    $role = ($u && (int) $u['id'] === (int) $userId && isset($u['role'])) ? $u['role'] : '';
+    if ($role !== 'accountant' && $userId > 0 && $pdo) {
+        try {
+            $st = $pdo->prepare('SELECT role FROM admin_users WHERE id = :id LIMIT 1');
+            $st->execute(array(':id' => (int) $userId));
+            $role = (string) $st->fetchColumn();
+        } catch (Exception $e) {
+            $role = '';
+        }
+    }
+    if ($role !== 'accountant') {
+        return true;
+    }
+    if (!$pdo || $userId <= 0) {
+        return true;
+    }
+    try {
+        $st = $pdo->prepare('SELECT ui_prefs FROM admin_users WHERE id = :id LIMIT 1');
+        $st->execute(array(':id' => (int) $userId));
+        $raw = $st->fetchColumn();
+        $data = is_string($raw) ? json_decode($raw, true) : null;
+        if (is_array($data) && array_key_exists('see_subscribers', $data)) {
+            return !empty($data['see_subscribers']);
+        }
+    } catch (Exception $e) {
+    }
+    return true;
+}
+
+function accountant_set_sees_subscribers($pdo, $userId, $on)
+{
+    $userId = (int) $userId;
+    if ($userId <= 0 || !$pdo) {
+        return false;
+    }
+    try {
+        $st = $pdo->prepare('SELECT ui_prefs, role FROM admin_users WHERE id = :id LIMIT 1');
+        $st->execute(array(':id' => $userId));
+        $row = $st->fetch();
+        if (!$row || (isset($row['role']) ? $row['role'] : '') !== 'accountant') {
+            return false;
+        }
+        $data = array();
+        if (!empty($row['ui_prefs'])) {
+            $decoded = json_decode((string) $row['ui_prefs'], true);
+            if (is_array($decoded)) {
+                $data = $decoded;
+            }
+        }
+        $data['see_subscribers'] = $on ? 1 : 0;
+        $json = json_encode($data);
+        if ($json === false) {
+            return false;
+        }
+        $up = $pdo->prepare('UPDATE admin_users SET ui_prefs = :p WHERE id = :id AND role = "accountant"');
+        $up->execute(array(':p' => $json, ':id' => $userId));
+        return true;
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
 function user_can($perm, $role = null)
 {
     if ($role === null) {
         $u = current_admin();
         $role = $u && isset($u['role']) ? $u['role'] : 'staff';
+    }
+    if ($role === 'accountant' && $perm === 'subscribers') {
+        global $pdo;
+        if (!accountant_sees_subscribers(isset($pdo) ? $pdo : null)) {
+            return false;
+        }
     }
     if ($role === 'accountant' && $perm !== 'dashboard') {
         global $pdo;
@@ -975,6 +1049,9 @@ function require_perm($perm)
     if (!user_can($perm)) {
         $lang = isset($GLOBALS['lang']) ? $GLOBALS['lang'] : 'ar';
         flash('error', $lang === 'en' ? 'No permission' : 'ما عندك صلاحية لهالصفحة');
+        if ($perm === 'subscribers' && function_exists('is_accountant_user') && is_accountant_user()) {
+            redirect('debts.php');
+        }
         redirect('index.php');
     }
 }
@@ -1451,9 +1528,12 @@ function portal_sas_manager_tree($pdo)
         if (is_array($raw) && isset($raw['rows']) && is_array($raw['rows'])) {
             $saved = $raw['rows'];
             $age = time() - (isset($raw['at']) ? (int) $raw['at'] : 0);
+            $treeVer = isset($raw['v']) ? (int) $raw['v'] : 0;
         }
     }
-    if (($saved && $age >= 0 && $age < 86400) || !empty($GLOBALS['portal_sas_tree_no_fetch'])) {
+    $treeVer = isset($treeVer) ? (int) $treeVer : 0;
+    $treeFresh = ($saved && $treeVer >= 3 && $age >= 0 && $age < 86400);
+    if ($treeFresh || (!empty($GLOBALS['portal_sas_tree_no_fetch']) && $saved && $treeVer >= 3)) {
         $memo = $saved;
         return $memo;
     }
@@ -1463,12 +1543,53 @@ function portal_sas_manager_tree($pdo)
         if (!is_dir($dir)) {
             @mkdir($dir, 0755, true);
         }
-        @file_put_contents($file, json_encode(array('at' => time(), 'rows' => $fresh)));
+        @file_put_contents($file, json_encode(array('v' => 3, 'at' => time(), 'rows' => $fresh)));
         $memo = $fresh;
         return $memo;
     }
     $memo = $saved;
     return $memo;
+}
+
+function portal_sas_manager_parent_from_detail($one, $selfId)
+{
+    $selfId = (int) $selfId;
+    if (!is_array($one) || isset($one['__http_error']) || isset($one['__auth_error']) || isset($one['__curl_error'])) {
+        return null;
+    }
+    $bags = array($one);
+    if (isset($one['data']) && is_array($one['data']) && !isset($one['data'][0])) {
+        $bags[] = $one['data'];
+    }
+    if (isset($one['manager']) && is_array($one['manager'])) {
+        $bags[] = $one['manager'];
+    }
+    if (isset($one['data']['manager']) && is_array($one['data']['manager'])) {
+        $bags[] = $one['data']['manager'];
+    }
+    $seenZero = false;
+    foreach ($bags as $bag) {
+        if (!is_array($bag)) {
+            continue;
+        }
+        $cands = array();
+        if (isset($bag['parent_id']) && is_numeric($bag['parent_id'])) {
+            $cands[] = (int) $bag['parent_id'];
+        }
+        if (isset($bag['parent']) && is_array($bag['parent']) && isset($bag['parent']['id']) && is_numeric($bag['parent']['id'])) {
+            $cands[] = (int) $bag['parent']['id'];
+        }
+        foreach ($cands as $p) {
+            if ($p === $selfId) {
+                $p = 0;
+            }
+            if ($p > 0) {
+                return $p;
+            }
+            $seenZero = true;
+        }
+    }
+    return $seenZero ? 0 : null;
 }
 
 function portal_sas_manager_tree_fetch($pdo)
@@ -1509,32 +1630,110 @@ function portal_sas_manager_tree_fetch($pdo)
     if (!$api || !method_exists($api, 'getManagers') || !method_exists($api, 'getManagerById')) {
         return array();
     }
-    $raw = $api->getManagers();
-    $list = is_array($raw) ? $raw : array();
-    if (isset($list['data']) && is_array($list['data'])) {
-        $list = $list['data'];
-    }
     $out = array();
-    $n = 0;
-    foreach ($list as $m) {
-        if (!is_array($m) || empty($m['id'])) {
-            continue;
+    $seen = array();
+    $start = 0;
+    $length = 500;
+    for ($page = 0; $page < 8; $page++) {
+        $raw = $api->getManagers($start, $length);
+        $list = is_array($raw) ? $raw : array();
+        if (isset($list['data']) && is_array($list['data'])) {
+            $list = $list['data'];
         }
-        $n++;
-        if ($n > 200) {
+        if (!$list || isset($list['__http_error']) || isset($list['__auth_error'])) {
             break;
         }
-        $id = (int) $m['id'];
-        $one = $api->getManagerById($id);
-        $name = (is_array($one) && !empty($one['username'])) ? (string) $one['username'] : (isset($m['username']) ? (string) $m['username'] : '');
-        if ($name === '') {
+        $added = 0;
+        foreach ($list as $m) {
+            if (!is_array($m) || empty($m['id']) || !is_numeric($m['id'])) {
+                continue;
+            }
+            $id = (int) $m['id'];
+            if ($id <= 0 || isset($seen[$id])) {
+                continue;
+            }
+            $name = isset($m['username']) ? trim((string) $m['username']) : '';
+            if ($name === '' && !empty($m['name'])) {
+                $name = trim((string) $m['name']);
+            }
+            if ($name === '') {
+                continue;
+            }
+            $parentId = 0;
+            if (isset($m['parent_id']) && is_numeric($m['parent_id']) && (int) $m['parent_id'] > 0) {
+                $parentId = (int) $m['parent_id'];
+            }
+            if ($parentId <= 0 && isset($m['parent']) && is_array($m['parent']) && !empty($m['parent']['id'])) {
+                $parentId = (int) $m['parent']['id'];
+            }
+            if ($parentId === $id) {
+                $parentId = 0;
+            }
+            $parentName = '';
+            foreach (array('parent_username', 'parent_name') as $nk) {
+                if (!empty($m[$nk]) && !is_array($m[$nk])) {
+                    $parentName = trim((string) $m[$nk]);
+                    break;
+                }
+            }
+            $seen[$id] = true;
+            $out[] = array(
+                'id' => $id,
+                'username' => $name,
+                'parent_id' => $parentId,
+                'parent_name' => $parentName,
+            );
+            $added++;
+        }
+        if ($added < $length) {
+            break;
+        }
+        $start += $length;
+    }
+    if ($out && function_exists('set_time_limit')) {
+        @set_time_limit(180);
+    }
+    $memoDir = dirname(__DIR__) . '/storage/cache';
+    if ($out && !is_dir($memoDir)) {
+        @mkdir($memoDir, 0775, true);
+    }
+    foreach ($out as $i => $node) {
+        $id = (int) $node['id'];
+        if ($id <= 0) {
             continue;
         }
-        $out[] = array(
-            'id' => $id,
-            'username' => $name,
-            'parent_id' => (is_array($one) && isset($one['parent_id'])) ? (int) $one['parent_id'] : 0,
-        );
+        $memo = $memoDir . '/mgr_parent_' . $id . '.txt';
+        $detail = null;
+        if (is_file($memo) && (time() - (int) @filemtime($memo)) < 604800) {
+            $cached = trim((string) @file_get_contents($memo));
+            if ($cached !== '' && (int) $cached > 0) {
+                $detail = (int) $cached;
+            }
+        }
+        if ($detail === null) {
+            $one = $api->getManagerById($id);
+            $detail = portal_sas_manager_parent_from_detail($one, $id);
+            if ($detail !== null && (int) $detail > 0) {
+                @file_put_contents($memo, (string) (int) $detail);
+            }
+        }
+        if ($detail !== null) {
+            $out[$i]['parent_id'] = (int) $detail;
+            $out[$i]['parent_locked'] = 1;
+        }
+    }
+    $byName = array();
+    foreach ($out as $node) {
+        $byName[strtolower($node['username'])] = (int) $node['id'];
+    }
+    foreach ($out as $i => $node) {
+        if (!empty($node['parent_locked']) || (int) $node['parent_id'] > 0) {
+            continue;
+        }
+        $pn = strtolower(trim((string) $node['parent_name']));
+        if ($pn !== '' && isset($byName[$pn])) {
+            $out[$i]['parent_id'] = (int) $byName[$pn];
+        }
     }
     return $out;
 }

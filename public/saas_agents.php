@@ -82,8 +82,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif ($action === 'reject') {
         flash(saas_reject_tenant($pdo, $tid) ? 'success' : 'error', $isEn ? 'Suspended' : 'تم التعليق');
     } elseif ($action === 'extend') {
-        $days = max(1, (int) post('days', '30'));
-        flash(saas_extend_subscription($pdo, $tid, $days, post('plan_code', 'manual'))
+        $planCode = trim((string) post('plan_code', ''));
+        $saasNow = function_exists('saas_settings') ? saas_settings($settings) : array('plans' => array());
+        $planRow = (isset($saasNow['plans'][$planCode]) && is_array($saasNow['plans'][$planCode])) ? $saasNow['plans'][$planCode] : null;
+        $days = $planRow ? max(1, (int) $planRow['days']) : max(1, (int) post('days', '30'));
+        if (!$planRow) {
+            $planCode = 'manual';
+        }
+        flash(saas_extend_subscription($pdo, $tid, $days, $planCode)
             ? 'success' : 'error', $isEn ? 'Extended' : 'تم التمديد');
     } elseif ($action === 'allow_login_as') {
         $uid = (int) post('user_id', '0');
@@ -343,6 +349,18 @@ $viewLabel = array(
                     <td class="meta" style="font-size:12px">
                         <?php echo e($isEn ? 'Trial' : 'تجريبي'); ?>: <?php echo e(!empty($r['trial_ends_at']) ? $r['trial_ends_at'] : '—'); ?><br>
                         <?php echo e($isEn ? 'Until' : 'حتى'); ?>: <?php echo e(!empty($r['subscription_expires_at']) ? $r['subscription_expires_at'] : '—'); ?>
+                        <?php
+                        $lastSale = function_exists('platform_tenant_last_sale') ? platform_tenant_last_sale($pdo, $tid) : null;
+                        if ($lastSale):
+                            $saleLabel = isset($lastSale['plan_label']) ? (string) $lastSale['plan_label'] : '';
+                            $saleNet = isset($lastSale['net']) ? (float) $lastSale['net'] : 0;
+                            $saleDis = isset($lastSale['discount']) ? (float) $lastSale['discount'] : 0;
+                        ?>
+                        <br><?php echo e($saleLabel); ?> · <?php echo e(money_format_iqd($saleNet, $config['currency'])); ?>
+                        <?php if ($saleDis > 0): ?>
+                            · <?php echo e($isEn ? 'Discount' : 'خصم'); ?> <?php echo e(money_format_iqd($saleDis, $config['currency'])); ?>
+                        <?php endif; ?>
+                        <?php endif; ?>
                     </td>
                     <td class="ag-actions">
                         <?php if ($st === 'pending'): ?>
@@ -363,8 +381,27 @@ $viewLabel = array(
                                 <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                                 <input type="hidden" name="action" value="extend">
                                 <input type="hidden" name="tenant_id" value="<?php echo $tid; ?>">
-                                <input type="number" name="days" value="30" min="1">
-                                <button class="btn sm" type="submit"><?php echo e($isEn ? 'Extend' : 'تمديد'); ?></button>
+                                <select name="plan_code">
+                                    <?php
+                                    $extendPlans = function_exists('saas_settings') ? saas_settings($settings) : array('plans' => array());
+                                    $extendPlans = isset($extendPlans['plans']) && is_array($extendPlans['plans']) ? $extendPlans['plans'] : array();
+                                    foreach ($extendPlans as $pCode => $pRow):
+                                        if (!is_array($pRow)) {
+                                            continue;
+                                        }
+                                        $pPrice = isset($pRow['amount']) ? (float) $pRow['amount'] : 0;
+                                        $pDis = isset($pRow['discount']) ? (float) $pRow['discount'] : 0;
+                                        $pNet = $pPrice - ($pDis > $pPrice ? $pPrice : $pDis);
+                                        $pLabel = (isset($pRow['label']) ? $pRow['label'] : $pCode)
+                                            . ' · ' . money_format_iqd($pNet, $config['currency']);
+                                        if ($pDis > 0) {
+                                            $pLabel .= ' · ' . ($isEn ? 'off ' : 'خصم ') . money_format_iqd($pDis, $config['currency']);
+                                        }
+                                    ?>
+                                    <option value="<?php echo e($pCode); ?>"><?php echo e($pLabel); ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                                <button class="btn sm" type="submit"><?php echo e($isEn ? 'Renew' : 'تجديد'); ?></button>
                             </form>
                             <?php if ($st !== 'suspended'): ?>
                             <form method="post" class="inline-form">

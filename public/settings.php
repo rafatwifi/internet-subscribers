@@ -150,6 +150,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         flash('error', $lang === 'en' ? 'Platform admin only' : 'للمدير العام فقط');
         redirect('settings.php?tab=sas');
     }
+    if ($section === 'sub_ping') {
+        $pingMode = function_exists('sas_ping_mode_normalize')
+            ? sas_ping_mode_normalize(post('sub_ping_mode', 'off'))
+            : 'off';
+        if (function_exists('admin_ui_prefs_save')) {
+            admin_ui_prefs_save($pdo, 'sub_ping_mode', $pingMode);
+        }
+        flash('success', $lang === 'en' ? 'Saved' : 'تم الحفظ');
+        redirect('settings.php?tab=sas');
+    }
     $data = array();
     $skipSettingsSave = false;
 
@@ -908,18 +918,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             flash('error', $lang === 'en' ? 'Super admin only' : 'للمدير العام فقط');
             redirect('settings.php');
         }
-        $plans = array(
-            'monthly' => array(
-                'label' => trim((string) post('plan_monthly_label', 'شهري')),
-                'days' => max(1, (int) post('plan_monthly_days', '30')),
-                'amount' => max(0, (float) post('plan_monthly_amount', '25000')),
-            ),
-            'yearly' => array(
-                'label' => trim((string) post('plan_yearly_label', 'سنوي')),
-                'days' => max(1, (int) post('plan_yearly_days', '365')),
-                'amount' => max(0, (float) post('plan_yearly_amount', '250000')),
-            ),
+        $planDefs = array(
+            'monthly' => array('شهري', 30, 25000),
+            'quarter' => array('3 أشهر', 90, 70000),
+            'half' => array('6 أشهر', 180, 130000),
+            'yearly' => array('سنوي', 365, 250000),
         );
+        $plans = array();
+        foreach ($planDefs as $code => $def) {
+            $price = max(0, (float) post('plan_' . $code . '_amount', (string) $def[2]));
+            $discount = max(0, (float) post('plan_' . $code . '_discount', '0'));
+            if ($discount > $price) {
+                $discount = $price;
+            }
+            $plans[$code] = array(
+                'label' => trim((string) post('plan_' . $code . '_label', $def[0])),
+                'days' => max(1, (int) post('plan_' . $code . '_days', (string) $def[1])),
+                'amount' => $price,
+                'discount' => $discount,
+            );
+        }
         $secret = (string) post('zaincash_secret', '');
         $data = array(
             'saas_registration_enabled' => post('saas_registration_enabled') === '1',
@@ -1828,14 +1846,15 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
 .wa-cover-head { margin:14px 0 8px; font-size:12px; font-weight:800; color:#64748b; }
 .wa-switch-row { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:12px 14px; border:1px solid #e2e8f0; border-radius:14px; background:#fff; }
 .wa-switch-row p { margin:0; color:#334155; font-weight:750; font-size:13.5px; line-height:1.55; }
-.wa-switch { position:relative; width:48px; height:28px; flex:0 0 auto; }
+.wa-switch-side { display:flex; align-items:center; gap:10px; flex:0 0 auto; }
+.wa-switch-word { font-size:15px; font-weight:800; color:#15803d; line-height:1; }
+.wa-switch-word.is-off { color:#64748b; }
+.wa-switch { position:relative; width:52px; height:30px; flex:0 0 auto; direction:ltr; }
 .wa-switch input { position:absolute; opacity:0; width:0; height:0; }
 .wa-switch i { position:absolute; inset:0; border-radius:999px; background:#cbd5e1; transition:.15s ease; cursor:pointer; }
-.wa-switch i:before { content:""; position:absolute; width:22px; height:22px; top:3px; left:3px; border-radius:50%; background:#fff; transition:.15s ease; box-shadow:0 1px 3px rgba(15,23,42,.25); }
+.wa-switch i:before { content:""; position:absolute; width:24px; height:24px; top:3px; left:3px; border-radius:50%; background:#fff; transition:.15s ease; box-shadow:0 1px 3px rgba(15,23,42,.25); }
 .wa-switch input:checked + i { background:#16a34a; }
-.wa-switch input:checked + i:before { transform:translateX(20px); }
-.wa-switch b { position:absolute; inset:0; display:flex; align-items:center; justify-content:flex-end; padding-right:8px; color:#fff; font-size:9px; font-weight:800; pointer-events:none; letter-spacing:.04em; }
-.wa-switch input:checked ~ b { justify-content:flex-start; padding:0 0 0 7px; }
+.wa-switch input:checked + i:before { transform:translateX(22px); }
 </style>
 
 <?php
@@ -1852,11 +1871,13 @@ if (function_exists('whatsapp_notifications_enabled') && isset($pdo)) {
   <p><?php echo e($lang === 'en'
       ? 'Use this to message your subscribers on WhatsApp: activation, expiry, and debt reminders.'
       : 'استخدم هذه الخاصية لإرسال رسائل لمشتركيك عبر واتساب، منها رسائل التفعيل والانتهاء وتذكير الديون.'); ?></p>
-  <label class="wa-switch" title="<?php echo e($waNotifyOn ? ($lang === 'en' ? 'ON' : 'تشغيل') : ($lang === 'en' ? 'OFF' : 'إيقاف')); ?>">
-    <input type="checkbox" name="wa_notify" value="1" <?php echo $waNotifyOn ? 'checked' : ''; ?> onchange="this.form.submit()">
-    <i></i>
-    <b><?php echo $waNotifyOn ? 'ON' : 'OFF'; ?></b>
-  </label>
+  <div class="wa-switch-side">
+    <span class="wa-switch-word<?php echo $waNotifyOn ? '' : ' is-off'; ?>"><?php echo e($waNotifyOn ? ($lang === 'en' ? 'On' : 'شغال') : ($lang === 'en' ? 'Off' : 'متوقف')); ?></span>
+    <label class="wa-switch" title="<?php echo e($waNotifyOn ? ($lang === 'en' ? 'On' : 'شغال') : ($lang === 'en' ? 'Off' : 'متوقف')); ?>">
+      <input type="checkbox" name="wa_notify" value="1" <?php echo $waNotifyOn ? 'checked' : ''; ?> onchange="this.form.submit()">
+      <i></i>
+    </label>
+  </div>
 </form>
 <?php if ($waNotifyOn): ?>
 <section class="wa-hero">
@@ -1938,8 +1959,8 @@ $waCoverGroups = array(
 <div class="wa-card">
     <h2><?php echo e($lang === 'en' ? 'Who this number covers' : 'من يشملهم هذا الرقم'); ?></h2>
     <p class="wa-lead"><?php echo e($lang === 'en'
-        ? 'Off by default: your number messages only your own subscribers. Tick an agent only if this number should also message that agent’s subscribers.'
-        : 'الافتراضي مغلق: رقمك يرسل لمشتركيك فقط. علّم الوكيل إذا تريد هذا الرقم يرسل لمشتركيه هو كمان.'); ?></p>
+        ? 'Every box starts off. Your number messages only your own subscribers until you tick an agent and save.'
+        : 'كل المربعات تبدأ مطفية. رقمك يرسل لمشتركيك فقط، وعلّم الوكيل إذا تريد هذا الرقم يرسل لمشتركيه ثم احفظ.'); ?></p>
     <form method="post">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="section" value="wa_cover">
@@ -1999,7 +2020,8 @@ var L = {
   connected: <?php echo json_encode($lang === 'en' ? 'Connected' : 'متصل'); ?>,
   connectedBox: <?php echo json_encode($lang === 'en' ? 'Linked.' : 'الربط محفوظ.'); ?>,
   scanBelow: <?php echo json_encode($lang === 'en' ? 'WhatsApp → Linked devices → Link a device.' : 'واتساب ← الأجهزة المرتبطة ← ربط جهاز.'); ?>,
-  restoring: <?php echo json_encode($lang === 'en' ? 'Opening the saved link.' : 'جاري فتح الربط المحفوظ.'); ?>,
+  restoring: <?php echo json_encode($lang === 'en' ? 'Saved link is reconnecting. No new scan.' : 'الربط محفوظ ويعيد الاتصال وحده. ما تحتاج تمسح رمز.'); ?>,
+  freshQr: <?php echo json_encode($lang === 'en' ? 'Preparing a new code. Do not scan an old picture.' : 'نجهز رمز جديد. لا تمسح صورة قديمة.'); ?>,
   gatewayDown: <?php echo json_encode($lang === 'en' ? 'WhatsApp is not connected.' : 'واتساب غير متصل.'); ?>,
   lost: <?php echo json_encode($lang === 'en' ? 'The phone unlinked this device.' : 'الموبايل فك الربط.'); ?>,
   needOnce: <?php echo json_encode($lang === 'en' ? 'This account is not linked yet.' : 'هذا الحساب بعد ما مربوط.'); ?>,
@@ -2087,13 +2109,23 @@ function paintState(data) {
     return 'stop';
   }
   paintConnected(false);
+  if (data.registered) {
+    setStatus('warn', L.restoring);
+    showWaitingBox(L.restoring, '');
+    return 'stop';
+  }
+  if (data.status === 'qr_wait') {
+    setStatus('warn', L.freshQr);
+    showWaitingBox(L.freshQr, '');
+    return 'qr';
+  }
   if (data.status === 'cert_expired' || data.status === 'tls_retry') {
     var tls = data.status === 'tls_retry' ? L.tlsRetry : L.certExpired;
     setStatus('warn', tls);
     showWaitingBox(tls, '');
     return 'stop';
   }
-  if (waMine(data) && data.qr_data_url && showQr(data.qr_data_url)) {
+  if (waMine(data) && data.qr_data_url && (!data.qr_age_ms || data.qr_age_ms <= 45000) && showQr(data.qr_data_url)) {
     setStatus('warn', L.scanBelow);
     return 'stop';
   }
@@ -2146,7 +2178,12 @@ function waitForQr(tries) {
   fetch('wa_proxy.php?action=qr&_=' + Date.now())
     .then(function (r) { return r.json(); })
     .then(function (qr) {
-      if (qr && qr.qr_data_url && waMine(qr) && showQr(qr.qr_data_url)) {
+      if (qr && qr.registered) {
+        paintState(qr);
+        waBusy = false;
+        return;
+      }
+      if (qr && qr.qr_data_url && waMine(qr) && (!qr.qr_age_ms || qr.qr_age_ms <= 45000) && showQr(qr.qr_data_url)) {
         paintConnected(false);
         setStatus('warn', L.scanNew);
         waBusy = false;
@@ -2241,6 +2278,40 @@ if ($sasTenantIdUi > 1) {
 ?>
 <div class="panel">
     <h2><?php echo e($sasTitle); ?></h2>
+    <div style="margin:0 0 14px">
+        <div style="font-weight:800;margin-bottom:6px"><?php echo e($isEn ? 'Subscriber ping' : 'بينغ المشتركين'); ?></div>
+        <p style="color:#64748b;font-weight:600;margin:0 0 8px;font-size:13px"><?php echo e($isEn
+            ? 'Saved for this login. Each portal agent keeps their own choice. Middle is off.'
+            : 'ينحفظ لهذا الحساب. كل وكيل بالبوابة يختار لحاله. الوسط طافي.'); ?></p>
+        <?php
+        $pingModeNow = function_exists('sas_ping_mode') ? sas_ping_mode($pdo) : 'off';
+        if (function_exists('sas_ping_mode_style')) {
+            echo sas_ping_mode_style();
+        }
+        if (function_exists('sas_ping_mode_buttons')) {
+            echo sas_ping_mode_buttons($isEn, $pingModeNow);
+        }
+        ?>
+    </div>
+    <script>
+    (function () {
+      var box = document.getElementById('subPingMode');
+      if (!box) return;
+      var csrf = <?php echo json_encode(csrf_token()); ?>;
+      box.addEventListener('click', function (e) {
+        var btn = e.target && e.target.closest ? e.target.closest('[data-ping-mode]') : null;
+        if (!btn || !box.contains(btn)) return;
+        var mode = btn.getAttribute('data-ping-mode') || 'off';
+        if (box.getAttribute('data-mode') === mode) return;
+        var body = new FormData();
+        body.append('csrf', csrf);
+        body.append('section', 'sub_ping');
+        body.append('sub_ping_mode', mode);
+        fetch('settings.php?tab=sas', { method: 'POST', credentials: 'same-origin', body: body, redirect: 'manual' })
+          .then(function () { window.location.href = 'settings.php?tab=sas'; });
+      });
+    })();
+    </script>
     <?php if ($sasTenantIdUi <= 1): ?>
     <p style="color:#6b7a88;font-weight:600;margin-top:0">
         <?php echo e($isEn
@@ -2577,8 +2648,17 @@ $sysGrace = (int) (isset($s['grace_days']) ? $s['grace_days'] : 3);
 <?php
 $isEn = ($lang === 'en');
 $plansUi = isset($s['saas_plans']) && is_array($s['saas_plans']) ? $s['saas_plans'] : array();
-$pm = isset($plansUi['monthly']) && is_array($plansUi['monthly']) ? $plansUi['monthly'] : array('label' => 'شهري', 'days' => 30, 'amount' => 25000);
-$py = isset($plansUi['yearly']) && is_array($plansUi['yearly']) ? $plansUi['yearly'] : array('label' => 'سنوي', 'days' => 365, 'amount' => 250000);
+$planForm = array(
+    'monthly' => array('label' => 'شهري', 'days' => 30, 'amount' => 25000, 'discount' => 0),
+    'quarter' => array('label' => '3 أشهر', 'days' => 90, 'amount' => 70000, 'discount' => 0),
+    'half' => array('label' => '6 أشهر', 'days' => 180, 'amount' => 130000, 'discount' => 0),
+    'yearly' => array('label' => 'سنوي', 'days' => 365, 'amount' => 250000, 'discount' => 0),
+);
+foreach ($planForm as $code => $def) {
+    if (isset($plansUi[$code]) && is_array($plansUi[$code])) {
+        $planForm[$code] = array_merge($def, $plansUi[$code]);
+    }
+}
 $zcConfigured = function_exists('zaincash_is_configured') && zaincash_is_configured($s);
 ?>
 <div class="panel">
@@ -2610,33 +2690,28 @@ $zcConfigured = function_exists('zaincash_is_configured') && zaincash_is_configu
                 <input class="ltr" name="zaincash_redirect_base" placeholder="https://example.com/public" value="<?php echo e(isset($s['zaincash_redirect_base']) ? $s['zaincash_redirect_base'] : ''); ?>">
             </div>
         </div>
-        <h3 style="font-size:15px;margin:18px 0 8px"><?php echo e($isEn ? 'Plans (IQD)' : 'الباقات (دينار)'); ?></h3>
-        <div class="form-grid cols-3">
+        <h3 style="font-size:15px;margin:18px 0 8px"><?php echo e($isEn ? 'Membership plans' : 'خطط عضوية البوابة'); ?></h3>
+        <p class="meta" style="margin:0 0 8px"><?php echo e($isEn ? 'Price and discount are for portal membership only.' : 'السعر والخصم لعضوية البوابة فقط، مو لباقات الساس.'); ?></p>
+        <?php foreach ($planForm as $code => $prow): ?>
+        <div class="form-grid cols-4" style="margin-bottom:8px">
             <div>
-                <label><?php echo e($isEn ? 'Monthly label' : 'تسمية الشهري'); ?></label>
-                <input name="plan_monthly_label" value="<?php echo e(isset($pm['label']) ? $pm['label'] : 'شهري'); ?>">
+                <label><?php echo e($isEn ? 'Name' : 'الاسم'); ?></label>
+                <input name="plan_<?php echo e($code); ?>_label" value="<?php echo e($prow['label']); ?>">
             </div>
             <div>
                 <label><?php echo e($isEn ? 'Days' : 'الأيام'); ?></label>
-                <input class="ltr" type="number" min="1" name="plan_monthly_days" value="<?php echo e(isset($pm['days']) ? (int) $pm['days'] : 30); ?>">
+                <input class="ltr" type="number" min="1" name="plan_<?php echo e($code); ?>_days" value="<?php echo (int) $prow['days']; ?>">
             </div>
             <div>
-                <label><?php echo e($isEn ? 'Amount IQD' : 'المبلغ دينار'); ?></label>
-                <input class="ltr" type="number" min="0" step="1" name="plan_monthly_amount" value="<?php echo e(isset($pm['amount']) ? (int) $pm['amount'] : 25000); ?>">
+                <label><?php echo e($isEn ? 'Price' : 'السعر'); ?></label>
+                <input class="ltr" type="number" min="0" step="1" name="plan_<?php echo e($code); ?>_amount" value="<?php echo (int) $prow['amount']; ?>">
             </div>
             <div>
-                <label><?php echo e($isEn ? 'Yearly label' : 'تسمية السنوي'); ?></label>
-                <input name="plan_yearly_label" value="<?php echo e(isset($py['label']) ? $py['label'] : 'سنوي'); ?>">
-            </div>
-            <div>
-                <label><?php echo e($isEn ? 'Days' : 'الأيام'); ?></label>
-                <input class="ltr" type="number" min="1" name="plan_yearly_days" value="<?php echo e(isset($py['days']) ? (int) $py['days'] : 365); ?>">
-            </div>
-            <div>
-                <label><?php echo e($isEn ? 'Amount IQD' : 'المبلغ دينار'); ?></label>
-                <input class="ltr" type="number" min="0" step="1" name="plan_yearly_amount" value="<?php echo e(isset($py['amount']) ? (int) $py['amount'] : 250000); ?>">
+                <label><?php echo e($isEn ? 'Discount' : 'الخصم'); ?></label>
+                <input class="ltr" type="number" min="0" step="1" name="plan_<?php echo e($code); ?>_discount" value="<?php echo isset($prow['discount']) ? (int) $prow['discount'] : 0; ?>">
             </div>
         </div>
+        <?php endforeach; ?>
         <h3 style="font-size:15px;margin:18px 0 8px"><?php echo e($isEn ? 'ZainCash keys' : 'مفاتيح زين كاش'); ?></h3>
         <div class="form-grid cols-2">
             <div>

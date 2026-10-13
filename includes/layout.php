@@ -44,7 +44,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     <link rel="icon" href="assets/favicon.png?v=2" type="image/png" sizes="32x32">
     <?php endif; ?>
     <link rel="apple-touch-icon" href="<?php echo e($brandIcon !== '' ? $brandIcon : 'assets/apple-touch-icon.png?v=2'); ?>">
-    <link rel="stylesheet" href="assets/style.css?v=ui15">
+    <link rel="stylesheet" href="assets/style.css?v=ui16">
     <style>
         <?php if ($bgMode === 'image' && $bgUrl !== ''): ?>
         body.app-bg-image {
@@ -540,8 +540,8 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
                 transition: stroke-dashoffset .22s ease;
             }
             .sas-toast {
-                position: fixed; top: 72px; inset-inline-start: 16px; inset-inline-end: auto; z-index: 100001;
-                width: min(340px, calc(100vw - 24px));
+                position: fixed; top: 12px; bottom: auto; inset-inline-end: 220px; inset-inline-start: auto; z-index: 100003;
+                width: min(320px, 42vw);
                 padding: 12px 14px; border-radius: 14px; font-weight: 700; text-align: start;
                 box-shadow: 0 14px 40px rgba(15, 23, 42, .22);
                 display: flex; align-items: flex-start; gap: 10px;
@@ -557,10 +557,9 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             }
             @media (max-width: 640px) {
                 .sas-toast {
-                    top: auto; bottom: 16px; inset-inline-start: 12px; inset-inline-end: 12px;
-                    width: auto;
+                    top: 10px; bottom: auto; inset-inline-start: 12px; inset-inline-end: 12px;
+                    width: auto; max-width: none;
                 }
-                .sas-toast.is-out { transform: translateY(10px); }
             }
             .sas-toast-success { background: #146c43; color: #fff; }
             .sas-toast-error { background: #9b2331; color: #fff; }
@@ -800,6 +799,119 @@ body.nav-pending .nav-progress { display: block; }
   setInterval(fireTick, 40000);
 })();
 
+window.placeCornerToast = function (el) {
+  if (!el || !el.style) return;
+  var phone = window.matchMedia && window.matchMedia('(max-width: 640px)').matches;
+  function set(prop, val) { el.style.setProperty(prop, val, 'important'); }
+  set('bottom', 'auto');
+  set('z-index', '100003');
+  if (phone) {
+    set('top', '10px');
+    set('left', '12px');
+    set('right', '12px');
+    set('width', 'auto');
+    set('max-width', 'none');
+    set('inset-inline-start', '12px');
+    set('inset-inline-end', '12px');
+    return;
+  }
+  var cluster = document.querySelector('.main-top-end');
+  set('width', 'min(320px, 42vw)');
+  set('max-width', '320px');
+  if (!cluster) {
+    set('top', '12px');
+    set('inset-inline-end', '16px');
+    set('inset-inline-start', 'auto');
+    return;
+  }
+  var r = cluster.getBoundingClientRect();
+  var h = el.offsetHeight || 44;
+  var top = Math.round(r.top + Math.max(0, (r.height - h) / 2));
+  if (top < 6) top = 6;
+  set('top', top + 'px');
+  if (document.body.classList.contains('rtl')) {
+    set('left', Math.round(r.right + 10) + 'px');
+    set('right', 'auto');
+  } else {
+    set('right', Math.round(window.innerWidth - r.left + 10) + 'px');
+    set('left', 'auto');
+  }
+  set('inset-inline-start', 'auto');
+  set('inset-inline-end', 'auto');
+};
+window.showCornerToast = function (msg, kind) {
+  var text = String(msg || '').replace(/^\s+|\s+$/g, '');
+  if (!text) return;
+  var old = document.getElementById('appCornerToast');
+  if (old && old.parentNode) old.parentNode.removeChild(old);
+  var el = document.createElement('div');
+  el.id = 'appCornerToast';
+  el.className = 'sas-toast ' + (kind === 'error' ? 'sas-toast-error' : 'sas-toast-success');
+  el.setAttribute('role', 'status');
+  var span = document.createElement('span');
+  span.className = 'sas-toast-text';
+  span.textContent = text;
+  el.appendChild(span);
+  document.body.appendChild(el);
+  if (window.placeCornerToast) window.placeCornerToast(el);
+  setTimeout(function () {
+    el.classList.add('is-out');
+    setTimeout(function () {
+      if (el.parentNode) el.parentNode.removeChild(el);
+    }, 820);
+  }, 3000);
+};
+(function () {
+  var wait = <?php echo !empty($_SESSION['wa_resend_wait']) ? 'true' : 'false'; ?>;
+  try {
+    if (sessionStorage.getItem('waResendWait') === '1') wait = true;
+    if (wait) sessionStorage.setItem('waResendWait', '1');
+  } catch (e) {}
+  if (!wait) return;
+  var tries = 0;
+  var idle = 0;
+  var en = <?php echo !empty($isEn) ? 'true' : 'false'; ?>;
+  function stopWait() {
+    try { sessionStorage.removeItem('waResendWait'); } catch (e) {}
+  }
+  function poll() {
+    var x = new XMLHttpRequest();
+    x.open('GET', 'messages.php?ajax=wa_notice', true);
+    x.timeout = 8000;
+    x.onload = function () {
+      var d = null;
+      try { d = JSON.parse(x.responseText || ''); } catch (err) { d = null; }
+      if (d && d.notice) {
+        var ok = parseInt(d.notice.ok, 10) || 0;
+        var fail = parseInt(d.notice.fail, 10) || 0;
+        var msg = '';
+        if (ok > 0 && fail < 1) msg = en ? ('Sent ' + ok) : ('تم إرسال ' + ok + ' رسالة');
+        else if (ok > 0) msg = en ? ('Sent ' + ok + ', failed ' + fail) : ('تم إرسال ' + ok + ' وفشل ' + fail);
+        else if (fail > 0) msg = en ? ('Failed to send ' + fail) : ('فشل إرسال ' + fail + ' رسالة');
+        if (msg && window.showCornerToast) window.showCornerToast(msg, (fail > 0 && ok < 1) ? 'error' : 'success');
+        stopWait();
+        return;
+      }
+      var pending = d && d.pending ? parseInt(d.pending, 10) : 0;
+      if (pending > 0) idle = 0;
+      else idle += 1;
+      tries += 1;
+      if (idle >= 3 || tries > 200) {
+        stopWait();
+        return;
+      }
+      setTimeout(poll, 4000);
+    };
+    x.onerror = x.ontimeout = function () {
+      tries += 1;
+      if (tries > 200) { stopWait(); return; }
+      setTimeout(poll, 4000);
+    };
+    x.send();
+  }
+  setTimeout(poll, 2500);
+})();
+
 (function () {
   var wrap = document.getElementById('topAdminMenu');
   var btn = document.getElementById('topAdminBtn');
@@ -997,6 +1109,14 @@ body.nav-pending .nav-progress { display: block; }
   window.addEventListener('pagehide', finishRing);
   window.addEventListener('pageshow', hideRing);
 
+  function placeAllToasts() {
+    var nodes = document.querySelectorAll('.sas-toast');
+    for (var i = 0; i < nodes.length; i++) {
+      if (window.placeCornerToast) window.placeCornerToast(nodes[i]);
+    }
+  }
+  placeAllToasts();
+  window.addEventListener('resize', placeAllToasts);
   var toast = document.querySelector('.sas-toast:not(#sasSyncOkBanner)');
   if (toast) {
     var closeToast = function () {

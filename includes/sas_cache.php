@@ -14,6 +14,16 @@ function ensure_sas_users_cache_table($pdo)
         return;
     }
     $done = true;
+    try {
+        $pingCol = $pdo->query("SHOW COLUMNS FROM sas_users_cache LIKE 'online_ping'")->fetch();
+        if (!$pingCol) {
+            $pdo->exec('ALTER TABLE sas_users_cache ADD COLUMN online_ping SMALLINT UNSIGNED NULL DEFAULT NULL');
+            if (function_exists('app_schema_touch')) {
+                app_schema_touch('sas_cache');
+            }
+        }
+    } catch (Exception $e) {
+    }
     if (function_exists('app_schema_fresh') && app_schema_fresh('sas_cache')) {
         return;
     }
@@ -83,6 +93,7 @@ function ensure_sas_users_cache_table($pdo)
         'is_online' => 'TINYINT(1) NOT NULL DEFAULT 0',
         'daily_traffic' => 'VARCHAR(60) NULL DEFAULT NULL',
         'framed_ip' => 'VARCHAR(45) NULL DEFAULT NULL',
+        'online_ping' => 'SMALLINT UNSIGNED NULL DEFAULT NULL',
     );
     foreach ($extraCols as $cName => $cSql) {
         try {
@@ -720,6 +731,595 @@ function sas_cache_framed_ip($row)
     return '';
 }
 
+function sas_cache_ping_number($value)
+{
+    if (is_array($value) || $value === null || is_bool($value)) {
+        return null;
+    }
+    $year = (int) date('Y');
+    if (is_int($value) || is_float($value) || (is_string($value) && preg_match('/^\d+(\.\d+)?$/', trim($value)))) {
+        $n = (int) round((float) $value);
+        if ($n >= 2010 && $n <= $year + 1) {
+            return null;
+        }
+        if ($n > 1000000000) {
+            return null;
+        }
+        if ($n > 0 && $n < 10000) {
+            return $n;
+        }
+        return null;
+    }
+    $s = trim((string) $value);
+    if ($s === '' || $s === '-' || $s === '—') {
+        return null;
+    }
+    if (preg_match('/\d{4}[-:\/]/', $s) || preg_match('/[-:\/]\d{4}/', $s) || preg_match('/\d{1,2}:\d{2}/', $s)) {
+        return null;
+    }
+    if (!preg_match('/^(\d+(?:\.\d+)?)(\s*ms)?$/i', $s, $m)) {
+        return null;
+    }
+    $n = (int) round((float) $m[1]);
+    if ($n >= 2010 && $n <= $year + 1) {
+        return null;
+    }
+    if ($n > 0 && $n < 10000) {
+        return $n;
+    }
+    return null;
+}
+
+function sas_cache_online_ping($row)
+{
+    if (!is_array($row)) {
+        return null;
+    }
+    $nests = array($row);
+    foreach (array('acct', 'session', 'radius', 'online', 'data', 'user', 'info', 'attributes') as $nk) {
+        if (isset($row[$nk]) && is_array($row[$nk]) && !isset($row[$nk][0])) {
+            $nests[] = $row[$nk];
+        }
+    }
+    $keys = array(
+        'ping', 'ping_ms', 'pingMs', 'ping_time', 'pingTime', 'user_ping',
+        'latency', 'latency_ms', 'rtt', 'rtt_ms', 'delay', 'response_time', 'avg_rtt',
+    );
+    foreach ($nests as $block) {
+        foreach ($keys as $k) {
+            if (!isset($block[$k]) || is_array($block[$k])) {
+                continue;
+            }
+            $n = sas_cache_ping_number($block[$k]);
+            if ($n !== null) {
+                return $n;
+            }
+        }
+        foreach ($block as $k => $v) {
+            if (is_array($v)) {
+                continue;
+            }
+            $name = strtolower((string) $k);
+            if (strpos($name, 'ping') === false && strpos($name, 'rtt') === false && strpos($name, 'latency') === false) {
+                continue;
+            }
+            $n = sas_cache_ping_number($v);
+            if ($n !== null) {
+                return $n;
+            }
+        }
+    }
+    return null;
+}
+
+function sas_ping_mode_normalize($mode)
+{
+    $mode = strtolower(trim((string) $mode));
+    if ($mode === 'sas' || $mode === 'portal') {
+        return $mode;
+    }
+    return 'off';
+}
+
+function sas_ping_mode($pdo)
+{
+    static $cached = null;
+    if ($cached !== null) {
+        return $cached;
+    }
+    $mode = 'off';
+    if ($pdo && function_exists('admin_ui_prefs_load')) {
+        $prefs = admin_ui_prefs_load($pdo);
+        if (is_array($prefs) && isset($prefs['sub_ping_mode'])) {
+            $mode = sas_ping_mode_normalize($prefs['sub_ping_mode']);
+        }
+    }
+    $cached = $mode;
+    return $cached;
+}
+
+function sas_ping_mode_style()
+{
+    static $done = false;
+    if ($done) {
+        return '';
+    }
+    $done = true;
+    return '<style>
+.ping-mode{display:inline-flex;direction:ltr;align-items:stretch;border:1px solid #dbe3ee;border-radius:999px;overflow:hidden;background:#f8fafc;max-width:100%}
+.ping-mode-btn{border:0;background:transparent;color:#64748b;font-weight:800;font-size:12px;line-height:1.2;padding:7px 10px;cursor:pointer;font-family:inherit}
+.ping-mode-btn + .ping-mode-btn{border-inline-start:1px solid #e2e8f0}
+.ping-mode-btn.is-on[data-ping-mode="portal"]{background:#0f766e;color:#fff}
+.ping-mode-btn.is-on[data-ping-mode="off"]{background:#e2e8f0;color:#334155}
+.ping-mode-btn.is-on[data-ping-mode="sas"]{background:#0284c7;color:#fff}
+@media(max-width:640px){
+  .ping-mode{display:flex;width:100%}
+  .ping-mode-btn{flex:1 1 0;font-size:11px;padding:8px 4px}
+}
+</style>';
+}
+
+function sas_ping_mode_buttons($en, $mode)
+{
+    $mode = sas_ping_mode_normalize($mode);
+    $opts = array(
+        array('portal', $en ? 'Portal ping' : 'البنك من خلال البوابة'),
+        array('off', $en ? 'Off' : 'طافي'),
+        array('sas', $en ? 'SAS ping' : 'البنك من خلال الساس'),
+    );
+    $html = '<div class="ping-mode" id="subPingMode" dir="ltr" role="radiogroup" data-mode="' . e($mode) . '">';
+    foreach ($opts as $opt) {
+        $on = ($mode === $opt[0]) ? ' is-on' : '';
+        $html .= '<button type="button" class="ping-mode-btn' . $on . '" data-ping-mode="' . e($opt[0]) . '">' . e($opt[1]) . '</button>';
+    }
+    $html .= '</div>';
+    return $html;
+}
+
+function sas_cache_radacct_id($row)
+{
+    if (!is_array($row)) {
+        return '';
+    }
+    $nests = array($row);
+    foreach (array('acct', 'session', 'radius', 'online') as $nk) {
+        if (isset($row[$nk]) && is_array($row[$nk]) && !isset($row[$nk][0])) {
+            $nests[] = $row[$nk];
+        }
+    }
+    foreach ($nests as $src) {
+        foreach (array('radacctid', 'radacct_id') as $k) {
+            if (!isset($src[$k]) || is_array($src[$k])) {
+                continue;
+            }
+            $v = trim((string) $src[$k]);
+            if ($v !== '' && $v !== '0') {
+                return $v;
+            }
+        }
+    }
+    return '';
+}
+
+function sas_radacct_cache_path($tid)
+{
+    $tid = (int) $tid;
+    if ($tid <= 0) {
+        $tid = 1;
+    }
+    return dirname(__DIR__) . '/storage/cache/sub_rad_t' . $tid . '.json';
+}
+
+function sas_icmp_parse_ms($text)
+{
+    if (!is_string($text) || $text === '') {
+        return null;
+    }
+    $ms = null;
+    if (preg_match('/time[=<]\s*([\d.]+)\s*ms/i', $text, $m)) {
+        $ms = (float) $m[1];
+    } elseif (preg_match('/Average\s*=\s*([\d.]+)\s*ms/i', $text, $m)) {
+        $ms = (float) $m[1];
+    } elseif (preg_match('/=\s*([\d.]+)\/([\d.]+)\/([\d.]+)/', $text, $m)) {
+        $ms = (float) $m[2];
+    }
+    if ($ms === null) {
+        return null;
+    }
+    $n = (int) round($ms);
+    if ($n <= 0 || $n >= 10000) {
+        return null;
+    }
+    return $n;
+}
+
+function sas_icmp_many($hosts)
+{
+    $clean = array();
+    if (!is_array($hosts)) {
+        return array();
+    }
+    foreach ($hosts as $host) {
+        $host = trim((string) $host);
+        if ($host === '' || !filter_var($host, FILTER_VALIDATE_IP)) {
+            continue;
+        }
+        $clean[$host] = true;
+        if (count($clean) >= 12) {
+            break;
+        }
+    }
+    $hosts = array_keys($clean);
+    $out = array();
+    if (!$hosts || !function_exists('proc_open')) {
+        return $out;
+    }
+    $isWin = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN';
+    $procs = array();
+    foreach ($hosts as $host) {
+        $cmd = $isWin
+            ? ('ping -n 1 -w 1000 ' . escapeshellarg($host))
+            : ('ping -c 1 -W 1 ' . escapeshellarg($host));
+        $pipes = array();
+        $proc = @proc_open($cmd, array(
+            0 => array('pipe', 'r'),
+            1 => array('pipe', 'w'),
+            2 => array('pipe', 'w'),
+        ), $pipes);
+        if (!is_resource($proc)) {
+            continue;
+        }
+        @fclose($pipes[0]);
+        @stream_set_blocking($pipes[1], false);
+        @stream_set_blocking($pipes[2], false);
+        $procs[] = array(
+            'host' => $host,
+            'proc' => $proc,
+            'out' => $pipes[1],
+            'err' => $pipes[2],
+            'buf' => '',
+        );
+    }
+    $deadline = microtime(true) + 1.8;
+    while ($procs && microtime(true) < $deadline) {
+        $read = array();
+        foreach ($procs as $p) {
+            if (isset($p['out']) && is_resource($p['out'])) {
+                $read[] = $p['out'];
+            }
+        }
+        if ($read) {
+            $write = null;
+            $except = null;
+            @stream_select($read, $write, $except, 0, 200000);
+        }
+        $left = array();
+        foreach ($procs as $p) {
+            if (isset($p['out']) && is_resource($p['out'])) {
+                $chunk = @fread($p['out'], 8192);
+                if (is_string($chunk) && $chunk !== '') {
+                    $p['buf'] .= $chunk;
+                }
+            }
+            $status = @proc_get_status($p['proc']);
+            $running = is_array($status) && !empty($status['running']);
+            if ($running && microtime(true) < $deadline) {
+                $left[] = $p;
+                continue;
+            }
+            if (isset($p['out']) && is_resource($p['out'])) {
+                $rest = @stream_get_contents($p['out']);
+                if (is_string($rest)) {
+                    $p['buf'] .= $rest;
+                }
+                @fclose($p['out']);
+            }
+            if (isset($p['err']) && is_resource($p['err'])) {
+                @fclose($p['err']);
+            }
+            @proc_close($p['proc']);
+            $ms = sas_icmp_parse_ms($p['buf']);
+            if ($ms !== null) {
+                $out[$p['host']] = $ms;
+            }
+        }
+        $procs = $left;
+    }
+    foreach ($procs as $p) {
+        if (is_resource($p['proc'])) {
+            @proc_terminate($p['proc']);
+            @proc_close($p['proc']);
+        }
+        if (isset($p['out']) && is_resource($p['out'])) {
+            @fclose($p['out']);
+        }
+        if (isset($p['err']) && is_resource($p['err'])) {
+            @fclose($p['err']);
+        }
+    }
+    return $out;
+}
+
+function sas_fill_online_pings($pdo, $rows)
+{
+    if (!$pdo || !is_array($rows) || !$rows) {
+        return is_array($rows) ? $rows : array();
+    }
+    $mode = function_exists('sas_ping_mode') ? sas_ping_mode($pdo) : 'off';
+    if ($mode === 'off') {
+        foreach ($rows as $i => $row) {
+            if (is_array($row)) {
+                $rows[$i]['online_ping'] = null;
+                $rows[$i]['_ping_fresh'] = 0;
+            }
+        }
+        return $rows;
+    }
+    if ($mode === 'sas') {
+        return sas_fill_sas_pings($pdo, $rows);
+    }
+    return sas_fill_portal_pings($pdo, $rows);
+}
+
+function sas_fill_sas_pings($pdo, $rows)
+{
+    if (function_exists('set_time_limit')) {
+        @set_time_limit(40);
+    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tid <= 0) {
+        $tid = 1;
+    }
+    $dir = dirname(__DIR__) . '/storage/cache';
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0775, true);
+    }
+    $file = $dir . '/sub_ping_sas_t' . $tid . '.json';
+    $saved = array();
+    if (is_file($file)) {
+        $raw = json_decode((string) @file_get_contents($file), true);
+        if (is_array($raw)) {
+            $saved = $raw;
+        }
+    }
+    $radPath = sas_radacct_cache_path($tid);
+    $radMap = array();
+    if (is_file($radPath)) {
+        $rawRad = json_decode((string) @file_get_contents($radPath), true);
+        if (is_array($rawRad)) {
+            $radMap = $rawRad;
+        }
+    }
+    $now = time();
+    $need = array();
+    foreach ($rows as $i => $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $rows[$i]['online_ping'] = null;
+        $rows[$i]['_ping_fresh'] = 0;
+        if (empty($row['is_online'])) {
+            continue;
+        }
+        $user = isset($row['username']) ? strtolower(trim((string) $row['username'])) : '';
+        if ($user === '') {
+            continue;
+        }
+        if (isset($saved[$user]) && is_array($saved[$user])
+            && isset($saved[$user]['at']) && ($now - (int) $saved[$user]['at']) < 30
+            && !empty($saved[$user]['ms'])) {
+            $rows[$i]['online_ping'] = (int) $saved[$user]['ms'];
+            $rows[$i]['_ping_fresh'] = 1;
+            continue;
+        }
+        if (count($need) >= 12) {
+            continue;
+        }
+        $need[$user] = $i;
+    }
+    $missingRad = false;
+    foreach ($need as $user => $i) {
+        if (!isset($radMap[$user]) || (string) $radMap[$user] === '') {
+            $missingRad = true;
+            break;
+        }
+    }
+    $api = null;
+    if ($missingRad && function_exists('sas_page_connector')) {
+        global $config;
+        $api = sas_page_connector($config);
+        if ($api && method_exists($api, 'listOnlineUsers')) {
+            try {
+                if (method_exists($api, 'setTimeout')) {
+                    $api->setTimeout(8);
+                }
+                $online = $api->listOnlineUsers();
+            } catch (Exception $e) {
+                $online = array();
+            }
+            if (is_array($online)) {
+                foreach ($online as $orow) {
+                    $u = function_exists('sas_cache_username') ? sas_cache_username($orow) : '';
+                    $rad = sas_cache_radacct_id($orow);
+                    if ($u === '' || $rad === '') {
+                        continue;
+                    }
+                    $keys = function_exists('sas_cache_username_match_keys')
+                        ? sas_cache_username_match_keys($u)
+                        : array(strtolower($u));
+                    foreach ($keys as $key) {
+                        $radMap[$key] = $rad;
+                    }
+                }
+                @file_put_contents($radPath, json_encode($radMap));
+            }
+        }
+    }
+    $pairs = array();
+    $pairIndex = array();
+    foreach ($need as $user => $i) {
+        if (!isset($radMap[$user]) || (string) $radMap[$user] === '') {
+            continue;
+        }
+        $shown = isset($rows[$i]['username']) ? trim((string) $rows[$i]['username']) : $user;
+        $pairs[] = array('username' => $shown, 'radacctid' => (string) $radMap[$user]);
+        $pairIndex[strtolower($shown)] = $i;
+    }
+    if ($pairs && function_exists('sas_page_connector')) {
+        if (!$api) {
+            global $config;
+            $api = sas_page_connector($config);
+        }
+        $hit = array();
+        if ($api && method_exists($api, 'pingOnlineUsers')) {
+            try {
+                $hit = $api->pingOnlineUsers($pairs);
+            } catch (Exception $e) {
+                $hit = array();
+            }
+        }
+        if (!is_array($hit)) {
+            $hit = array();
+        }
+        foreach ($hit as $user => $ms) {
+            $user = strtolower(trim((string) $user));
+            $ms = (int) $ms;
+            if ($user === '' || $ms <= 0 || !isset($pairIndex[$user])) {
+                continue;
+            }
+            $i = $pairIndex[$user];
+            $rows[$i]['online_ping'] = $ms;
+            $rows[$i]['_ping_fresh'] = 1;
+            $saved[$user] = array('ms' => $ms, 'at' => $now);
+        }
+    }
+    $fresh = array();
+    foreach ($saved as $user => $item) {
+        if (!is_array($item) || empty($item['at']) || ($now - (int) $item['at']) > 180) {
+            continue;
+        }
+        $fresh[$user] = $item;
+    }
+    @file_put_contents($file, json_encode($fresh));
+    return $rows;
+}
+
+function sas_fill_portal_pings($pdo, $rows)
+{
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tid <= 0) {
+        $tid = 1;
+    }
+    $dir = dirname(__DIR__) . '/storage/cache';
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0775, true);
+    }
+    $file = $dir . '/sub_ping_t' . $tid . '.json';
+    $saved = array();
+    if (is_file($file)) {
+        $raw = json_decode((string) @file_get_contents($file), true);
+        if (is_array($raw)) {
+            $saved = $raw;
+        }
+    }
+    $now = time();
+    $need = array();
+    foreach ($rows as $i => $row) {
+        if (!is_array($row) || empty($row['is_online'])) {
+            continue;
+        }
+        $user = isset($row['username']) ? strtolower(trim((string) $row['username'])) : '';
+        $ip = isset($row['framed_ip']) ? trim((string) $row['framed_ip']) : '';
+        if ($user === '' || !filter_var($ip, FILTER_VALIDATE_IP)) {
+            continue;
+        }
+        if (isset($saved[$user]) && is_array($saved[$user])
+            && isset($saved[$user]['ip']) && (string) $saved[$user]['ip'] === $ip
+            && isset($saved[$user]['at']) && ($now - (int) $saved[$user]['at']) < 30
+            && !empty($saved[$user]['ms'])) {
+            $rows[$i]['online_ping'] = (int) $saved[$user]['ms'];
+            $rows[$i]['_ping_fresh'] = 1;
+            continue;
+        }
+        if (!isset($need[$ip])) {
+            $need[$ip] = array();
+        }
+        $need[$ip][] = $i;
+    }
+    if ($need) {
+        $hit = sas_icmp_many(array_keys($need));
+        $upd = null;
+        try {
+            $upd = $pdo->prepare('UPDATE sas_users_cache SET online_ping = :ms WHERE tenant_id = :t AND LOWER(username) = :u');
+        } catch (Exception $e) {
+            $upd = null;
+        }
+        foreach ($need as $ip => $indexes) {
+            if (!isset($hit[$ip])) {
+                continue;
+            }
+            $ms = (int) $hit[$ip];
+            foreach ($indexes as $i) {
+                $rows[$i]['online_ping'] = $ms;
+                $rows[$i]['_ping_fresh'] = 1;
+                $user = strtolower(trim((string) $rows[$i]['username']));
+                $saved[$user] = array('ms' => $ms, 'at' => $now, 'ip' => $ip);
+                if ($upd) {
+                    try {
+                        $upd->execute(array(':ms' => $ms, ':t' => $tid, ':u' => $user));
+                    } catch (Exception $e) {
+                    }
+                }
+            }
+        }
+    }
+    $fresh = array();
+    foreach ($saved as $user => $item) {
+        if (!is_array($item) || empty($item['at']) || ($now - (int) $item['at']) > 180) {
+            continue;
+        }
+        $fresh[$user] = $item;
+    }
+    @file_put_contents($file, json_encode($fresh));
+    return $rows;
+}
+
+function sas_ago_label($dt, $en)
+{
+    $ts = strtotime((string) $dt);
+    if (!$ts) {
+        return '';
+    }
+    $sec = time() - $ts;
+    if ($sec < 0) {
+        $sec = 0;
+    }
+    if ($sec < 60) {
+        return (int) $sec . ($en ? 's' : 'ث');
+    }
+    if ($sec < 3600) {
+        return (int) floor($sec / 60) . ($en ? 'm' : 'د');
+    }
+    if ($sec < 86400) {
+        return (int) floor($sec / 3600) . ($en ? 'h' : 'س');
+    }
+    if ($sec < 30 * 86400) {
+        return (int) floor($sec / 86400) . ($en ? 'd' : 'ي');
+    }
+    $months = (int) floor($sec / (30 * 86400));
+    if ($months < 12) {
+        if ($months < 1) {
+            $months = 1;
+        }
+        return $months . ($en ? 'mo' : 'ش');
+    }
+    $years = (int) floor($sec / (365 * 86400));
+    if ($years < 1) {
+        $years = 1;
+    }
+    return $years . ($en ? 'y' : 'سنة');
+}
+
 /**
  * مفاتيح مطابقة لاسم الدخول (مع/بدون @realm)
  */
@@ -791,6 +1391,8 @@ function sas_refresh_online_flags($pdo, $config)
     $names = array();
     $trafMap = array();
     $ipMap = array();
+    $pingMap = array();
+    $radMap = array();
     foreach ($rows as $row) {
         $u = sas_cache_username($row);
         if ($u === '') {
@@ -802,6 +1404,8 @@ function sas_refresh_online_flags($pdo, $config)
         }
         $ip = sas_cache_framed_ip($row);
         $tr = sas_cache_daily_traffic($row);
+        $ping = sas_cache_online_ping($row);
+        $rad = sas_cache_radacct_id($row);
         foreach ($keys as $key) {
             $names[$key] = $u;
             if ($ip !== '') {
@@ -809,6 +1413,12 @@ function sas_refresh_online_flags($pdo, $config)
             }
             if ($tr !== '') {
                 $trafMap[$key] = sas_clip($tr, 60);
+            }
+            if ($ping !== null) {
+                $pingMap[$key] = (int) $ping;
+            }
+            if ($rad !== '') {
+                $radMap[$key] = $rad;
             }
         }
     }
@@ -818,7 +1428,7 @@ function sas_refresh_online_flags($pdo, $config)
         if ($tidOnline <= 0) {
             $tidOnline = 1;
         }
-        $pdo->exec('UPDATE sas_users_cache SET is_online = 0 WHERE tenant_id = ' . $tidOnline . ' AND is_online = 1');
+        $pdo->exec('UPDATE sas_users_cache SET is_online = 0, online_ping = NULL WHERE tenant_id = ' . $tidOnline . ' AND is_online = 1');
         if ($names) {
             $onlineKeys = array_keys($names);
             $chunks = array_chunk($onlineKeys, 40);
@@ -827,8 +1437,10 @@ function sas_refresh_online_flags($pdo, $config)
                 $bind = array();
                 $caseIp = 'CASE LOWER(username)';
                 $caseTr = 'CASE LOWER(username)';
+                $casePing = 'CASE LOWER(username)';
                 $hasIp = false;
                 $hasTr = false;
+                $hasPing = false;
                 $i = 0;
                 foreach ($chunk as $key) {
                     $in[] = ':in' . $i;
@@ -845,6 +1457,12 @@ function sas_refresh_online_flags($pdo, $config)
                         $bind[':tr' . $i] = $trafMap[$key];
                         $hasTr = true;
                     }
+                    if (isset($pingMap[$key]) && (int) $pingMap[$key] > 0) {
+                        $casePing .= ' WHEN :pgk' . $i . ' THEN :pgv' . $i;
+                        $bind[':pgk' . $i] = $key;
+                        $bind[':pgv' . $i] = (int) $pingMap[$key];
+                        $hasPing = true;
+                    }
                     $i++;
                 }
                 $set = 'is_online = 1, last_online = NOW()';
@@ -854,12 +1472,22 @@ function sas_refresh_online_flags($pdo, $config)
                 if ($hasTr) {
                     $set .= ', daily_traffic = ' . $caseTr . ' ELSE daily_traffic END';
                 }
+                if ($hasPing) {
+                    $set .= ', online_ping = ' . $casePing . ' ELSE NULL END';
+                } else {
+                    $set .= ', online_ping = NULL';
+                }
                 $sqlUp = 'UPDATE sas_users_cache SET ' . $set
                     . ' WHERE tenant_id = ' . $tidOnline
                     . ' AND LOWER(username) IN (' . implode(',', $in) . ')';
                 $pdo->prepare($sqlUp)->execute($bind);
             }
         }
+        $radDir = dirname(__DIR__) . '/storage/cache';
+        if (!is_dir($radDir)) {
+            @mkdir($radDir, 0775, true);
+        }
+        @file_put_contents($radDir . '/sub_rad_t' . $tidOnline . '.json', json_encode($radMap));
         @file_put_contents($throttleFile, (string) time());
         if ($lockFh) {
             @flock($lockFh, LOCK_UN);
@@ -4619,6 +5247,21 @@ function sas_render_table_row($row, $n, $config, $lang)
     $html .= '<td class="sub-check-cell"><label class="sub-check-lab"><input type="checkbox" class="sub-check" value="' . e($username) . '"></label></td>';
     $html .= '<td class="col-num">' . (int) $n . '</td>';
     $html .= '<td class="status-cell col-status" title="' . e($statusTitle) . '">' . $statusHtml . '</td>';
+    $pingHtml = '';
+    if ($isOnline && !empty($row['_ping_fresh']) && isset($row['online_ping']) && $row['online_ping'] !== null && $row['online_ping'] !== '' && (int) $row['online_ping'] > 0) {
+        $ms = (int) $row['online_ping'];
+        $tone = ($ms <= 80) ? '' : (($ms <= 180) ? ' is-mid' : ' is-slow');
+        $pingHtml = '<span class="sub-ping' . $tone . '" dir="ltr">' . $ms . '<small>ms</small></span>';
+    }
+    $html .= '<td class="col-ping">' . $pingHtml . '</td>';
+    $seenHtml = '';
+    if (!$isOnline && !empty($row['last_online'])) {
+        $ago = sas_ago_label($row['last_online'], $lang === 'en');
+        if ($ago !== '') {
+            $seenHtml = '<span class="sub-ago" title="' . e((string) $row['last_online']) . '">' . e($ago) . '</span>';
+        }
+    }
+    $html .= '<td class="col-seen">' . $seenHtml . '</td>';
     $copyTip = $lang === 'en' ? 'Copy username' : 'نسخ اسم الدخول';
     $html .= '<td class="col-user"><span class="sas-user-copywrap">'
         . '<button type="button" class="sas-user-copy" data-copy="' . e($username) . '" title="' . e($copyTip) . '" aria-label="' . e($copyTip) . '">⧉</button>'

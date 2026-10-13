@@ -80,8 +80,10 @@ function settings_defaults()
         'saas_registration_enabled' => true,
         'saas_trial_days' => 7,
         'saas_plans' => array(
-            'monthly' => array('label' => 'شهري', 'days' => 30, 'amount' => 25000),
-            'yearly' => array('label' => 'سنوي', 'days' => 365, 'amount' => 250000),
+            'monthly' => array('label' => 'شهري', 'days' => 30, 'amount' => 25000, 'discount' => 0),
+            'quarter' => array('label' => '3 أشهر', 'days' => 90, 'amount' => 70000, 'discount' => 0),
+            'half' => array('label' => '6 أشهر', 'days' => 180, 'amount' => 130000, 'discount' => 0),
+            'yearly' => array('label' => 'سنوي', 'days' => 365, 'amount' => 250000, 'discount' => 0),
         ),
         'zaincash_merchant_id' => '',
         'zaincash_secret' => '',

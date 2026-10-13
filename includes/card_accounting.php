@@ -540,6 +540,76 @@ function card_child_sas_manager_ids($pdo, $homeId)
     return array_values($ids);
 }
 
+function card_sas_id_from_tree_names($names)
+{
+    if (!function_exists('portal_sas_manager_tree_file')) {
+        return 0;
+    }
+    $file = portal_sas_manager_tree_file();
+    if (!is_file($file)) {
+        return 0;
+    }
+    $raw = json_decode((string) @file_get_contents($file), true);
+    $rows = (is_array($raw) && isset($raw['rows']) && is_array($raw['rows'])) ? $raw['rows'] : array();
+    if (!$rows) {
+        return 0;
+    }
+    $exact = array();
+    $norm = array();
+    foreach ($names as $name) {
+        $key = strtolower(trim((string) $name));
+        if ($key === '') {
+            continue;
+        }
+        $exact[$key] = true;
+        $n = preg_replace('/[^a-z0-9]/', '', $key);
+        if ($n !== '') {
+            $norm[$n] = true;
+        }
+    }
+    if (!$exact) {
+        return 0;
+    }
+    $bestId = 0;
+    $bestScore = 0;
+    $tie = false;
+    foreach ($rows as $node) {
+        if (!is_array($node) || empty($node['id']) || !is_numeric($node['id'])) {
+            continue;
+        }
+        $id = (int) $node['id'];
+        $uname = isset($node['username']) ? strtolower(trim((string) $node['username'])) : '';
+        if ($id <= 0 || $uname === '') {
+            continue;
+        }
+        $score = 0;
+        if (isset($exact[$uname])) {
+            $score = 3;
+        } else {
+            $un = preg_replace('/[^a-z0-9]/', '', $uname);
+            if ($un !== '' && isset($norm[$un])) {
+                $score = 2;
+            }
+        }
+        if ($score < 2 || $score < $bestScore) {
+            continue;
+        }
+        if ($score === $bestScore && $bestId > 0 && $bestId !== $id) {
+            $tie = true;
+            continue;
+        }
+        if ($score > $bestScore) {
+            $tie = false;
+            $bestId = $id;
+            $bestScore = $score;
+        }
+    }
+    if ($tie || $bestId <= 0) {
+        return 0;
+    }
+    return $bestId;
+}
+
 function card_user_sas_manager_id($pdo, $userId, $homeId, $api)
 {
     $userId = (int) $userId;
@@ -557,10 +627,30 @@ function card_user_sas_manager_id($pdo, $userId, $homeId, $api)
         return 0;
     }
     $row = get_admin_user($pdo, $userId);
-    if (!$row || empty($row['sas_manager_id'])) {
+    if (!$row) {
         return 0;
     }
-    return (int) $row['sas_manager_id'];
+    if (!empty($row['sas_manager_id'])) {
+        return (int) $row['sas_manager_id'];
+    }
+    $names = array();
+    if (!empty($row['username'])) {
+        $names[] = (string) $row['username'];
+    }
+    if (!empty($row['display_name'])) {
+        $names[] = (string) $row['display_name'];
+    }
+    $found = card_sas_id_from_tree_names($names);
+    if ($found > 0) {
+        return $found;
+    }
+    if ($api && method_exists($api, 'findManagerIdByNames')) {
+        $found = (int) $api->findManagerIdByNames($names);
+        if ($found > 0) {
+            return $found;
+        }
+    }
+    return 0;
 }
 
 function card_sas_stock_forget()
