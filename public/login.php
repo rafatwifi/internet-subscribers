@@ -27,7 +27,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } else {
         $reason = isset($GLOBALS['login_block_reason']) ? $GLOBALS['login_block_reason'] : '';
         if ($reason === 'pending') {
-            $error = ($lang === 'en') ? 'Awaiting admin approval' : 'بانتظار موافقة الإدارة';
+            redirect('register.php?wait=1');
         } elseif ($reason === 'suspended') {
             $error = ($lang === 'en') ? 'Account suspended' : 'الحساب معلّق';
         } else {

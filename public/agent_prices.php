@@ -1051,6 +1051,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('agent_prices.php?agent=' . $backId);
     }
     $back = 'agent_prices.php?agent=' . (int) $agentId;
+    $targetOpen = function_exists('account_user_is_open') && account_user_is_open($pdo, $agentId);
     if ($action === 'clear' && ($isPriceAdmin || $isAccPrice) && $agentId !== $homeId) {
         $homeSaved = function_exists('agent_card_prices_list') ? agent_card_prices_list($pdo, $homeId) : array();
         $n = 0;
@@ -1078,7 +1079,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $key = strtolower($nm);
             $sasPrice = isset($line['price']) ? (float) $line['price'] : 0;
             $cost = 0;
-            if (!empty($line['from_plan']) && $sasPrice > 0) {
+            if ($targetOpen) {
+                $cost = 0;
+            } elseif (!empty($line['from_plan']) && $sasPrice > 0) {
                 $cost = $sasPrice;
             } elseif (isset($baseByName[$key]) && (float) $baseByName[$key] > 0) {
                 $cost = (float) $baseByName[$key];
@@ -1123,6 +1126,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
         $tooLow = array();
+        $openBlank = false;
         $downAllowed = array();
         if (!$isPriceAdmin && !$isAccPrice && $agentId !== $homeId) {
             foreach (agent_price_people_under($pdo, $meId, $agents) as $underOk) {
@@ -1144,13 +1148,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $postedW = isset($row['wholesale_price']) ? (float) $row['wholesale_price'] : 0;
             $postedA = isset($row['agent_price']) ? (float) $row['agent_price'] : 0;
             $postedR = isset($row['retail_price']) ? (float) $row['retail_price'] : 0;
+            if ($targetOpen && function_exists('account_user_price_positive') && !account_user_price_positive($pdo, $agentId, 0, '')) {
+                $needVals = array();
+                if (isset($row['retail_price'])) {
+                    $needVals[] = $postedR;
+                }
+                if (isset($row['agent_price'])) {
+                    $needVals[] = $postedA;
+                }
+                if (isset($row['subagent_price'])) {
+                    $needVals[] = (float) $row['subagent_price'];
+                }
+                foreach ($needVals as $needV) {
+                    if ($needV <= 0) {
+                        $openBlank = true;
+                    }
+                }
+            }
             $above = isset($aboveFloor[$floorKey]) ? (float) $aboveFloor[$floorKey] : 0;
             $mine = isset($mySell[$floorKey]) ? (float) $mySell[$floorKey] : 0;
-            if ($mine <= 0) {
+            if ($mine <= 0 && !$targetOpen) {
                 $mine = $sasFloor;
             }
             $knownW = 0;
-            if ($agentId !== $homeId && !$viewerIsTop && $mine > 0) {
+            if ($targetOpen) {
+                $knownW = 0;
+            } elseif ($agentId !== $homeId && !$viewerIsTop && $mine > 0) {
                 $knownW = $mine;
             } elseif ($agentId !== $homeId && isset($baseByName[$floorKey]) && (float) $baseByName[$floorKey] > 0) {
                 $knownW = (float) $baseByName[$floorKey];
@@ -1159,7 +1182,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } elseif ($agentId !== $homeId && $mine > 0) {
                 $knownW = $mine;
             }
-            if ($agentId === $homeId) {
+            if ($targetOpen) {
+                $floorW = 0;
+                $floorA = 0;
+                $floorR = 0;
+            } elseif ($agentId === $homeId) {
                 $floorW = $above;
                 if ($postedW > $floorW) {
                     $floorW = $postedW;
@@ -1210,6 +1237,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
         }
+        if ($openBlank) {
+            flash('error', $isEn
+                ? 'Set a price above zero on every package before saving'
+                : 'سعّر كل الباقات برقم أكبر من صفر قبل الحفظ');
+            redirect('agent_prices.php?agent=' . (int) $agentId);
+        }
         if ($tooLow) {
             flash('error', $isEn
                 ? 'Price cannot be below the current price'
@@ -1254,7 +1287,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $w = $oldW;
                         }
                     }
-                } elseif ($agentId !== $homeId) {
+                } elseif ($agentId !== $homeId && !$targetOpen) {
                     $saveKey = strtolower($profileName);
                     $knownW = 0;
                     $mineSave = isset($mySell[$saveKey]) ? (float) $mySell[$saveKey] : 0;
@@ -1728,6 +1761,7 @@ foreach ($picker as $opt) {
     }
 }
 $aid = $ag ? (int) $ag['id'] : 0;
+$openSheet = function_exists('account_user_is_open') && account_user_is_open($pdo, $aid);
 $saved = ($aid > 0) ? agent_card_prices_list($pdo, $aid) : array();
 $byName = array();
 $bySoft = array();
@@ -1783,6 +1817,11 @@ foreach ($picker as $downOpt) {
         echo e($agName);
         ?>
     </h3>
+    <?php if ($openSheet): ?>
+        <p class="meta"><?php echo e($isEn
+            ? 'This account has no parent. Prices start at 0. Set them and save before adding or activating a subscriber.'
+            : 'هالحساب ما عنده أب. الأسعار صفر، ولازم تسعّرها وتحفظها قبل ما تضيف مشترك أو تفعّله.'); ?></p>
+    <?php endif; ?>
     <?php if (!$isSelf && !$isAccPrice): ?>
         <p class="meta"><?php echo e($isEn
             ? 'The package price is shown. Set the agent sale at that price or higher.'
@@ -1841,10 +1880,14 @@ foreach ($picker as $downOpt) {
                     $sasPrice = isset($line['price']) ? (float) $line['price'] : 0;
                     $above = isset($aboveFloor[$key]) ? (float) $aboveFloor[$key] : 0;
                     $mine = isset($mySell[$key]) ? (float) $mySell[$key] : 0;
-                    if ($mine <= 0) {
+                    if ($mine <= 0 && !$openSheet) {
                         $mine = $sasPrice;
                     }
-                    if ($isSelf) {
+                    if ($openSheet) {
+                        $floorW = 0;
+                        $floorA = 0;
+                        $floorR = 0;
+                    } elseif ($isSelf) {
                         $floorW = $above;
                         $floorA = $above;
                         $floorR = $above;
@@ -1855,7 +1898,7 @@ foreach ($picker as $downOpt) {
                     }
                     $knownW = 0;
                     $savedMine = isset($mySell[$key]) ? (float) $mySell[$key] : 0;
-                    if (!$isSelf) {
+                    if (!$isSelf && !$openSheet) {
                         if ($savedMine > 0) {
                             $knownW = $savedMine;
                         } elseif (!empty($line['from_plan']) && $sasPrice > 0) {
@@ -1871,7 +1914,7 @@ foreach ($picker as $downOpt) {
                         }
                     }
                     $orig = ($have && isset($have['wholesale_price'])) ? (float) $have['wholesale_price'] : 0;
-                    if (!$isSelf && $knownW > 0) {
+                    if (!$isSelf && !$openSheet && $knownW > 0) {
                         $orig = $knownW;
                         $floorW = $knownW;
                         $floorA = $knownW;
@@ -1879,7 +1922,7 @@ foreach ($picker as $downOpt) {
                     }
                     $sell = ($have && isset($have['agent_price'])) ? (float) $have['agent_price'] : 0;
                     $retail = ($have && isset($have['retail_price'])) ? (float) $have['retail_price'] : 0;
-                    if (!$isSelf && $knownW > 0) {
+                    if (!$isSelf && !$openSheet && $knownW > 0) {
                         if ($sell <= 0) {
                             $sell = $knownW;
                         }
@@ -1903,7 +1946,7 @@ foreach ($picker as $downOpt) {
                     }
                     if ($selfCost <= 0 && $aboveId > 0 && $savedAp > 0) {
                         $selfCost = $savedAp;
-                    } elseif ($selfCost <= 0 && $sasPrice > 0) {
+                    } elseif ($selfCost <= 0 && !$openSheet && $sasPrice > 0) {
                         $selfCost = $sasPrice;
                     } elseif ($selfCost <= 0 && $savedW > 0) {
                         $selfCost = $savedW;
@@ -1913,12 +1956,12 @@ foreach ($picker as $downOpt) {
                         $floorW = $selfCost;
                         $floorA = $selfCost;
                         $floorR = $selfCost;
-                        if ($retail <= 0 && $selfCost > 0) {
+                        if ($retail <= 0 && $selfCost > 0 && !$openSheet) {
                             $retail = $selfCost;
                         }
                     }
                     $subagent = ($have && isset($have['subagent_price'])) ? (float) $have['subagent_price'] : 0;
-                    if ($isSelf && $hasDownline && $subagent <= 0 && $selfCost > 0) {
+                    if ($isSelf && $hasDownline && $subagent <= 0 && $selfCost > 0 && !$openSheet) {
                         $subagent = $selfCost;
                     }
                     $profitBase = $knownW > 0 ? $knownW : ($isSelf ? $orig : $mine);

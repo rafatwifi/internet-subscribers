@@ -2695,6 +2695,29 @@ function attempt_login($pdo, $config, $username, $password)
             );
             $stmt->execute(array(':u' => $username));
             $row = $stmt->fetch();
+            if (!$row) {
+                $stmt = $pdo->prepare('SELECT * FROM admin_users WHERE username = :u LIMIT 1');
+                $stmt->execute(array(':u' => $username));
+                $idle = $stmt->fetch();
+                if ($idle && !empty($idle['password_hash']) && admin_password_verify($password, $idle['password_hash'])) {
+                    $tidIdle = isset($idle['tenant_id']) ? (int) $idle['tenant_id'] : 1;
+                    $idleCode = '';
+                    if ($tidIdle > 1 && $pdo && function_exists('tenant_subscription_status')) {
+                        list($idleOk, $idleCode) = tenant_subscription_status($pdo, $tidIdle);
+                        if (!$idleOk && $idleCode === 'pending') {
+                            $_SESSION['reg_wait_user'] = (int) $idle['id'];
+                            $_SESSION['reg_wait_tenant'] = $tidIdle;
+                            $_SESSION['reg_wait_name'] = isset($idle['display_name']) ? (string) $idle['display_name'] : '';
+                            $GLOBALS['login_block_reason'] = 'pending';
+                            return false;
+                        }
+                        if (!$idleOk && $idleCode === 'suspended') {
+                            $GLOBALS['login_block_reason'] = 'suspended';
+                            return false;
+                        }
+                    }
+                }
+            }
             if ($row && !empty($row['password_hash']) && admin_password_verify($password, $row['password_hash'])) {
                 // تحقق اشتراك الشركة (ما عدا السوبر / tenant 1)
                 $tid = isset($row['tenant_id']) ? (int) $row['tenant_id'] : 1;
@@ -2708,6 +2731,9 @@ function attempt_login($pdo, $config, $username, $password)
                 if ($tid > 1 && $pdo && function_exists('tenant_subscription_status')) {
                     list($okSub, $code) = tenant_subscription_status($pdo, $tid);
                     if (!$okSub && $code === 'pending') {
+                        $_SESSION['reg_wait_user'] = (int) $row['id'];
+                        $_SESSION['reg_wait_tenant'] = $tid;
+                        $_SESSION['reg_wait_name'] = isset($row['display_name']) ? (string) $row['display_name'] : '';
                         $GLOBALS['login_block_reason'] = 'pending';
                         return false;
                     }

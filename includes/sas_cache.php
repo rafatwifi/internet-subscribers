@@ -3765,6 +3765,15 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
 {
     $username = trim((string) $username);
     $fields = is_array($fields) ? $fields : array();
+    if (in_array($action, array('sas_create', 'sas_activate_card', 'sas_activate_credit', 'sas_activate_reward'), true)
+        && function_exists('account_open_price_block')) {
+        $pricePid = isset($fields['profile_id']) ? (int) $fields['profile_id'] : 0;
+        $priceName = isset($fields['profile_name']) ? (string) $fields['profile_name'] : '';
+        $priceBlock = account_open_price_block($pdo, $pricePid, $priceName);
+        if ($priceBlock !== '') {
+            return array(false, $priceBlock, array());
+        }
+    }
     if (function_exists('sas_writes_allowed') && !sas_writes_allowed($pdo, $config)) {
         return array(false, 'الساس غير متصل — الكتابة موقوفة مؤقتاً (البيانات المحلية محفوظة)', array());
     }

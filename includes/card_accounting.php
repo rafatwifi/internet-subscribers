@@ -1396,6 +1396,84 @@ function account_package_rates($pdo, $userId, $serviceName, $sasProfileId = 0)
     return $out;
 }
 
+function account_user_is_open($pdo, $userId)
+{
+    $userId = (int) $userId;
+    if ($userId <= 0 || !$pdo) {
+        return false;
+    }
+    try {
+        $st = $pdo->prepare('SELECT reports_to_user_id, tenant_id FROM admin_users WHERE id = :id LIMIT 1');
+        $st->execute(array(':id' => $userId));
+        $row = $st->fetch();
+    } catch (Exception $e) {
+        return false;
+    }
+    if (!$row) {
+        return false;
+    }
+    $tid = isset($row['tenant_id']) ? (int) $row['tenant_id'] : 1;
+    $parent = isset($row['reports_to_user_id']) ? (int) $row['reports_to_user_id'] : 0;
+    return ($tid > 1 && $parent <= 0);
+}
+
+function account_user_price_positive($pdo, $userId, $profileId, $profileName)
+{
+    $userId = (int) $userId;
+    $profileId = (int) $profileId;
+    $profileName = strtolower(trim((string) $profileName));
+    if ($userId <= 0 || !$pdo || !function_exists('agent_card_prices_list')) {
+        return false;
+    }
+    $any = ($profileId <= 0 && $profileName === '');
+    foreach (agent_card_prices_list($pdo, $userId) as $row) {
+        $hit = $any;
+        if (!$hit && $profileId > 0 && isset($row['profile_id']) && (int) $row['profile_id'] === $profileId) {
+            $hit = true;
+        }
+        if (!$hit && $profileName !== '') {
+            $rowName = strtolower(trim(isset($row['profile_name']) ? (string) $row['profile_name'] : ''));
+            if ($rowName === $profileName) {
+                $hit = true;
+            }
+        }
+        if (!$hit) {
+            continue;
+        }
+        $vals = array(
+            isset($row['wholesale_price']) ? (float) $row['wholesale_price'] : 0,
+            isset($row['agent_price']) ? (float) $row['agent_price'] : 0,
+            isset($row['retail_price']) ? (float) $row['retail_price'] : 0,
+            isset($row['subagent_price']) ? (float) $row['subagent_price'] : 0,
+        );
+        foreach ($vals as $v) {
+            if ($v > 0) {
+                return true;
+            }
+        }
+        if (!$any) {
+            return false;
+        }
+    }
+    return false;
+}
+
+function account_open_price_block($pdo, $profileId, $profileName)
+{
+    $me = function_exists('current_admin') ? current_admin() : null;
+    $uid = $me ? (int) $me['id'] : 0;
+    if (!account_user_is_open($pdo, $uid)) {
+        return '';
+    }
+    if (account_user_price_positive($pdo, $uid, (int) $profileId, (string) $profileName)) {
+        return '';
+    }
+    if ((int) $profileId <= 0 && trim((string) $profileName) === '') {
+        return 'سعّر الباقات أولاً. الأسعار تبدأ من صفر، وما يكتمل المشترك قبل الحفظ.';
+    }
+    return 'سعّر هالباقة أولاً من صفحة الأسعار. السعر يبدأ من صفر.';
+}
+
 function account_viewer_parent_id($pdo)
 {
     static $cached = null;
@@ -1870,6 +1948,16 @@ function account_viewer_package_price($pdo, $name, $sasId, $catalogCost)
         : array('found' => false, 'cost' => 0);
     $own = (!empty($rates['found']) && (float) $rates['cost'] > 0) ? (float) $rates['cost'] : 0;
     $ownIsList = ($own > 0 && abs($own - $catalogCost) < 0.5);
+    $tid = ($me && isset($me['tenant_id'])) ? (int) $me['tenant_id'] : 1;
+    if ($parentId <= 0 && $tid > 1) {
+        if ($own > 0) {
+            return $own;
+        }
+        if (!empty($rates['retail']) && (float) $rates['retail'] > 0) {
+            return (float) $rates['retail'];
+        }
+        return 0;
+    }
 
     if ($parentId > 0) {
         $parentRates = account_package_rates($pdo, $parentId, $name, (int) $sasId);
