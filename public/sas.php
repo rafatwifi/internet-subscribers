@@ -5003,6 +5003,15 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
         liveBusy = false;
         if (filter && filter.value.trim() !== String((liveQs && liveQs.q) || '')) return null;
         if (d && d.ok && d.html && !tableIsBusy()) replaceTableHtml(d.html);
+        if (d && d.ok && pingModeNow !== 'off' && document.querySelector('#subsTable .sub-ping-wait')) {
+          if (!window._pingPasses) window._pingPasses = 0;
+          if (window._pingPasses < 6) {
+            window._pingPasses += 1;
+            setTimeout(function () { refreshTableLive(); }, 400);
+          }
+        } else {
+          window._pingPasses = 0;
+        }
         return d;
       })
       .catch(function () { liveBusy = false; return null; });

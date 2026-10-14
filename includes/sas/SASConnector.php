@@ -1112,7 +1112,7 @@ class SASConnector
         $handles = array();
         $n = 0;
         foreach ($pairs as $pair) {
-            if ($n >= 12) {
+            if ($n >= 40) {
                 break;
             }
             if (!is_array($pair)) {
@@ -1145,7 +1145,7 @@ class SASConnector
             $handles[] = array('ch' => $ch, 'user' => strtolower($username));
             $n++;
         }
-        $deadline = microtime(true) + 9;
+        $deadline = microtime(true) + 12;
         $active = null;
         do {
             $status = curl_multi_exec($mh, $active);

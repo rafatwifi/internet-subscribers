@@ -945,7 +945,7 @@ function sas_icmp_many($hosts)
             continue;
         }
         $clean[$host] = true;
-        if (count($clean) >= 12) {
+        if (count($clean) >= 40) {
             break;
         }
     }
@@ -980,7 +980,7 @@ function sas_icmp_many($hosts)
             'buf' => '',
         );
     }
-    $deadline = microtime(true) + 1.8;
+    $deadline = microtime(true) + 2.6;
     while ($procs && microtime(true) < $deadline) {
         $read = array();
         foreach ($procs as $p) {
@@ -1093,6 +1093,7 @@ function sas_fill_online_pings($pdo, $rows)
     }
     if ($mode === 'sas') {
         $rows = sas_fill_sas_pings($pdo, $rows);
+        $rows = sas_ping_icmp_missing($pdo, $rows);
     } else {
         $rows = sas_fill_portal_pings($pdo, $rows);
     }
@@ -1100,8 +1101,79 @@ function sas_fill_online_pings($pdo, $rows)
         return array();
     }
     foreach ($rows as $i => $row) {
-        if (is_array($row)) {
+        if (!is_array($row)) {
+            continue;
+        }
+        if (empty($row['is_online']) || !empty($row['_ping_attempted'])) {
             $rows[$i]['_ping_checked'] = 1;
+        }
+    }
+    return $rows;
+}
+
+function sas_ping_icmp_missing($pdo, $rows)
+{
+    if (!is_array($rows) || !$rows) {
+        return is_array($rows) ? $rows : array();
+    }
+    $need = array();
+    foreach ($rows as $i => $row) {
+        if (!is_array($row) || empty($row['is_online'])) {
+            continue;
+        }
+        if (isset($row['online_ping']) && (int) $row['online_ping'] > 0) {
+            continue;
+        }
+        $ip = isset($row['framed_ip']) ? trim((string) $row['framed_ip']) : '';
+        if (!filter_var($ip, FILTER_VALIDATE_IP)) {
+            continue;
+        }
+        if (!isset($need[$ip])) {
+            $need[$ip] = array();
+        }
+        $need[$ip][] = $i;
+        if (count($need) >= 40) {
+            break;
+        }
+    }
+    if (!$need) {
+        return $rows;
+    }
+    $hit = sas_icmp_many(array_keys($need));
+    if (!is_array($hit)) {
+        $hit = array();
+    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tid <= 0) {
+        $tid = 1;
+    }
+    $upd = null;
+    if ($pdo) {
+        try {
+            $upd = $pdo->prepare('UPDATE sas_users_cache SET online_ping = :ms WHERE tenant_id = :t AND LOWER(username) = :u');
+        } catch (Exception $e) {
+            $upd = null;
+        }
+    }
+    foreach ($need as $ip => $indexes) {
+        $ms = isset($hit[$ip]) ? (int) $hit[$ip] : 0;
+        foreach ($indexes as $i) {
+            $rows[$i]['_ping_attempted'] = 1;
+            if ($ms <= 0) {
+                continue;
+            }
+            $rows[$i]['online_ping'] = $ms;
+            $rows[$i]['_ping_fresh'] = 1;
+            if ($upd) {
+                $user = strtolower(trim((string) $rows[$i]['username']));
+                if ($user === '') {
+                    continue;
+                }
+                try {
+                    $upd->execute(array(':ms' => $ms, ':t' => $tid, ':u' => $user));
+                } catch (Exception $e) {
+                }
+            }
         }
     }
     return $rows;
@@ -1142,10 +1214,15 @@ function sas_fill_sas_pings($pdo, $rows)
         if (!is_array($row)) {
             continue;
         }
-        $rows[$i]['online_ping'] = null;
-        $rows[$i]['_ping_fresh'] = 0;
         if (empty($row['is_online'])) {
+            $rows[$i]['online_ping'] = null;
+            $rows[$i]['_ping_fresh'] = 0;
             continue;
+        }
+        $storedPing = isset($row['online_ping']) ? (int) $row['online_ping'] : 0;
+        if ($storedPing <= 0) {
+            $rows[$i]['online_ping'] = null;
+            $rows[$i]['_ping_fresh'] = 0;
         }
         $user = isset($row['username']) ? strtolower(trim((string) $row['username'])) : '';
         if ($user === '') {
@@ -1158,7 +1235,7 @@ function sas_fill_sas_pings($pdo, $rows)
             $rows[$i]['_ping_fresh'] = 1;
             continue;
         }
-        if (count($need) >= 12) {
+        if (count($need) >= 40) {
             continue;
         }
         $need[$user] = $i;
@@ -1204,12 +1281,23 @@ function sas_fill_sas_pings($pdo, $rows)
     $pairs = array();
     $pairIndex = array();
     foreach ($need as $user => $i) {
-        if (!isset($radMap[$user]) || (string) $radMap[$user] === '') {
+        $rad = isset($radMap[$user]) ? (string) $radMap[$user] : '';
+        if ($rad === '' && function_exists('sas_cache_username_match_keys')) {
+            $radKeys = sas_cache_username_match_keys($user);
+            foreach ($radKeys as $radKey) {
+                if (isset($radMap[$radKey]) && (string) $radMap[$radKey] !== '') {
+                    $rad = (string) $radMap[$radKey];
+                    break;
+                }
+            }
+        }
+        if ($rad === '') {
             continue;
         }
         $shown = isset($rows[$i]['username']) ? trim((string) $rows[$i]['username']) : $user;
-        $pairs[] = array('username' => $shown, 'radacctid' => (string) $radMap[$user]);
+        $pairs[] = array('username' => $shown, 'radacctid' => $rad);
         $pairIndex[strtolower($shown)] = $i;
+        $rows[$i]['_ping_attempted'] = 1;
     }
     if ($pairs && function_exists('sas_page_connector')) {
         if (!$api) {
@@ -1237,6 +1325,13 @@ function sas_fill_sas_pings($pdo, $rows)
             $rows[$i]['online_ping'] = $ms;
             $rows[$i]['_ping_fresh'] = 1;
             $saved[$user] = array('ms' => $ms, 'at' => $now);
+            if ($pdo) {
+                try {
+                    $updSas = $pdo->prepare('UPDATE sas_users_cache SET online_ping = :ms WHERE tenant_id = :t AND LOWER(username) = :u');
+                    $updSas->execute(array(':ms' => $ms, ':t' => $tid, ':u' => $user));
+                } catch (Exception $e) {
+                }
+            }
         }
     }
     $fresh = array();
@@ -1288,12 +1383,18 @@ function sas_fill_portal_pings($pdo, $rows)
             continue;
         }
         if (!isset($need[$ip])) {
+            if (count($need) >= 40) {
+                continue;
+            }
             $need[$ip] = array();
         }
         $need[$ip][] = $i;
     }
     if ($need) {
         $hit = sas_icmp_many(array_keys($need));
+        if (!is_array($hit)) {
+            $hit = array();
+        }
         $upd = null;
         try {
             $upd = $pdo->prepare('UPDATE sas_users_cache SET online_ping = :ms WHERE tenant_id = :t AND LOWER(username) = :u');
@@ -1301,11 +1402,12 @@ function sas_fill_portal_pings($pdo, $rows)
             $upd = null;
         }
         foreach ($need as $ip => $indexes) {
-            if (!isset($hit[$ip])) {
-                continue;
-            }
-            $ms = (int) $hit[$ip];
+            $ms = isset($hit[$ip]) ? (int) $hit[$ip] : 0;
             foreach ($indexes as $i) {
+                $rows[$i]['_ping_attempted'] = 1;
+                if ($ms <= 0) {
+                    continue;
+                }
                 $rows[$i]['online_ping'] = $ms;
                 $rows[$i]['_ping_fresh'] = 1;
                 $user = strtolower(trim((string) $rows[$i]['username']));
@@ -5326,7 +5428,7 @@ function sas_render_table_row($row, $n, $config, $lang)
     if (isset($GLOBALS['pdo']) && function_exists('sas_ping_mode')) {
         $pingMode = sas_ping_mode($GLOBALS['pdo']);
     }
-    if ($isOnline && !empty($row['_ping_fresh']) && isset($row['online_ping']) && $row['online_ping'] !== null && $row['online_ping'] !== '' && (int) $row['online_ping'] > 0) {
+    if ($isOnline && isset($row['online_ping']) && $row['online_ping'] !== null && $row['online_ping'] !== '' && (int) $row['online_ping'] > 0) {
         $ms = (int) $row['online_ping'];
         $tone = ($ms <= 80) ? '' : (($ms <= 180) ? ' is-mid' : ' is-slow');
         $pingHtml = '<span class="sub-ping' . $tone . '" dir="ltr">' . $ms . '<small>ms</small></span>';
