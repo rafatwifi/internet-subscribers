@@ -1488,8 +1488,12 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
           qty.addEventListener('input', paintQty);
           form.addEventListener('submit', function (e) {
             paintEnds();
-            if (!paintQty()) e.preventDefault();
-          });
+            if (!paintQty()) {
+              e.preventDefault();
+              return;
+            }
+            if (window.appBusySet) window.appBusySet({ force: true });
+          }, true);
           paintEnds();
           paintQty();
           if (stockPending) {

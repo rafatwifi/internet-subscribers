@@ -51,4 +51,10 @@ if (function_exists('wa_retry_due_batch')) {
     } catch (Exception $e) {
     }
 }
+if (function_exists('sas_ping_warm')) {
+    try {
+        @sas_ping_warm($pdo);
+    } catch (Exception $e) {
+    }
+}
 echo json_encode(array('ok' => $ok));

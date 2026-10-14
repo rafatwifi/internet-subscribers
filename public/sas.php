@@ -940,7 +940,7 @@ if (isset($_GET['live']) && $_GET['live'] === '1') {
     if (function_exists('app_session_close')) {
         app_session_close();
     }
-    $html = '<tr><td colspan="19">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
+    $html = '<tr><td colspan="18">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
     $liveCount = 0;
     try {
         $fromSql = function_exists('sas_cache_list_from_sql')
@@ -987,12 +987,12 @@ if (isset($_GET['live']) && $_GET['live'] === '1') {
         }
         $liveCount = count($liveRows);
         if ($html === '') {
-            $html = '<tr><td colspan="19">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
+            $html = '<tr><td colspan="18">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
         }
     } catch (Exception $e) {
-        $html = '<tr><td colspan="19">' . e($e->getMessage()) . '</td></tr>';
+        $html = '<tr><td colspan="18">' . e($e->getMessage()) . '</td></tr>';
     } catch (Error $e) {
-        $html = '<tr><td colspan="19">' . e($e->getMessage()) . '</td></tr>';
+        $html = '<tr><td colspan="18">' . e($e->getMessage()) . '</td></tr>';
     }
     echo json_encode(array(
         'html' => $html,
@@ -1004,9 +1004,20 @@ if (isset($_GET['live']) && $_GET['live'] === '1') {
 }
 
 $page = isset($_GET['page']) ? max(1, (int) $_GET['page']) : 1;
-$perPageRaw = isset($_GET['per_page']) ? $_GET['per_page'] : '10';
-$showAll = ($perPageRaw === 'all');
-$perPage = $showAll ? 0 : max(1, (int) $perPageRaw);
+$perAllowed = array(10, 50, 100, 500);
+$perPageRaw = isset($_GET['per_page']) ? (string) $_GET['per_page'] : '10';
+if ($perPageRaw === 'all') {
+    $showAll = true;
+    $perPage = 0;
+} else {
+    $perNum = (int) $perPageRaw;
+    if (!in_array($perNum, $perAllowed, true)) {
+        $perNum = 10;
+    }
+    $perPageRaw = (string) $perNum;
+    $showAll = false;
+    $perPage = $perNum;
+}
 
 $sortKey = isset($_GET['sort']) ? (string) $_GET['sort'] : 'name';
 $sortDir = isset($_GET['dir']) && strtolower((string) $_GET['dir']) === 'desc' ? 'desc' : 'asc';
@@ -1120,7 +1131,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'live_table') {
             $html .= sas_render_table_row($liveRow, $nLive++, $config, $lang);
         }
         if ($html === '') {
-            $html = '<tr><td colspan="19">' . e($lang === 'en' ? 'No SAS users in cache yet' : 'ماكو مشتركين من الساس بعد') . '</td></tr>';
+            $html = '<tr><td colspan="18">' . e($lang === 'en' ? 'No SAS users in cache yet' : 'ماكو مشتركين من الساس بعد') . '</td></tr>';
         }
         echo json_encode(array('ok' => true, 'html' => $html, 'count' => count($rows)));
     } catch (Exception $e) {
@@ -1488,6 +1499,19 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 #subsPager {
   margin: 10px 12px 16px !important;
   padding-bottom: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.subs-pager-pages,
+.subs-pager-sizes {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
 }
 #subsPager .btn.sm {
   height: 28px; min-width: 28px; padding: 0 11px; font-size: 12px;
@@ -2286,8 +2310,11 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 }
 .sas-radius-page #subsTable th.col-fn,
 .sas-radius-page #subsTable td.col-fn,
-.sas-radius-page #subsTable td.col-fn .cell-edit {
+.sas-radius-page #subsTable th.col-fn .th-sort,
+.sas-radius-page #subsTable td.col-fn .sas-fn-link {
+  direction: rtl;
   text-align: right !important;
+  unicode-bidi: isolate;
 }
 .sas-radius-page #subsTable .col-ip {
   direction: ltr;
@@ -2296,9 +2323,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   white-space: nowrap;
 }
 .sas-radius-page #subsTable th.col-ping,
-.sas-radius-page #subsTable td.col-ping,
-.sas-radius-page #subsTable th.col-seen,
-.sas-radius-page #subsTable td.col-seen {
+.sas-radius-page #subsTable td.col-ping {
   width: 1%;
   white-space: nowrap;
   text-align: center;
@@ -2333,12 +2358,59 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   color: #64748b;
   letter-spacing: 0;
 }
+.sas-radius-page #subsTable th.col-fn,
+.sas-radius-page #subsTable td.col-fn {
+  width: 1%;
+  white-space: nowrap;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+.sas-radius-page #subsTable th.col-fn .th-sort {
+  display: inline-block;
+  width: 0;
+  min-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
 .sas-radius-page #subsTable .sas-fn-wrap {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  max-width: 100%;
+  gap: 3px;
+  width: auto;
+  max-width: none;
+  vertical-align: middle;
 }
+.sas-radius-page #subsTable .sas-fn-link {
+  display: inline;
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
+  line-height: 1.35;
+}
+.sas-radius-page #subsTable .sas-rent-mini {
+  position: static;
+  flex: 0 0 auto;
+  line-height: 0;
+}
+.sas-radius-page #subsTable .sub-ping-na {
+  font-size: 11px;
+  font-weight: 800;
+  color: #94a3b8;
+  letter-spacing: 0.02em;
+}
+.sas-radius-page #subsTable .sub-ping-wait {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid #dbe4ee;
+  border-top-color: #2563eb;
+  border-radius: 50%;
+  animation: subPingSpin .7s linear infinite;
+  vertical-align: middle;
+}
+@keyframes subPingSpin { to { transform: rotate(360deg); } }
 .sas-radius-page #subsTable .sas-rent-mini .rent-badge {
   width: 22px;
   height: 22px;
@@ -2547,10 +2619,22 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     padding-inline: 36px 32px;
   }
   .sas-radius-page .table-wrap {
-    overflow: auto;
-    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: visible;
+    max-height: none;
     -webkit-overflow-scrolling: touch;
   }
+  body.top-away .sas-table-card {
+    max-height: none !important;
+  }
+  #subsPager {
+    margin: 10px 8px 0 !important;
+    padding: 4px 8px calc(28px + env(safe-area-inset-bottom)) !important;
+  }
+  body:has(.sas-radius-page) .container {
+    margin-bottom: calc(96px + env(safe-area-inset-bottom));
+  }
+  body:has(.sas-radius-page) .footer { display: none; }
   .sas-radius-page #subsTable { min-width: 0; width: 100%; table-layout: auto; }
   .sas-radius-page #subsTable th,
   .sas-radius-page #subsTable td {
@@ -2732,8 +2816,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
                 <th class="sub-check-cell"><label class="th-check-only"><input type="checkbox" id="subCheckAll"></label></th>
                 <th class="col-num">#</th>
                 <th class="status-cell col-status"><?php echo e($lang === 'en' ? 'Status' : 'الحالة'); ?></th>
-                <th class="col-ping" title="<?php echo e($lang === 'en' ? 'Ping between SAS and the subscriber' : 'البينغ بين الساس والمشترك'); ?>"><?php echo e($lang === 'en' ? 'Ping' : 'بينغ'); ?></th>
-                <th class="col-seen" title="<?php echo e($lang === 'en' ? 'Last connection' : 'آخر اتصال'); ?>"><?php echo e($lang === 'en' ? 'Ago' : 'آخر'); ?></th>
+                <th class="col-ping" title="<?php echo e($lang === 'en' ? 'Ping while online, last connection while offline' : 'البنك للمتصل، وآخر اتصال للفاصل'); ?>">PING</th>
                 <th class="col-user"><?php echo sas_sort_link('username', $lang === 'en' ? 'Username' : 'اسم الدخول', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
                 <th class="col-ip"><?php echo sas_sort_link('ip', 'IP Address', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
                 <th class="col-fn"><?php echo sas_sort_link('firstname', $lang === 'en' ? 'First Name' : 'الاسم الأول', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
@@ -2764,7 +2847,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
                 } else {
                     $emptyMsg = ($lang === 'en') ? 'No SAS users in cache yet' : 'ماكو مشتركين من الساس بعد';
                 }
-                echo '<tr><td colspan="19">' . e($emptyMsg) . '</td></tr>';
+                echo '<tr><td colspan="18">' . e($emptyMsg) . '</td></tr>';
             }
             if (function_exists('phones_known_register_from_rows')) {
                 phones_known_register_from_rows($rows, $pdo);
@@ -2777,24 +2860,26 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
         </table>
     </div>
 
-    <?php if ($totalPages > 1 || $perPageRaw !== 'all'): ?>
+    <?php if ($totalRows > 0): ?>
         <div class="actions" id="subsPager" style="margin-top:14px">
             <?php
-            $baseQs = array();
+            $keepQs = array();
             if ($q !== '') {
-                $baseQs[] = 'q=' . urlencode($q);
+                $keepQs[] = 'q=' . urlencode($q);
             }
             if ($subFilter !== '') {
-                $baseQs[] = 'sub=' . urlencode($subFilter);
+                $keepQs[] = 'sub=' . urlencode($subFilter);
             }
             if ($parentFilter !== '') {
-                $baseQs[] = 'parent=' . urlencode($parentFilter);
+                $keepQs[] = 'parent=' . urlencode($parentFilter);
             }
+            $keepStr = count($keepQs) ? '&' . implode('&', $keepQs) : '';
+            $baseQs = $keepQs;
             if ($perPageRaw !== '10') {
                 $baseQs[] = 'per_page=' . urlencode($perPageRaw);
             }
             $baseStr = count($baseQs) ? '&' . implode('&', $baseQs) : '';
-            $extraQs = $baseStr;
+            $extraQs = $keepStr;
             $window = 9;
             $winStart = (int) (floor(($page - 1) / $window) * $window) + 1;
             if ($winStart < 1) {
@@ -2813,6 +2898,8 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
                 $nextPage = $totalPages;
             }
             ?>
+            <?php if ($totalPages > 1): ?>
+            <div class="subs-pager-pages">
             <?php if ($winStart > 1): ?>
                 <a class="btn ghost sm" href="?page=<?php echo $prevPage . $baseStr; ?>" aria-label="prev">&gt;&gt;</a>
             <?php else: ?>
@@ -2826,11 +2913,14 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
             <?php else: ?>
                 <span class="btn ghost sm" style="opacity:.35;pointer-events:none" aria-hidden="true">&lt;&lt;</span>
             <?php endif; ?>
-            <?php if (!$showAll): ?>
-                <a class="btn ghost sm" href="?per_page=all<?php echo $extraQs; ?>"><?php echo e(t('show_all')); ?></a>
-            <?php else: ?>
-                <a class="btn ghost sm" href="?per_page=10<?php echo $extraQs; ?>">10</a>
+            </div>
             <?php endif; ?>
+            <div class="subs-pager-sizes">
+            <?php foreach (array(500, 100, 50, 10) as $perChoice): ?>
+                <a class="btn <?php echo (!$showAll && (int) $perPageRaw === $perChoice) ? '' : 'ghost'; ?> sm" href="?per_page=<?php echo (int) $perChoice . $extraQs; ?>"><?php echo (int) $perChoice; ?></a>
+            <?php endforeach; ?>
+            <a class="btn <?php echo $showAll ? '' : 'ghost'; ?> sm" href="?per_page=all<?php echo $extraQs; ?>"><?php echo e(t('show_all')); ?></a>
+            </div>
         </div>
     <?php endif; ?>
     </div>
@@ -2871,13 +2961,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     </div>
     <div class="cols-check ops-item" data-col-row="ping">
         <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
-        <label><input type="checkbox" data-col="ping" checked> <?php echo e($lang === 'en' ? 'Ping' : 'البينغ'); ?></label>
-        <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
-        <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
-    </div>
-    <div class="cols-check ops-item" data-col-row="seen">
-        <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
-        <label><input type="checkbox" data-col="seen" checked> <?php echo e($lang === 'en' ? 'Last connection' : 'آخر اتصال'); ?></label>
+        <label><input type="checkbox" data-col="ping" checked> PING</label>
         <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
         <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
     </div>
@@ -3289,7 +3373,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   var liveBusy = false;
   var COLS_KEY = 'sas_table_cols_v1';
   var ORDER_KEY = 'sas_table_col_order_v1';
-  var DEFAULT_COL_ORDER = ['num','status','ping','seen','user','ip','fn','ln','phone','exp','parent','pkg','rent','debt','traf','grace','days','msg'];
+  var DEFAULT_COL_ORDER = ['num','status','ping','user','ip','fn','ln','phone','exp','parent','pkg','rent','debt','traf','grace','days','msg'];
   function loadLocalCols() {
     try {
       var raw = localStorage.getItem(COLS_KEY);
@@ -4881,7 +4965,6 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
       body.append('csrf', csrf);
       body.append('action', 'sas_ping_mode');
       body.append('sub_ping_mode', mode);
-      if (mode !== 'off' && window.appBusySet) window.appBusySet({ force: true });
       fetch('sas.php', { method: 'POST', credentials: 'same-origin', body: body })
         .then(function () {
           function go(left) {
@@ -4907,21 +4990,22 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     if (typed !== locked) return Promise.resolve(null);
     liveBusy = true;
     var pingModeNow = pingModeBox ? (pingModeBox.getAttribute('data-mode') || 'off') : 'off';
-    var pingWait = false;
-    if (pingModeNow !== 'off' && window.appBusySet) {
-      window.appBusySet();
-      pingWait = true;
+    if (pingModeNow !== 'off') {
+      var pingCells = document.querySelectorAll('#subsTable tbody tr[data-online="1"] .col-ping');
+      for (var pi = 0; pi < pingCells.length; pi++) {
+        if (pingCells[pi].querySelector('.sub-ping')) continue;
+        pingCells[pi].innerHTML = '<span class="sub-ping-wait" aria-hidden="true"></span>';
+      }
     }
     return fetch(liveTableUrl(), { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(function (d) {
         liveBusy = false;
-        if (pingWait && window.appBusyDone) window.appBusyDone();
         if (filter && filter.value.trim() !== String((liveQs && liveQs.q) || '')) return null;
         if (d && d.ok && d.html && !tableIsBusy()) replaceTableHtml(d.html);
         return d;
       })
-      .catch(function () { liveBusy = false; if (pingWait && window.appBusyDone) window.appBusyDone(); return null; });
+      .catch(function () { liveBusy = false; return null; });
   }
   function applyAutoRefresh(sec, skipSave) {
     refreshSec = parseInt(sec, 10) || 0;
@@ -5025,7 +5109,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
         if (d && typeof d.html === 'string') {
           applyLiveRows(d.html, typeof d.count === 'number' ? d.count : null);
         } else if (force) {
-          applyLiveRows('<tr><td colspan="19">' + noMatchLabel + '</td></tr>', 0);
+          applyLiveRows('<tr><td colspan="18">' + noMatchLabel + '</td></tr>', 0);
         }
       })
       .catch(function (err) {
@@ -5273,6 +5357,31 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
       if (field === 'grace_days') {
         el.textContent = (current === 'system' || current === '') ? '' : current;
       }
+      if (field === 'phone') {
+        var startDigits = String(current).replace(/\D/g, '');
+        if (startDigits.indexOf('964') === 0 && startDigits.length >= 12) {
+          startDigits = '0' + startDigits.slice(3);
+        }
+        el.textContent = startDigits.replace(/\D/g, '').slice(0, 11);
+        if (!el._phoneCap) {
+        el._phoneCap = function () {
+          if (!el.classList.contains('editing')) return;
+          var digits = String(el.textContent || '').replace(/\D/g, '').slice(0, 11);
+          if (el.textContent !== digits) {
+            el.textContent = digits;
+            try {
+              var r2 = document.createRange();
+              r2.selectNodeContents(el);
+              r2.collapse(false);
+              var s2 = window.getSelection();
+              s2.removeAllRanges();
+              s2.addRange(r2);
+            } catch (err2) {}
+          }
+        };
+        el.addEventListener('input', el._phoneCap);
+        }
+      }
       el.focus();
       try {
         var range = document.createRange();
@@ -5291,6 +5400,23 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
         if (!ok) {
           el.textContent = el.getAttribute('data-display') || current || '-';
           return;
+        }
+        if (field === 'phone') {
+          var phoneDigits = String(val).replace(/\D/g, '');
+          if (phoneDigits.length !== 11) {
+            alert(<?php echo json_encode($lang === 'en' ? 'Phone must be 11 digits' : 'رقم الهاتف لازم يكون 11 رقم'); ?>);
+            el.textContent = el.getAttribute('data-display') || current || '-';
+            return;
+          }
+          var curDigits = String(current).replace(/\D/g, '');
+          if (curDigits.indexOf('964') === 0 && curDigits.length >= 12) {
+            curDigits = '0' + curDigits.slice(3);
+          }
+          if (phoneDigits === curDigits) {
+            el.textContent = el.getAttribute('data-display') || current || '-';
+            return;
+          }
+          val = phoneDigits;
         }
         if (!allowEmpty && val === '') {
           el.textContent = el.getAttribute('data-display') || current || '-';

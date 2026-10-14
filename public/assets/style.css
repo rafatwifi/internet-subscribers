@@ -864,8 +864,16 @@ body.ltr .nav-role { margin-right: 0; margin-left: 6px; }
   line-height: 1.5;
 }
 .msg-retry-form {
+  margin-top: 0;
+}
+.msg-log-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
   margin-top: 10px;
 }
+.msg-log-actions form { margin: 0; }
 .msg-log-item.msg-failed {
   border-color: #f5c6cb;
   background: #fffafa;
@@ -2149,8 +2157,25 @@ body.ltr .side-links a.active {
   align-items: center;
   gap: 10px;
   padding: 10px 16px;
-  position: relative;
+  position: sticky;
+  top: 0;
   z-index: 100002;
+  transition: transform .22s ease, margin-bottom .22s ease;
+}
+body.top-away .main-top {
+  height: 0;
+  min-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  margin: 0;
+  border: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+@media (min-width: 761px) {
+  body.top-away .sas-table-card {
+    max-height: calc(100vh - 96px);
+  }
 }
 .main-title {
   font-size: 18px;

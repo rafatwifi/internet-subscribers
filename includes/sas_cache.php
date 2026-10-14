@@ -1040,6 +1040,41 @@ function sas_icmp_many($hosts)
     return $out;
 }
 
+function sas_ping_warm($pdo)
+{
+    if (!$pdo || !function_exists('sas_ping_mode') || sas_ping_mode($pdo) === 'off') {
+        return;
+    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tid <= 0) {
+        $tid = 1;
+    }
+    $dir = dirname(__DIR__) . '/storage/cache';
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0775, true);
+    }
+    $lockPath = $dir . '/sub_ping_warm_t' . $tid . '.lock';
+    $fh = @fopen($lockPath, 'c');
+    if (!$fh) {
+        return;
+    }
+    if (!flock($fh, LOCK_EX | LOCK_NB)) {
+        fclose($fh);
+        return;
+    }
+    try {
+        $scope = function_exists('sas_agent_scope_sql') ? sas_agent_scope_sql('c') : '';
+        $sql = 'SELECT c.username, c.is_online, c.framed_ip FROM sas_users_cache c WHERE c.tenant_id = ' . $tid . ' AND c.is_online = 1' . $scope . ' LIMIT 40';
+        $rows = $pdo->query($sql)->fetchAll();
+        if (is_array($rows) && $rows) {
+            sas_fill_online_pings($pdo, $rows);
+        }
+    } catch (Exception $e) {
+    }
+    flock($fh, LOCK_UN);
+    fclose($fh);
+}
+
 function sas_fill_online_pings($pdo, $rows)
 {
     if (!$pdo || !is_array($rows) || !$rows) {
@@ -1051,14 +1086,25 @@ function sas_fill_online_pings($pdo, $rows)
             if (is_array($row)) {
                 $rows[$i]['online_ping'] = null;
                 $rows[$i]['_ping_fresh'] = 0;
+                $rows[$i]['_ping_checked'] = 1;
             }
         }
         return $rows;
     }
     if ($mode === 'sas') {
-        return sas_fill_sas_pings($pdo, $rows);
+        $rows = sas_fill_sas_pings($pdo, $rows);
+    } else {
+        $rows = sas_fill_portal_pings($pdo, $rows);
     }
-    return sas_fill_portal_pings($pdo, $rows);
+    if (!is_array($rows)) {
+        return array();
+    }
+    foreach ($rows as $i => $row) {
+        if (is_array($row)) {
+            $rows[$i]['_ping_checked'] = 1;
+        }
+    }
+    return $rows;
 }
 
 function sas_fill_sas_pings($pdo, $rows)
@@ -3821,6 +3867,16 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
             $sc = sas_config($config);
             $parentId = isset($sc['parent_id']) ? (int) $sc['parent_id'] : 0;
         }
+        $createPhone = isset($fields['phone']) ? trim((string) $fields['phone']) : '';
+        if ($createPhone !== '') {
+            $createDigits = preg_replace('/\D+/', '', $createPhone);
+            if ($createDigits === null) {
+                $createDigits = '';
+            }
+            if (strlen($createDigits) !== 11) {
+                return array(false, 'رقم الهاتف لازم يكون 11 رقم', array());
+            }
+        }
         $payload = array(
             'username' => $newUser,
             'password' => $pass,
@@ -3860,6 +3916,15 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
         }
         if ($action === 'sas_inline' && $field === 'phone') {
             $phoneIn = $value;
+        }
+        if (($action === 'sas_inline' && $field === 'phone') || $phoneIn !== '') {
+            $phoneDigits = preg_replace('/\D+/', '', $phoneIn);
+            if ($phoneDigits === null) {
+                $phoneDigits = '';
+            }
+            if (strlen($phoneDigits) !== 11) {
+                return array(false, 'رقم الهاتف لازم يكون 11 رقم', array());
+            }
         }
         if ($action === 'sas_inline' && $field === 'firstname') {
             $firstname = $value;
@@ -5256,21 +5321,26 @@ function sas_render_table_row($row, $n, $config, $lang)
     $html .= '<td class="sub-check-cell"><label class="sub-check-lab"><input type="checkbox" class="sub-check" value="' . e($username) . '"></label></td>';
     $html .= '<td class="col-num">' . (int) $n . '</td>';
     $html .= '<td class="status-cell col-status" title="' . e($statusTitle) . '">' . $statusHtml . '</td>';
-    $pingHtml = '';
+    $pingHtml = '<span class="sub-ping-na" dir="ltr">N/A</span>';
+    $pingMode = 'off';
+    if (isset($GLOBALS['pdo']) && function_exists('sas_ping_mode')) {
+        $pingMode = sas_ping_mode($GLOBALS['pdo']);
+    }
     if ($isOnline && !empty($row['_ping_fresh']) && isset($row['online_ping']) && $row['online_ping'] !== null && $row['online_ping'] !== '' && (int) $row['online_ping'] > 0) {
         $ms = (int) $row['online_ping'];
         $tone = ($ms <= 80) ? '' : (($ms <= 180) ? ' is-mid' : ' is-slow');
         $pingHtml = '<span class="sub-ping' . $tone . '" dir="ltr">' . $ms . '<small>ms</small></span>';
-    }
-    $html .= '<td class="col-ping">' . $pingHtml . '</td>';
-    $seenHtml = '';
-    if (!$isOnline && !empty($row['last_online'])) {
-        $ago = sas_ago_label($row['last_online'], $lang === 'en');
+    } elseif ($pingMode !== 'off' && $isOnline && empty($row['_ping_checked'])) {
+        $pingHtml = '<span class="sub-ping-wait" aria-hidden="true"></span>';
+    } elseif (!$isOnline) {
+        $ago = !empty($row['last_online']) ? sas_ago_label($row['last_online'], $lang === 'en') : '';
         if ($ago !== '') {
-            $seenHtml = '<span class="sub-ago" title="' . e((string) $row['last_online']) . '">' . e($ago) . '</span>';
+            $pingHtml = '<span class="sub-ago" title="' . e((string) $row['last_online']) . '">' . e($ago) . '</span>';
+        } else {
+            $pingHtml = '';
         }
     }
-    $html .= '<td class="col-seen">' . $seenHtml . '</td>';
+    $html .= '<td class="col-ping">' . $pingHtml . '</td>';
     $copyTip = $lang === 'en' ? 'Copy username' : 'نسخ اسم الدخول';
     $html .= '<td class="col-user"><span class="sas-user-copywrap">'
         . '<button type="button" class="sas-user-copy" data-copy="' . e($username) . '" title="' . e($copyTip) . '" aria-label="' . e($copyTip) . '">⧉</button>'
@@ -5305,8 +5375,9 @@ function sas_render_table_row($row, $n, $config, $lang)
         $rentBadge = rental_badge_html($rentSub);
     }
     // الشعار يسار الاسم (في RTL: الاسم أولاً ثم الشعار)
-    $html .= '<td class="col-fn"><span class="sas-fn-wrap">'
-        . '<span class="cell-edit" tabindex="0" data-edit="firstname" data-id="' . e($username) . '" data-value="' . e($fn) . '" title="' . e($editTip) . '">' . e($fn !== '' ? $fn : '-') . '</span>'
+    $fnText = ($fn !== '') ? $fn : '-';
+    $html .= '<td class="col-fn"><span class="sas-fn-wrap' . ($rentBadge !== '' ? ' has-rent' : '') . '">'
+        . '<a class="sas-link sas-fn-link" href="' . e($detailUrl) . '" title="' . e($fnText) . '">' . e($fnText) . '</a>'
         . ($rentBadge !== '' ? '<span class="sas-rent-mini" title="' . e($rentDevName) . '">' . $rentBadge . '</span>' : '')
         . '</span></td>';
     $html .= '<td class="col-ln"><span class="cell-edit" tabindex="0" data-edit="lastname" data-allow-empty="1" data-id="' . e($username) . '" data-value="' . e($ln) . '" title="' . e($editTip) . '">' . e($ln !== '' ? $ln : '-') . '</span></td>';

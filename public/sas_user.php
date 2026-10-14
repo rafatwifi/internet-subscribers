@@ -325,7 +325,7 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
                 </div>
                 <div>
                     <label><?php echo e($isEn ? 'Phone' : 'الهاتف'); ?></label>
-                    <input name="phone" value="<?php echo e($phone); ?>">
+                    <input name="phone" type="tel" inputmode="numeric" maxlength="11" pattern="[0-9]{11}" value="<?php echo e(function_exists('format_phone_display') ? format_phone_display($phone) : $phone); ?>">
                 </div>
             </div>
         </div>
@@ -459,6 +459,29 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
 <?php endif; ?>
 <script>
 (function () {
+  var phoneInp = document.querySelector('input[name="phone"]');
+  function localPhone11(raw) {
+    var d = String(raw || '').replace(/\D/g, '');
+    if (d.indexOf('964') === 0 && d.length >= 12) d = '0' + d.slice(3);
+    return d.replace(/\D/g, '').slice(0, 11);
+  }
+  if (phoneInp) {
+    phoneInp.addEventListener('input', function () {
+      var next = localPhone11(phoneInp.value);
+      if (phoneInp.value !== next) phoneInp.value = next;
+    });
+    if (phoneInp.form) {
+      phoneInp.form.addEventListener('submit', function (ev) {
+        if (String(phoneInp.value || '').replace(/\D/g, '') === '') return;
+        var digits = localPhone11(phoneInp.value);
+        phoneInp.value = digits;
+        if (digits.length !== 11) {
+          ev.preventDefault();
+          alert(<?php echo json_encode($isEn ? 'Phone must be 11 digits' : 'رقم الهاتف لازم يكون 11 رقم'); ?>);
+        }
+      });
+    }
+  }
   var mode = document.getElementById('graceModeSel');
   var inp = document.getElementById('graceDaysInp');
   if (mode && inp) {

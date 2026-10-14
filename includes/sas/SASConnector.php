@@ -2986,38 +2986,42 @@ class SASConnector
             $fail[1] = 'short:' . count($snap['ids']);
             return $fail;
         }
-        $attempt = $this->sasPrefixAttempt($series, $snap, $count, $newOwner, $backOwner, 'series/changeOwnerRange', $count);
-        if (!empty($attempt['exact'])) {
-            return array(true, '', (int) $snap['start'], (int) $snap['ids'][$count - 1], $attempt['moved_series']);
-        }
-        if (empty($attempt['wrote']) || !empty($attempt['unchanged'])) {
-            $fail[1] = !empty($attempt['message']) ? $attempt['message'] : 'sas';
-            return $fail;
-        }
-        if (!$this->sasUndoPrefix((int) $snap['start'], $backOwner, $attempt['moved_series'])) {
-            $fail[1] = 'stuck';
-            return $fail;
-        }
-        $series2 = $this->sasFindSeriesStartingAt((int) $snap['start'], '');
-        if ($series2 === '') {
-            $series2 = $series;
-        }
-        $snap2 = $this->sasPrefixSnapshot($series2);
-        if (empty($snap2['ok']) || (int) $snap2['start'] !== (int) $snap['start'] || count($snap2['ids']) < $count) {
-            $fail[1] = 'undone';
-            return $fail;
-        }
-        $attempt2 = $this->sasPrefixAttempt($series2, $snap2, $count, $newOwner, $backOwner, 'series/changeOwnerCount', $count - 1);
-        if (!empty($attempt2['exact'])) {
-            return array(true, '', (int) $snap2['start'], (int) $snap2['ids'][$count - 1], $attempt2['moved_series']);
-        }
-        if (!empty($attempt2['wrote']) && empty($attempt2['unchanged'])) {
-            if (!$this->sasUndoPrefix((int) $snap2['start'], $backOwner, $attempt2['moved_series'])) {
+        $routes = array(
+            array('series/changeOwnerCount', $count),
+            array('series/changeOwnerRange', $count),
+        );
+        $seriesNow = $series;
+        $snapNow = $snap;
+        $lastMsg = 'sas';
+        foreach ($routes as $route) {
+            $attempt = $this->sasPrefixAttempt($seriesNow, $snapNow, $count, $newOwner, $backOwner, $route[0], $route[1]);
+            if (!empty($attempt['exact'])) {
+                $movedName = !empty($attempt['moved_series']) ? $attempt['moved_series'] : $seriesNow;
+                return array(true, '', (int) $snapNow['start'], (int) $snapNow['ids'][$count - 1], $movedName);
+            }
+            if (!empty($attempt['message'])) {
+                $lastMsg = $attempt['message'];
+            }
+            if (empty($attempt['wrote']) || !empty($attempt['unchanged'])) {
+                continue;
+            }
+            if (!$this->sasUndoPrefix((int) $snapNow['start'], $backOwner, $attempt['moved_series'])) {
                 $fail[1] = 'stuck';
                 return $fail;
             }
+            $series2 = $this->sasFindSeriesStartingAt((int) $snapNow['start'], '');
+            if ($series2 === '') {
+                $series2 = $seriesNow;
+            }
+            $snap2 = $this->sasPrefixSnapshot($series2);
+            if (empty($snap2['ok']) || (int) $snap2['start'] !== (int) $snap['start'] || count($snap2['ids']) < $count) {
+                $fail[1] = 'undone';
+                return $fail;
+            }
+            $seriesNow = $series2;
+            $snapNow = $snap2;
         }
-        $fail[1] = 'undone';
+        $fail[1] = $lastMsg !== '' ? $lastMsg : 'undone';
         return $fail;
     }
 
@@ -3048,15 +3052,16 @@ class SASConnector
             $out['message'] = $msg !== '' ? $msg : 'sas';
             return $out;
         }
+        if ($judge === 'exact') {
+            $out['exact'] = true;
+            $out['moved_series'] = $series;
+            return $out;
+        }
         $moved = $this->sasFindSeriesStartingAt($start, $series);
         if ($moved === '' && $this->sasSeriesRangeStart($series) === $start) {
             $moved = $series;
         }
         $out['moved_series'] = $moved;
-        if ($judge === 'exact' && $moved !== '') {
-            $out['exact'] = true;
-            return $out;
-        }
         return $out;
     }
 

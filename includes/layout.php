@@ -44,7 +44,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     <link rel="icon" href="assets/favicon.png?v=2" type="image/png" sizes="32x32">
     <?php endif; ?>
     <link rel="apple-touch-icon" href="<?php echo e($brandIcon !== '' ? $brandIcon : 'assets/apple-touch-icon.png?v=2'); ?>">
-    <link rel="stylesheet" href="assets/style.css?v=ui16">
+    <link rel="stylesheet" href="assets/style.css?v=ui18">
     <style>
         <?php if ($bgMode === 'image' && $bgUrl !== ''): ?>
         body.app-bg-image {
@@ -795,8 +795,8 @@ body.nav-pending .nav-progress { display: block; }
       x.send();
     } catch (e) {}
   }
-  setTimeout(fireTick, 6000);
-  setInterval(fireTick, 40000);
+  setTimeout(fireTick, 800);
+  setInterval(fireTick, 25000);
 })();
 
 window.placeCornerToast = function (el) {
@@ -1097,17 +1097,66 @@ window.showCornerToast = function (msg, kind) {
       if (u.origin !== window.location.origin) return;
       if (u.pathname === window.location.pathname && u.search === window.location.search) return;
     } catch (err) { return; }
+    navHold = Date.now();
     armRing();
   }, true);
+  var navHold = 0;
   document.addEventListener('submit', function (ev) {
     if (ev.defaultPrevented) return;
     var form = ev.target;
     if (!form || !form.getAttribute) return;
     if (form.getAttribute('data-no-wait') === '1') return;
-    armRing();
+    navHold = Date.now();
+    if (form.id === 'cardXferForm') showRing();
+    else armRing();
   });
-  window.addEventListener('pagehide', finishRing);
+  window.addEventListener('pagehide', function () {
+    if (navHold && (Date.now() - navHold) < 20000) return;
+    finishRing();
+  });
   window.addEventListener('pageshow', hideRing);
+
+  (function () {
+    var top = document.querySelector('.main-top');
+    if (!top) return;
+    function markHeight() {
+      var h = top.offsetHeight || 64;
+      document.documentElement.style.setProperty('--main-top-h', h + 'px');
+    }
+    markHeight();
+    var lastWin = window.pageYOffset || 0;
+    var topLock = 0;
+    function onMove(y, prev) {
+      if (Date.now() < topLock) return;
+      markHeight();
+      var hidden = document.body.classList.contains('top-away');
+      if (!hidden && y > prev + 12 && y > 36) {
+        document.body.classList.add('top-away');
+        topLock = Date.now() + 400;
+      } else if (hidden && (y < prev - 12 || y < 8)) {
+        document.body.classList.remove('top-away');
+        topLock = Date.now() + 400;
+      }
+    }
+    window.addEventListener('scroll', function () {
+      var y = window.pageYOffset || document.documentElement.scrollTop || 0;
+      var prev = lastWin;
+      lastWin = y;
+      onMove(y, prev);
+    }, { passive: true });
+    var wraps = document.querySelectorAll('.table-wrap');
+    for (var i = 0; i < wraps.length; i++) {
+      (function (el) {
+        var prev = el.scrollTop || 0;
+        el.addEventListener('scroll', function () {
+          var y = el.scrollTop || 0;
+          var p = prev;
+          prev = y;
+          onMove(y, p);
+        }, { passive: true });
+      })(wraps[i]);
+    }
+  })();
 
   function placeAllToasts() {
     var nodes = document.querySelectorAll('.sas-toast');

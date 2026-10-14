@@ -25,8 +25,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $address = post('address');
         $notes = post('notes');
 
-        if ($name === '' || $phone === '') {
-            flash('error', 'الاسم والهاتف مطلوبان');
+        $phoneDigits = preg_replace('/\D+/', '', (string) post('phone', ''));
+        if ($phoneDigits === null) {
+            $phoneDigits = '';
+        }
+        if (strpos($phoneDigits, '964') === 0 && strlen($phoneDigits) >= 12) {
+            $phoneDigits = '0' . substr($phoneDigits, 3);
+        }
+        if ($name === '' || strlen($phoneDigits) !== 11) {
+            flash('error', $name === '' ? 'الاسم والهاتف مطلوبان' : 'رقم الهاتف لازم يكون 11 رقم');
             redirect('subscriber.php?id=' . $id);
         }
         if (subscriber_name_taken($pdo, $name, $id)) {
@@ -426,6 +433,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('subscriber.php?id=' . $id . '#messages');
     }
 
+    if ($action === 'delete_message') {
+        $logId = (int) post('log_id', '0');
+        $owned = false;
+        $failed = false;
+        try {
+            $stLog = $pdo->prepare('SELECT id, success FROM message_logs WHERE id = :id AND subscriber_id = :s LIMIT 1');
+            $stLog->execute(array(':id' => $logId, ':s' => $id));
+            $logRow = $stLog->fetch();
+            $owned = (bool) $logRow;
+            $failed = $logRow && empty($logRow['success']);
+        } catch (Exception $e) {
+            $owned = false;
+        }
+        if (!$owned || !$failed) {
+            flash('error', $lang === 'en' ? 'This message cannot be deleted' : 'ما تنحذف هالرسالة');
+            redirect('subscriber.php?id=' . $id . '#messages');
+        }
+        list($okDel, $msgDel) = function_exists('delete_failed_message_log')
+            ? delete_failed_message_log($pdo, $logId)
+            : array(false, 'غير متاح');
+        flash($okDel ? 'success' : 'error', $msgDel);
+        redirect('subscriber.php?id=' . $id . '#messages');
+    }
+
     if ($action === 'delete') {
         if (function_exists('log_subscriber_delete')) {
             log_subscriber_delete($pdo, $id);
@@ -547,7 +578,7 @@ if ($editMode):
             <div>
                 <label><?php echo e(t('phone')); ?></label>
                 <div class="phone-pick-row">
-                    <input id="subPhone" name="phone" type="tel" inputmode="tel" autocomplete="tel" enterkeyhint="done" value="<?php echo e(format_phone_display($subscriber['phone'])); ?>" required>
+                    <input id="subPhone" name="phone" type="tel" inputmode="numeric" maxlength="11" pattern="[0-9]{11}" autocomplete="tel" enterkeyhint="done" value="<?php echo e(format_phone_display($subscriber['phone'])); ?>" required>
                     <button type="button" class="btn secondary" id="pickContactBtn"><?php echo e(t('pick_contact')); ?></button>
                 </div>
             </div>
@@ -585,6 +616,27 @@ if ($editMode):
   var nameInput = document.querySelector('#subEditForm input[name="name"]');
   var form = document.getElementById('subEditForm');
   var contactsMsg = <?php echo json_encode(t('contacts_unsupported')); ?>;
+  function localPhone11(raw) {
+    var d = String(raw || '').replace(/\D/g, '');
+    if (d.indexOf('964') === 0 && d.length >= 12) d = '0' + d.slice(3);
+    return d.replace(/\D/g, '').slice(0, 11);
+  }
+  if (phoneInput) {
+    phoneInput.addEventListener('input', function () {
+      var next = localPhone11(phoneInput.value);
+      if (phoneInput.value !== next) phoneInput.value = next;
+    });
+  }
+  if (form && phoneInput) {
+    form.addEventListener('submit', function (ev) {
+      var digits = localPhone11(phoneInput.value);
+      phoneInput.value = digits;
+      if (digits.length !== 11) {
+        ev.preventDefault();
+        alert(<?php echo json_encode($lang === 'en' ? 'Phone must be 11 digits' : 'رقم الهاتف لازم يكون 11 رقم'); ?>);
+      }
+    });
+  }
   if (pickBtn && phoneInput) {
     pickBtn.addEventListener('click', function () {
       if (!(navigator.contacts && typeof navigator.contacts.select === 'function')) {
@@ -598,7 +650,7 @@ if ($editMode):
         if (c.tel && c.tel.length) {
           tel = String(c.tel[0] || '').replace(/[^\d+]/g, '');
         }
-        if (tel) phoneInput.value = tel;
+        if (tel) phoneInput.value = localPhone11(tel);
         if (nameInput && !nameInput.value && c.name && c.name.length) {
           nameInput.value = String(c.name[0] || '');
         }
@@ -962,11 +1014,17 @@ if ($activeSubCard) {
             <div class="msg-short" style="margin-top:4px"><?php echo e(message_short_summary($lastMsg['message_type'], $lastMsg['body'], false)); ?></div>
             <?php endif; ?>
         </div>
-        <form method="post" data-no-wait="1">
+        <form method="post" data-no-wait="1" style="display:inline">
             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
             <input type="hidden" name="action" value="retry_message">
             <input type="hidden" name="log_id" value="<?php echo (int) $lastMsg['id']; ?>">
             <button class="btn secondary" type="submit"><?php echo e(t('retry_send')); ?></button>
+        </form>
+        <form method="post" data-no-wait="1" style="display:inline" onsubmit="return confirm(<?php echo json_encode($lang === 'en' ? 'Delete this failed message?' : 'حذف رسالة الفشل؟'); ?>);">
+            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+            <input type="hidden" name="action" value="delete_message">
+            <input type="hidden" name="log_id" value="<?php echo (int) $lastMsg['id']; ?>">
+            <button class="btn danger" type="submit"><?php echo e($lang === 'en' ? 'Delete' : 'حذف'); ?></button>
         </form>
     </div>
 </div>
@@ -1362,12 +1420,20 @@ if ($activeSubCard) {
                         <pre class="msg-full-body"><?php echo e($log['body']); ?></pre>
                     </details>
                     <?php if (!$ok && !$resolved): ?>
+                        <div class="msg-log-actions">
                         <form method="post" class="msg-retry-form" data-no-wait="1">
                             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                             <input type="hidden" name="action" value="retry_message">
                             <input type="hidden" name="log_id" value="<?php echo (int) $log['id']; ?>">
                             <button class="btn secondary sm" type="submit"><?php echo e(t('retry_send')); ?></button>
                         </form>
+                        <form method="post" data-no-wait="1" onsubmit="return confirm(<?php echo json_encode($lang === 'en' ? 'Delete this failed message?' : 'حذف رسالة الفشل؟'); ?>);">
+                            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                            <input type="hidden" name="action" value="delete_message">
+                            <input type="hidden" name="log_id" value="<?php echo (int) $log['id']; ?>">
+                            <button class="btn danger sm" type="submit"><?php echo e($lang === 'en' ? 'Delete' : 'حذف'); ?></button>
+                        </form>
+                        </div>
                     <?php endif; ?>
                 </div>
             <?php endforeach; ?>
