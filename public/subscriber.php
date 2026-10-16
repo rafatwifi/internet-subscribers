@@ -125,6 +125,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('subscriber.php?id=' . $id);
     }
 
+    if ($action === 'add_one_day') {
+        $unameSt = $pdo->prepare('SELECT sas_username FROM subscribers WHERE id = :id LIMIT 1');
+        $unameSt->execute(array(':id' => $id));
+        $uname = trim((string) $unameSt->fetchColumn());
+        if ($uname === '' || !function_exists('sas_extend_one_day')) {
+            flash('error', $lang === 'en' ? 'This subscriber has no SAS username' : 'ماكو يوزرنيم ساس لهذا المشترك');
+            redirect('subscriber.php?id=' . $id);
+        }
+        list($ok, $msg) = sas_extend_one_day($pdo, $config, $uname, false);
+        flash($ok ? 'success' : 'error', $msg !== '' ? $msg : ($ok ? ($lang === 'en' ? 'One day added' : 'تمت إضافة يوم') : ($lang === 'en' ? 'Could not add a day' : 'تعذر إضافة اليوم')));
+        redirect('subscriber.php?id=' . $id);
+    }
+
     if ($action === 'update_rental') {
         $enabled = post('rental_enabled') === '1';
         $deviceId = trim((string) post('rental_device_id', ''));
@@ -288,6 +301,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             flash('error', debt_edit_denied_message());
             redirect('subscriber.php?id=' . $id . '#debts');
         }
+        $oldDebtLines = function_exists('debt_unpaid_lines') ? debt_unpaid_lines($pdo, $id) : array();
         $debtInfo = insert_opening_debts($pdo, $id, $_POST);
         $debtCount = is_array($debtInfo) ? (int) $debtInfo['count'] : (int) $debtInfo;
         if ($debtCount > 0) {
@@ -303,15 +317,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     if ($useCustom && $customBody !== '') {
                         $msg = $customBody;
                     } else {
-                        $debtTotal = subscriber_unpaid_total($pdo, $id);
-                        $msg = reminder_message(array(
-                            'name' => $subRow['name'],
-                            'phone' => $subRow['phone'],
-                            'month_label' => date('Y-m'),
-                            'amount' => $debtTotal,
-                            'debt_total' => $debtTotal,
-                            'notes' => '',
-                        ), $config);
+                        $newDebtLines = (is_array($debtInfo) && isset($debtInfo['lines']) && is_array($debtInfo['lines']))
+                            ? $debtInfo['lines']
+                            : array();
+                        $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
+                        $msg = function_exists('debt_added_customer_message')
+                            ? debt_added_customer_message($subRow['name'], $newDebtLines, $oldDebtLines, $currency)
+                            : reminder_message(array(
+                                'name' => $subRow['name'],
+                                'phone' => $subRow['phone'],
+                                'month_label' => date('Y-m'),
+                                'amount' => subscriber_unpaid_total($pdo, $id),
+                                'debt_total' => subscriber_unpaid_total($pdo, $id),
+                                'notes' => '',
+                            ), $config);
                     }
                     $result = whatsapp_send($config, $subRow['phone'], $msg, 'debt_created');
                     log_message($pdo, $id, $result);
@@ -724,7 +743,7 @@ return;
 endif;
 ?>
 
-<div class="cards">
+<div class="cards sub-profile-cards">
     <div class="card-stat glass g-red">
         <div class="label">المتبقي / الدين</div>
         <div class="value"><?php echo e(money_format_iqd($unpaid, $config['currency'])); ?></div>
@@ -823,13 +842,51 @@ $isActiveSub = !empty($activeSubCard);
         <input type="hidden" name="action" value="give_test">
         <button class="btn ghost" type="submit"><?php echo e(t('give_test')); ?></button>
     </form>
+    <button type="button" class="btn sub-day-btn" id="addDayOpen"><?php echo e($lang === 'en' ? 'Add 1 day' : 'إضافة 1 يوم'); ?></button>
     <?php if ($canEditDebts): ?>
     <a class="btn money" href="subscriber.php?id=<?php echo (int) $id; ?>&tab=add_debt#debts"><?php echo e($lang === 'en' ? 'Add debt' : 'إضافة دين'); ?></a>
     <?php endif; ?>
     <?php if ($unpaid > 0): ?>
-    <a class="btn" style="background:#16a34a;border-color:#16a34a;color:#fff" href="subscriber.php?id=<?php echo (int) $id; ?>&tab=pay#debts"><?php echo e(t('pay_debts')); ?></a>
+    <a class="btn sub-pay-btn" href="subscriber.php?id=<?php echo (int) $id; ?>&tab=pay#debts"><?php echo e(t('pay_debts')); ?></a>
     <?php endif; ?>
 </div>
+<div class="modal-backdrop hidden" id="addDayAsk" role="dialog" aria-modal="true">
+    <div class="modal-card">
+        <h3><?php echo e($lang === 'en' ? 'Add 1 day' : 'إضافة 1 يوم'); ?></h3>
+        <p class="meta" style="margin:0 0 14px"><?php echo e($lang === 'en' ? 'Add one day to this subscriber’s expiry?' : 'إضافة يوم واحد على انتهاء هذا المشترك؟'); ?></p>
+        <form method="post" style="display:flex;gap:8px;justify-content:flex-end">
+            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+            <input type="hidden" name="action" value="add_one_day">
+            <button type="button" class="btn ghost" id="addDayNo"><?php echo e($lang === 'en' ? 'Cancel' : 'إلغاء'); ?></button>
+            <button class="btn sub-day-btn" type="submit"><?php echo e($lang === 'en' ? 'Add' : 'إضافة'); ?></button>
+        </form>
+    </div>
+</div>
+<style>
+.sub-profile-cards { margin-bottom: 12px; }
+.sub-profile-cards .card-stat {
+  border-radius: 20px;
+  box-shadow: 0 14px 30px rgba(15, 23, 42, .12);
+}
+.sub-toolbar .btn, .sub-toolbar a.btn, .sub-toolbar button.btn {
+  height: 36px; border-radius: 999px; padding: 0 14px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-weight: 800; box-shadow: none;
+}
+.sub-day-btn { background: #0f766e !important; border-color: #0f766e !important; color: #fff !important; }
+.sub-pay-btn { background: #16a34a !important; border-color: #16a34a !important; color: #fff !important; }
+</style>
+<script>
+(function () {
+  var openBtn = document.getElementById('addDayOpen');
+  var box = document.getElementById('addDayAsk');
+  var noBtn = document.getElementById('addDayNo');
+  function closeAsk() { if (box) box.classList.add('hidden'); }
+  if (openBtn && box) openBtn.addEventListener('click', function () { box.classList.remove('hidden'); });
+  if (noBtn) noBtn.addEventListener('click', closeAsk);
+  if (box) box.addEventListener('click', function (e) { if (e.target === box) closeAsk(); });
+})();
+</script>
 
 <?php
 $plansForChange = $pdo->query(

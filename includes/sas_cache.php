@@ -24,6 +24,43 @@ function ensure_sas_users_cache_table($pdo)
         }
     } catch (Exception $e) {
     }
+    try {
+        $macCol = $pdo->query("SHOW COLUMNS FROM sas_users_cache LIKE 'mac_address'")->fetch();
+        if (!$macCol) {
+            $pdo->exec('ALTER TABLE sas_users_cache ADD COLUMN mac_address VARCHAR(32) NULL DEFAULT NULL');
+        }
+    } catch (Exception $e) {
+    }
+    try {
+        $pdo->exec(
+            'CREATE TABLE IF NOT EXISTS sas_user_sessions (
+                tenant_id INT UNSIGNED NOT NULL,
+                username VARCHAR(80) NOT NULL,
+                session_key VARCHAR(80) NOT NULL,
+                mac_address VARCHAR(32) NULL DEFAULT NULL,
+                framed_ip VARCHAR(45) NULL DEFAULT NULL,
+                nas_ip VARCHAR(45) NULL DEFAULT NULL,
+                started_at DATETIME NULL DEFAULT NULL,
+                stopped_at DATETIME NULL DEFAULT NULL,
+                session_seconds INT UNSIGNED NULL DEFAULT NULL,
+                bytes_in BIGINT UNSIGNED NULL DEFAULT NULL,
+                bytes_out BIGINT UNSIGNED NULL DEFAULT NULL,
+                is_open TINYINT(1) NOT NULL DEFAULT 0,
+                synced_at DATETIME NOT NULL,
+                PRIMARY KEY (tenant_id, username, session_key)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8'
+        );
+    } catch (Exception $e) {
+    }
+    foreach (array('bytes_in', 'bytes_out') as $byteCol) {
+        try {
+            $hasByte = $pdo->query("SHOW COLUMNS FROM sas_user_sessions LIKE " . $pdo->quote($byteCol))->fetch();
+            if (!$hasByte) {
+                $pdo->exec('ALTER TABLE sas_user_sessions ADD COLUMN ' . $byteCol . ' BIGINT UNSIGNED NULL DEFAULT NULL');
+            }
+        } catch (Exception $e) {
+        }
+    }
     if (function_exists('app_schema_fresh') && app_schema_fresh('sas_cache')) {
         return;
     }
@@ -94,6 +131,7 @@ function ensure_sas_users_cache_table($pdo)
         'daily_traffic' => 'VARCHAR(60) NULL DEFAULT NULL',
         'framed_ip' => 'VARCHAR(45) NULL DEFAULT NULL',
         'online_ping' => 'SMALLINT UNSIGNED NULL DEFAULT NULL',
+        'mac_address' => 'VARCHAR(32) NULL DEFAULT NULL',
     );
     foreach ($extraCols as $cName => $cSql) {
         try {
@@ -691,6 +729,41 @@ function sas_cache_is_online_row($row)
         }
     }
     return 0;
+}
+
+function sas_cache_mac($row)
+{
+    if (!is_array($row)) {
+        return '';
+    }
+    $nests = array($row);
+    foreach (array('acct', 'session', 'radius', 'online', 'data', 'user', 'info', 'attributes') as $nk) {
+        if (isset($row[$nk]) && is_array($row[$nk]) && !isset($row[$nk][0])) {
+            $nests[] = $row[$nk];
+        }
+    }
+    $keys = array(
+        'callingstationid', 'calling_station_id', 'callingStationId',
+        'Calling-Station-Id', 'calling-station-id',
+        'mac_address', 'macaddress', 'macAddress', 'mac', 'user_mac', 'client_mac',
+    );
+    foreach ($nests as $block) {
+        foreach ($keys as $k) {
+            if (!isset($block[$k]) || is_array($block[$k])) {
+                continue;
+            }
+            $v = strtoupper(trim((string) $block[$k]));
+            $v = str_replace('-', ':', $v);
+            if ($v === '' || $v === '00:00:00:00:00:00' || $v === '0') {
+                continue;
+            }
+            if (!preg_match('/^[0-9A-F:]{11,32}$/', $v)) {
+                continue;
+            }
+            return sas_clip($v, 32);
+        }
+    }
+    return '';
 }
 
 function sas_cache_framed_ip($row)
@@ -1500,7 +1573,7 @@ function sas_refresh_online_flags($pdo, $config)
 {
     $throttleFile = sas_online_flags_throttle_file();
     $throttleAge = is_file($throttleFile) ? (time() - (int) @filemtime($throttleFile)) : 99999;
-    if ($throttleAge < 25) {
+    if ($throttleAge < 2) {
         return 0;
     }
     $lockPath = dirname($throttleFile) . DIRECTORY_SEPARATOR . 'isp_sas_online_flags_' . md5($throttleFile) . '.lock';
@@ -1536,21 +1609,27 @@ function sas_refresh_online_flags($pdo, $config)
     if (isset($api->lastOnlineListOk) && !$api->lastOnlineListOk) {
         return 0;
     }
-    $names = array();
-    $trafMap = array();
-    $ipMap = array();
-    $pingMap = array();
-    $radMap = array();
-    foreach ($rows as $row) {
-        $u = sas_cache_username($row);
-        if ($u === '') {
-            continue;
-        }
+        $names = array();
+        $trafMap = array();
+        $ipMap = array();
+        $macMap = array();
+        $pingMap = array();
+        $radMap = array();
+        $rowByUser = array();
+        foreach ($rows as $row) {
+            $u = sas_cache_username($row);
+            if ($u === '') {
+                continue;
+            }
+            if (!isset($rowByUser[$u])) {
+                $rowByUser[$u] = $row;
+            }
         $keys = sas_cache_username_match_keys($u);
         if (!$keys) {
             continue;
         }
         $ip = sas_cache_framed_ip($row);
+        $mac = function_exists('sas_cache_mac') ? sas_cache_mac($row) : '';
         $tr = sas_cache_daily_traffic($row);
         $ping = sas_cache_online_ping($row);
         $rad = sas_cache_radacct_id($row);
@@ -1558,6 +1637,9 @@ function sas_refresh_online_flags($pdo, $config)
             $names[$key] = $u;
             if ($ip !== '') {
                 $ipMap[$key] = sas_clip($ip, 45);
+            }
+            if ($mac !== '') {
+                $macMap[$key] = sas_clip($mac, 32);
             }
             if ($tr !== '') {
                 $trafMap[$key] = sas_clip($tr, 60);
@@ -1584,9 +1666,11 @@ function sas_refresh_online_flags($pdo, $config)
                 $in = array();
                 $bind = array();
                 $caseIp = 'CASE LOWER(username)';
+                $caseMac = 'CASE LOWER(username)';
                 $caseTr = 'CASE LOWER(username)';
                 $casePing = 'CASE LOWER(username)';
                 $hasIp = false;
+                $hasMac = false;
                 $hasTr = false;
                 $hasPing = false;
                 $i = 0;
@@ -1598,6 +1682,12 @@ function sas_refresh_online_flags($pdo, $config)
                         $bind[':ik' . $i] = $key;
                         $bind[':ip' . $i] = $ipMap[$key];
                         $hasIp = true;
+                    }
+                    if (isset($macMap[$key]) && $macMap[$key] !== '') {
+                        $caseMac .= ' WHEN :mk' . $i . ' THEN :mv' . $i;
+                        $bind[':mk' . $i] = $key;
+                        $bind[':mv' . $i] = $macMap[$key];
+                        $hasMac = true;
                     }
                     if (isset($trafMap[$key]) && $trafMap[$key] !== '') {
                         $caseTr .= ' WHEN :tk' . $i . ' THEN :tr' . $i;
@@ -1616,6 +1706,9 @@ function sas_refresh_online_flags($pdo, $config)
                 $set = 'is_online = 1, last_online = NOW()';
                 if ($hasIp) {
                     $set .= ', framed_ip = ' . $caseIp . ' ELSE framed_ip END';
+                }
+                if ($hasMac) {
+                    $set .= ', mac_address = ' . $caseMac . ' ELSE mac_address END';
                 }
                 if ($hasTr) {
                     $set .= ', daily_traffic = ' . $caseTr . ' ELSE daily_traffic END';
@@ -1636,6 +1729,10 @@ function sas_refresh_online_flags($pdo, $config)
             @mkdir($radDir, 0775, true);
         }
         @file_put_contents($radDir . '/sub_rad_t' . $tidOnline . '.json', json_encode($radMap));
+        try {
+            sas_sessions_note_online($pdo, $rowByUser);
+        } catch (Exception $e2) {
+        }
         @file_put_contents($throttleFile, (string) time());
         if ($lockFh) {
             @flock($lockFh, LOCK_UN);
@@ -4248,6 +4345,9 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
             return array(false, 'SAS: ' . (function_exists('sas_response_message') ? sas_response_message($res) : 'فشل قطع الاتصال'), array());
         }
         sas_cache_patch($pdo, $username, array('is_online' => 0, 'framed_ip' => null));
+        if (function_exists('sas_sessions_mark_user_closed')) {
+            sas_sessions_mark_user_closed($pdo, $username);
+        }
         return array(true, 'تم قطع اتصال المشترك (Disconnect)', array(
             'is_online' => 0,
             'framed_ip' => '',
@@ -4511,6 +4611,7 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
         ':last_online' => sas_cache_last_online($row),
         ':is_online' => sas_cache_is_online_row($row),
         ':framed_ip' => (($ip = sas_cache_framed_ip($row)) !== '' ? sas_clip($ip, 45) : null),
+        ':mac_address' => (($macUp = sas_cache_mac($row)) !== '' ? sas_clip($macUp, 32) : null),
         ':daily_traffic' => (($tr = sas_cache_daily_traffic($row)) !== '' ? sas_clip($tr, 60) : null),
         ':synced_at' => $nowSql,
     );
@@ -4562,6 +4663,7 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
                     last_online = IF(:last_online_chk IS NULL, last_online, :last_online2),
                     is_online = IF(:is_online_chk = 1, 1, is_online),
                     framed_ip = IF(:framed_ip_chk IS NULL OR :framed_ip_chk = "", framed_ip, :framed_ip2),
+                    mac_address = IF(:mac_chk IS NULL OR :mac_chk = "", mac_address, :mac2),
                     daily_traffic = IF(:daily_traffic_chk IS NULL, daily_traffic, :daily_traffic2),
                     synced_at = :synced_at' . $accSet . '
                  WHERE tenant_id = :tenant_id AND username = :username'
@@ -4571,6 +4673,8 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
             $updParams[':last_online2'] = $params[':last_online'];
             $updParams[':framed_ip_chk'] = $params[':framed_ip'];
             $updParams[':framed_ip2'] = $params[':framed_ip'];
+            $updParams[':mac_chk'] = $params[':mac_address'];
+            $updParams[':mac2'] = $params[':mac_address'];
             $updParams[':daily_traffic_chk'] = $params[':daily_traffic'];
             $updParams[':daily_traffic2'] = $params[':daily_traffic'];
             $updParams[':is_online_chk'] = $params[':is_online'];
@@ -4578,6 +4682,7 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
                 $updParams[':last_online'],
                 $updParams[':is_online'],
                 $updParams[':framed_ip'],
+                $updParams[':mac_address'],
                 $updParams[':daily_traffic']
             );
             $upd->execute($updParams);
@@ -4591,19 +4696,19 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
             $insSql = $pdo->prepare(
                 'INSERT INTO sas_users_cache
                     (tenant_id, username, sas_user_id, firstname, lastname, display_name, phone, profile_id, profile_name,
-                     enabled, expire_at, parent_id, parent_name, city, email, company, last_online, is_online, framed_ip, daily_traffic, local_subscriber_id, synced_at, sas_account_id)
+                     enabled, expire_at, parent_id, parent_name, city, email, company, last_online, is_online, framed_ip, mac_address, daily_traffic, local_subscriber_id, synced_at, sas_account_id)
                  VALUES
                     (:tenant_id, :username, :sas_user_id, :firstname, :lastname, :display_name, :phone, :profile_id, :profile_name,
-                     :enabled, :expire_at, :parent_id, :parent_name, :city, :email, :company, :last_online, :is_online, :framed_ip, :daily_traffic, NULL, :synced_at, :sas_account_id)'
+                     :enabled, :expire_at, :parent_id, :parent_name, :city, :email, :company, :last_online, :is_online, :framed_ip, :mac_address, :daily_traffic, NULL, :synced_at, :sas_account_id)'
             );
         } else {
             $insSql = $pdo->prepare(
                 'INSERT INTO sas_users_cache
                     (tenant_id, username, sas_user_id, firstname, lastname, display_name, phone, profile_id, profile_name,
-                     enabled, expire_at, parent_id, parent_name, city, email, company, last_online, is_online, framed_ip, daily_traffic, local_subscriber_id, synced_at)
+                     enabled, expire_at, parent_id, parent_name, city, email, company, last_online, is_online, framed_ip, mac_address, daily_traffic, local_subscriber_id, synced_at)
                  VALUES
                     (:tenant_id, :username, :sas_user_id, :firstname, :lastname, :display_name, :phone, :profile_id, :profile_name,
-                     :enabled, :expire_at, :parent_id, :parent_name, :city, :email, :company, :last_online, :is_online, :framed_ip, :daily_traffic, NULL, :synced_at)'
+                     :enabled, :expire_at, :parent_id, :parent_name, :city, :email, :company, :last_online, :is_online, :framed_ip, :mac_address, :daily_traffic, NULL, :synced_at)'
             );
         }
         $insSql->execute($params);
@@ -4688,7 +4793,7 @@ function sas_cache_patch($pdo, $username, $fields)
     $allow = array(
         'sas_user_id', 'firstname', 'lastname', 'display_name', 'phone',
         'profile_id', 'profile_name', 'enabled', 'expire_at',
-        'parent_id', 'parent_name', 'city', 'email', 'company', 'last_online', 'is_online', 'framed_ip', 'daily_traffic',
+        'parent_id', 'parent_name', 'city', 'email', 'company', 'last_online', 'is_online', 'framed_ip', 'mac_address', 'daily_traffic',
     );
     $cols = array();
     $params = array(':u' => $username);
@@ -5562,6 +5667,11 @@ function sas_render_table_row($row, $n, $config, $lang)
     } else {
         $html .= '<td class="col-ip" dir="ltr">-</td>';
     }
+    $macShow = isset($row['mac_address']) ? trim((string) $row['mac_address']) : '';
+    $macTitle = $isOnline
+        ? ($lang === 'en' ? 'Connected MAC' : 'ماك الاتصال الحالي')
+        : ($lang === 'en' ? 'Last MAC' : 'آخر ماك');
+    $html .= '<td class="col-mac" dir="ltr" title="' . e($macTitle) . '">' . ($macShow !== '' ? e($macShow) : '—') . '</td>';
     $rentBadge = '';
     if (function_exists('subscriber_has_rental') && subscriber_has_rental($rentSub) && function_exists('rental_badge_html')) {
         $rentBadge = rental_badge_html($rentSub);
@@ -5637,6 +5747,530 @@ function sas_render_table_row($row, $n, $config, $lang)
     $html .= '</td>';
     $html .= '</tr>';
     return $html;
+}
+
+function sas_session_tenant_id()
+{
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    return $tid > 0 ? $tid : 1;
+}
+
+function sas_session_time($value)
+{
+    if ($value === null || $value === '' || is_array($value)) {
+        return null;
+    }
+    if (is_numeric($value)) {
+        $n = (int) $value;
+        if ($n > 1000000000000) {
+            $n = (int) floor($n / 1000);
+        }
+        if ($n > 946684800 && $n < 4102444800) {
+            return date('Y-m-d H:i:s', $n);
+        }
+        return null;
+    }
+    $raw = trim((string) $value);
+    if ($raw === '' || $raw === '0' || $raw === '0000-00-00 00:00:00') {
+        return null;
+    }
+    $ts = strtotime($raw);
+    if ($ts && $ts > 946684800) {
+        return date('Y-m-d H:i:s', $ts);
+    }
+    return null;
+}
+
+function sas_session_pick($row, $keys)
+{
+    if (!is_array($row)) {
+        return '';
+    }
+    $nests = array($row);
+    foreach (array('acct', 'session', 'radius', 'online', 'data') as $nk) {
+        if (isset($row[$nk]) && is_array($row[$nk]) && !isset($row[$nk][0])) {
+            $nests[] = $row[$nk];
+        }
+    }
+    foreach ($nests as $block) {
+        foreach ($keys as $k) {
+            if (!isset($block[$k]) || is_array($block[$k])) {
+                continue;
+            }
+            $v = trim((string) $block[$k]);
+            if ($v !== '' && $v !== '0') {
+                return $v;
+            }
+        }
+    }
+    return '';
+}
+
+function sas_session_number($raw)
+{
+    if ($raw === null || is_array($raw)) {
+        return null;
+    }
+    $raw = trim((string) $raw);
+    if ($raw === '' || !is_numeric($raw)) {
+        return null;
+    }
+    $n = (float) $raw;
+    if ($n < 0) {
+        return null;
+    }
+    return $n;
+}
+
+function sas_session_side_bytes($row, $octetKeys, $gigaKeys)
+{
+    $oct = null;
+    $giga = 0.0;
+    $found = false;
+    foreach ($octetKeys as $k) {
+        $n = sas_session_number(sas_session_pick($row, array($k)));
+        if ($n !== null) {
+            $oct = $n;
+            $found = true;
+            break;
+        }
+    }
+    foreach ($gigaKeys as $k) {
+        $n = sas_session_number(sas_session_pick($row, array($k)));
+        if ($n !== null && $n > 0) {
+            $giga = $n;
+            $found = true;
+            break;
+        }
+    }
+    if (!$found) {
+        return null;
+    }
+    $bytes = ($giga * 4294967296) + ($oct === null ? 0 : $oct);
+    if ($bytes > 9000000000000000) {
+        $bytes = 9000000000000000;
+    }
+    return (int) round($bytes);
+}
+
+function sas_session_usage($row)
+{
+    $down = sas_session_side_bytes($row, array(
+        'acctoutputoctets', 'acct_output_octets', 'outputoctets', 'output_octets',
+        'bytes_out', 'download', 'rx_bytes', 'rx', 'down_bytes', 'total_download',
+    ), array('acctoutputgigawords', 'acct_output_gigawords'));
+    $up = sas_session_side_bytes($row, array(
+        'acctinputoctets', 'acct_input_octets', 'inputoctets', 'input_octets',
+        'bytes_in', 'upload', 'tx_bytes', 'tx', 'up_bytes', 'total_upload',
+    ), array('acctinputgigawords', 'acct_input_gigawords'));
+    if ($down === null && $up === null) {
+        $total = sas_session_side_bytes($row, array(
+            'acctsessionoctets', 'total_bytes', 'totalbytes', 'session_bytes', 'usage', 'used',
+        ), array());
+        return array('in' => null, 'out' => $total);
+    }
+    return array(
+        'in' => $up === null ? 0 : $up,
+        'out' => $down === null ? 0 : $down,
+    );
+}
+
+function sas_session_pack($row)
+{
+    if (!is_array($row)) {
+        return null;
+    }
+    $mac = sas_cache_mac($row);
+    $ip = sas_cache_framed_ip($row);
+    $nas = sas_session_pick($row, array('nasipaddress', 'nas_ip_address', 'nasip', 'nas_ip'));
+    $start = null;
+    foreach (array('acctstarttime', 'acct_start_time', 'started_at', 'start_time') as $k) {
+        $start = sas_session_time(sas_session_pick($row, array($k)));
+        if ($start) {
+            break;
+        }
+    }
+    $stop = null;
+    foreach (array('acctstoptime', 'acct_stop_time', 'stopped_at', 'stop_time') as $k) {
+        $stop = sas_session_time(sas_session_pick($row, array($k)));
+        if ($stop) {
+            break;
+        }
+    }
+    $sec = null;
+    $secRaw = sas_session_pick($row, array('acctsessiontime', 'acct_session_time', 'session_time'));
+    if ($secRaw !== '' && is_numeric($secRaw)) {
+        $sec = (int) $secRaw;
+    }
+    $usage = sas_session_usage($row);
+    $rad = sas_cache_radacct_id($row);
+    $sid = sas_session_pick($row, array('acctsessionid', 'acct_session_id'));
+    if ($rad !== '') {
+        $key = 'r' . $rad;
+    } elseif ($sid !== '') {
+        $key = 's' . substr($sid, 0, 70);
+    } elseif ($start) {
+        $key = 't' . substr(md5($start . '|' . $mac . '|' . $ip), 0, 24);
+    } else {
+        $key = 'live';
+    }
+    return array(
+        'key' => sas_clip($key, 80),
+        'mac' => $mac !== '' ? sas_clip($mac, 32) : null,
+        'ip' => $ip !== '' ? sas_clip($ip, 45) : null,
+        'nas' => $nas !== '' ? sas_clip($nas, 45) : null,
+        'start' => $start,
+        'stop' => $stop,
+        'seconds' => $sec,
+        'bytes_in' => $usage['in'],
+        'bytes_out' => $usage['out'],
+        'open' => $stop === null ? 1 : 0,
+    );
+}
+
+function sas_session_duration_label($start, $stop, $seconds, $open)
+{
+    $sec = null;
+    if ($seconds !== null && $seconds !== '' && is_numeric($seconds) && (int) $seconds > 0) {
+        $sec = (int) $seconds;
+    } elseif ($start) {
+        $a = strtotime((string) $start);
+        $b = 0;
+        if ($stop) {
+            $b = strtotime((string) $stop);
+        } elseif ($open) {
+            $b = time();
+        }
+        if ($a && $b && $b >= $a) {
+            $sec = $b - $a;
+        }
+    }
+    if ($sec === null || $sec < 0) {
+        return '';
+    }
+    $h = (int) floor($sec / 3600);
+    $m = (int) floor(($sec % 3600) / 60);
+    $s = (int) ($sec % 60);
+    return sprintf('%d:%02d:%02d', $h, $m, $s);
+}
+
+function sas_sessions_upsert($pdo, $username, $packs)
+{
+    $username = sas_clip(trim((string) $username), 80);
+    if ($username === '' || !is_array($packs) || !$packs) {
+        return;
+    }
+    ensure_sas_users_cache_table($pdo);
+    $tid = sas_session_tenant_id();
+    $now = date('Y-m-d H:i:s');
+    $sql = 'INSERT INTO sas_user_sessions
+        (tenant_id, username, session_key, mac_address, framed_ip, nas_ip, started_at, stopped_at, session_seconds, bytes_in, bytes_out, is_open, synced_at)
+        VALUES (:t, :u, :k, :m, :ip, :nas, :st, :sp, :sec, :bi, :bo, :op, :sy)
+        ON DUPLICATE KEY UPDATE
+          mac_address = IF(:m2 IS NULL OR :m2 = "", mac_address, :m3),
+          framed_ip = IF(:ip2 IS NULL OR :ip2 = "", framed_ip, :ip3),
+          nas_ip = IF(:nas2 IS NULL OR :nas2 = "", nas_ip, :nas3),
+          started_at = IFNULL(:st2, started_at),
+          stopped_at = :sp2,
+          session_seconds = IFNULL(:sec2, session_seconds),
+          bytes_in = IF(:bik = 1, :bi2, bytes_in),
+          bytes_out = IF(:bok = 1, :bo2, bytes_out),
+          is_open = :op2,
+          synced_at = :sy2';
+    $st = $pdo->prepare($sql);
+    $latestMac = '';
+    $dropLive = false;
+    foreach ($packs as $p) {
+        if (!is_array($p) || empty($p['key'])) {
+            continue;
+        }
+        $key = sas_clip((string) $p['key'], 80);
+        if (strpos($key, 'live:') !== 0 && $key !== 'live') {
+            $dropLive = true;
+        }
+        $mac = !empty($p['mac']) ? $p['mac'] : null;
+        $ip = !empty($p['ip']) ? $p['ip'] : null;
+        $nas = !empty($p['nas']) ? $p['nas'] : null;
+        $start = !empty($p['start']) ? $p['start'] : null;
+        $stop = !empty($p['stop']) ? $p['stop'] : null;
+        $sec = (isset($p['seconds']) && $p['seconds'] !== null && $p['seconds'] !== '') ? (int) $p['seconds'] : null;
+        $open = !empty($p['open']) ? 1 : 0;
+        $binKnown = array_key_exists('bytes_in', $p) && $p['bytes_in'] !== null;
+        $boutKnown = array_key_exists('bytes_out', $p) && $p['bytes_out'] !== null;
+        $bin = $binKnown ? (int) $p['bytes_in'] : 0;
+        $bout = $boutKnown ? (int) $p['bytes_out'] : 0;
+        $st->execute(array(
+            ':t' => $tid,
+            ':u' => $username,
+            ':k' => $key,
+            ':m' => $mac,
+            ':ip' => $ip,
+            ':nas' => $nas,
+            ':st' => $start,
+            ':sp' => $stop,
+            ':sec' => $sec,
+            ':bi' => $bin,
+            ':bo' => $bout,
+            ':op' => $open,
+            ':sy' => $now,
+            ':m2' => $mac,
+            ':m3' => $mac,
+            ':ip2' => $ip,
+            ':ip3' => $ip,
+            ':nas2' => $nas,
+            ':nas3' => $nas,
+            ':st2' => $start,
+            ':sp2' => $stop,
+            ':sec2' => $sec,
+            ':bik' => $binKnown ? 1 : 0,
+            ':bi2' => $bin,
+            ':bok' => $boutKnown ? 1 : 0,
+            ':bo2' => $bout,
+            ':op2' => $open,
+            ':sy2' => $now,
+        ));
+        if ($mac && ($latestMac === '' || $open)) {
+            $latestMac = $mac;
+        }
+    }
+    if ($dropLive) {
+        $pdo->prepare('DELETE FROM sas_user_sessions WHERE tenant_id = :t AND username = :u AND session_key LIKE :lk')
+            ->execute(array(':t' => $tid, ':u' => $username, ':lk' => 'live:%'));
+    }
+    if ($latestMac !== '') {
+        $pdo->prepare('UPDATE sas_users_cache SET mac_address = :m WHERE tenant_id = :t AND username = :u')
+            ->execute(array(':m' => $latestMac, ':t' => $tid, ':u' => $username));
+    }
+}
+
+function sas_sessions_replace_missing($pdo, $username, $keys)
+{
+    $username = sas_clip(trim((string) $username), 80);
+    if ($username === '' || !is_array($keys) || !$keys) {
+        return;
+    }
+    $tid = sas_session_tenant_id();
+    $ph = array();
+    $bind = array(':t' => $tid, ':u' => $username);
+    $i = 0;
+    foreach ($keys as $k) {
+        $k = sas_clip((string) $k, 80);
+        if ($k === '') {
+            continue;
+        }
+        $ph[] = ':k' . $i;
+        $bind[':k' . $i] = $k;
+        $i++;
+    }
+    if (!$ph) {
+        return;
+    }
+    $sql = 'DELETE FROM sas_user_sessions WHERE tenant_id = :t AND username = :u AND session_key NOT IN (' . implode(',', $ph) . ')';
+    $pdo->prepare($sql)->execute($bind);
+}
+
+function sas_sessions_note_online($pdo, $rowByUser)
+{
+    ensure_sas_users_cache_table($pdo);
+    $tid = sas_session_tenant_id();
+    $pdo->prepare('UPDATE sas_user_sessions SET is_open = 0 WHERE tenant_id = :t AND is_open = 1')
+        ->execute(array(':t' => $tid));
+    if (!is_array($rowByUser) || !$rowByUser) {
+        return;
+    }
+    foreach ($rowByUser as $username => $row) {
+        $username = sas_clip((string) $username, 80);
+        if ($username === '' || !is_array($row)) {
+            continue;
+        }
+        $pack = sas_session_pack($row);
+        if (!$pack) {
+            continue;
+        }
+        $pack['open'] = 1;
+        $pack['stop'] = null;
+        if ($pack['key'] === '' || $pack['key'] === 'live') {
+            $pack['key'] = sas_clip('live:' . $username, 80);
+        }
+        sas_sessions_upsert($pdo, $username, array($pack));
+    }
+}
+
+function sas_sessions_mark_user_closed($pdo, $username)
+{
+    $username = sas_clip(trim((string) $username), 80);
+    if ($username === '') {
+        return;
+    }
+    ensure_sas_users_cache_table($pdo);
+    $pdo->prepare('UPDATE sas_user_sessions SET is_open = 0 WHERE tenant_id = :t AND username = :u AND is_open = 1')
+        ->execute(array(':t' => sas_session_tenant_id(), ':u' => $username));
+}
+
+function sas_sessions_month($pdo, $username)
+{
+    $empty = array('month_used' => '', 'month_up' => '', 'month_down' => '');
+    $username = sas_clip(trim((string) $username), 80);
+    if ($username === '') {
+        return $empty;
+    }
+    $from = date('Y-m-01 00:00:00');
+    $st = $pdo->prepare(
+        'SELECT
+            COALESCE(SUM(CASE WHEN bytes_in IS NOT NULL THEN bytes_in ELSE 0 END), 0) AS up_b,
+            COALESCE(SUM(CASE WHEN bytes_in IS NOT NULL THEN IFNULL(bytes_out, 0) ELSE 0 END), 0) AS down_b,
+            COALESCE(SUM(CASE WHEN bytes_in IS NULL THEN IFNULL(bytes_out, 0) ELSE 0 END), 0) AS only_b,
+            SUM(CASE WHEN bytes_in IS NOT NULL THEN 1 ELSE 0 END) AS split_n
+         FROM sas_user_sessions
+         WHERE tenant_id = :t AND username = :u
+           AND (
+                (started_at IS NOT NULL AND started_at >= :from)
+                OR (started_at IS NULL AND is_open = 1)
+           )'
+    );
+    $st->execute(array(
+        ':t' => sas_session_tenant_id(),
+        ':u' => $username,
+        ':from' => $from,
+    ));
+    $row = $st->fetch();
+    if (!is_array($row)) {
+        return $empty;
+    }
+    $up = (float) $row['up_b'];
+    $down = (float) $row['down_b'];
+    $only = (float) $row['only_b'];
+    $total = $up + $down + $only;
+    $out = array(
+        'month_used' => $total > 0 ? sas_format_bytes($total) : '',
+        'month_up' => '',
+        'month_down' => '',
+    );
+    if (!empty($row['split_n'])) {
+        $out['month_up'] = sas_format_bytes($up);
+        $out['month_down'] = sas_format_bytes($down);
+    }
+    return $out;
+}
+
+function sas_sessions_public($pdo, $username)
+{
+    $username = sas_clip(trim((string) $username), 80);
+    $out = array();
+    if ($username === '') {
+        return $out;
+    }
+    ensure_sas_users_cache_table($pdo);
+    $st = $pdo->prepare(
+        'SELECT mac_address, framed_ip, nas_ip, started_at, stopped_at, session_seconds, bytes_in, bytes_out, is_open
+         FROM sas_user_sessions
+         WHERE tenant_id = :t AND username = :u
+         ORDER BY is_open DESC, started_at DESC, synced_at DESC
+         LIMIT 80'
+    );
+    $st->execute(array(':t' => sas_session_tenant_id(), ':u' => $username));
+    $rows = $st->fetchAll();
+    if (!is_array($rows)) {
+        return $out;
+    }
+    foreach ($rows as $r) {
+        $open = !empty($r['is_open']) ? 1 : 0;
+        $start = !empty($r['started_at']) ? (string) $r['started_at'] : '';
+        $stop = !empty($r['stopped_at']) ? (string) $r['stopped_at'] : '';
+        $in = (isset($r['bytes_in']) && $r['bytes_in'] !== null && $r['bytes_in'] !== '') ? (float) $r['bytes_in'] : null;
+        $down = (isset($r['bytes_out']) && $r['bytes_out'] !== null && $r['bytes_out'] !== '') ? (float) $r['bytes_out'] : null;
+        $upLabel = '';
+        $downLabel = '';
+        $usedLabel = '';
+        if ($in === null && $down === null) {
+            $usedLabel = '';
+        } elseif ($in === null) {
+            $usedLabel = sas_format_bytes($down);
+        } else {
+            $upLabel = sas_format_bytes($in);
+            $downLabel = sas_format_bytes($down === null ? 0 : $down);
+            $usedLabel = sas_format_bytes($in + ($down === null ? 0 : $down));
+        }
+        $out[] = array(
+            'mac' => isset($r['mac_address']) ? (string) $r['mac_address'] : '',
+            'ip' => isset($r['framed_ip']) ? (string) $r['framed_ip'] : '',
+            'nas' => isset($r['nas_ip']) ? (string) $r['nas_ip'] : '',
+            'start' => $start,
+            'stop' => $stop,
+            'open' => $open,
+            'duration' => sas_session_duration_label($start, $stop, isset($r['session_seconds']) ? $r['session_seconds'] : null, $open),
+            'up' => $upLabel,
+            'down' => $downLabel,
+            'used' => $usedLabel,
+        );
+    }
+    return $out;
+}
+
+function sas_sessions_pull($pdo, $config, $username, $userId = 0)
+{
+    $username = sas_clip(trim((string) $username), 80);
+    $userId = (int) $userId;
+    ensure_sas_users_cache_table($pdo);
+    $fresh = false;
+    $api = function_exists('sas_page_connector') ? sas_page_connector($config) : null;
+    if ($api && method_exists($api, 'listUserSessions')) {
+        if (function_exists('app_session_close')) {
+            app_session_close();
+        } elseif (session_status() === PHP_SESSION_ACTIVE) {
+            @session_write_close();
+        }
+        try {
+            if (method_exists($api, 'setTimeout')) {
+                $api->setTimeout(8);
+            }
+            $rows = $api->listUserSessions($username, $userId);
+            $fresh = !empty($api->lastSessionListOk);
+        } catch (Exception $e) {
+            $rows = array();
+        }
+        if (is_array($rows) && $rows) {
+            $packs = array();
+            $keys = array();
+            $stopped = 0;
+            foreach ($rows as $row) {
+                $p = sas_session_pack($row);
+                if (!$p) {
+                    continue;
+                }
+                if ($p['key'] === '' || $p['key'] === 'live') {
+                    $p['key'] = sas_clip('live:' . substr(md5($username . '|' . $p['mac'] . '|' . $p['ip'] . '|' . $p['start']), 0, 24), 80);
+                }
+                $packs[] = $p;
+                $keys[] = $p['key'];
+                if (!empty($p['stop'])) {
+                    $stopped++;
+                }
+            }
+            if ($packs) {
+                sas_sessions_upsert($pdo, $username, $packs);
+                if ($stopped > 0 || count($packs) > 1) {
+                    sas_sessions_replace_missing($pdo, $username, $keys);
+                } else {
+                    $pdo->prepare('UPDATE sas_user_sessions SET is_open = 0 WHERE tenant_id = :t AND username = :u AND is_open = 1 AND session_key <> :k')
+                        ->execute(array(
+                            ':t' => sas_session_tenant_id(),
+                            ':u' => $username,
+                            ':k' => $packs[0]['key'],
+                        ));
+                }
+            }
+        }
+    }
+    $month = sas_sessions_month($pdo, $username);
+    return array(
+        'ok' => true,
+        'fresh' => $fresh ? 1 : 0,
+        'rows' => sas_sessions_public($pdo, $username),
+        'month_used' => $month['month_used'],
+        'month_up' => $month['month_up'],
+        'month_down' => $month['month_down'],
+    );
 }
 
 }

@@ -60,16 +60,25 @@ if (isset($_GET['ajax']) && (string) $_GET['ajax'] === 'log_ring') {
         }
         try {
             $q = $pdo->query(
-                'SELECT m.id, m.success, m.queued_at, m.next_retry_at, m.retry_hold
+                'SELECT m.id, m.success, m.subscriber_id, m.queued_at, m.next_retry_at, m.retry_hold
                  FROM message_logs m
                  LEFT JOIN subscribers s ON s.id = m.subscriber_id
                  WHERE ' . $whereRing
             );
-            if ($q) {
-                while ($row = $q->fetch()) {
-                    $pack = function_exists('message_log_live_pack') ? message_log_live_pack($row, 'ar') : array('kind' => 'fail', 'label' => 'فشل');
-                    $out['rows'][(string) (int) $row['id']] = $pack;
+            $ringRows = $q ? $q->fetchAll() : array();
+            $settled = function_exists('message_logs_resolved_map') ? message_logs_resolved_map($pdo, $ringRows) : array();
+            foreach ($ringRows as $row) {
+                $rid = (int) $row['id'];
+                if (!empty($row['success'])) {
+                    $out['rows'][(string) $rid] = array('kind' => 'ok', 'label' => 'تم');
+                    continue;
                 }
+                if (!empty($settled[$rid]) || (isset($row['retry_hold']) && (string) $row['retry_hold'] === 'dup')) {
+                    $out['rows'][(string) $rid] = array('kind' => 'settled', 'label' => 'تمت المعالجة');
+                    continue;
+                }
+                $pack = function_exists('message_log_live_pack') ? message_log_live_pack($row, 'ar') : array('kind' => 'fail', 'label' => 'فشل');
+                $out['rows'][(string) $rid] = $pack;
             }
         } catch (Exception $e) {
         }
@@ -1611,7 +1620,7 @@ $sendFilters = array(
                         <?php endif; ?>
                     </td>
                     <td><small><?php echo e(message_type_title($row['message_type'])); ?></small></td>
-                    <td class="msg-status-log" data-log-live="<?php echo (int) $row['id']; ?>">
+                    <td class="msg-status-log" data-log-live="<?php echo (!$ok && !$resolved) ? (int) $row['id'] : 0; ?>">
                         <?php
                         $tryN = isset($row['attempt']) ? (int) $row['attempt'] : 0;
                         if ($tryN < 1) {
@@ -1626,13 +1635,9 @@ $sendFilters = array(
                         $failText = (!$ok && function_exists('message_log_fail_text')) ? message_log_fail_text($row) : '';
                         ?>
                         <?php if ($ok): ?>
-                            <span class="dot-msg ok" title="<?php echo e($isEnMsg ? 'Sent' : 'تم'); ?>"></span>
-                            <?php echo e($isEnMsg ? 'OK' : 'تم'); ?>
+                            <span class="msg-st-line"><span class="dot-msg ok" title="<?php echo e($isEnMsg ? 'Sent' : 'تم'); ?>"></span><span class="msg-ok-word"><?php echo e($isEnMsg ? 'OK' : 'تم'); ?></span></span>
                         <?php elseif ($resolved): ?>
-                            <span class="dot-msg resolved"></span>
-                            <span class="msg-fail-muted"><?php echo e($isEnMsg ? 'Fail' : 'فشل'); ?></span>
-                            <span class="msg-resolved-arrow">→</span>
-                            <span class="msg-resolved-ok" title="<?php echo e($failText !== '' ? $failText : ($isEnMsg ? 'Failure reason is not stored' : 'ماكو سبب محفوظ')); ?>"><?php echo e($isEnMsg ? 'Processed' : 'تمت المعالجة'); ?></span>
+                            <span class="msg-st-line"><span class="dot-msg resolved"></span><span class="msg-resolved-ok" title="<?php echo e($failText !== '' ? $failText : ($isEnMsg ? 'Failure reason is not stored' : 'ماكو سبب محفوظ')); ?>"><?php echo e($isEnMsg ? 'Processed' : 'تمت المعالجة'); ?></span></span>
                         <?php else: ?>
                             <?php
                             $liveHtml = function_exists('message_log_live_html') ? message_log_live_html($row, $isEnMsg ? 'en' : 'ar') : '';
@@ -1640,11 +1645,7 @@ $sendFilters = array(
                             <?php if ($liveHtml !== ''): ?>
                                 <?php echo $liveHtml; ?>
                             <?php else: ?>
-                            <span class="dot-msg fail"></span>
-                            <?php echo e($isEnMsg ? 'Fail' : 'فشل'); ?>
-                            <?php if ($showTry): ?>
-                                <span class="msg-try"><?php echo (int) $tryN; ?>/3</span>
-                            <?php endif; ?>
+                            <span class="msg-st-line"><span class="dot-msg fail"></span><span><?php echo e($isEnMsg ? 'Fail' : 'فشل'); ?></span><?php if ($showTry): ?><span class="msg-try"><?php echo (int) $tryN; ?>/3</span><?php endif; ?></span>
                             <?php endif; ?>
                         <?php endif; ?>
                         <?php if ($failText !== '' && !$ok && !$resolved): ?>
@@ -1743,6 +1744,10 @@ $sendFilters = array(
         #msgLogTable .msg-status-log { white-space: normal; }
         .msg-live-note { font-size: 12px; }
       }
+      .msg-st-line { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; vertical-align: middle; }
+      .msg-ok-word { color: #15803d; font-weight: 800; }
+      #msgLogTable tr.row-msg-fail .msg-ok-word { color: #15803d; }
+      #msgLogTable .msg-status-log { white-space: nowrap; vertical-align: middle; }
       .msg-resolved-ok { cursor: help; }
     </style>
     <script>
@@ -1850,29 +1855,38 @@ $sendFilters = array(
         ok: <?php echo json_encode($isEnMsg ? 'Sent' : 'تم'); ?>,
         fail: <?php echo json_encode($isEnMsg ? 'Failed' : 'فشل'); ?>
       };
+      function rowOf(cell) {
+        return cell && cell.closest ? cell.closest('tr') : null;
+      }
       function paint(id, kind, label) {
         var cell = document.querySelector('[data-log-live="' + id + '"]');
-        if (!cell) return;
+        if (!cell || cell.getAttribute('data-log-live') === '0') return;
+        var tr = rowOf(cell);
         if (kind === 'ok') {
-          cell.innerHTML = '<span class="dot-msg ok"></span> ' + labels.ok;
+          cell.innerHTML = '<span class="msg-st-line"><span class="dot-msg ok"></span><span class="msg-ok-word">' + labels.ok + '</span></span>';
+          if (tr) {
+            tr.classList.remove('row-msg-fail');
+            tr.classList.remove('row-msg-resolved');
+            tr.setAttribute('data-log-fail', '0');
+          }
+          cell.setAttribute('data-log-live', '0');
+          return;
+        }
+        if (kind === 'settled') {
+          cell.innerHTML = '<span class="msg-st-line"><span class="dot-msg resolved"></span><span class="msg-resolved-ok">' + (label || 'تمت المعالجة') + '</span></span>';
+          if (tr) {
+            tr.classList.remove('row-msg-fail');
+            tr.classList.add('row-msg-resolved');
+            tr.setAttribute('data-log-fail', '0');
+          }
+          cell.setAttribute('data-log-live', '0');
           return;
         }
         if (kind === 'fail') {
-          var live = cell.querySelector('.msg-live');
-          if (live) live.remove();
-          if (!cell.querySelector('.dot-msg')) {
-            cell.insertAdjacentHTML('afterbegin', '<span class="dot-msg fail"></span> ' + labels.fail + ' ');
-          }
+          cell.innerHTML = '<span class="msg-st-line"><span class="dot-msg fail"></span><span>' + labels.fail + '</span></span>';
           return;
         }
-        var box = cell.querySelector('.msg-live');
-        if (!box) {
-          cell.insertAdjacentHTML('afterbegin', '<span class="msg-live"><i class="msg-ring" aria-hidden="true"></i><b></b></span>');
-          box = cell.querySelector('.msg-live');
-        }
-        box.className = 'msg-live is-' + kind;
-        var b = box.querySelector('b');
-        if (b) b.textContent = label || '';
+        cell.innerHTML = '<span class="msg-live is-' + kind + '"><i class="msg-ring" aria-hidden="true"></i><b>' + (label || '') + '</b></span>';
       }
       function tick() {
         fetch('messages.php?ajax=log_ring&ids=' + ids.join(',') + '&_=' + Date.now(), { credentials: 'same-origin' })

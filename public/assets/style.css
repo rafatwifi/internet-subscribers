@@ -3946,6 +3946,17 @@ input.chk-sm[type="checkbox"],
 #msgLogTable tr.row-msg-resolved td { background: transparent; }
 #msgLogTable .msg-status-log {
   white-space: nowrap;
+  vertical-align: middle;
+}
+#msgLogTable .msg-st-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+#msgLogTable .msg-ok-word {
+  color: #15803d;
+  font-weight: 800;
 }
 #msgLogTable .msg-fail-muted {
   color: #94a3b8;

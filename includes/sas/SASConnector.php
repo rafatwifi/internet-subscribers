@@ -20,6 +20,7 @@ class SASConnector
     private $lastError = '';
     private $lastDebug = array();
     public $lastOnlineListOk = false;
+    public $lastSessionListOk = false;
 
     private $secretKey = 'abcdefghijuklmno0123456789012345';
     private $reclaimUser = '';
@@ -3392,6 +3393,151 @@ class SASConnector
             }
         }
         return $all;
+    }
+
+    /**
+     * جلسات المشترك من الساس (Session). يرجّع صفوف الجلسة كما جاءت.
+     */
+    public function listUserSessions($username, $userId = 0)
+    {
+        $username = trim((string) $username);
+        $userId = (int) $userId;
+        $this->lastSessionListOk = false;
+        if ($username === '' && $userId <= 0) {
+            return array();
+        }
+        if (!$this->token && !$this->login()) {
+            return array();
+        }
+        $payload = array(
+            'page' => 1,
+            'count' => 80,
+            'search' => $username,
+            'username' => $username,
+            'user_id' => $userId,
+            'id' => $userId,
+            'sortBy' => 'username',
+            'direction' => 'asc',
+        );
+        $routes = array(
+            'index/online',
+            'index/onlineUser',
+            'index/session',
+            'index/radacct',
+            'index/userSessions',
+            'index/userSession',
+            'user/sessions',
+            'user/session',
+        );
+        if ($userId > 0) {
+            $routes[] = 'user/' . $userId . '/sessions';
+            $routes[] = 'user/' . $userId . '/session';
+        }
+        $routes[] = 'index/session';
+        $want = strtolower($username);
+        foreach ($routes as $route) {
+            $payload['page'] = 1;
+            $full = $this->decodeApiBody($this->post($route, $payload, true), false);
+            if (!is_array($full) || isset($full['__http_error']) || isset($full['__auth_error']) || isset($full['__curl_error'])) {
+                continue;
+            }
+            $this->lastSessionListOk = true;
+            $batch = $this->normalizeUserList($full);
+            if (!is_array($batch) || !$batch) {
+                $batch = array();
+                foreach (array('sessions', 'session', 'radacct', 'acct') as $sk) {
+                    $chunk = null;
+                    if (isset($full[$sk]) && is_array($full[$sk])) {
+                        $chunk = $full[$sk];
+                    } elseif (isset($full['data'][$sk]) && is_array($full['data'][$sk])) {
+                        $chunk = $full['data'][$sk];
+                    }
+                    if ($chunk === null) {
+                        continue;
+                    }
+                    $try = $this->normalizeUserList($chunk);
+                    if (is_array($try) && $try) {
+                        $batch = $try;
+                        break;
+                    }
+                }
+            }
+            $mine = array();
+            $global = ($route === 'index/session');
+            foreach ($batch as $row) {
+                if (!is_array($row) || !$this->sasLooksLikeSessionRow($row)) {
+                    continue;
+                }
+                $u = isset($row['username']) ? strtolower(trim((string) $row['username'])) : '';
+                $rid = 0;
+                if (isset($row['user_id']) && !is_array($row['user_id'])) {
+                    $rid = (int) $row['user_id'];
+                } elseif (isset($row['id']) && !is_array($row['id']) && $global) {
+                    $rid = (int) $row['id'];
+                }
+                if ($global) {
+                    if ($want !== '' && $u !== '' && $u !== $want) {
+                        continue;
+                    }
+                    if ($u === '' && ($userId <= 0 || $rid !== $userId)) {
+                        continue;
+                    }
+                } elseif ($u !== '' && $want !== '' && $u !== $want && ($userId <= 0 || $rid !== $userId)) {
+                    continue;
+                }
+                $mine[] = $row;
+            }
+            $globalRoute = ($route === 'index/session');
+            if ($mine && !$globalRoute && count($batch) >= 80) {
+                $page = 2;
+                while ($page <= 3) {
+                    $payload['page'] = $page;
+                    $more = $this->decodeApiBody($this->post($route, $payload, true), false);
+                    if (!is_array($more) || isset($more['__http_error']) || isset($more['__auth_error']) || isset($more['__curl_error'])) {
+                        break;
+                    }
+                    $moreBatch = $this->normalizeUserList($more);
+                    if (!is_array($moreBatch) || !$moreBatch) {
+                        break;
+                    }
+                    foreach ($moreBatch as $row) {
+                        if (!is_array($row) || !$this->sasLooksLikeSessionRow($row)) {
+                            continue;
+                        }
+                        $u = isset($row['username']) ? strtolower(trim((string) $row['username'])) : '';
+                        $rid = 0;
+                        if (isset($row['user_id']) && !is_array($row['user_id'])) {
+                            $rid = (int) $row['user_id'];
+                        }
+                        if ($u !== '' && $want !== '' && $u !== $want && ($userId <= 0 || $rid !== $userId)) {
+                            continue;
+                        }
+                        $mine[] = $row;
+                    }
+                    if (count($moreBatch) < 80) {
+                        break;
+                    }
+                    $page++;
+                }
+            }
+            if ($mine) {
+                return $mine;
+            }
+        }
+        return array();
+    }
+
+    private function sasLooksLikeSessionRow($row)
+    {
+        if (!is_array($row)) {
+            return false;
+        }
+        foreach (array('acctstarttime', 'acctsessionid', 'callingstationid', 'radacctid', 'acctstoptime', 'acct_session_id', 'mac', 'mac_address', 'framedipaddress', 'framed_ip') as $k) {
+            if (isset($row[$k]) && !is_array($row[$k]) && trim((string) $row[$k]) !== '') {
+                return true;
+            }
+        }
+        return false;
     }
 
     public function activateUserCard($username, $pin, $userId = 0, $cardId = 0, $profileId = 0)

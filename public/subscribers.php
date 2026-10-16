@@ -105,15 +105,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             if ($addDebts && $sendDebtWa && (int) $debtInfo['count'] > 0) {
                 $debtTotal = subscriber_unpaid_total($pdo, $newId);
-                $row = array(
-                    'name' => $name,
-                    'phone' => $phone,
-                    'month_label' => date('Y-m'),
-                    'amount' => (float) $debtInfo['sum'],
-                    'debt_total' => $debtTotal,
-                    'notes' => '',
-                );
-                $msg = debt_created_message($row, $config);
+                $newDebtLines = (isset($debtInfo['lines']) && is_array($debtInfo['lines'])) ? $debtInfo['lines'] : array();
+                $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
+                $msg = function_exists('debt_added_customer_message')
+                    ? debt_added_customer_message($name, $newDebtLines, array(), $currency)
+                    : debt_created_message(array(
+                        'name' => $name,
+                        'phone' => $phone,
+                        'month_label' => date('Y-m'),
+                        'amount' => (float) $debtInfo['sum'],
+                        'debt_total' => $debtTotal,
+                        'notes' => '',
+                    ), $config);
                 $result = whatsapp_send($config, $phone, $msg, 'debt_created');
                 log_message($pdo, $newId, $result);
                 if (!empty($result['success'])) {
@@ -1980,8 +1983,7 @@ window.DEBT_ENTRY = {
     var anyDebt = rows.some(function (r) { return r.debt || (r.debtAmount > 0); });
     showEl(document.getElementById('opsSep'), n > 0);
     showEl(document.getElementById('opsItemOpen'), !!one);
-    // تسديد ديون: دائماً مع أي تحديد — وبالأخص عند وجود دين
-    showEl(document.getElementById('opsItemPay'), n >= 1);
+    showEl(document.getElementById('opsItemPay'), anyDebt);
     showEl(document.getElementById('opsItemActivate'), !!one);
     showEl(document.getElementById('opsItemGiveTest'), !!one);
     showEl(document.getElementById('opsItemBulkActivate'), n > 1);
@@ -2060,13 +2062,6 @@ window.DEBT_ENTRY = {
     if (!opsDrop) return;
     opsIgnoreCloseUntil = Date.now() + 450;
     refreshMenuItems();
-    // تأكيد إضافي: زر التسديد ظاهر
-    var payBtn = document.getElementById('opsItemPay');
-    if (payBtn && selectedRows().length >= 1) {
-      payBtn.hidden = false;
-      payBtn.removeAttribute('hidden');
-      payBtn.style.display = 'block';
-    }
     placeMenuAt(opsDrop, clientX, clientY, opsBtn);
     if (opsBtn) opsBtn.setAttribute('aria-expanded', 'true');
   }

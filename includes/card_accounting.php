@@ -352,7 +352,7 @@ function transfer_cards($pdo, $fromAgentId, $toAgentId, $profileId, $profileName
             if ($srcNow && (int) $srcNow['qty'] >= $qty) {
                 $profileId = (int) $srcNow['profile_id'];
                 $profileName = (string) $srcNow['profile_name'];
-                $ok = card_stock_adjust($pdo, $fromAgentId, $profileId, $profileName, -$qty, $wholesalePrice, $agentPrice);
+            $ok = card_stock_adjust($pdo, $fromAgentId, $profileId, $profileName, -$qty, $wholesalePrice, $agentPrice);
                 if (!$ok && !$sasBacked) {
                     $pdo->rollBack();
                     return array(false, 'insufficient_stock', 0);
@@ -401,22 +401,22 @@ function transfer_cards($pdo, $fromAgentId, $toAgentId, $profileId, $profileName
             $insParams[':sas'] = $sasBacked ? $rangesJson : null;
             $ins->execute($insParams);
         } catch (Exception $e) {
-            $ins = $pdo->prepare(
-                'INSERT INTO agent_card_transfers
-                 (from_agent_id, to_agent_id, profile_id, profile_name, qty, wholesale_price, agent_price, note, created_by)
-                 VALUES (:f, :t, :p, :n, :q, :w, :ap, :note, :by)'
-            );
-            $ins->execute(array(
-                ':f' => $fromAgentId > 0 ? $fromAgentId : null,
-                ':t' => $toAgentId,
-                ':p' => $profileId,
-                ':n' => $profileName,
-                ':q' => $qty,
-                ':w' => (float) $wholesalePrice,
-                ':ap' => (float) $agentPrice,
-                ':note' => $note !== '' ? $note : null,
-                ':by' => $createdBy > 0 ? $createdBy : null,
-            ));
+        $ins = $pdo->prepare(
+            'INSERT INTO agent_card_transfers
+             (from_agent_id, to_agent_id, profile_id, profile_name, qty, wholesale_price, agent_price, note, created_by)
+             VALUES (:f, :t, :p, :n, :q, :w, :ap, :note, :by)'
+        );
+        $ins->execute(array(
+            ':f' => $fromAgentId > 0 ? $fromAgentId : null,
+            ':t' => $toAgentId,
+            ':p' => $profileId,
+            ':n' => $profileName,
+            ':q' => $qty,
+            ':w' => (float) $wholesalePrice,
+            ':ap' => (float) $agentPrice,
+            ':note' => $note !== '' ? $note : null,
+            ':by' => $createdBy > 0 ? $createdBy : null,
+        ));
         }
         $xferId = (int) $pdo->lastInsertId();
         $pdo->commit();
@@ -1119,9 +1119,9 @@ function list_recent_card_transfers($pdo, $limit = 30, $agentUserId = null, $cre
     }
     $sql .= ' ORDER BY t.created_at DESC, t.id DESC LIMIT ' . $limit;
     try {
-        $st = $pdo->prepare($sql);
-        $st->execute($params);
-        return $st->fetchAll();
+    $st = $pdo->prepare($sql);
+    $st->execute($params);
+    return $st->fetchAll();
     } catch (Exception $e) {
         return array();
     }
@@ -1195,17 +1195,17 @@ function record_card_payment($pdo, $agentUserId, $amount, $note, $createdBy)
         return array(true, 'ok', (int) $pdo->lastInsertId());
     } catch (Exception $e) {
         // بدون عمود tenant_id
-        try {
-            $pdo->prepare(
-                'INSERT INTO agent_card_payments (agent_user_id, amount, note, created_by)
-                 VALUES (:a, :m, :n, :by)'
-            )->execute(array(
-                ':a' => $agentUserId,
-                ':m' => $amount,
-                ':n' => $note !== '' ? $note : null,
-                ':by' => $createdBy > 0 ? $createdBy : null,
-            ));
-            return array(true, 'ok', (int) $pdo->lastInsertId());
+    try {
+        $pdo->prepare(
+            'INSERT INTO agent_card_payments (agent_user_id, amount, note, created_by)
+             VALUES (:a, :m, :n, :by)'
+        )->execute(array(
+            ':a' => $agentUserId,
+            ':m' => $amount,
+            ':n' => $note !== '' ? $note : null,
+            ':by' => $createdBy > 0 ? $createdBy : null,
+        ));
+        return array(true, 'ok', (int) $pdo->lastInsertId());
         } catch (Exception $e2) {
             return array(false, $e2->getMessage(), 0);
         }

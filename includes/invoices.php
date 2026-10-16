@@ -371,6 +371,7 @@ function insert_opening_debts($pdo, $subscriberId, $post)
     $dnotes = isset($post['debt_notes']) && is_array($post['debt_notes']) ? $post['debt_notes'] : array();
     $debtCount = 0;
     $debtSum = 0.0;
+    $lines = array();
 
     $subPrice = subscriber_monthly_price($pdo, $subscriberId);
     $rentFee = 0.0;
@@ -476,8 +477,14 @@ function insert_opening_debts($pdo, $subscriberId, $post)
         }
         $debtCount++;
         $debtSum += $amt;
+        $lines[] = array(
+            'id' => $newId,
+            'month' => $month,
+            'amount' => $amt,
+            'notes' => $dnote,
+        );
     }
-    return array('count' => $debtCount, 'sum' => $debtSum);
+    return array('count' => $debtCount, 'sum' => $debtSum, 'lines' => $lines);
 }
 
 function debt_edit_denied_message()

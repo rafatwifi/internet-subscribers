@@ -592,6 +592,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!function_exists('insert_opening_debts')) {
             sas_json_out(false, 'ملف الديون غير مكتمل');
         }
+        $oldDebtLines = function_exists('debt_unpaid_lines') ? debt_unpaid_lines($pdo, $localId) : array();
         $added = insert_opening_debts($pdo, $localId, array(
             'debt_kind' => array($debtKind),
             'debt_amount' => array($amount),
@@ -614,15 +615,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 } elseif ($mlStore === '') {
                     $mlStore = date('Y-m');
                 }
-                $row = array(
-                    'name' => $subRow['name'],
-                    'phone' => $subRow['phone'],
-                    'month_label' => $mlStore,
-                    'amount' => isset($added['sum']) ? $added['sum'] : $amount,
-                    'debt_total' => $total,
-                    'notes' => $notes,
-                );
-                $msgWa = debt_created_message($row, $config);
+                $newDebtLines = (isset($added['lines']) && is_array($added['lines'])) ? $added['lines'] : array();
+                if (!$newDebtLines) {
+                    $newDebtLines = array(array(
+                        'month' => $mlStore,
+                        'amount' => isset($added['sum']) ? $added['sum'] : $amount,
+                        'notes' => $notes,
+                    ));
+                }
+                $currencyWa = isset($config['currency']) ? $config['currency'] : 'د.ع';
+                $msgWa = function_exists('debt_added_customer_message')
+                    ? debt_added_customer_message($subRow['name'], $newDebtLines, $oldDebtLines, $currencyWa)
+                    : debt_created_message(array(
+                        'name' => $subRow['name'],
+                        'phone' => $subRow['phone'],
+                        'month_label' => $mlStore,
+                        'amount' => isset($added['sum']) ? $added['sum'] : $amount,
+                        'debt_total' => $total,
+                        'notes' => $notes,
+                    ), $config);
                 $result = whatsapp_send($config, $subRow['phone'], $msgWa, 'debt_created');
                 if (function_exists('log_message')) {
                     log_message($pdo, $localId, $result);
@@ -1104,7 +1115,7 @@ if (isset($_GET['live']) && $_GET['live'] === '1') {
     if (function_exists('app_session_close')) {
         app_session_close();
     }
-    $html = '<tr><td colspan="18">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
+    $html = '<tr><td colspan="19">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
     $liveCount = 0;
     try {
         $fromSql = function_exists('sas_cache_list_from_sql')
@@ -1151,12 +1162,12 @@ if (isset($_GET['live']) && $_GET['live'] === '1') {
         }
         $liveCount = count($liveRows);
         if ($html === '') {
-            $html = '<tr><td colspan="18">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
+            $html = '<tr><td colspan="19">' . e($lang === 'en' ? 'No matches' : 'ماكو نتيجة') . '</td></tr>';
         }
     } catch (Exception $e) {
-        $html = '<tr><td colspan="18">' . e($e->getMessage()) . '</td></tr>';
+        $html = '<tr><td colspan="19">' . e($e->getMessage()) . '</td></tr>';
     } catch (Error $e) {
-        $html = '<tr><td colspan="18">' . e($e->getMessage()) . '</td></tr>';
+        $html = '<tr><td colspan="19">' . e($e->getMessage()) . '</td></tr>';
     }
     echo json_encode(array(
         'html' => $html,
@@ -1271,6 +1282,74 @@ try {
     }
 }
 
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'live_online') {
+    header('Content-Type: application/json; charset=utf-8');
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
+    $liveMap = array();
+    try {
+        if (function_exists('sas_refresh_online_flags_throttled')) {
+            sas_refresh_online_flags_throttled($pdo, $config, 2, true);
+        }
+        $rawUsers = isset($_GET['users']) ? (string) $_GET['users'] : '';
+        $wantUsers = array();
+        foreach (explode(',', $rawUsers) as $oneUser) {
+            $oneUser = trim($oneUser);
+            if ($oneUser === '' || isset($wantUsers[$oneUser])) {
+                continue;
+            }
+            $wantUsers[$oneUser] = 1;
+            if (count($wantUsers) >= 200) {
+                break;
+            }
+        }
+        if ($wantUsers) {
+            $tidLive = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+            if ($tidLive <= 0) {
+                $tidLive = 1;
+            }
+            $ph = array();
+            $bind = array(':t' => $tidLive);
+            $i = 0;
+            foreach (array_keys($wantUsers) as $oneUser) {
+                $ph[] = ':u' . $i;
+                $bind[':u' . $i] = $oneUser;
+                $i++;
+            }
+            $stLive = $pdo->prepare(
+                'SELECT username, is_online, framed_ip, mac_address, daily_traffic
+                 FROM sas_users_cache
+                 WHERE tenant_id = :t AND username IN (' . implode(',', $ph) . ')'
+            );
+            $stLive->execute($bind);
+            $liveRows = $stLive->fetchAll();
+            if (is_array($liveRows)) {
+                foreach ($liveRows as $lr) {
+                    $un = isset($lr['username']) ? (string) $lr['username'] : '';
+                    if ($un === '') {
+                        continue;
+                    }
+                    $on = !empty($lr['is_online']) ? 1 : 0;
+                    $ip = ($on && isset($lr['framed_ip'])) ? trim((string) $lr['framed_ip']) : '';
+                    $mac = isset($lr['mac_address']) ? trim((string) $lr['mac_address']) : '';
+                    $traf = isset($lr['daily_traffic']) ? trim((string) $lr['daily_traffic']) : '';
+                    $liveMap[$un] = array(
+                        'on' => $on,
+                        'ip' => $ip,
+                        'mac' => $mac,
+                        'traf' => $traf,
+                    );
+                }
+            }
+        }
+        echo json_encode(array('ok' => true, 'rows' => $liveMap));
+    } catch (Exception $e) {
+        echo json_encode(array('ok' => false, 'rows' => array()));
+    }
+    exit;
+}
+
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'live_table') {
     header('Content-Type: application/json; charset=utf-8');
     if (function_exists('app_session_close')) {
@@ -1282,7 +1361,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'live_table') {
     }
     try {
         if (function_exists('sas_refresh_online_flags_throttled')) {
-            sas_refresh_online_flags_throttled($pdo, $config, 4, false);
+            sas_refresh_online_flags_throttled($pdo, $config, 2, true);
         } elseif (function_exists('sas_refresh_online_flags')) {
             sas_refresh_online_flags($pdo, $config);
         }
@@ -1301,7 +1380,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'live_table') {
             $html .= sas_render_table_row($liveRow, $nLive++, $config, $lang);
         }
         if ($html === '') {
-            $html = '<tr><td colspan="18">' . e($lang === 'en' ? 'No SAS users in cache yet' : 'ماكو مشتركين من الساس بعد') . '</td></tr>';
+            $html = '<tr><td colspan="19">' . e($lang === 'en' ? 'No SAS users in cache yet' : 'ماكو مشتركين من الساس بعد') . '</td></tr>';
         }
         echo json_encode(array('ok' => true, 'html' => $html, 'count' => count($rows)));
     } catch (Exception $e) {
@@ -1453,7 +1532,9 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 .sas-radius-page #subsTable td.col-exp {
   text-align: left !important;
   vertical-align: middle;
-  white-space: nowrap;
+  white-space: nowrap !important;
+  padding-left: 6px;
+  padding-right: 6px;
 }
 .sas-radius-page #subsTable th.col-phone,
 .sas-radius-page #subsTable td.col-phone,
@@ -1465,44 +1546,63 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   white-space: nowrap;
 }
 .sas-expire-dt {
-  display: inline-flex;
-  flex-direction: row;
+  display: inline-grid;
+  grid-template-columns: 10ch 8ch;
+  column-gap: 1ch;
   align-items: center;
-  justify-content: flex-start;
-  gap: 6px;
+  justify-items: start;
+  direction: ltr;
+  width: max-content;
   margin: 0;
-  white-space: nowrap;
   line-height: 1.2;
   text-align: left;
-  font-size: 14px;
+  white-space: nowrap;
+  font-family: Consolas, "Courier New", Courier, monospace;
+  font-size: 13px;
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  letter-spacing: 0;
 }
 .sas-expire-dt .sas-exp-d,
 .sas-expire-dt .sas-exp-t {
-  display: inline;
-  width: auto;
-  font-size: 14px;
-  font-weight: 700;
-  opacity: 1;
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
   text-align: left;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.sas-radius-page #subsTable th.col-msg,
+.sas-radius-page #subsTable td.col-msg,
+.sas-radius-page #subsTable td.msg-status-cell {
+  width: 1px;
+  min-width: 0;
+  max-width: none;
+  white-space: nowrap;
+  padding-left: 6px;
+  padding-right: 6px;
 }
 .sas-radius-page #subsTable .col-msg {
-  white-space: nowrap;
-  text-align: center;
+  text-align: center !important;
 }
 .sas-radius-page #subsTable .msg-status-row {
-  display: inline-grid;
-  grid-template-columns: 22px 12px;
-  column-gap: 6px;
+  display: inline-flex;
   align-items: center;
-  justify-items: center;
+  justify-content: center;
+  gap: 4px;
   direction: ltr;
-  width: 40px;
+  width: auto;
 }
-.sas-radius-page #subsTable .msg-retry-slot {
-  width: 22px;
-  height: 22px;
-  display: block;
+.sas-radius-page #subsTable .msg-retry-slot:empty {
+  display: none;
+  width: 0;
+  height: 0;
+  margin: 0;
+  padding: 0;
 }
 .sas-radius-page #subsTable .dot-msg {
   display: block;
@@ -2515,6 +2615,13 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+.sas-radius-page #subsTable th.col-mac,
+.sas-radius-page #subsTable td.col-mac {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  direction: ltr;
+}
 .sas-radius-page #subsTable th.col-ping,
 .sas-radius-page #subsTable td.col-ping {
   white-space: nowrap;
@@ -2845,30 +2952,41 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 }
 @media (min-width: 761px) {
   body:has(.sas-radius-page) .footer { display: none; }
-  body:has(.sas-radius-page) .main-top {
-    position: sticky;
-    top: 0;
-    z-index: 60;
+  body:has(.sas-radius-page) .sidebar {
+    overflow: hidden;
+    scrollbar-width: none;
   }
-  .sas-table-card {
-    display: flex;
-    flex-direction: column;
-    max-height: calc(100vh - 168px);
-    min-height: 0;
+  body:has(.sas-radius-page) .sidebar::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+    display: none;
   }
-  .sas-table-headbar { flex: 0 0 auto; position: sticky; top: 0; z-index: 4; }
+  body:has(.sas-radius-page) .main {
+    min-width: 0;
+    overflow: visible;
+  }
+  body:has(.sas-radius-page) .container {
+    width: auto;
+    max-width: none;
+    min-width: 0;
+    margin: 8px 10px 16px;
+    overflow: visible;
+  }
+  .sas-radius-page,
+  .sas-table-card,
+  body.top-away:has(.sas-radius-page) .sas-table-card {
+    max-height: none;
+    height: auto;
+    overflow: visible;
+  }
   .sas-radius-page .table-wrap {
-    flex: 1 1 auto;
-    min-height: 0;
-    overflow: auto;
+    max-height: none;
+    overflow-x: auto;
+    overflow-y: visible;
   }
   .sas-radius-page #subsTable thead th {
-    position: sticky;
-    top: 0;
-    z-index: 3;
-    background: #f4f4f4;
+    position: static;
   }
-  #subsPager { flex: 0 0 auto; }
 }
 .bulk-act-card, .bulk-act-people, .bulk-act-person { max-width: 100%; }
 .bulk-act-person header { flex-wrap: wrap; align-items: center; }
@@ -3020,6 +3138,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
                 <th class="col-ping" title="<?php echo e($lang === 'en' ? 'Ping while online, last connection while offline' : 'البنك للمتصل، وآخر اتصال للفاصل'); ?>">PING</th>
                 <th class="col-user"><?php echo sas_sort_link('username', $lang === 'en' ? 'Username' : 'اسم الدخول', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
                 <th class="col-ip"><?php echo sas_sort_link('ip', 'IP Address', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
+                <th class="col-mac" title="<?php echo e($lang === 'en' ? 'MAC while online, last MAC while offline' : 'الماك للمتصل، وآخر ماك للفاصل'); ?>">MAC</th>
                 <th class="col-fn"><?php echo sas_sort_link('firstname', $lang === 'en' ? 'First Name' : 'الاسم الأول', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
                 <th class="col-ln"><?php echo sas_sort_link('lastname', $lang === 'en' ? 'Last Name' : 'الاسم الثاني', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
                 <th class="col-phone"><?php echo e($lang === 'en' ? 'Phone' : 'الهاتف'); ?></th>
@@ -3048,7 +3167,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
                 } else {
                     $emptyMsg = ($lang === 'en') ? 'No SAS users in cache yet' : 'ماكو مشتركين من الساس بعد';
                 }
-                echo '<tr><td colspan="18">' . e($emptyMsg) . '</td></tr>';
+                echo '<tr><td colspan="19">' . e($emptyMsg) . '</td></tr>';
             }
             if (function_exists('phones_known_register_from_rows')) {
                 phones_known_register_from_rows($rows, $pdo);
@@ -3175,6 +3294,12 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     <div class="cols-check ops-item" data-col-row="ip">
         <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
         <label><input type="checkbox" data-col="ip" checked> IP Address</label>
+        <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
+        <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
+    </div>
+    <div class="cols-check ops-item" data-col-row="mac">
+        <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
+        <label><input type="checkbox" data-col="mac" checked> MAC</label>
         <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
         <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
     </div>
@@ -3525,6 +3650,17 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     </div>
 </div>
 
+<div class="modal-backdrop hidden" id="sasAskModal" role="dialog" aria-modal="true">
+    <div class="modal-card">
+        <h3 id="sasAskTitle"></h3>
+        <p class="meta" id="sasAskText" style="margin:0 0 14px"></p>
+        <div style="display:flex;gap:8px">
+            <button type="button" class="btn ghost" id="sasAskNo" style="flex:1"><?php echo e($lang === 'en' ? 'Cancel' : 'إلغاء'); ?></button>
+            <button type="button" class="btn" id="sasAskYes" style="flex:1;background:#0f172a;color:#fff;border:0"><?php echo e($lang === 'en' ? 'Disconnect' : 'فصل'); ?></button>
+        </div>
+    </div>
+</div>
+
 <div class="modal-backdrop hidden" id="sasRentConfirmModal" role="dialog" aria-modal="true" style="z-index:12000">
     <div class="modal-card ops-modal-card">
         <h3 id="sasRentConfirmTitle"><?php echo e($lang === 'en' ? 'Rental' : 'الإيجار'); ?></h3>
@@ -3580,7 +3716,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   var liveBusy = false;
   var COLS_KEY = 'sas_table_cols_v1';
   var ORDER_KEY = 'sas_table_col_order_v1';
-  var DEFAULT_COL_ORDER = ['num','status','ping','user','ip','fn','ln','phone','exp','parent','pkg','rent','debt','traf','grace','days','msg'];
+  var DEFAULT_COL_ORDER = ['num','status','ping','user','ip','mac','fn','ln','phone','exp','parent','pkg','rent','debt','traf','grace','days','msg'];
   function loadLocalCols() {
     try {
       var raw = localStorage.getItem(COLS_KEY);
@@ -3978,12 +4114,6 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     if (!opsDrop) return;
     opsIgnoreCloseUntil = Date.now() + 450;
     updateOps();
-    var payBtn = document.getElementById('opsItemPay');
-    if (payBtn && selectedRows().length >= 1) {
-      payBtn.hidden = false;
-      payBtn.removeAttribute('hidden');
-      payBtn.style.display = 'block';
-    }
     placeMenuAt(opsDrop, clientX, clientY, opsBtn);
     if (opsBtn) opsBtn.setAttribute('aria-expanded', 'true');
   }
@@ -3991,10 +4121,11 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     var rows = selectedRows();
     var n = rows.length;
     var one = n === 1 ? rows[0] : null;
+    var anyDebt = rows.some(function (r) { return r.debt; });
     showEl(document.getElementById('opsSep'), n > 0);
     showEl(document.getElementById('opsItemHint'), n === 0);
     showEl(document.getElementById('opsItemOpen'), !!one);
-    showEl(document.getElementById('opsItemPay'), n >= 1);
+    showEl(document.getElementById('opsItemPay'), anyDebt);
     showEl(document.getElementById('opsItemActivate'), !!one && !maintBlockActivate);
     showEl(document.getElementById('opsItemProfile'), !!one);
     showEl(document.getElementById('opsItemEnable'), !!(one && !one.enabled));
@@ -4008,6 +4139,76 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     showEl(document.getElementById('opsItemDays'), !!(one && one.hasDays));
     showEl(document.getElementById('opsItemRetry'), !!(one && one.msgFail));
   }
+  var askRun = null;
+  function closeAsk() {
+    var m = document.getElementById('sasAskModal');
+    if (m) m.classList.add('hidden');
+    askRun = null;
+  }
+  function openAsk(title, text, onYes) {
+    var m = document.getElementById('sasAskModal');
+    var h = document.getElementById('sasAskTitle');
+    var p = document.getElementById('sasAskText');
+    if (!m || !h || !p) {
+      if (onYes) onYes();
+      return;
+    }
+    h.textContent = title || '';
+    p.textContent = text || '';
+    askRun = onYes || null;
+    m.classList.remove('hidden');
+  }
+  function runDisconnect(one) {
+    if (!one) return;
+    postSas('sas_disconnect', { id: one.id }).then(function (d) {
+      if (d && d.ok) {
+        rememberActFlash((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Disconnected' : 'تم قطع الاتصال'); ?>, 'ok');
+        if (one.tr) {
+          one.tr.setAttribute('data-online', '0');
+          var ipCell = one.tr.querySelector('.col-ip');
+          if (ipCell) ipCell.textContent = '-';
+          var macCell = one.tr.querySelector('.col-mac');
+          if (macCell) macCell.title = <?php echo json_encode($lang === 'en' ? 'Last MAC' : 'آخر ماك'); ?>;
+        }
+        showAppToast((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Disconnected' : 'تم قطع الاتصال'); ?>, 'ok');
+        chaseOnline();
+      } else {
+        showAppToast((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Failed' : 'فشل'); ?>, 'error');
+      }
+    }).catch(function () {
+      showAppToast(<?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>, 'error');
+    });
+  }
+  function runBulkDisconnect(onlineRows) {
+    if (!onlineRows || !onlineRows.length) return;
+    var body = new FormData();
+    body.append('csrf', csrf);
+    body.append('action', 'bulk_disconnect');
+    onlineRows.forEach(function (r) { body.append('ids[]', r.id); });
+    fetch('sas.php', { method: 'POST', body: body, credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        rememberActFlash((d && d.message) || '', d && d.ok ? 'ok' : 'error');
+        window.location.reload();
+      })
+      .catch(function () {
+        showAppToast(<?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>, 'error');
+      });
+  }
+  (function bindAsk() {
+    var yes = document.getElementById('sasAskYes');
+    var no = document.getElementById('sasAskNo');
+    var m = document.getElementById('sasAskModal');
+    if (yes) yes.addEventListener('click', function () {
+      var fn = askRun;
+      closeAsk();
+      if (fn) fn();
+    });
+    if (no) no.addEventListener('click', closeAsk);
+    if (m) m.addEventListener('click', function (e) {
+      if (e.target === m) closeAsk();
+    });
+  })();
   function runOps(action) {
     var rows = selectedRows();
     var one = rows.length === 1 ? rows[0] : null;
@@ -4029,44 +4230,24 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
       return;
     }
     if (action === 'disconnect' && one) {
-      if (!window.confirm(<?php echo json_encode($lang === 'en' ? 'Disconnect this online session?' : 'تقطع اتصال هذا المشترك الأونلاين؟'); ?>)) return;
-      postSas('sas_disconnect', { id: one.id }).then(function (d) {
-        if (d && d.ok) {
-          rememberActFlash((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Disconnected' : 'تم قطع الاتصال'); ?>, 'ok');
-          if (one.tr) {
-            one.tr.setAttribute('data-online', '0');
-            var ipCell = one.tr.querySelector('.col-ip');
-            if (ipCell) ipCell.textContent = '-';
-          }
-          showAppToast((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Disconnected' : 'تم قطع الاتصال'); ?>, 'ok');
-        } else {
-          alert((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Failed' : 'فشل'); ?>);
-        }
-      }).catch(function () {
-        alert(<?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>);
-      });
+      openAsk(
+        <?php echo json_encode($lang === 'en' ? 'Disconnect' : 'فصل الاتصال'); ?>,
+        (one.username || one.id || '') + ' — ' + <?php echo json_encode($lang === 'en' ? 'Cut this online session?' : 'تقطع اتصال هذا المشترك؟'); ?>,
+        function () { runDisconnect(one); }
+      );
       return;
     }
     if (action === 'bulk_disconnect') {
       var onlineRows = rows.filter(function (r) { return r.online; });
       if (!onlineRows.length) {
-        alert(<?php echo json_encode($lang === 'en' ? 'No online users selected' : 'ماكو مشتركين أونلاين محددين'); ?>);
+        showAppToast(<?php echo json_encode($lang === 'en' ? 'No online users selected' : 'ماكو مشتركين أونلاين محددين'); ?>, 'error');
         return;
       }
-      if (!window.confirm(<?php echo json_encode($lang === 'en' ? 'Disconnect selected online users?' : 'تقطع اتصال المحددين الأونلاين؟'); ?> + ' (' + onlineRows.length + ')')) return;
-      var body = new FormData();
-      body.append('csrf', csrf);
-      body.append('action', 'bulk_disconnect');
-      onlineRows.forEach(function (r) { body.append('ids[]', r.id); });
-      fetch('sas.php', { method: 'POST', body: body, credentials: 'same-origin' })
-        .then(function (r) { return r.json(); })
-        .then(function (d) {
-          rememberActFlash((d && d.message) || '', d && d.ok ? 'ok' : 'error');
-          window.location.reload();
-        })
-        .catch(function () {
-          alert(<?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>);
-        });
+      openAsk(
+        <?php echo json_encode($lang === 'en' ? 'Disconnect' : 'فصل الاتصال'); ?>,
+        <?php echo json_encode($lang === 'en' ? 'Cut the selected online sessions?' : 'تقطع اتصال المحددين الأونلاين؟'); ?> + ' (' + onlineRows.length + ')',
+        function () { runBulkDisconnect(onlineRows); }
+      );
       return;
     }
     if (action === 'give_test' && one) {
@@ -5333,6 +5514,97 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
         .catch(function () { if (window.appBusyDone) window.appBusyDone(); });
     });
   }
+  function chaseOnline() {
+    [800, 2000, 4000, 7000].forEach(function (ms) {
+      setTimeout(function () { paintLiveOnline(); }, ms);
+    });
+  }
+  function visibleLiveNames() {
+    var out = [];
+    if (!tbody) return out;
+    var rows = tbody.querySelectorAll('tr[data-id]');
+    for (var i = 0; i < rows.length && out.length < 200; i++) {
+      var id = rows[i].getAttribute('data-id') || '';
+      if (id) out.push(id);
+    }
+    return out;
+  }
+  function escLive(s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c];
+    });
+  }
+  function paintIpCell(td, ip) {
+    if (!td) return;
+    var prev = td.getAttribute('data-ip') || '';
+    if (prev === (ip || '') && td.getAttribute('data-ip') !== null) return;
+    td.setAttribute('data-ip', ip || '');
+    if (!ip) {
+      td.textContent = '-';
+      return;
+    }
+    var href = 'http://' + ip + '/';
+    if (ip.indexOf(':') >= 0) href = 'http://[' + ip + ']/';
+    td.innerHTML = '<span class="sas-ip-wrap"><button type="button" class="sas-user-copy" data-copy="'
+      + escLive(ip) + '" title="IP">⧉</button><a class="sas-link sas-ip-link" href="'
+      + escLive(href) + '" target="_blank" rel="noopener noreferrer">' + escLive(ip) + '</a></span>';
+  }
+  function paintStatusSquare(tr, on) {
+    var sq = tr.querySelector('.status-sq');
+    if (!sq) return;
+    var enabled = tr.getAttribute('data-enabled') === '1';
+    var active = tr.getAttribute('data-active') === '1';
+    var cls = 'status-sq ';
+    if (!enabled) cls += 'status-left';
+    else if (on && active) cls += 'status-online';
+    else if (on) cls += 'status-expired-online';
+    else if (active) cls += 'status-active';
+    else cls += 'status-expired';
+    sq.className = cls;
+  }
+  var liveOnlineBusy = false;
+  function paintLiveOnline() {
+    if (liveOnlineBusy || tableIsBusy() || document.hidden) return;
+    var names = visibleLiveNames();
+    if (!names.length) return;
+    liveOnlineBusy = true;
+    fetch('sas.php?ajax=live_online&users=' + encodeURIComponent(names.join(',')), {
+      credentials: 'same-origin',
+      cache: 'no-store'
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        liveOnlineBusy = false;
+        if (!d || !d.ok || !d.rows || tableIsBusy()) return;
+        Object.keys(d.rows).forEach(function (name) {
+          var info = d.rows[name] || {};
+          var tr = null;
+          var all = tbody.querySelectorAll('tr[data-id]');
+          for (var ri = 0; ri < all.length; ri++) {
+            if (all[ri].getAttribute('data-id') === name) { tr = all[ri]; break; }
+          }
+          if (!tr || tr.querySelector('.editing') || tr.querySelector('[contenteditable="true"]')) return;
+          var on = info.on ? '1' : '0';
+          tr.setAttribute('data-online', on);
+          paintStatusSquare(tr, info.on ? 1 : 0);
+          paintIpCell(tr.querySelector('.col-ip'), info.ip || '');
+          var macCell = tr.querySelector('.col-mac');
+          if (macCell) {
+            var mac = info.mac || '';
+            if ((macCell.getAttribute('data-mac') || '') !== mac) {
+              macCell.setAttribute('data-mac', mac);
+              macCell.textContent = mac || '—';
+            }
+            macCell.title = info.on
+              ? <?php echo json_encode($lang === 'en' ? 'Connected MAC' : 'ماك الاتصال الحالي'); ?>
+              : <?php echo json_encode($lang === 'en' ? 'Last MAC' : 'آخر ماك'); ?>;
+          }
+          var trafCell = tr.querySelector('.col-traf');
+          if (trafCell && info.traf && trafCell.textContent !== info.traf) trafCell.textContent = info.traf;
+        });
+      })
+      .catch(function () { liveOnlineBusy = false; });
+  }
   function refreshTableLive() {
     if (liveBusy || liveSearchBusy || tableIsBusy() || document.hidden) return Promise.resolve(null);
     if (Date.now() < colsSkipUntil) return Promise.resolve(null);
@@ -5399,8 +5671,9 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     });
   }
   applyAutoRefresh(refreshSec, true);
-  // أول تحديث فوري للأونلاين/IP عند فتح الصفحة
-  setTimeout(function () { refreshTableLive(); }, 200);
+  // أول رسم من الكاش، وبعدها الاتصال والايبي والماك يتحدثون بصمت بدون سبنر وبدون ضباب
+  setTimeout(function () { paintLiveOnline(); }, 400);
+  setInterval(function () { paintLiveOnline(); }, 2000);
 
   function setFoundCount(n, searching) {
     if (!foundLabel) return;
@@ -5470,7 +5743,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
         if (d && typeof d.html === 'string') {
           applyLiveRows(d.html, typeof d.count === 'number' ? d.count : null);
         } else if (force) {
-          applyLiveRows('<tr><td colspan="18">' + noMatchLabel + '</td></tr>', 0);
+          applyLiveRows('<tr><td colspan="19">' + noMatchLabel + '</td></tr>', 0);
         }
       })
       .catch(function (err) {

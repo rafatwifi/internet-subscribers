@@ -465,6 +465,16 @@ render_header(t('debts'), 'debts');
 }
 .debts-hero h1 { margin: 0 0 6px; font-size: 20px; font-weight: 800; }
 .debts-hero p { margin: 0; opacity: .88; font-size: 13px; font-weight: 600; max-width: 52ch; }
+.debts-hero-who { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.debts-avatar {
+  width: 68px; height: 68px; flex: 0 0 auto; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 28px; font-weight: 800; line-height: 1; color: #fff;
+  background:
+    radial-gradient(circle at 32% 28%, rgba(255,255,255,.55), rgba(255,255,255,.08) 42%, rgba(14,165,233,.35) 100%);
+  border: 2px solid rgba(255,255,255,.72);
+  box-shadow: 0 10px 24px rgba(2, 6, 23, .28), inset 0 0 0 4px rgba(255,255,255,.12);
+}
 .debts-hero-stat {
   min-width: 180px; padding: 12px 14px; border-radius: 14px;
   background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.22);
@@ -472,6 +482,19 @@ render_header(t('debts'), 'debts');
 }
 .debts-hero-stat .label { font-size: 12px; font-weight: 700; opacity: .9; }
 .debts-hero-stat .value { font-size: 26px; font-weight: 800; margin-top: 4px; letter-spacing: -.02em; }
+.debts-hero-side { display: flex; flex-direction: column; gap: 8px; min-width: 200px; }
+.debts-payall {
+  height: 38px; border: 0; border-radius: 12px; background: #fff; color: #0f172a;
+  font-weight: 800; cursor: pointer; box-shadow: none;
+}
+.debts-page .debts-acts { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.debts-page .debts-payone,
+.debts-page .debts-payall-sm {
+  height: 32px; padding: 0 12px; border-radius: 999px; font-weight: 800; font-size: 13px;
+  box-shadow: none; display: inline-flex; align-items: center; justify-content: center;
+}
+.debts-page .debts-payone { background: #16a34a; color: #fff; border: 0; }
+.debts-page .debts-payall-sm { background: #fff; color: #166534; border: 1px solid #86efac; }
 .debts-toolbar {
   display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
   margin: 0 0 12px; padding: 12px; border-radius: 14px;
@@ -525,17 +548,25 @@ render_header(t('debts'), 'debts');
 }
 @media (max-width: 640px) {
   .debts-hero { padding: 14px; }
-  .debts-hero-stat { min-width: 100%; }
+  .debts-hero-stat, .debts-hero-side { min-width: 100%; }
 }
 </style>
 <div class="debts-page">
-<p class="meta" style="margin:0 0 10px">
-    <?php echo e($lang === 'en'
-        ? 'Local debts are independent of SAS. Changing debt on SAS does not change amounts here.'
-        : 'ديون النظام محلية ومستقلة عن الساس. تعديل الدين بالساس لا يغيّر المبالغ هنا.'); ?>
-</p>
 <div class="debts-hero">
-  <div>
+  <div class="debts-hero-who">
+    <?php if ($filterSubscriberId > 0): ?>
+      <?php
+      $avatarLetter = '•';
+      $avatarSrc = trim($filterName);
+      if ($avatarSrc !== '' && function_exists('mb_substr')) {
+          $avatarLetter = mb_substr($avatarSrc, 0, 1, 'UTF-8');
+      } elseif ($avatarSrc !== '') {
+          $avatarLetter = substr($avatarSrc, 0, 1);
+      }
+      ?>
+      <span class="debts-avatar" aria-hidden="true"><?php echo e($avatarLetter); ?></span>
+    <?php endif; ?>
+    <div>
     <h1><?php
       if ($filterSubscriberId > 0) {
           echo e($lang === 'en' ? 'Subscriber debts' : 'ديون المشترك');
@@ -555,11 +586,21 @@ render_header(t('debts'), 'debts');
               : 'متابعة الفواتير غير المسددة، استلام الدفعات، وإرسال تذكير واتساب.');
       }
     ?></p>
+    </div>
   </div>
+  <div class="debts-hero-side">
   <a class="debts-hero-stat" href="<?php echo e($cardHref); ?>" style="color:inherit;text-decoration:none">
     <div class="label"><?php echo e($cardLabel); ?></div>
     <div class="value"><?php echo e(money_format_iqd($cardDebt, $config['currency'])); ?></div>
   </a>
+  <?php if ($filterSubscriberId > 0 && $cardDebt > 0 && !empty($canEditDebts)): ?>
+    <button type="button" class="debts-payall js-pay-open"
+      data-mode="all" data-invoice="0"
+      data-sub="<?php echo (int) $filterSubscriberId; ?>"
+      data-amount="<?php echo (int) round($cardDebt); ?>"
+      data-name="<?php echo e($filterName); ?>"><?php echo e($lang === 'en' ? 'Pay all debts' : 'تسديد كل الديون'); ?></button>
+  <?php endif; ?>
+  </div>
 </div>
 
 <div class="debts-toolbar">
@@ -575,7 +616,6 @@ render_header(t('debts'), 'debts');
         <?php if ($filterSubscriberId > 0): ?>
             <a class="btn ghost" href="debts.php?status=unpaid"><?php echo e(t('show_all')); ?></a>
         <?php endif; ?>
-        <span class="meta" style="margin-inline-start:auto"><?php echo e($lang === 'en' ? 'Right-click a row for actions' : 'كلك يمين على السطر للإجراءات'); ?></span>
 </div>
 
 <?php if ($canEditDebts): ?>
@@ -660,6 +700,7 @@ render_header(t('debts'), 'debts');
                 <th><?php echo e($lang === 'en' ? 'Month' : 'الشهر'); ?></th>
                 <th><?php echo e($lang === 'en' ? 'Amount' : 'المبلغ'); ?></th>
                 <th><?php echo e(t('notes')); ?></th>
+                <th><?php echo e($lang === 'en' ? 'Pay' : 'التسديد'); ?></th>
                 <?php if ($status !== 'unpaid'): ?>
                 <th><?php echo e(t('profit')); ?></th>
                 <th><?php echo e($lang === 'en' ? 'Status' : 'الحالة'); ?></th>
@@ -669,8 +710,9 @@ render_header(t('debts'), 'debts');
             </thead>
             <tbody>
             <?php if (!$rows): ?>
-                <tr><td colspan="7"><?php echo e($lang === 'en' ? 'No debts' : 'لا توجد ديون'); ?></td></tr>
+                <tr><td colspan="<?php echo $status === 'unpaid' ? 5 : 8; ?>"><?php echo e($lang === 'en' ? 'No debts' : 'لا توجد ديون'); ?></td></tr>
             <?php endif; ?>
+            <?php $seenPayAll = array(); ?>
             <?php foreach ($rows as $row): ?>
                 <?php
                 $rowSubId = (int) $row['subscriber_id'];
@@ -707,6 +749,33 @@ render_header(t('debts'), 'debts');
                         <?php endif; ?>
                     </td>
                     <td class="notes-cell"><?php echo e(isset($row['notes']) ? $row['notes'] : ''); ?></td>
+                    <td>
+                        <?php if ($row['status'] === 'unpaid' && !empty($canEditDebts)): ?>
+                            <?php
+                            $showPayAll = $filterSubscriberId <= 0 && $rowSubTotal > 0 && !isset($seenPayAll[$rowSubId]);
+                            if ($showPayAll) {
+                                $seenPayAll[$rowSubId] = true;
+                            }
+                            ?>
+                            <div class="debts-acts">
+                                <button type="button" class="btn debts-payone js-pay-open"
+                                    data-mode="one"
+                                    data-invoice="<?php echo (int) $row['id']; ?>"
+                                    data-sub="<?php echo $rowSubId; ?>"
+                                    data-amount="<?php echo $rowAmt; ?>"
+                                    data-name="<?php echo e($row['name']); ?>"><?php echo e($lang === 'en' ? 'Pay' : 'تسديد'); ?></button>
+                                <?php if ($showPayAll): ?>
+                                <button type="button" class="btn debts-payall-sm js-pay-open"
+                                    data-mode="all" data-invoice="0"
+                                    data-sub="<?php echo $rowSubId; ?>"
+                                    data-amount="<?php echo $rowSubTotal; ?>"
+                                    data-name="<?php echo e($row['name']); ?>"><?php echo e($lang === 'en' ? 'Pay all' : 'تسديد الكل'); ?></button>
+                                <?php endif; ?>
+                            </div>
+                        <?php elseif ($row['status'] === 'paid'): ?>
+                            <span class="meta"><?php echo e($lang === 'en' ? 'Paid' : 'مسدد'); ?></span>
+                        <?php endif; ?>
+                    </td>
                     <?php if ($status !== 'unpaid'): ?>
                     <td><?php echo e(money_format_iqd(isset($row['profit']) ? $row['profit'] : 0, $config['currency'])); ?></td>
                     <td><span class="badge <?php echo e($row['status']); ?>"><?php echo $row['status'] === 'paid' ? ($lang === 'en' ? 'Paid' : 'مسدد') : ($lang === 'en' ? 'Unpaid' : 'غير مسدد'); ?></span></td>
@@ -930,6 +999,16 @@ render_header(t('debts'), 'debts');
   syncKind();
 })();
 </script>
+<div class="modal-backdrop hidden" id="debtAskModal" role="dialog" aria-modal="true">
+    <div class="modal-card">
+        <h3><?php echo e($lang === 'en' ? 'Delete debt' : 'حذف الدين'); ?></h3>
+        <p class="meta" id="debtAskText" style="margin:0 0 14px"></p>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+            <button type="button" class="btn ghost" id="debtAskNo"><?php echo e($lang === 'en' ? 'Cancel' : 'إلغاء'); ?></button>
+            <button type="button" class="btn danger" id="debtAskYes"><?php echo e($lang === 'en' ? 'Delete' : 'حذف'); ?></button>
+        </div>
+    </div>
+</div>
 <div class="modal-backdrop hidden" id="payFloat" role="dialog" aria-modal="true">
     <div class="modal-card pay-float-card">
         <h3 id="payFloatTitle"><?php echo e($lang === 'en' ? 'Confirm payment' : 'تأكيد التسديد'); ?></h3>
@@ -1101,7 +1180,11 @@ render_header(t('debts'), 'debts');
     if (menu && !menu.classList.contains('hidden') && !e.target.closest('#debtsOpsMenu')) hideMenu();
   });
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') hideMenu();
+    if (e.key === 'Escape') {
+      hideMenu();
+      var askBox = document.getElementById('debtAskModal');
+      if (askBox) askBox.classList.add('hidden');
+    }
   });
   if (menu) {
     menu.addEventListener('click', function (e) {
@@ -1146,13 +1229,32 @@ render_header(t('debts'), 'debts');
         return;
       }
       if (op === 'delete') {
-        if (!window.confirm(<?php echo json_encode($lang === 'en' ? 'Delete this debt? It will be removed from totals and logged.' : 'تحذف هذا الدين؟ ينشال من المجموع وينحفظ بالسجل.'); ?>)) return;
-        var f = document.getElementById('debtDeleteForm');
-        var idEl = document.getElementById('debtDeleteId');
-        var subEl = document.getElementById('debtDeleteSub');
-        if (idEl) idEl.value = ctx.invoice;
-        if (subEl) subEl.value = ctx.sub;
-        if (f) f.submit();
+        var ask = document.getElementById('debtAskModal');
+        var askText = document.getElementById('debtAskText');
+        var snapInv = ctx.invoice;
+        var snapSub = ctx.sub;
+        var snapName = ctx.name || '';
+        if (askText) {
+          askText.textContent = snapName
+            ? (<?php echo json_encode($lang === 'en' ? 'Delete this debt for ' : 'تحذف دين '); ?> + snapName + <?php echo json_encode($lang === 'en' ? '? It leaves the total and stays in the log.' : '؟ ينشال من المجموع ويبقى بالسجل.'); ?>)
+            : <?php echo json_encode($lang === 'en' ? 'Delete this debt? It leaves the total and stays in the log.' : 'تحذف هذا الدين؟ ينشال من المجموع ويبقى بالسجل.'); ?>;
+        }
+        if (ask) ask.classList.remove('hidden');
+        var yes = document.getElementById('debtAskYes');
+        var no = document.getElementById('debtAskNo');
+        function closeAsk() { if (ask) ask.classList.add('hidden'); }
+        if (no) no.onclick = closeAsk;
+        if (ask) ask.onclick = function (ev) { if (ev.target === ask) closeAsk(); };
+        if (yes) {
+          yes.onclick = function () {
+            var f = document.getElementById('debtDeleteForm');
+            var idEl = document.getElementById('debtDeleteId');
+            var subEl = document.getElementById('debtDeleteSub');
+            if (idEl) idEl.value = snapInv;
+            if (subEl) subEl.value = snapSub;
+            if (f) f.submit();
+          };
+        }
         return;
       }
       if (op === 'remind') {

@@ -1167,7 +1167,7 @@ function msg_table_status_html($hasMsg, $msgOk, $noWa, $rowId, $logId, $lang = '
     $noPhoneLabel = ($lang === 'en') ? 'No number' : 'ماعنده رقم';
     $noPhoneTitle = ($lang === 'en') ? 'Warning: this subscriber has no phone number' : 'تحذير: المشترك ما عنده رقم';
     $failTitle = ($lang === 'en') ? 'Warning: send failed' : 'تحذير: فشل الإرسال';
-    $retryBtn = '<span class="msg-retry-slot" aria-hidden="true"></span>';
+    $retryBtn = '';
     if ((int) $logId > 0 && $hasMsg && !$msgOk && !$noPhone && !$noWa) {
         $retryBtn = '<button type="button" class="msg-retry-btn" data-retry="1" data-id="'
             . e((string) $rowId) . '" data-log-id="' . (int) $logId . '" title="' . e($retryTitle)
@@ -1770,13 +1770,20 @@ function retry_failed_message($pdo, $config, $logId, $subscriberId = 0, $manual 
     if (substr($type, -6) !== '_retry') {
         $type .= '_retry';
     }
+    $retrySession = trim((string) $sessionOverride);
     if (function_exists('whatsapp_may_message_subscriber') && !whatsapp_may_message_subscriber($pdo, (int) $log['sid'])) {
-        $sessNow = function_exists('whatsapp_session_id') ? whatsapp_session_id() : '';
-        if ($sessNow !== '') {
+        $own = wa_session_for_subscriber($pdo, (int) $log['sid']);
+        if ($own !== '') {
+            $retrySession = $own;
+        } else {
+            try {
+                $pdo->prepare('UPDATE message_logs SET queued_at = NULL, next_retry_at = NOW() WHERE id = :id AND success = 0')
+                    ->execute(array(':id' => (int) $log['id']));
+            } catch (Exception $e) {
+            }
             return array(false, 'هذا المشترك مو تابع لواتساب الحساب المفتوح');
         }
     }
-    $retrySession = trim((string) $sessionOverride);
     if ($retrySession === '') {
         $retrySession = function_exists('whatsapp_session_id') ? whatsapp_session_id() : '';
     }
@@ -1968,6 +1975,24 @@ function wa_retry_release($pdo, $config)
     }
     $readyCache = array();
     try {
+        $pdo->exec(
+            "UPDATE message_logs m1
+             INNER JOIN message_logs m2
+               ON m2.subscriber_id = m1.subscriber_id
+              AND m2.success = 1
+              AND m2.id > m1.id
+              AND (
+                    m2.body = m1.body
+                    OR REPLACE(m2.message_type, '_retry', '') = REPLACE(m1.message_type, '_retry', '')
+                  )
+             SET m1.retry_hold = 'dup', m1.next_retry_at = NULL, m1.queued_at = NULL
+             WHERE m1.success = 0
+               AND m1.created_at >= DATE_SUB(NOW(), INTERVAL 14 DAY)
+               AND (m1.retry_hold IS NULL OR m1.retry_hold = '' OR m1.retry_hold IN ('wait_link', 'wait_net', 'wait_on'))"
+        );
+    } catch (Exception $e) {
+    }
+    try {
         $stWait = $pdo->query(
             "SELECT id, subscriber_id, retry_hold, message_type
              FROM message_logs
@@ -2033,7 +2058,7 @@ function wa_retry_due_batch($pdo, $config, $limit = 2)
     $now = time();
     if (is_file($lock)) {
         $prev = (int) trim((string) @file_get_contents($lock));
-        if ($prev > 0 && ($now - $prev) < 50) {
+        if ($prev > 0 && ($now - $prev) < 15) {
             return 0;
         }
     }
@@ -2049,12 +2074,30 @@ function wa_retry_due_batch($pdo, $config, $limit = 2)
     if ($limit < 1) {
         $limit = 1;
     }
-    if ($limit > 2) {
-        $limit = 2;
+    if ($limit > 5) {
+        $limit = 5;
     }
     $tid = 0;
     if (!empty($_SESSION['admin_logged_in']) && function_exists('current_tenant_id')) {
         $tid = (int) current_tenant_id();
+    }
+    $pull = 'UPDATE message_logs m';
+    if ($tid > 0) {
+        $pull .= ' INNER JOIN subscribers s ON s.id = m.subscriber_id AND s.tenant_id = ' . $tid;
+    }
+    $pull .= " SET m.next_retry_at = NOW(), m.queued_at = NULL,
+                   m.attempt = IF(m.attempt >= 3, 1, m.attempt)
+               WHERE m.success = 0 AND m.subscriber_id IS NOT NULL
+                 AND (m.retry_hold IS NULL OR m.retry_hold = '')
+                 AND (
+                      m.fail_reason LIKE '%ربط%'
+                      OR m.fail_reason LIKE '%غير مفع%'
+                      OR m.fail_reason LIKE '%متصل%'
+                      OR m.fail_reason LIKE '%متوقف%'
+                 )";
+    try {
+        $pdo->exec($pull);
+    } catch (Exception $e) {
     }
     $sql = 'SELECT m.id FROM message_logs m';
     if ($tid > 0) {
@@ -2919,6 +2962,101 @@ function reminder_message($row, $config)
         ));
     }
     return 'السلام عليكم ' . $row['name'] . ' يرجى تسديد الديون البالغة ' . $debt . ' لتجنب قطع الخدمة';
+}
+
+function debt_unpaid_lines($pdo, $subscriberId)
+{
+    $subscriberId = (int) $subscriberId;
+    if ($subscriberId <= 0 || !$pdo) {
+        return array();
+    }
+    try {
+        $st = $pdo->prepare(
+            'SELECT id, month_label, amount, notes
+             FROM invoices
+             WHERE subscriber_id = :id AND status = "unpaid"
+             ORDER BY id ASC'
+        );
+        $st->execute(array(':id' => $subscriberId));
+        $rows = $st->fetchAll();
+    } catch (Exception $e) {
+        return array();
+    }
+    $out = array();
+    if (!is_array($rows)) {
+        return $out;
+    }
+    foreach ($rows as $r) {
+        $out[] = array(
+            'id' => isset($r['id']) ? (int) $r['id'] : 0,
+            'month' => isset($r['month_label']) ? (string) $r['month_label'] : '',
+            'amount' => isset($r['amount']) ? (float) $r['amount'] : 0,
+            'notes' => isset($r['notes']) ? trim((string) $r['notes']) : '',
+        );
+    }
+    return $out;
+}
+
+function debt_lines_sum($lines)
+{
+    $sum = 0.0;
+    if (!is_array($lines)) {
+        return 0.0;
+    }
+    foreach ($lines as $line) {
+        $sum += (is_array($line) && isset($line['amount'])) ? (float) $line['amount'] : 0;
+    }
+    return $sum;
+}
+
+function debt_lines_text($lines, $currency)
+{
+    if (!is_array($lines) || !$lines) {
+        return '';
+    }
+    $parts = array();
+    foreach ($lines as $line) {
+        if (!is_array($line)) {
+            continue;
+        }
+        $month = isset($line['month']) ? (string) $line['month'] : '';
+        if ($month !== '' && function_exists('month_short_label')) {
+            $month = month_short_label($month);
+        }
+        $amt = isset($line['amount']) ? (float) $line['amount'] : 0;
+        $money = function_exists('money_format_iqd') ? money_format_iqd($amt, $currency) : (string) (int) round($amt);
+        $bit = $month !== '' ? ($month . ': ' . $money) : $money;
+        $notes = isset($line['notes']) ? trim((string) $line['notes']) : '';
+        if ($notes !== '') {
+            $bit .= ' — ' . $notes;
+        }
+        $parts[] = '- ' . $bit;
+    }
+    return implode("\n", $parts);
+}
+
+function debt_added_customer_message($name, $newLines, $oldLines, $currency)
+{
+    $name = trim((string) $name);
+    if (!is_array($newLines)) {
+        $newLines = array();
+    }
+    if (!is_array($oldLines)) {
+        $oldLines = array();
+    }
+    $total = debt_lines_sum($newLines) + debt_lines_sum($oldLines);
+    $totalTxt = function_exists('money_format_iqd') ? money_format_iqd($total, $currency) : (string) (int) round($total);
+    $msg = 'السلام عليكم ' . $name;
+    $newBlock = debt_lines_text($newLines, $currency);
+    if ($newBlock !== '') {
+        $msg .= "\nالديون الجديدة:\n" . $newBlock;
+    }
+    $oldBlock = debt_lines_text($oldLines, $currency);
+    if ($oldBlock !== '') {
+        $msg .= "\nالديون السابقة:\n" . $oldBlock;
+    }
+    $msg .= "\nالإجمالي: " . $totalTxt;
+    return $msg;
 }
 
 function debt_created_message($row, $config)

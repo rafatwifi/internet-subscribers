@@ -920,6 +920,44 @@ function sas_reward_points_number($v)
     return (float) $s;
 }
 
+function sas_find_reward_points_loose($node, $depth = 0)
+{
+    if ($depth > 5 || !is_array($node) || isset($node[0])) {
+        return null;
+    }
+    if (isset($node['__http_error']) || isset($node['__auth_error']) || isset($node['__curl_error'])) {
+        return null;
+    }
+    foreach (array(
+        'reward_points', 'rewardPoints', 'RewardPoints', 'reward_point',
+        'reward_points_balance', 'available_reward_points', 'available_points',
+        'points_balance', 'point_balance', 'manager_points', 'managerPoints', 'points',
+    ) as $k) {
+        if (!array_key_exists($k, $node) || is_array($node[$k])) {
+            continue;
+        }
+        $num = sas_reward_points_number($node[$k]);
+        if ($num !== null) {
+            return $num;
+        }
+    }
+    foreach ($node as $k => $v) {
+        if (!is_array($v) || isset($v[0])) {
+            continue;
+        }
+        $lk = strtolower((string) $k);
+        if ($lk === 'users' || $lk === 'managers' || $lk === 'cards' || $lk === 'profiles'
+            || $lk === 'permissions' || $lk === 'traffic' || $lk === 'token') {
+            continue;
+        }
+        $found = sas_find_reward_points_loose($v, $depth + 1);
+        if ($found !== null) {
+            return $found;
+        }
+    }
+    return null;
+}
+
 function sas_row_reward_points($row)
 {
     return sas_find_reward_points($row);
@@ -953,6 +991,11 @@ function sas_find_reward_points($node, $depth = 0, $wantUser = '', $wantId = 0)
         'reward_point',
         'reward_points_balance',
         'available_reward_points',
+        'available_points',
+        'points_balance',
+        'point_balance',
+        'manager_points',
+        'managerPoints',
     ) as $k) {
         if (!array_key_exists($k, $node)) {
             continue;
@@ -1143,7 +1186,7 @@ function sas_manager_reward_points($config, $pdo = null)
 {
     $cachedAt = isset($_SESSION['sas_rp_at']) ? (int) $_SESSION['sas_rp_at'] : 0;
     $haveBal = array_key_exists('sas_balance_disp', $_SESSION);
-    if ($cachedAt > 0 && (time() - $cachedAt) < 15 && array_key_exists('sas_rp_val', $_SESSION)
+    if ($cachedAt > 0 && (time() - $cachedAt) < 8 && array_key_exists('sas_rp_val', $_SESSION)
         && $_SESSION['sas_rp_val'] !== null && $haveBal) {
         return array(true, $_SESSION['sas_rp_val'], '');
     }
@@ -1172,7 +1215,7 @@ function sas_manager_reward_points($config, $pdo = null)
             } elseif (isset($login['manager']) && is_array($login['manager'])) {
                 $login = $login['manager'];
             }
-            if ($want === '' && !empty($login['username'])) {
+            if (!empty($login['username'])) {
                 $want = strtolower(trim((string) $login['username']));
             }
             if (isset($login['id']) && is_numeric($login['id'])) {
@@ -1232,6 +1275,12 @@ function sas_manager_reward_points($config, $pdo = null)
 
         if ($points === null && is_array($login)) {
             $points = sas_find_reward_points($login, 0, $want, $wantId);
+        }
+        if ($points === null && isset($fin) && is_array($fin)) {
+            $points = sas_find_reward_points_loose($fin);
+        }
+        if ($points === null && is_array($login)) {
+            $points = sas_find_reward_points_loose($login);
         }
 
         if ($balance === null && $rows) {

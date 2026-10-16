@@ -550,6 +550,13 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             }
             .sas-toast[hidden] { display: none !important; }
             .sas-toast.is-out { opacity: 0; transform: translateY(-10px); }
+            .sas-toast.sas-toast-mid {
+                inset-inline-start: auto;
+                inset-inline-end: auto;
+                right: auto;
+            }
+            .sas-toast.sas-toast-mid.is-out { transform: translate(-50%, calc(-50% - 12px)) !important; }
+            .sas-toast.sas-toast-mid.sas-toast-scrolled.is-out { transform: translateX(-50%) translateY(-12px) !important; }
             .sas-toast-text { flex: 1; line-height: 1.45; }
             .sas-toast-x {
                 border: 0; background: transparent; color: inherit; font-size: 20px;
@@ -831,10 +838,36 @@ body.nav-pending .nav-progress { display: block; }
 
 window.placeCornerToast = function (el) {
   if (!el || !el.style) return;
-  var phone = window.matchMedia && window.matchMedia('(max-width: 640px)').matches;
   function set(prop, val) { el.style.setProperty(prop, val, 'important'); }
-  set('bottom', 'auto');
   set('z-index', '100003');
+  if (!el.classList.contains('sas-toast-stay')) {
+    el.classList.add('sas-toast-mid');
+    var main = document.querySelector('.main');
+    var bar = document.querySelector('.main-top');
+    var mr = main ? main.getBoundingClientRect() : null;
+    var br = bar ? bar.getBoundingClientRect() : null;
+    var cx = mr ? (mr.left + mr.width / 2) : (window.innerWidth / 2);
+    var inBar = br && br.height > 24 && br.bottom > 8;
+    if (inBar) el.classList.remove('sas-toast-scrolled');
+    else el.classList.add('sas-toast-scrolled');
+    set('right', 'auto');
+    set('bottom', 'auto');
+    set('width', 'max-content');
+    set('max-width', mr ? Math.max(180, Math.min(420, mr.width - 240)) + 'px' : '420px');
+    set('text-align', 'center');
+    set('justify-content', 'center');
+    if (inBar) {
+      set('top', (br.top + br.height / 2) + 'px');
+      set('transform', 'translate(-50%, -50%)');
+    } else {
+      set('top', '12px');
+      set('transform', 'translateX(-50%)');
+    }
+    set('left', cx + 'px');
+    return;
+  }
+  var phone = window.matchMedia && window.matchMedia('(max-width: 640px)').matches;
+  set('bottom', 'auto');
   if (phone) {
     set('top', '10px');
     set('left', '12px');
@@ -1196,6 +1229,11 @@ window.showCornerToast = function (msg, kind) {
   }
   placeAllToasts();
   window.addEventListener('resize', placeAllToasts);
+  window.addEventListener('scroll', placeAllToasts, { passive: true });
+  var toastBoxes = document.querySelectorAll('.table-wrap');
+  for (var ti = 0; ti < toastBoxes.length; ti++) {
+    toastBoxes[ti].addEventListener('scroll', placeAllToasts, { passive: true });
+  }
   var toast = document.querySelector('.sas-toast:not(#sasSyncOkBanner)');
   if (toast) {
     var closeToast = function () {

@@ -159,6 +159,25 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_ping') {
     exit;
 }
 
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_points') {
+    header('Content-Type: application/json; charset=utf-8');
+    $ptsOut = array('ok' => false, 'points' => '');
+    if (function_exists('sas_manager_reward_points')) {
+        list($ptsOk, $ptsVal) = sas_manager_reward_points($config, $pdo);
+        if ($ptsOk && $ptsVal !== null) {
+            $ptsOut['ok'] = true;
+            $ptsOut['points'] = ((float) $ptsVal == (int) $ptsVal)
+                ? number_format((int) $ptsVal)
+                : number_format((float) $ptsVal, 2);
+        }
+    }
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
+    echo json_encode($ptsOut);
+    exit;
+}
+
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
     header('Content-Type: application/json; charset=utf-8');
     $en = (isset($lang) && $lang === 'en');
@@ -206,6 +225,12 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
     }
 
     if (!$force) {
+        if (isset($_SESSION['sas_rp_val']) && $_SESSION['sas_rp_val'] !== null && $_SESSION['sas_rp_val'] !== '') {
+            $cachedPts = $_SESSION['sas_rp_val'];
+            $out['points'] = ((float) $cachedPts == (int) $cachedPts)
+                ? number_format((int) $cachedPts)
+                : number_format((float) $cachedPts, 2);
+        }
         $cachedMs = isset($_SESSION['sas_latency_ms']) ? $_SESSION['sas_latency_ms'] : null;
         $cachedHost = isset($_SESSION['sas_latency_host']) ? trim((string) $_SESSION['sas_latency_host']) : '';
         $bankNow = function_exists('system_reseller_bank') ? system_reseller_bank($config) : array('host' => '');
@@ -1129,7 +1154,7 @@ if (!$accLocked) {
   function applyDash(d) {
     if (!d || !d.ok) return;
     var p = document.getElementById('dashPointsVal');
-    if (p && d.points && d.points !== '—') p.textContent = d.points;
+    if (p && d.points !== undefined && d.points !== null && d.points !== '' && d.points !== '—') p.textContent = d.points;
     var b = document.getElementById('dashBankVal');
     if (b && d.balance && d.balance !== '—') b.textContent = d.balance;
     var c = document.getElementById('dashCardsVal');
@@ -1209,8 +1234,19 @@ if (!$accLocked) {
         if (ping) ping.classList.remove('is-loading');
       });
   }
+  function loadPoints() {
+    return fetch('index.php?ajax=dash_points', { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        var p = document.getElementById('dashPointsVal');
+        if (p && d && d.ok && d.points !== undefined && d.points !== null && d.points !== '') p.textContent = d.points;
+      })
+      .catch(function () {});
+  }
   loadDash(false, true);
+  loadPoints();
   loadBank();
+  setInterval(loadPoints, 20000);
   setInterval(function () { loadDash(false, true); loadBank(); }, 180000);
 })();
 </script>
