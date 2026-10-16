@@ -167,14 +167,49 @@ function activate_one_subscriber($pdo, $config, $subscriberId, $opts = array())
     $serviceName = $plan['name'];
     $monthlyPrice = (float) $plan['monthly_price'];
     $costPrice = isset($plan['cost_price']) ? (float) $plan['cost_price'] : 0;
-    if (function_exists('current_admin') && function_exists('account_package_rates')) {
+    $sheetName = trim((string) $serviceName);
+    $shownName = '';
+    $sasPid = isset($plan['sas_profile_id']) ? (int) $plan['sas_profile_id'] : 0;
+    if (($sasPid <= 0 || $shownName === '') && !empty($subscriberRow['sas_username']) && function_exists('sas_cache_get')) {
+        $priceCache = sas_cache_get($pdo, $subscriberRow['sas_username']);
+        if ($priceCache && $sasPid <= 0 && !empty($priceCache['profile_id'])) {
+            $sasPid = (int) $priceCache['profile_id'];
+        }
+        if ($priceCache && !empty($priceCache['profile_name'])) {
+            $shownName = trim((string) $priceCache['profile_name']);
+        }
+    }
+    if ($sasPid > 0) {
+        try {
+            $sheetSt = $pdo->prepare(
+                'SELECT name FROM service_plans
+                 WHERE sas_profile_id = :p AND is_active = 1 ORDER BY id ASC LIMIT 1'
+            );
+            $sheetSt->execute(array(':p' => $sasPid));
+            $sheetFound = $sheetSt->fetchColumn();
+            if ($sheetFound) {
+                $sheetName = trim((string) $sheetFound);
+            }
+        } catch (Exception $e) {
+        }
+    }
+    if (function_exists('current_admin')) {
         $priceMe = current_admin();
         $priceUid = $priceMe ? (int) $priceMe['id'] : 0;
-        $sasPid = isset($plan['sas_profile_id']) ? (int) $plan['sas_profile_id'] : 0;
-        $rates = account_package_rates($pdo, $priceUid, $serviceName, $sasPid);
-        if (!empty($rates['found'])) {
-            $costPrice = (float) $rates['cost'];
-            $monthlyPrice = (float) $rates['retail'] > 0 ? (float) $rates['retail'] : $costPrice;
+        if ($priceUid > 0 && function_exists('account_package_rates')) {
+            $rates = account_package_rates($pdo, $priceUid, $sheetName !== '' ? $sheetName : $serviceName, $sasPid);
+            if (!empty($rates['found']) && (float) $rates['cost'] > 0) {
+                $costPrice = (float) $rates['cost'];
+            }
+        }
+        if ($priceUid > 0 && function_exists('account_customer_sell_price')) {
+            $sell = $sheetName !== '' ? (float) account_customer_sell_price($pdo, $sheetName, $sasPid, $priceUid) : 0.0;
+            if ($sell <= 0 && $shownName !== '' && strtolower($shownName) !== strtolower($sheetName)) {
+                $sell = (float) account_customer_sell_price($pdo, $shownName, 0, $priceUid);
+            }
+            if ($sell > 0) {
+                $monthlyPrice = $sell;
+            }
         }
     }
     $planIdSaved = isset($plan['id']) ? (int) $plan['id'] : 0;
@@ -341,16 +376,14 @@ function activate_one_subscriber($pdo, $config, $subscriberId, $opts = array())
             if ($row) {
                 $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
                 $extra = $msgNote;
-                $useCreditDebts = ($payMode === 'credit' && $sendOldDebts && $oldDebtLines);
-                $actCase = $useCreditDebts ? 'activation_credit_debts'
-                    : (($payMode === 'credit') ? 'activation_credit' : 'activation_cash');
                 $waTemplate = $waTemplateOverride;
-                if ($waTemplate === '' && function_exists('wa_case_template_key')) {
-                    $waTemplate = wa_case_template_key($config, $actCase);
-                }
-                if ($waTemplate === '') {
-                    $waTemplate = $useCreditDebts ? 'activation_credit_debts'
-                        : (($payMode === 'credit') ? 'activation_credit' : 'activation');
+                if ($payMode !== 'credit') {
+                    if ($waTemplate === '' && function_exists('wa_case_template_key')) {
+                        $waTemplate = wa_case_template_key($config, 'activation_cash');
+                    }
+                    if ($waTemplate === '') {
+                        $waTemplate = 'activation';
+                    }
                 }
                 $debtMonths = array();
                 if ($sendOldDebts && $oldDebtLines) {
@@ -365,20 +398,30 @@ function activate_one_subscriber($pdo, $config, $subscriberId, $opts = array())
                     }
                 }
                 $notesLine = implode(' · ', $debtMonths);
-                $msg = function_exists('wa_render_named_template')
-                    ? wa_render_named_template($waTemplate, $row, $config, array(
-                        'amount' => $chargeTotal,
-                        'debt' => $oldDebtSum,
-                        'package' => $serviceName,
-                        'notes' => $notesLine,
-                    ))
-                    : '';
-                if ($msg === '' && function_exists('activation_message')) {
-                    $msg = activation_message($row, $config, '');
-                }
-                if ($msg === '' && function_exists('activation_message_with_rental')) {
-                    $rentName = $rentalDev ? $rentalDev['name'] : '';
-                    $msg = activation_message_with_rental($row, $config, '', $rentalFee, $rentName);
+                if ($payMode === 'credit' && function_exists('activation_credit_customer_message')) {
+                    $msg = activation_credit_customer_message(
+                        $row,
+                        $config,
+                        $monthlyPrice,
+                        ($sendOldDebts ? $oldDebtSum : 0),
+                        ($sendOldDebts ? $notesLine : '')
+                    );
+                } else {
+                    $msg = function_exists('wa_render_named_template')
+                        ? wa_render_named_template($waTemplate, $row, $config, array(
+                            'amount' => $chargeTotal,
+                            'debt' => $oldDebtSum,
+                            'package' => $serviceName,
+                            'notes' => $notesLine,
+                        ))
+                        : '';
+                    if ($msg === '' && function_exists('activation_message')) {
+                        $msg = activation_message($row, $config, '');
+                    }
+                    if ($msg === '' && function_exists('activation_message_with_rental')) {
+                        $rentName = $rentalDev ? $rentalDev['name'] : '';
+                        $msg = activation_message_with_rental($row, $config, '', $rentalFee, $rentName);
+                    }
                 }
                 if ($rentalFee > 0 && $rentalDev && strpos($msg, (string) $rentalDev['name']) === false) {
                     $msg .= "\nإيجار (" . $rentalDev['name'] . '): ' . money_format_iqd($rentalFee, $currency);
@@ -386,7 +429,7 @@ function activate_one_subscriber($pdo, $config, $subscriberId, $opts = array())
                 if ($extra !== '') {
                     $msg .= "\n" . $extra;
                 }
-                if (!$useCreditDebts && $sendOldDebts && $oldDebtLines) {
+                if ($payMode !== 'credit' && $sendOldDebts && $oldDebtLines) {
                     $debtKey = function_exists('wa_case_template_key')
                         ? wa_case_template_key($config, 'activation_debts')
                         : 'activation_debts';
@@ -525,9 +568,14 @@ function change_subscriber_plan($pdo, $config, $subscriberId, $planId)
         $priceUid = $priceMe ? (int) $priceMe['id'] : 0;
         $sasPid = isset($plan['sas_profile_id']) ? (int) $plan['sas_profile_id'] : 0;
         $rates = account_package_rates($pdo, $priceUid, $newName, $sasPid);
-        if (!empty($rates['found'])) {
+        if (!empty($rates['found']) && (float) $rates['cost'] > 0) {
             $newCost = (float) $rates['cost'];
-            $newPrice = (float) $rates['retail'] > 0 ? (float) $rates['retail'] : $newCost;
+        }
+        if ($priceUid > 0 && function_exists('account_customer_sell_price')) {
+            $sell = account_customer_sell_price($pdo, $newName, $sasPid, $priceUid);
+            if ($sell > 0) {
+                $newPrice = $sell;
+            }
         }
     }
 

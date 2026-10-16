@@ -11,6 +11,59 @@ function redirect($path)
     exit;
 }
 
+/** يرد للمتصفح فوراً ويكمل الشغل حتى لو انسكر التلفون */
+function app_detach_client()
+{
+    ignore_user_abort(true);
+    $GLOBALS['app_detached'] = 1;
+    if (function_exists('set_time_limit')) {
+        @set_time_limit(0);
+    }
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        session_write_close();
+    }
+    while (ob_get_level() > 0) {
+        @ob_end_clean();
+    }
+}
+
+function app_finish_and_continue($path)
+{
+    app_detach_client();
+    if (!headers_sent()) {
+        header('Location: ' . $path);
+        header('Content-Length: 0');
+        header('Connection: close');
+    }
+    if (function_exists('fastcgi_finish_request')) {
+        fastcgi_finish_request();
+    } else {
+        @flush();
+    }
+}
+
+function app_finish_json($ok, $message, $extra = array())
+{
+    app_detach_client();
+    if (!headers_sent()) {
+        header('Content-Type: application/json; charset=utf-8');
+        header('Connection: close');
+        header('Cache-Control: no-store');
+    }
+    $payload = array('ok' => (bool) $ok, 'message' => (string) $message, 'background' => 1);
+    if (is_array($extra)) {
+        foreach ($extra as $k => $v) {
+            $payload[$k] = $v;
+        }
+    }
+    echo json_encode($payload);
+    if (function_exists('fastcgi_finish_request')) {
+        fastcgi_finish_request();
+    } else {
+        @flush();
+    }
+}
+
 function flash($type, $message, $sticky = false)
 {
     $_SESSION['flash'] = array(
@@ -102,6 +155,9 @@ function app_session_apply_pending($pending)
 /** أعد فتح الجلسة واحتفظ بتعديلات الذاكرة حتى تنحفظ */
 function app_session_reopen()
 {
+    if (!empty($GLOBALS['app_detached'])) {
+        return;
+    }
     if (session_status() === PHP_SESSION_ACTIVE) {
         return;
     }

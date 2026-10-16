@@ -1779,6 +1779,24 @@ function sas_phone_digits($phone)
     return $d;
 }
 
+function sas_subscriber_identity_ok($row, $username, $sasUserId)
+{
+    if (!is_array($row) || empty($row['id'])) {
+        return false;
+    }
+    $uname = isset($row['sas_username']) ? trim((string) $row['sas_username']) : '';
+    $sid = isset($row['sas_user_id']) ? (int) $row['sas_user_id'] : 0;
+    $username = trim((string) $username);
+    $sasUserId = (int) $sasUserId;
+    if ($username !== '' && $uname !== '' && strcasecmp($uname, $username) !== 0) {
+        return false;
+    }
+    if ($sasUserId > 0 && $sid > 0 && $sid !== $sasUserId) {
+        return false;
+    }
+    return true;
+}
+
 function sas_cache_pick_local($pdo, $username, $sasUserId, $phone)
 {
     $username = trim((string) $username);
@@ -1870,18 +1888,17 @@ function sas_cache_pick_local($pdo, $username, $sasUserId, $phone)
         }
     }
     $pool = $exact ? $exact : $matches;
-    if (count($pool) === 1) {
-        return $pool[0];
-    }
-
-    // أكثر من سجل بنفس الرقم: نختار صاحب أكبر دين حتى ما تضيع الديون
-    $best = $pool[0];
+    $free = array();
     foreach ($pool as $m) {
-        if ((float) $m['debt'] > (float) $best['debt']) {
-            $best = $m;
+        if (!sas_subscriber_identity_ok($m, $username, $sasUserId)) {
+            continue;
         }
+        $free[] = $m;
     }
-    return $best;
+    if (count($free) === 1) {
+        return $free[0];
+    }
+    return null;
 }
 
 function sas_cache_link_local_fields($pdo, $local, $username, $sasUserId)
@@ -1956,6 +1973,18 @@ function sas_cache_ensure_local($pdo, $config, $cacheRow)
     }
     $sasUserId = isset($cacheRow['sas_user_id']) ? (int) $cacheRow['sas_user_id'] : 0;
     $phone = isset($cacheRow['phone']) ? (string) $cacheRow['phone'] : '';
+    if (!empty($cacheRow['local_subscriber_id'])) {
+        try {
+            $stKeep = $pdo->prepare('SELECT * FROM subscribers WHERE id = :id LIMIT 1');
+            $stKeep->execute(array(':id' => (int) $cacheRow['local_subscriber_id']));
+            $kept = $stKeep->fetch();
+            if ($kept && sas_subscriber_identity_ok($kept, $username, $sasUserId)) {
+                $id = sas_cache_link_local_fields($pdo, $kept, $username, $sasUserId);
+                return array($id, '');
+            }
+        } catch (Exception $e) {
+        }
+    }
     $local = sas_cache_pick_local($pdo, $username, $sasUserId, $phone);
     if ($local) {
         $id = sas_cache_link_local_fields($pdo, $local, $username, $sasUserId);
@@ -2953,7 +2982,7 @@ function sas_dash_card_groups($api, $force = false)
     return $groups;
 }
 
-function sas_activation_quote($pdo, $config, $username, $profileId = 0)
+function sas_activation_quote($pdo, $config, $username, $profileId = 0, $profileName = '')
 {
     $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
     $out = array(
@@ -2966,29 +2995,46 @@ function sas_activation_quote($pdo, $config, $username, $profileId = 0)
     $username = trim((string) $username);
     $localId = 0;
     $cache = ($username !== '' && function_exists('sas_cache_get')) ? sas_cache_get($pdo, $username) : null;
-    if ($cache && !empty($cache['local_subscriber_id'])) {
-        $localId = (int) $cache['local_subscriber_id'];
-    }
-    if ($localId <= 0 && $cache && function_exists('sas_cache_ensure_local')) {
+    if ($cache && function_exists('sas_cache_ensure_local')) {
         list($localId) = sas_cache_ensure_local($pdo, $config, $cache);
+    } elseif ($cache && !empty($cache['local_subscriber_id'])) {
+        $localId = (int) $cache['local_subscriber_id'];
     }
     $out['local_id'] = (int) $localId;
     $profileId = (int) $profileId;
     if ($profileId <= 0 && $cache && !empty($cache['profile_id'])) {
         $profileId = (int) $cache['profile_id'];
     }
+    $shownName = trim((string) $profileName);
+    if ($shownName === '' && $cache && !empty($cache['profile_name'])) {
+        $shownName = trim((string) $cache['profile_name']);
+    }
+    $planName = '';
     if ($profileId > 0) {
         try {
             $pst = $pdo->prepare(
-                'SELECT monthly_price FROM service_plans
+                'SELECT name, monthly_price FROM service_plans
                  WHERE sas_profile_id = :p AND is_active = 1 ORDER BY id ASC LIMIT 1'
             );
             $pst->execute(array(':p' => $profileId));
-            $price = $pst->fetchColumn();
-            if ($price !== false) {
-                $out['charge'] = (float) $price;
+            $planRow = $pst->fetch();
+            if ($planRow) {
+                $out['charge'] = (float) $planRow['monthly_price'];
+                $planName = isset($planRow['name']) ? trim((string) $planRow['name']) : '';
             }
         } catch (Exception $e) {
+        }
+    }
+    if (function_exists('account_customer_sell_price')) {
+        $sell = 0.0;
+        if ($planName !== '') {
+            $sell = (float) account_customer_sell_price($pdo, $planName, $profileId);
+        }
+        if ($sell <= 0 && $shownName !== '' && strtolower($shownName) !== strtolower($planName)) {
+            $sell = (float) account_customer_sell_price($pdo, $shownName, 0);
+        }
+        if ($sell > 0) {
+            $out['charge'] = $sell;
         }
     }
     if ($localId > 0 && function_exists('subscriber_has_rental')) {
@@ -3384,7 +3430,8 @@ function sas_notify_activation_whatsapp($pdo, $config, $username, $sendOldDebts,
     if (!$local) {
         return '';
     }
-    $planName = !empty($cache['profile_name']) ? (string) $cache['profile_name'] : '';
+    $shownName = !empty($cache['profile_name']) ? trim((string) $cache['profile_name']) : '';
+    $planName = $shownName;
     $price = 0.0;
     $pid = !empty($cache['profile_id']) ? (int) $cache['profile_id'] : 0;
     if ($pid > 0) {
@@ -3396,10 +3443,20 @@ function sas_notify_activation_whatsapp($pdo, $config, $username, $sendOldDebts,
             $pst->execute(array(':p' => $pid));
             $plan = $pst->fetch();
             if ($plan) {
-                if ($planName === '' && !empty($plan['name'])) {
-                    $planName = (string) $plan['name'];
+                $sheetName = !empty($plan['name']) ? trim((string) $plan['name']) : '';
+                if ($sheetName !== '') {
+                    $planName = $sheetName;
                 }
                 $price = (float) $plan['monthly_price'];
+                if (function_exists('account_customer_sell_price')) {
+                    $sell = $sheetName !== '' ? (float) account_customer_sell_price($pdo, $sheetName, $pid) : 0.0;
+                    if ($sell <= 0 && $shownName !== '' && strtolower($shownName) !== strtolower($sheetName)) {
+                        $sell = (float) account_customer_sell_price($pdo, $shownName, 0);
+                    }
+                    if ($sell > 0) {
+                        $price = $sell;
+                    }
+                }
             }
         } catch (Exception $e) {
         }
@@ -3443,29 +3500,14 @@ function sas_notify_activation_whatsapp($pdo, $config, $username, $sendOldDebts,
             $notesLine = implode("\n", $parts);
         }
     }
-    $useCreditDebts = ($payMode === 'credit' && $sendOldDebts && $oldLines);
-    $actCase = $useCreditDebts
-        ? 'activation_credit_debts'
-        : (($payMode === 'credit') ? 'activation_credit' : 'activation_cash');
-    // آجل + ديون قديمة = قالب واحد فقط (بدون دمج قالبين)
-    $tplKey = function_exists('wa_case_template_key')
-        ? wa_case_template_key($config, $actCase)
-        : ($useCreditDebts ? 'activation_credit_debts'
-            : (($payMode === 'credit') ? 'activation_credit' : 'activation'));
-    if ($useCreditDebts && function_exists('wa_render_named_template')) {
-        $msg = wa_render_named_template($tplKey, $msgRow, $config, array(
-            'amount' => $price,
-            'debt' => $oldDebtSum,
-            'package' => $msgRow['service_name'],
-            'notes' => $notesLine,
-            'month' => !empty($oldLines[0]['month_label']) ? $oldLines[0]['month_label'] : date('Y-m'),
-        ));
-        if ($msg === '') {
-            $msg = activation_message($msgRow, $config, '');
-            if ($notesLine !== '') {
-                $msg .= "\n\nديون سابقة:\n" . $notesLine;
-            }
-        }
+    if ($payMode === 'credit' && function_exists('activation_credit_customer_message')) {
+        $msg = activation_credit_customer_message(
+            $msgRow,
+            $config,
+            $price,
+            ($sendOldDebts ? $oldDebtSum : 0),
+            ($sendOldDebts ? $notesLine : '')
+        );
     } else {
         // نقدي + ديون قديمة فقط: رسالة التفعيل + ملحق الديون
         if ($payMode !== 'credit' && $sendOldDebts && $notesLine !== '') {
@@ -3485,19 +3527,7 @@ function sas_notify_activation_whatsapp($pdo, $config, $username, $sendOldDebts,
                 $extra = "\n\n" . $extra;
             }
         }
-        if ($payMode === 'credit' && function_exists('wa_render_named_template')) {
-            $msg = wa_render_named_template($tplKey, $msgRow, $config, array(
-                'amount' => $price,
-                'package' => $msgRow['service_name'],
-            ));
-            if ($msg === '') {
-                $msg = activation_message($msgRow, $config, $extra);
-            } elseif ($extra !== '') {
-                $msg .= $extra;
-            }
-        } else {
-            $msg = activation_message($msgRow, $config, $extra);
-        }
+        $msg = activation_message($msgRow, $config, $extra);
     }
     $result = whatsapp_send($config, $local['phone'], $msg, 'activation');
     if (function_exists('log_message')) {
@@ -5235,8 +5265,17 @@ function sas_sql_username_eq($leftExpr, $rightExpr)
 
 function sas_cache_list_from_sql()
 {
+    $userEq = function_exists('sas_sql_username_eq')
+        ? sas_sql_username_eq('su.sas_username', 'c.username')
+        : 'su.sas_username = c.username';
+    $selfEq = function_exists('sas_sql_username_eq')
+        ? sas_sql_username_eq('s.sas_username', 'c.username')
+        : 's.sas_username = c.username';
     return ' FROM sas_users_cache c
-     LEFT JOIN subscribers s ON s.id = c.local_subscriber_id';
+     LEFT JOIN subscribers su ON ' . $userEq . ' AND su.tenant_id = c.tenant_id
+     LEFT JOIN subscribers s ON s.id = IF(su.id IS NOT NULL, su.id, c.local_subscriber_id)
+       AND (s.sas_username IS NULL OR s.sas_username = \'\' OR ' . $selfEq . ')
+       AND (s.sas_user_id IS NULL OR s.sas_user_id = 0 OR c.sas_user_id IS NULL OR c.sas_user_id = 0 OR s.sas_user_id = c.sas_user_id)';
 }
 
 function sas_cache_list_select_sql($light = false)
@@ -5274,6 +5313,57 @@ function sas_cache_list_select_sql($light = false)
         (SELECT m.created_at FROM message_logs m WHERE m.subscriber_id = s.id ORDER BY m.id DESC LIMIT 1) AS last_msg_at,
         (SELECT m.id FROM message_logs m WHERE m.subscriber_id = s.id ORDER BY m.id DESC LIMIT 1) AS last_msg_id';
     return $sql;
+}
+
+/** آخر رسالة لكل مشترك ظاهر، حتى ما تبقى خانة الرسالة رصاصية في قائمة الصفحة. */
+function sas_attach_last_messages($pdo, $rows)
+{
+    if (!is_array($rows) || !$rows) {
+        return is_array($rows) ? $rows : array();
+    }
+    $ids = array();
+    foreach ($rows as $r) {
+        $id = !empty($r['local_id']) ? (int) $r['local_id'] : 0;
+        if ($id > 0) {
+            $ids[$id] = $id;
+        }
+    }
+    if (!$ids) {
+        return $rows;
+    }
+    $by = array();
+    try {
+        $sql = 'SELECT m.subscriber_id, m.success AS last_msg_ok, m.message_type AS last_msg_type,
+                m.body AS last_msg_body, m.response_json AS last_msg_response, m.phone AS last_msg_phone,
+                m.created_at AS last_msg_at, m.id AS last_msg_id
+            FROM message_logs m
+            INNER JOIN (
+                SELECT subscriber_id, MAX(id) AS mid
+                FROM message_logs
+                WHERE subscriber_id IN (' . implode(',', $ids) . ')
+                GROUP BY subscriber_id
+            ) t ON t.mid = m.id';
+        foreach ($pdo->query($sql)->fetchAll() as $m) {
+            $by[(int) $m['subscriber_id']] = $m;
+        }
+    } catch (Exception $e) {
+        return $rows;
+    }
+    foreach ($rows as $i => $r) {
+        $id = !empty($r['local_id']) ? (int) $r['local_id'] : 0;
+        if ($id <= 0 || !isset($by[$id])) {
+            continue;
+        }
+        $m = $by[$id];
+        $rows[$i]['last_msg_ok'] = $m['last_msg_ok'];
+        $rows[$i]['last_msg_type'] = $m['last_msg_type'];
+        $rows[$i]['last_msg_body'] = $m['last_msg_body'];
+        $rows[$i]['last_msg_response'] = $m['last_msg_response'];
+        $rows[$i]['last_msg_phone'] = $m['last_msg_phone'];
+        $rows[$i]['last_msg_at'] = $m['last_msg_at'];
+        $rows[$i]['last_msg_id'] = $m['last_msg_id'];
+    }
+    return $rows;
 }
 
 function sas_status_squares_html($enabled, $isOnline, $isActive)

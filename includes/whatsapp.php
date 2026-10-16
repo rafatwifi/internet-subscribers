@@ -1167,8 +1167,8 @@ function msg_table_status_html($hasMsg, $msgOk, $noWa, $rowId, $logId, $lang = '
     $noPhoneLabel = ($lang === 'en') ? 'No number' : 'ماعنده رقم';
     $noPhoneTitle = ($lang === 'en') ? 'Warning: this subscriber has no phone number' : 'تحذير: المشترك ما عنده رقم';
     $failTitle = ($lang === 'en') ? 'Warning: send failed' : 'تحذير: فشل الإرسال';
-    $retryBtn = '';
-    if ((int) $logId > 0) {
+    $retryBtn = '<span class="msg-retry-slot" aria-hidden="true"></span>';
+    if ((int) $logId > 0 && $hasMsg && !$msgOk && !$noPhone && !$noWa) {
         $retryBtn = '<button type="button" class="msg-retry-btn" data-retry="1" data-id="'
             . e((string) $rowId) . '" data-log-id="' . (int) $logId . '" title="' . e($retryTitle)
             . '" aria-label="' . e($retryTitle) . '">'
@@ -1182,13 +1182,15 @@ function msg_table_status_html($hasMsg, $msgOk, $noWa, $rowId, $logId, $lang = '
         $html .= '<span class="msg-nowa msg-nophone" title="' . e($noPhoneTitle) . '">' . e($noPhoneLabel) . '</span>';
     } elseif ($noWa) {
         $html .= '<span class="msg-nowa" title="' . e($noWaTitle) . '">' . e($noWaLabel) . '</span>';
-    } elseif (!$hasMsg) {
-        $html .= '<span class="dot-msg off" title="' . e($lang === 'en' ? 'No message sent' : 'لم تُرسل رسالة') . '"></span>';
-    } elseif ($msgOk) {
-        $html .= '<span class="dot-msg ok" title="' . e($lang === 'en' ? 'Sent' : 'أُرسلت') . '"></span>';
     } else {
-        $html .= '<span class="dot-msg fail" title="' . e($failTitle) . '"></span>';
         $html .= $retryBtn;
+        if (!$hasMsg) {
+            $html .= '<span class="dot-msg off" title="' . e($lang === 'en' ? 'No message sent' : 'لم تُرسل رسالة') . '"></span>';
+        } elseif ($msgOk) {
+            $html .= '<span class="dot-msg ok" title="' . e($lang === 'en' ? 'Sent' : 'أُرسلت') . '"></span>';
+        } else {
+            $html .= '<span class="dot-msg fail" title="' . e($failTitle) . '"></span>';
+        }
     }
     $html .= '</span>';
     return $html;
@@ -1967,17 +1969,33 @@ function wa_retry_release($pdo, $config)
     $readyCache = array();
     try {
         $stWait = $pdo->query(
-            "SELECT id, subscriber_id, retry_hold
+            "SELECT id, subscriber_id, retry_hold, message_type
              FROM message_logs
              WHERE success = 0 AND retry_hold IN ('wait_link', 'wait_net', 'wait_on')
                AND created_at >= DATE_SUB(NOW(), INTERVAL 14 DAY)
-             ORDER BY id ASC
-             LIMIT 24"
+             ORDER BY id DESC
+             LIMIT 80"
         );
         $rows = $stWait ? $stWait->fetchAll() : array();
+        $keptRemind = array();
+        $parkDup = $pdo->prepare(
+            "UPDATE message_logs SET retry_hold = 'dup', next_retry_at = NULL, queued_at = NULL
+             WHERE id = :id AND success = 0"
+        );
         foreach ($rows as $row) {
             $sid = isset($row['subscriber_id']) ? (int) $row['subscriber_id'] : 0;
             $hold = isset($row['retry_hold']) ? (string) $row['retry_hold'] : '';
+            $mtype = isset($row['message_type']) ? (string) $row['message_type'] : '';
+            if ($mtype === 'expiry_auto' && $sid > 0) {
+                if (isset($keptRemind[$sid])) {
+                    try {
+                        $parkDup->execute(array(':id' => (int) $row['id']));
+                    } catch (Exception $e) {
+                    }
+                    continue;
+                }
+                $keptRemind[$sid] = 1;
+            }
             $sess = ($sid > 0 && function_exists('wa_session_for_subscriber')) ? wa_session_for_subscriber($pdo, $sid) : '';
             if ($sess === '') {
                 continue;
@@ -2835,6 +2853,47 @@ function activation_message($sub, $config, $extraNote = '')
     return $msg;
 }
 
+/** تفعيل بالآجل: جملة التفعيل أولاً، ثم الديون السابقة في نفس الرسالة. */
+function activation_credit_customer_message($sub, $config, $amount, $debtSum = 0, $notesLine = '')
+{
+    $row = is_array($sub) ? $sub : array();
+    $row['monthly_price'] = $amount;
+    $package = isset($row['service_name']) ? (string) $row['service_name'] : '';
+    $extra = array(
+        'amount' => $amount,
+        'debt' => $debtSum,
+        'package' => $package,
+        'notes' => $notesLine,
+    );
+    $msg = '';
+    if (function_exists('wa_render_named_template')) {
+        $msg = wa_render_named_template('activation_credit', $row, $config, $extra);
+    }
+    $hasActivation = ($msg !== '' && (strpos($msg, 'تفعيل') !== false || stripos($msg, 'activat') !== false));
+    if (!$hasActivation) {
+        $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
+        $amountTxt = function_exists('money_format_iqd') ? money_format_iqd($amount, $currency) : (string) $amount;
+        $name = isset($row['name']) ? (string) $row['name'] : '';
+        $from = isset($row['start_date']) ? (string) $row['start_date'] : '';
+        $to = isset($row['end_date']) ? (string) $row['end_date'] : '';
+        $msg = "مرحباً {$name}\n"
+            . "تم تفعيل خدمة الإنترنت ({$package}) بالآجل\n"
+            . "من {$from} إلى {$to}\n"
+            . 'المبلغ المستحق: ' . $amountTxt;
+    }
+    $debtSum = (float) $debtSum;
+    if ($debtSum > 0 && strpos($msg, 'ديون') === false) {
+        $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
+        $debtTxt = function_exists('money_format_iqd') ? money_format_iqd($debtSum, $currency) : (string) $debtSum;
+        $msg .= "\nوعليك ديون سابقة بمبلغ " . $debtTxt;
+        $notesLine = trim((string) $notesLine);
+        if ($notesLine !== '') {
+            $msg .= "\nالتفاصيل:\n" . $notesLine;
+        }
+    }
+    return $msg;
+}
+
 function reminder_message($row, $config)
 {
     $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
@@ -3206,6 +3265,44 @@ function expiry_remind_already($pdo, $phone, $subscriberId)
     }
 }
 
+function expiry_remind_waiting($pdo, $phone, $subscriberId)
+{
+    $phone = trim((string) $phone);
+    if ($phone !== '' && function_exists('normalize_phone')) {
+        $norm = normalize_phone($phone);
+        if ($norm !== '') {
+            $phone = $norm;
+        }
+    }
+    $subscriberId = (int) $subscriberId;
+    $parts = array();
+    $params = array();
+    if ($subscriberId > 0) {
+        $parts[] = 'subscriber_id = :sid';
+        $params[':sid'] = $subscriberId;
+    }
+    if ($phone !== '') {
+        $parts[] = 'phone = :ph';
+        $params[':ph'] = $phone;
+    }
+    if (!$parts) {
+        return false;
+    }
+    $sql = 'SELECT id FROM message_logs
+            WHERE success = 0
+              AND message_type = \'expiry_auto\'
+              AND created_at >= DATE_SUB(NOW(), INTERVAL 3 DAY)
+              AND (' . implode(' OR ', $parts) . ')
+            LIMIT 1';
+    try {
+        $st = $pdo->prepare($sql);
+        $st->execute($params);
+        return (bool) $st->fetchColumn();
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
 function expiry_remind_mark($pdo, $username, $tenantId, $endDate, $subRowId, $subscriberId)
 {
     $endDate = trim((string) $endDate);
@@ -3465,7 +3562,9 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
             $result = array('success' => false, 'skipped' => true);
         }
         $result['type'] = 'expiry_auto';
-        log_message($pdo, $sid, $result);
+        if (empty($result['skipped']) || !expiry_remind_waiting($pdo, $phone, $sid)) {
+            log_message($pdo, $sid, $result);
+        }
         expiry_remind_unlock($pdo, $phone);
         $doneUsers[$username] = true;
         $donePhones[$phone] = true;
@@ -3474,17 +3573,6 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
             $out['sent']++;
             usleep(250000);
         } elseif (!empty($result['skipped'])) {
-            try {
-                $rel = 'UPDATE sas_users_cache SET expiry_remind_for_expire = NULL
-                        WHERE username = :u AND expiry_remind_for_expire = :e';
-                $relParams = array(':u' => $username, ':e' => $endDate);
-                if ($remindTid > 0) {
-                    $rel .= ' AND tenant_id = :t';
-                    $relParams[':t'] = $remindTid;
-                }
-                $pdo->prepare($rel)->execute($relParams);
-            } catch (Exception $e) {
-            }
             $out['skipped']++;
         } else {
             $out['failed']++;
@@ -3568,7 +3656,9 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
                 $result = array('success' => false, 'skipped' => true);
             }
             $result['type'] = 'expiry_auto';
-            log_message($pdo, (int) $row['subscriber_id'], $result);
+            if (empty($result['skipped']) || !expiry_remind_waiting($pdo, $localPhone, (int) $row['subscriber_id'])) {
+                log_message($pdo, (int) $row['subscriber_id'], $result);
+            }
             expiry_remind_unlock($pdo, $lockKey);
             if ($u !== '') {
                 $doneUsers[$u] = true;
@@ -3581,13 +3671,6 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
                 $out['sent']++;
                 usleep(250000);
             } elseif (!empty($result['skipped'])) {
-                try {
-                    $pdo->prepare(
-                        'UPDATE subscriptions SET expiry_remind_for_end = NULL
-                         WHERE id = :id AND expiry_remind_for_end = :e'
-                    )->execute(array(':id' => (int) $row['sub_id'], ':e' => $row['end_date']));
-                } catch (Exception $e) {
-                }
                 $out['skipped']++;
             } else {
                 $out['failed']++;

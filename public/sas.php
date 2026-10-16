@@ -54,6 +54,42 @@ function sas_page_redirect($extra = '')
     redirect($url);
 }
 
+function sas_bulk_cards_short($cards, $jobs)
+{
+    $need = array();
+    foreach ($jobs as $job) {
+        if (!empty($job['blocked'])) {
+            continue;
+        }
+        $label = isset($job['profile_name']) ? trim((string) $job['profile_name']) : '';
+        $pid = isset($job['profile_id']) ? (int) $job['profile_id'] : 0;
+        if ($label === '') {
+            $label = $pid > 0 ? ('#' . $pid) : 'بدون فئة';
+        }
+        $key = function_exists('sas_profile_norm') ? sas_profile_norm($label) : strtolower($label);
+        if ($key === '') {
+            $key = 'p' . $pid;
+        }
+        if (!isset($need[$key])) {
+            $need[$key] = array('n' => 0, 'label' => $label, 'pid' => $pid, 'name' => $label);
+        }
+        $need[$key]['n']++;
+    }
+    $parts = array();
+    foreach ($need as $row) {
+        $have = function_exists('sas_cards_filter_cached')
+            ? count(sas_cards_filter_cached($cards, $row['pid'], $row['name']))
+            : 0;
+        if ($have < $row['n']) {
+            $parts[] = $row['label'] . ': مطلوب ' . $row['n'] . ' وشاغر ' . $have;
+        }
+    }
+    if (!$parts) {
+        return '';
+    }
+    return 'الكروت ما تكفي. ' . implode(' — ', $parts) . '. ما انسجل بيع.';
+}
+
 function sas_resolve_local_from_username($pdo, $config, $username)
 {
     $username = trim((string) $username);
@@ -83,8 +119,9 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'quote') {
     }
     $username = isset($_GET['username']) ? trim((string) $_GET['username']) : '';
     $profileId = isset($_GET['profile_id']) ? (int) $_GET['profile_id'] : 0;
+    $profileName = isset($_GET['profile_name']) ? trim((string) $_GET['profile_name']) : '';
     $quote = function_exists('sas_activation_quote')
-        ? sas_activation_quote($pdo, $config, $username, $profileId)
+        ? sas_activation_quote($pdo, $config, $username, $profileId, $profileName)
         : array();
     sas_json_out(true, '', is_array($quote) ? $quote : array());
 }
@@ -165,7 +202,7 @@ if (isset($_GET['ajax']) && ($_GET['ajax'] === 'profiles' || $_GET['ajax'] === '
             : $allCards);
     $quote = array();
     if (!$preload && function_exists('sas_activation_quote')) {
-        $quote = sas_activation_quote($pdo, $config, $username, $profileId);
+        $quote = sas_activation_quote($pdo, $config, $username, $profileId, $profileName);
     }
     sas_json_out(true, '', array_merge(array(
         'cards' => is_array($cards) ? $cards : array(),
@@ -375,7 +412,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'pay_mode' => post('pay_mode', 'cash'),
             'wa_template' => post('wa_template', 'activation'),
         );
+        $bgActivate = in_array($action, array('sas_activate_card', 'sas_activate_credit', 'sas_activate_reward'), true);
+        if ($bgActivate && function_exists('app_finish_json')) {
+            app_finish_json(true, 'بدأ التفعيل. تقدر تسكر الصفحة. النتيجة باللوك.');
+        }
         list($ok, $msg, $extra) = sas_write_user($pdo, $config, $action, $username, $fields);
+        if ($bgActivate) {
+            if (!$ok && function_exists('activity_log')) {
+                $sid = 0;
+                $cacheLog = function_exists('sas_cache_get') ? sas_cache_get($pdo, $username) : null;
+                if ($cacheLog && !empty($cacheLog['local_subscriber_id'])) {
+                    $sid = (int) $cacheLog['local_subscriber_id'];
+                }
+                activity_log(
+                    $pdo,
+                    $sid,
+                    'subscriber',
+                    $sid,
+                    'activate_fail',
+                    $username . ': ما تفعّل وما انسجل بيع',
+                    ($msg !== '' ? $msg : 'الساس ما أكد التفعيل') . "\nما انحسبت فلوس وما انفتحت فاتورة."
+                );
+            }
+            exit;
+        }
         sas_json_out($ok, $msg, is_array($extra) ? $extra : array());
     }
 
@@ -625,51 +685,161 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         $ids = isset($_POST['ids']) && is_array($_POST['ids']) ? $_POST['ids'] : array();
         $payMode = post('pay_mode') === 'credit' ? 'credit' : 'cash';
+        $payFor = (isset($_POST['pay_for']) && is_array($_POST['pay_for'])) ? $_POST['pay_for'] : array();
         $sendWa = post('send_whatsapp') === '1';
-        $okN = 0;
-        $failN = 0;
-        $failNames = array();
-        foreach ($ids as $raw) {
-            $username = trim((string) $raw);
+        $sendOld = post('send_old_debts') === '1';
+        $jobs = array();
+        foreach ($ids as $rawId) {
+            $username = trim((string) $rawId);
             if ($username === '') {
                 continue;
             }
-            if (function_exists('user_can_access_sas_username') && !user_can_access_sas_username($pdo, $username)) {
-                $failN++;
-                $failNames[] = $username . ' (صلاحية)';
-                continue;
+            $personPay = $payMode;
+            if (isset($payFor[$username]) && ($payFor[$username] === 'credit' || $payFor[$username] === 'cash')) {
+                $personPay = (string) $payFor[$username];
             }
-            list($localId, $err) = sas_resolve_local_from_username($pdo, $config, $username);
-            if ($localId <= 0) {
-                $failN++;
-                $failNames[] = $username . ' (' . $err . ')';
-                continue;
+            $cache = function_exists('sas_cache_get') ? sas_cache_get($pdo, $username) : null;
+            $blocked = (function_exists('user_can_access_sas_username') && !user_can_access_sas_username($pdo, $username)) ? 1 : 0;
+            $jobs[] = array(
+                'username' => $username,
+                'profile_id' => ($cache && !empty($cache['profile_id'])) ? (int) $cache['profile_id'] : 0,
+                'profile_name' => ($cache && !empty($cache['profile_name'])) ? (string) $cache['profile_name'] : '',
+                'pay' => $personPay,
+                'blocked' => $blocked,
+            );
+        }
+        if (!$jobs) {
+            flash('error', 'حدد مشتركاً واحداً على الأقل');
+            sas_page_redirect();
+        }
+        $previewCards = (isset($_SESSION['sas_unused_ui_v6']) && is_array($_SESSION['sas_unused_ui_v6']))
+            ? $_SESSION['sas_unused_ui_v6']
+            : array();
+        if ($previewCards) {
+            $shortNow = sas_bulk_cards_short($previewCards, $jobs);
+            if ($shortNow !== '') {
+                flash('error', $shortNow);
+                if (function_exists('activity_log')) {
+                    activity_log($pdo, 0, 'subscriber', 0, 'bulk_activate_fail', $shortNow, 'ما انحسبت فلوس وما انفتحت فاتورة.');
+                }
+                sas_page_redirect();
             }
-            list($ok, $msg) = activate_one_subscriber($pdo, $config, $localId, array(
-                'plan_id' => 0,
-                'pay_mode' => $payMode,
-                'send_whatsapp' => $sendWa,
-                'send_old_debts' => false,
-                'carry_days' => true,
-            ));
-            if ($ok) {
-                $okN++;
+        }
+        flash('info', 'بدأ التفعيل. تقدر تسكر الصفحة. النتيجة باللوك.');
+        if (function_exists('app_finish_and_continue')) {
+            app_finish_and_continue('sas.php');
+        }
+        $cardPool = $previewCards;
+        if (!$cardPool && function_exists('sas_page_connector') && function_exists('sas_unused_cards_cached')) {
+            $apiCards = sas_page_connector($config);
+            if ($apiCards) {
+                $loaded = sas_unused_cards_cached($apiCards, false);
+                if (is_array($loaded)) {
+                    $cardPool = $loaded;
+                }
+            }
+        }
+        $shortLater = sas_bulk_cards_short($cardPool, $jobs);
+        if ($shortLater !== '') {
+            if (function_exists('activity_log')) {
+                activity_log($pdo, 0, 'subscriber', 0, 'bulk_activate_fail', $shortLater, 'ما انحسبت فلوس وما انفتحت فاتورة.');
+            }
+            exit;
+        }
+        $spentPins = array();
+        $okN = 0;
+        $failN = 0;
+        $lines = array();
+        foreach ($jobs as $job) {
+            $username = $job['username'];
+            $personPay = $job['pay'];
+            $modeWord = ($personPay === 'credit') ? 'آجل' : 'نقد';
+            $profileId = (int) $job['profile_id'];
+            $profileName = (string) $job['profile_name'];
+            $summary = '';
+            $details = '';
+            $loggedOk = false;
+            if (!empty($job['blocked'])) {
+                $failN++;
+                $summary = $username . ': ما تفعّل — ما عندك صلاحية، وما انسجل بيع';
+                $details = 'ما انحسبت فلوس وما انفتحت فاتورة.';
+            } elseif (!function_exists('sas_write_user')) {
+                $failN++;
+                $summary = $username . ': ما تفعّل — ملف الساس ناقص، وما انسجل بيع';
+                $details = 'ما انحسبت فلوس وما انفتحت فاتورة.';
             } else {
-                $failN++;
-                $failNames[] = $username . ' (' . $msg . ')';
+                $matched = function_exists('sas_cards_filter_cached')
+                    ? sas_cards_filter_cached($cardPool, $profileId, $profileName)
+                    : array();
+                $ok = false;
+                $msg = '';
+                $tried = 0;
+                foreach ($matched as $card) {
+                    $pin = (is_array($card) && isset($card['pin'])) ? trim((string) $card['pin']) : '';
+                    if ($pin === '' || isset($spentPins[$pin])) {
+                        continue;
+                    }
+                    $spentPins[$pin] = 1;
+                    $tried++;
+                    list($ok, $msg) = sas_write_user($pdo, $config, 'sas_activate_card', array(
+                        'pin' => $pin,
+                        'card_id' => (is_array($card) && isset($card['id'])) ? (string) $card['id'] : '0',
+                        'profile_id' => (string) $profileId,
+                        'profile_name' => $profileName,
+                        'send_whatsapp' => $sendWa ? '1' : '0',
+                        'send_old_debts' => $sendOld ? '1' : '0',
+                        'pay_mode' => $personPay,
+                    ));
+                    if ($ok) {
+                        break;
+                    }
+                    $low = strtolower((string) $msg);
+                    if (strpos($low, 'فشل الدخول') !== false || strpos($low, 'login') !== false) {
+                        break;
+                    }
+                    if ($tried >= 5) {
+                        break;
+                    }
+                }
+                if (!$ok && $tried === 0) {
+                    $msg = 'ماكو كرت شاغر لهاي الفئة';
+                }
+                $msg = trim((string) $msg);
+                if ($ok && strpos($msg, 'محلي:') !== false) {
+                    $okN++;
+                    $loggedOk = true;
+                    $summary = $username . ': تفعّل بالساس بس التسجيل المحلي فشل';
+                    $details = $msg . "\nالخط اشتغل. تأكد الفاتورة يدوياً، يمكن ما انسجل البيع.";
+                } elseif ($ok) {
+                    $okN++;
+                    $loggedOk = true;
+                    $summary = $username . ': تفعّل بالساس وانسجل ' . $modeWord;
+                    $details = ($msg !== '' ? $msg : 'تم التفعيل') . "\nانسجل بيع " . $modeWord . ' بعد ما الساس أكد إن الخط تفعّل.';
+                } else {
+                    $failN++;
+                    $summary = $username . ': ما تفعّل بالساس وما انسجل بيع';
+                    $details = ($msg !== '' ? $msg : 'الساس ما أكد التفعيل') . "\nما انحسبت فلوس وما انفتحت فاتورة.";
+                }
+            }
+            $lines[] = $summary;
+            if (function_exists('activity_log')) {
+                $sid = 0;
+                $cacheLog = function_exists('sas_cache_get') ? sas_cache_get($pdo, $username) : null;
+                if ($cacheLog && !empty($cacheLog['local_subscriber_id'])) {
+                    $sid = (int) $cacheLog['local_subscriber_id'];
+                }
+                activity_log(
+                    $pdo,
+                    $sid,
+                    'subscriber',
+                    $sid,
+                    $loggedOk ? 'bulk_activate' : 'bulk_activate_fail',
+                    $summary,
+                    $details
+                );
             }
         }
-        $note = 'تفعيل SAS: نجح ' . $okN;
-        if ($failN > 0) {
-            $note .= ' / فشل ' . $failN;
-            if ($failNames) {
-                $note .= ' — ' . implode('؛ ', array_slice($failNames, 0, 5));
-            }
-            flash($okN > 0 ? 'info' : 'error', $note);
-        } else {
-            flash($okN > 0 ? 'success' : 'error', $okN > 0 ? $note : 'حدد مشتركاً واحداً على الأقل');
-        }
-        sas_page_redirect();
+        exit;
     }
 
     if ($action === 'remind_debt' || $action === 'bulk_remind_debt') {
@@ -687,15 +857,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 continue;
             }
             $cache = sas_cache_get($pdo, $username);
-            $localId = $cache && !empty($cache['local_subscriber_id']) ? (int) $cache['local_subscriber_id'] : 0;
-            if ($localId <= 0 && $cache) {
-                $picked = sas_cache_pick_local(
-                    $pdo,
-                    $username,
-                    isset($cache['sas_user_id']) ? (int) $cache['sas_user_id'] : 0,
-                    isset($cache['phone']) ? $cache['phone'] : ''
-                );
-                $localId = $picked ? (int) $picked['id'] : 0;
+            $localId = 0;
+            if ($cache && function_exists('sas_cache_ensure_local')) {
+                list($localId) = sas_cache_ensure_local($pdo, $config, $cache);
             }
             if ($localId <= 0) {
                 $failN++;
@@ -1092,6 +1256,9 @@ try {
     $stmt = $pdo->prepare($sql);
     $stmt->execute($params);
     $rows = $stmt->fetchAll();
+    if (function_exists('sas_attach_last_messages')) {
+        $rows = sas_attach_last_messages($pdo, $rows);
+    }
 } catch (Exception $e) {
     $rows = array();
     if ($pageError === '') {
@@ -1122,6 +1289,9 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'live_table') {
         $stmt = $pdo->prepare($sql);
         $stmt->execute($params);
         $rows = $stmt->fetchAll();
+        if (function_exists('sas_attach_last_messages')) {
+            $rows = sas_attach_last_messages($pdo, $rows);
+        }
         if (function_exists('sas_fill_online_pings')) {
             $rows = sas_fill_online_pings($pdo, $rows);
         }
@@ -1317,23 +1487,29 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   text-align: left;
 }
 .sas-radius-page #subsTable .col-msg {
-  width: 124px;
-  min-width: 108px;
-  max-width: 180px;
   white-space: nowrap;
+  text-align: center;
 }
 .sas-radius-page #subsTable .msg-status-row {
-  display: inline-flex;
+  display: inline-grid;
+  grid-template-columns: 22px 12px;
+  column-gap: 6px;
   align-items: center;
-  justify-content: center;
-  gap: 5px;
+  justify-items: center;
+  direction: ltr;
+  width: 40px;
+}
+.sas-radius-page #subsTable .msg-retry-slot {
+  width: 22px;
+  height: 22px;
+  display: block;
 }
 .sas-radius-page #subsTable .dot-msg {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
+  display: block;
+  width: 12px;
+  height: 12px;
   border-radius: 3px;
-  vertical-align: middle;
+  justify-self: center;
 }
 .sas-radius-page #subsTable .dot-msg.ok { background: #34c759; }
 .sas-radius-page #subsTable .dot-msg.fail { background: #ff9f0a; }
@@ -1341,6 +1517,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 .sas-radius-page #subsTable .msg-nowa {
   display: inline-flex;
   align-items: center;
+  grid-column: 1 / -1;
   height: 20px;
   padding: 0 7px;
   border-radius: 999px;
@@ -1394,9 +1571,9 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   flex-direction: row;
   align-items: center;
   justify-content: flex-start;
-  gap: 6px;
-  max-width: 100%;
-  width: 100%;
+  gap: 4px;
+  width: auto;
+  max-width: none;
 }
 .sas-user-copywrap a,
 .sas-ip-wrap a,
@@ -2262,7 +2439,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 .sas-radius-page .table-wrap { width: 100%; overflow: auto; max-width: 100%; overflow-anchor: none; }
 .sas-radius-page #subsTable {
   width: 100%;
-  min-width: 0;
+  min-width: max-content;
   border-collapse: collapse;
   table-layout: auto;
 }
@@ -2285,6 +2462,22 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 .sas-radius-page #subsTable td {
   padding: 4px 6px; font-size: 14px; font-weight: 600;
   border-bottom: 1px solid #ececec;
+}
+.sas-radius-page #subsTable td.col-user,
+.sas-radius-page #subsTable th.col-user,
+.sas-radius-page #subsTable td.col-ip,
+.sas-radius-page #subsTable th.col-ip,
+.sas-radius-page #subsTable td.col-phone,
+.sas-radius-page #subsTable th.col-phone,
+.sas-radius-page #subsTable td.col-pkg,
+.sas-radius-page #subsTable th.col-pkg,
+.sas-radius-page #subsTable td.col-debt,
+.sas-radius-page #subsTable th.col-debt,
+.sas-radius-page #subsTable td.col-days,
+.sas-radius-page #subsTable th.col-days {
+  white-space: nowrap;
+  padding-left: 6px;
+  padding-right: 6px;
 }
 .sas-radius-page #subsTable td.col-user,
 .sas-radius-page #subsTable th.col-user {
@@ -2324,11 +2517,10 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 }
 .sas-radius-page #subsTable th.col-ping,
 .sas-radius-page #subsTable td.col-ping {
-  width: 1%;
   white-space: nowrap;
   text-align: center;
-  padding-left: 3px;
-  padding-right: 3px;
+  padding-left: 6px;
+  padding-right: 6px;
 }
 .sas-radius-page #subsTable .sub-ping {
   display: inline-flex;
@@ -2360,17 +2552,17 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 }
 .sas-radius-page #subsTable th.col-fn,
 .sas-radius-page #subsTable td.col-fn {
-  width: 1%;
   white-space: nowrap;
-  padding-left: 4px;
-  padding-right: 4px;
+  padding-left: 6px;
+  padding-right: 6px;
 }
 .sas-radius-page #subsTable th.col-fn .th-sort {
-  display: inline-block;
-  width: 0;
-  min-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  display: inline;
+  width: auto;
+  min-width: 0;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
   vertical-align: bottom;
 }
 .sas-radius-page #subsTable .sas-fn-wrap {
@@ -2635,7 +2827,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     margin-bottom: calc(96px + env(safe-area-inset-bottom));
   }
   body:has(.sas-radius-page) .footer { display: none; }
-  .sas-radius-page #subsTable { min-width: 0; width: 100%; table-layout: auto; }
+  .sas-radius-page #subsTable { min-width: 0; width: max-content; table-layout: auto; }
   .sas-radius-page #subsTable th,
   .sas-radius-page #subsTable td {
     padding: 4px 4px;
@@ -2678,6 +2870,15 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   }
   #subsPager { flex: 0 0 auto; }
 }
+.bulk-act-card, .bulk-act-people, .bulk-act-person { max-width: 100%; }
+.bulk-act-person header { flex-wrap: wrap; align-items: center; }
+.bulk-who { min-width: 0; flex: 1 1 140px; }
+.bulk-who strong, .bulk-who span { display: block; overflow-wrap: anywhere; }
+.bulk-pay { display: inline-flex; border: 1px solid #cbd5e1; border-radius: 999px; overflow: hidden; flex: 0 0 auto; }
+.bulk-pay label { margin: 0; position: relative; }
+.bulk-pay input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.bulk-pay span { display: block; padding: 3px 10px; font-size: 12px; font-weight: 800; line-height: 1.5; color: #475569; }
+.bulk-pay input:checked + span { background: #0f172a; color: #fff; }
 </style>
 <script>
 (function () {
@@ -3081,14 +3282,15 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 </div>
 
 <div class="modal-backdrop hidden" id="opsBulkModal">
-    <div class="modal-card ops-modal-card">
+    <div class="modal-card ops-modal-card bulk-act-card">
         <div class="ops-modal-head">
             <h3><?php echo e(t('bulk_activate')); ?></h3>
             <button type="button" class="btn ghost sm" id="opsBulkModalClose">×</button>
         </div>
-        <ul class="ops-selected-list" id="opsSelectedList"></ul>
+        <div class="bulk-act-people" id="opsBulkPeople"></div>
+        <div class="bulk-act-grand" id="opsBulkGrand"></div>
         <div class="ops-section">
-            <div class="pay-mode-label"><?php echo e(t('pay_mode')); ?></div>
+            <div class="pay-mode-label" id="opsPayModeLabel"><?php echo e(t('pay_mode')); ?></div>
             <div class="pay-mode-row" id="opsPayModeRow">
                 <label class="pay-mode-option">
                     <input type="radio" name="pay_mode" value="cash" form="opsBulkActivateForm" checked>
@@ -3099,13 +3301,18 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
                     <span class="pay-mode-card credit"><strong><?php echo e(t('pay_credit')); ?></strong></span>
                 </label>
             </div>
-            <form method="post" id="opsBulkActivateForm" class="ops-activate-form">
+            <form method="post" id="opsBulkActivateForm" class="ops-activate-form" data-no-wait="1">
                 <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                 <input type="hidden" name="action" value="bulk_activate">
                 <label class="toggle" style="margin:12px 0">
                     <input type="checkbox" name="send_whatsapp" value="1" checked>
                     <span class="toggle-ui"></span>
                     <span class="toggle-text"><?php echo e(t('send_message')); ?></span>
+                </label>
+                <label class="toggle" style="margin:0 0 12px">
+                    <input type="checkbox" name="send_old_debts" value="1" checked>
+                    <span class="toggle-ui"></span>
+                    <span class="toggle-text"><?php echo e($lang === 'en' ? 'Include each person\'s old debts in the message' : 'أرفق ديون كل شخص برسالته'); ?></span>
                 </label>
                 <button class="btn" type="submit" style="width:100%"><?php echo e(t('bulk_activate')); ?></button>
             </form>
@@ -3525,6 +3732,154 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
       checkAll.indeterminate = n > 0 && n < list.length;
     }
   }
+  var bulkQuotes = [];
+  function escBulk(s) {
+    return String(s || '').replace(/[&<>"']/g, function (ch) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch];
+    });
+  }
+  function bulkMoney(n) {
+    var v = Math.round(Number(n) || 0);
+    return String(v).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+  function bulkIsCredit() {
+    var on = document.querySelector('#opsBulkModal input[name="pay_mode"]:checked');
+    return !!(on && on.value === 'credit');
+  }
+  function bulkPersonCredit(q) {
+    if (bulkQuotes.length > 1) return q.pay === 'credit';
+    return bulkIsCredit();
+  }
+  function syncBulkPayChrome() {
+    var multi = bulkQuotes.length > 1;
+    var row = document.getElementById('opsPayModeRow');
+    var lab = document.getElementById('opsPayModeLabel');
+    if (row) row.style.display = multi ? 'none' : '';
+    if (lab) lab.style.display = multi ? 'none' : '';
+  }
+  function paintBulkPeople() {
+    var box = document.getElementById('opsBulkPeople');
+    var grand = document.getElementById('opsBulkGrand');
+    if (!box) return;
+    syncBulkPayChrome();
+    var multi = bulkQuotes.length > 1;
+    var sumOld = 0;
+    var sumNew = 0;
+    var sumLeft = 0;
+    var html = '';
+    bulkQuotes.forEach(function (q) {
+      var lines = '';
+      var oldSum = Number(q.old_sum) || 0;
+      var charge = Number(q.charge) || 0;
+      var credit = bulkPersonCredit(q);
+      sumOld += oldSum;
+      sumNew += charge;
+      if (q.profile) {
+        lines += '<div class="bulk-act-line"><span>الباقة</span><span>' + escBulk(q.profile) + '</span></div>';
+      }
+      if (q.lines && q.lines.length) {
+        q.lines.forEach(function (ln) {
+          var lab = ln.label || '';
+          if (ln.notes) lab += (lab ? ' — ' : '') + ln.notes;
+          lines += '<div class="bulk-act-line debt"><span>' + escBulk(lab || 'دين سابق') + '</span><span>' + bulkMoney(ln.amount) + '</span></div>';
+        });
+      } else if (!q.loading) {
+        lines += '<div class="bulk-act-line"><span>ديون سابقة</span><span>ماكو</span></div>';
+      }
+      lines += '<div class="bulk-act-line"><span>هذا التفعيل</span><span>' + (q.loading ? '…' : bulkMoney(charge)) + '</span></div>';
+      var after = credit ? (oldSum + charge) : oldSum;
+      sumLeft += after;
+      lines += '<div class="bulk-act-line total"><span>' + (credit ? 'بعد التفعيل بالآجل' : 'يبقى عليه') + '</span><span>' + (q.loading ? '…' : bulkMoney(after)) + '</span></div>';
+      var payUi = '';
+      if (multi) {
+        var cashOn = q.pay !== 'credit';
+        var pid = escBulk(q.id);
+        payUi = '<div class="bulk-pay">'
+          + '<label><input type="radio" name="bpay_' + pid + '" data-id="' + pid + '" value="cash"' + (cashOn ? ' checked' : '') + '><span>نقد</span></label>'
+          + '<label><input type="radio" name="bpay_' + pid + '" data-id="' + pid + '" value="credit"' + (cashOn ? '' : ' checked') + '><span>آجل</span></label>'
+          + '</div>';
+      }
+      html += '<article class="bulk-act-person"><header><div class="bulk-who"><strong>' + escBulk(q.name) + '</strong><span>' + escBulk(q.username) + '</span></div>' + payUi + '</header>' + lines + '</article>';
+    });
+    box.innerHTML = html;
+    if (grand) {
+      grand.innerHTML = '<span>المجموع</span><span>ديون ' + bulkMoney(sumOld) + ' · تفعيل ' + bulkMoney(sumNew) + ' · يبقى ' + bulkMoney(sumLeft) + '</span>';
+    }
+  }
+  function openBulkActivateModal(rows) {
+    if (!rows || !rows.length || !bulkModal) return;
+    bulkQuotes = rows.map(function (r) {
+      return {
+        id: r.id,
+        name: r.name || r.username || r.id,
+        username: r.username || r.id,
+        profile: r.profileName || '',
+        profileId: r.profileId || '0',
+        pay: 'cash',
+        old_sum: 0,
+        charge: 0,
+        lines: [],
+        loading: true
+      };
+    });
+    paintBulkPeople();
+    fillHiddenIds(document.getElementById('opsBulkActivateForm'));
+    bulkModal.classList.remove('hidden');
+    bulkQuotes.forEach(function (q, i) {
+      var url = 'sas.php?ajax=quote&username=' + encodeURIComponent(q.id) + '&profile_id=' + encodeURIComponent(q.profileId || '0') + '&profile_name=' + encodeURIComponent(q.profile || '');
+      fetch(url, { credentials: 'same-origin' })
+        .then(function (res) { return res.json(); })
+        .then(function (d) {
+          if (!bulkQuotes[i]) return;
+          bulkQuotes[i].loading = false;
+          bulkQuotes[i].old_sum = d && d.old_sum ? d.old_sum : 0;
+          bulkQuotes[i].charge = d && d.charge ? d.charge : 0;
+          bulkQuotes[i].lines = (d && d.old_lines) ? d.old_lines : [];
+          paintBulkPeople();
+        })
+        .catch(function () {
+          if (!bulkQuotes[i]) return;
+          bulkQuotes[i].loading = false;
+          paintBulkPeople();
+        });
+    });
+  }
+  document.querySelectorAll('#opsBulkModal input[name="pay_mode"]').forEach(function (el) {
+    el.addEventListener('change', paintBulkPeople);
+  });
+  var bulkPeopleBox = document.getElementById('opsBulkPeople');
+  if (bulkPeopleBox) {
+    bulkPeopleBox.addEventListener('change', function (e) {
+      var inp = e.target;
+      if (!inp || !inp.getAttribute) return;
+      var id = inp.getAttribute('data-id');
+      if (!id) return;
+      var i;
+      for (i = 0; i < bulkQuotes.length; i++) {
+        if (String(bulkQuotes[i].id) === String(id)) {
+          bulkQuotes[i].pay = inp.value === 'credit' ? 'credit' : 'cash';
+        }
+      }
+      paintBulkPeople();
+    });
+  }
+  var bulkActForm = document.getElementById('opsBulkActivateForm');
+  if (bulkActForm) {
+    bulkActForm.addEventListener('submit', function () {
+      Array.prototype.slice.call(bulkActForm.querySelectorAll('input.ops-pay-dyn')).forEach(function (el) {
+        if (el.parentNode) el.parentNode.removeChild(el);
+      });
+      if (bulkQuotes.length < 2) return;
+      bulkQuotes.forEach(function (q) {
+        var inp = document.createElement('input');
+        inp.type = 'hidden';
+        inp.name = 'pay_for[' + q.id + ']';
+        inp.value = q.pay === 'credit' ? 'credit' : 'cash';
+        inp.className = 'ops-pay-dyn';
+        bulkActForm.appendChild(inp);
+      });
+    });
+  }
   function fillHiddenIds(form) {
     if (!form) return;
     Array.prototype.slice.call(form.querySelectorAll('input.ops-id-dyn')).forEach(function (el) {
@@ -3732,10 +4087,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
       return;
     }
     if (action === 'bulk_activate') {
-      var list = document.getElementById('opsSelectedList');
-      if (list) list.innerHTML = rows.map(function (r) { return '<li><strong>' + r.name + '</strong></li>'; }).join('');
-      fillHiddenIds(document.getElementById('opsBulkActivateForm'));
-      if (bulkModal) bulkModal.classList.remove('hidden');
+      openBulkActivateModal(rows);
       return;
     }
     if (action === 'pay') {
@@ -3964,8 +4316,8 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     };
     renderActDebts();
   }
-  function loadQuote(username, profileId) {
-    return fetch('sas.php?ajax=quote&username=' + encodeURIComponent(username || '') + '&profile_id=' + encodeURIComponent(profileId || '0'), { credentials: 'same-origin' })
+  function loadQuote(username, profileId, profileName) {
+    return fetch('sas.php?ajax=quote&username=' + encodeURIComponent(username || '') + '&profile_id=' + encodeURIComponent(profileId || '0') + '&profile_name=' + encodeURIComponent(profileName || ''), { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(function (d) { applyQuote(d); return d; })
       .catch(function () { return null; });
@@ -4038,7 +4390,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     return byId.length ? byId : byName;
   }
   function loadCards(username, profileId, profileName) {
-    loadQuote(username, profileId);
+    loadQuote(username, profileId, profileName);
     if (Array.isArray(cardsCacheAll) && cardsCacheAll.length) {
       return Promise.resolve(cardsForProfile(profileId, profileName));
     }
@@ -4200,7 +4552,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     }
     setActMode('card');
     paintRewardPts(rewardPtsDisp);
-    loadQuote(row.id, row.profileId);
+    loadQuote(row.id, row.profileId, row.profileName);
     // اعرض كروت الجرد فوراً (نفس صفحة الكروت) — بدون تفريغ القائمة
     renderCards(cardsForProfile(row.profileId, row.profileName));
     loadProfiles().then(function (ps) {

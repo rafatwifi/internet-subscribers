@@ -498,10 +498,10 @@ class SASConnector
             }
         } else {
             $routes = array(
+                'user/activate',
                 'user/activate/credit',
                 'user/activate/managerBalance',
                 'user/activate/manager_balance',
-                'user/renew',
                 'user/purchase',
             );
             if ($userId > 0) {
@@ -540,6 +540,9 @@ class SASConnector
         }
         $last['success'] = false;
         $hint = isset($last['message']) ? trim((string) $last['message']) : '';
+        if (strpos($hint, '404') !== false || strpos($hint, 'المسار غير موجود') !== false) {
+            $hint = '';
+        }
         $last['message'] = ($hint !== '' ? ($hint . ' — ') : '')
             . 'الساس ما غيّر تاريخ الانتهاء بعد طلب التفعيل';
         return $last;
@@ -1379,7 +1382,7 @@ class SASConnector
         return $meta;
     }
 
-    private function sasCardFetchPaged($routes, $payload, $maxPages = 20)
+    private function sasCardFetchPaged($routes, $payload, $maxPages = 20, $stopAfter = 0)
     {
         $all = array();
         if (!is_array($payload)) {
@@ -1400,6 +1403,10 @@ class SASConnector
                 continue;
             }
             $all = $got;
+            $stopAfter = (int) $stopAfter;
+            if ($stopAfter > 0 && count($all) >= $stopAfter) {
+                return array_slice($all, 0, $stopAfter);
+            }
             $meta = $this->sasCardListMeta($full);
             $total = 0;
             foreach (array('total', 'recordsTotal', 'recordsFiltered') as $k) {
@@ -1434,6 +1441,9 @@ class SASConnector
                     break;
                 }
                 $all = array_merge($all, $got2);
+                if ($stopAfter > 0 && count($all) >= $stopAfter) {
+                    return array_slice($all, 0, $stopAfter);
+                }
                 if (count($got2) < $perPage) {
                     break;
                 }
@@ -2606,7 +2616,7 @@ class SASConnector
         return true;
     }
 
-    private function sasFreeCardIds($seriesCode)
+    private function sasFreeCardIds($seriesCode, $need = 0)
     {
         $seriesCode = trim((string) $seriesCode);
         if ($seriesCode === '') {
@@ -2620,8 +2630,10 @@ class SASConnector
             'search' => '',
             'used' => 0,
         );
+        $need = (int) $need;
+        $pages = ($need > 0) ? 2 : 8;
         $routes = array('index/card/' . $seriesCode);
-        $rows = $this->sasCardFetchPaged($routes, $page, 8);
+        $rows = $this->sasCardFetchPaged($routes, $page, $pages, $need);
         if (!$rows) {
             unset($page['used']);
             $rows = $this->sasCardFetchPaged($routes, $page, 4);
@@ -2843,10 +2855,11 @@ class SASConnector
         return array(false, 'sas');
     }
 
-    private function sasPrefixSnapshot($series)
+    private function sasPrefixSnapshot($series, $need = 0)
     {
         $series = trim((string) $series);
-        $idsPack = $this->sasFreeCardIds($series);
+        $need = (int) $need;
+        $idsPack = $this->sasFreeCardIds($series, $need > 0 ? ($need + 1) : 0);
         $ids = (is_array($idsPack) && !empty($idsPack['ids']) && is_array($idsPack['ids'])) ? $idsPack['ids'] : array();
         $start = $this->sasSeriesRangeStart($series);
         if ($series === '' || $start <= 0 || !$ids) {
@@ -2977,7 +2990,7 @@ class SASConnector
         if ($series === '' || $count < 1 || $newOwner <= 0 || $backOwner <= 0) {
             return $fail;
         }
-        $snap = $this->sasPrefixSnapshot($series);
+        $snap = $this->sasPrefixSnapshot($series, $count);
         if (empty($snap['ok'])) {
             $fail[1] = !empty($snap['message']) ? $snap['message'] : 'pins';
             return $fail;

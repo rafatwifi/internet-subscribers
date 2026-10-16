@@ -3182,6 +3182,55 @@ th.status-cell {
   max-width: 520px;
   width: calc(100% - 24px);
 }
+.bulk-act-card { max-width: 760px; }
+.bulk-act-people {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: min(54vh, 460px);
+  overflow: auto;
+  margin: 0 0 8px;
+}
+.bulk-act-person {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 8px 10px;
+  background: #fff;
+}
+.bulk-act-person header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: baseline;
+  margin-bottom: 4px;
+}
+.bulk-act-person header span { color: #64748b; font-size: 12px; }
+.bulk-act-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+  padding: 2px 0;
+}
+.bulk-act-line.debt { color: #b45309; }
+.bulk-act-line.total { font-weight: 800; }
+.bulk-act-grand {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-weight: 800;
+  font-size: 13px;
+  margin: 0 0 8px;
+}
+@media (min-width: 800px) {
+  .bulk-act-people { display: grid; grid-template-columns: 1fr 1fr; align-content: start; }
+}
+@media (max-width: 760px) {
+  .bulk-act-card { width: calc(100% - 16px); max-height: calc(100vh - 24px); overflow: auto; }
+  .bulk-act-people { max-height: 46vh; }
+  .bulk-act-grand { font-size: 12px; }
+}
 .ops-modal-head {
   display: flex;
   align-items: center;

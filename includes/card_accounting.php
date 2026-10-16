@@ -2025,6 +2025,50 @@ function account_plan_money($pdo, $plan)
     return $monthly;
 }
 
+/** سعر المشترك النهائي فقط. لا يرجع سعر الجملة ولا سعر الوكيل. */
+function account_customer_sell_price($pdo, $serviceName, $sasProfileId = 0, $userId = 0)
+{
+    $userId = (int) $userId;
+    if ($userId <= 0 && function_exists('current_admin')) {
+        $me = current_admin();
+        $userId = $me ? (int) $me['id'] : 0;
+    }
+    if ($userId <= 0 || !$pdo || !function_exists('agent_card_prices_list')) {
+        return 0.0;
+    }
+    $want = strtolower(trim((string) $serviceName));
+    $wantSoft = function_exists('card_price_soft_key') ? card_price_soft_key($serviceName) : '';
+    $sasProfileId = (int) $sasProfileId;
+    $exact = 0.0;
+    $soft = 0.0;
+    $byPid = 0.0;
+    foreach (agent_card_prices_list($pdo, $userId) as $row) {
+        $rowName = isset($row['profile_name']) ? (string) $row['profile_name'] : '';
+        $retail = isset($row['retail_price']) ? (float) $row['retail_price'] : 0;
+        if ($retail <= 0) {
+            continue;
+        }
+        $nameHit = ($want !== '' && strtolower(trim($rowName)) === $want);
+        $softHit = (!$nameHit && $wantSoft !== '' && function_exists('card_price_soft_key') && card_price_soft_key($rowName) === $wantSoft);
+        $pidHit = ($sasProfileId > 0 && isset($row['profile_id']) && (int) $row['profile_id'] === $sasProfileId);
+        if ($nameHit) {
+            $exact = $retail;
+        } elseif ($softHit && $soft <= 0) {
+            $soft = $retail;
+        }
+        if ($pidHit && $byPid <= 0) {
+            $byPid = $retail;
+        }
+    }
+    if ($exact > 0) {
+        return $exact;
+    }
+    if ($soft > 0) {
+        return $soft;
+    }
+    return $byPid;
+}
+
 function agent_card_price_save($pdo, $agentUserId, $profileId, $profileName, $wholesale, $agentPrice, $retailPrice = null, $subagentPrice = null)
 {
     ensure_agent_card_prices_table($pdo);

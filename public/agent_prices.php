@@ -1845,18 +1845,18 @@ foreach ($picker as $downOpt) {
                 <tr>
                     <th><?php echo e($isEn ? 'Package' : 'الباقة'); ?></th>
                     <?php if ($isAccPrice): ?>
-                    <th><?php echo e($isEn ? 'Cost' : 'سعر التكلفة'); ?></th>
-                    <th><?php echo e($isEn ? 'Subscriber price' : 'سعر المشترك النهائي'); ?></th>
+                    <th><?php echo e($isEn ? 'Cost' : 'التكلفة'); ?></th>
+                    <th><?php echo e($isEn ? 'Final' : 'النهائي'); ?></th>
                     <?php elseif ($isSelf): ?>
-                    <th><?php echo e($isEn ? 'Cost' : 'سعر التكلفة'); ?></th>
-                    <th><?php echo e($isEn ? 'Subscriber price' : 'سعر المشترك النهائي'); ?></th>
+                    <th><?php echo e($isEn ? 'Cost' : 'التكلفة'); ?></th>
                     <?php if ($hasDownline): ?>
-                    <th><?php echo e($isEn ? 'Sub-agent sale' : 'سعر البيع للوكيل الفرعي'); ?></th>
+                    <th><?php echo e($isEn ? 'Agent' : 'الوكيل'); ?></th>
                     <?php endif; ?>
+                    <th><?php echo e($isEn ? 'Final' : 'النهائي'); ?></th>
                     <?php else: ?>
-                    <th><?php echo e($isEn ? 'Cost' : 'سعر التكلفة'); ?></th>
-                    <th><?php echo e($isEn ? 'Agent price' : 'سعر الوكيل'); ?></th>
-                    <th><?php echo e($isEn ? 'Final subscriber' : 'سعر المشترك النهائي'); ?></th>
+                    <th><?php echo e($isEn ? 'Cost' : 'التكلفة'); ?></th>
+                    <th><?php echo e($isEn ? 'Agent' : 'الوكيل'); ?></th>
+                    <th><?php echo e($isEn ? 'Final' : 'النهائي'); ?></th>
                     <th><?php echo e($isEn ? 'Profit' : 'الربح'); ?></th>
                     <?php endif; ?>
                 </tr>
@@ -1986,23 +1986,23 @@ foreach ($picker as $downOpt) {
                             <?php endif; ?>
                         </td>
                         <?php if (!$isSelf && !$isAccPrice): ?>
-                        <td data-label="<?php echo e($isEn ? 'Cost' : 'سعر التكلفة'); ?>"><input class="ltr pkg-price" data-col="w" type="text" readonly tabindex="-1" value="<?php echo (int) $orig; ?>"></td>
-                        <td data-label="<?php echo e($isEn ? 'Agent price' : 'سعر الوكيل'); ?>"><input class="ltr js-price" data-col="a" type="number" min="0" step="1" data-floor="<?php echo (int) $floorA; ?>" name="rows[<?php echo (int) $i; ?>][agent_price]" value="<?php echo (int) $sell; ?>"></td>
-                        <td data-label="<?php echo e($isEn ? 'Subscriber price' : 'سعر المشترك النهائي'); ?>"><input class="ltr js-price" data-col="r" type="number" min="0" step="1" data-floor="<?php echo (int) $floorR; ?>" name="rows[<?php echo (int) $i; ?>][retail_price]" value="<?php echo (int) $retail; ?>"></td>
+                        <td data-label="<?php echo e($isEn ? 'Cost' : 'التكلفة'); ?>"><input class="ltr pkg-price" data-col="w" type="text" readonly tabindex="-1" value="<?php echo (int) $orig; ?>"></td>
+                        <td data-label="<?php echo e($isEn ? 'Agent' : 'الوكيل'); ?>"><input class="ltr js-price" data-col="a" type="number" min="0" step="1" data-floor="<?php echo (int) $floorA; ?>" name="rows[<?php echo (int) $i; ?>][agent_price]" value="<?php echo (int) $sell; ?>"></td>
+                        <td data-label="<?php echo e($isEn ? 'Final' : 'النهائي'); ?>"><input class="ltr js-price" data-col="r" type="number" min="0" step="1" data-floor="<?php echo (int) $floorR; ?>" name="rows[<?php echo (int) $i; ?>][retail_price]" value="<?php echo (int) $retail; ?>"></td>
                         <td class="ltr js-profit" data-label="<?php echo e($isEn ? 'Profit' : 'الربح'); ?>" style="font-weight:800"><?php echo (int) $profitNow; ?></td>
                         <?php elseif ($isSelf): ?>
-                        <td data-label="<?php echo e($isEn ? 'Cost' : 'سعر التكلفة'); ?>">
+                        <td data-label="<?php echo e($isEn ? 'Cost' : 'التكلفة'); ?>">
                             <input class="ltr pkg-price" data-col="w" type="text" readonly tabindex="-1" value="<?php echo (int) $orig; ?>">
                             <input type="hidden" name="rows[<?php echo (int) $i; ?>][wholesale_price]" value="<?php echo (int) $savedW; ?>">
                         </td>
-                        <td data-label="<?php echo e($isEn ? 'Subscriber price' : 'سعر المشترك النهائي'); ?>"><input class="ltr js-price" data-col="r" data-bind="1" type="number" min="0" step="1" data-floor="<?php echo (int) $floorR; ?>" name="rows[<?php echo (int) $i; ?>][retail_price]" value="<?php echo (int) $retail; ?>"></td>
                         <?php if ($hasDownline): ?>
-                        <td data-label="<?php echo e($isEn ? 'Sub-agent sale' : 'سعر البيع للوكيل الفرعي'); ?>"><input class="ltr js-price" data-col="s" data-bind="1" type="number" min="0" step="1" data-floor="<?php echo (int) $floorA; ?>" name="rows[<?php echo (int) $i; ?>][subagent_price]" value="<?php echo (int) $subagent; ?>"></td>
+                        <td data-label="<?php echo e($isEn ? 'Agent' : 'الوكيل'); ?>"><input class="ltr js-price" data-col="s" data-bind="1" type="number" min="0" step="1" data-floor="<?php echo (int) $floorA; ?>" name="rows[<?php echo (int) $i; ?>][subagent_price]" value="<?php echo (int) $subagent; ?>"></td>
                         <?php endif; ?>
+                        <td data-label="<?php echo e($isEn ? 'Final' : 'النهائي'); ?>"><input class="ltr js-price" data-col="r" data-bind="1" type="number" min="0" step="1" data-floor="<?php echo (int) $floorR; ?>" name="rows[<?php echo (int) $i; ?>][retail_price]" value="<?php echo (int) $retail; ?>"></td>
                         <?php else: ?>
                         <?php if ($isAccPrice): ?>
-                        <td data-label="<?php echo e($isEn ? 'Cost' : 'سعر التكلفة'); ?>"><input class="ltr js-price" data-col="w" type="number" min="0" step="1" data-floor="<?php echo (int) $floorW; ?>" name="rows[<?php echo (int) $i; ?>][wholesale_price]" value="<?php echo (int) $orig; ?>" <?php echo $lockWholesale ? 'readonly' : ''; ?>></td>
-                        <td data-label="<?php echo e($isEn ? 'Subscriber price' : 'سعر المشترك النهائي'); ?>"><input class="ltr js-price" data-col="r" type="number" min="0" step="1" data-floor="<?php echo (int) $floorR; ?>" name="rows[<?php echo (int) $i; ?>][retail_price]" value="<?php echo (int) $retail; ?>" <?php echo $canRetail ? '' : 'readonly'; ?>></td>
+                        <td data-label="<?php echo e($isEn ? 'Cost' : 'التكلفة'); ?>"><input class="ltr js-price" data-col="w" type="number" min="0" step="1" data-floor="<?php echo (int) $floorW; ?>" name="rows[<?php echo (int) $i; ?>][wholesale_price]" value="<?php echo (int) $orig; ?>" <?php echo $lockWholesale ? 'readonly' : ''; ?>></td>
+                        <td data-label="<?php echo e($isEn ? 'Final' : 'النهائي'); ?>"><input class="ltr js-price" data-col="r" type="number" min="0" step="1" data-floor="<?php echo (int) $floorR; ?>" name="rows[<?php echo (int) $i; ?>][retail_price]" value="<?php echo (int) $retail; ?>" <?php echo $canRetail ? '' : 'readonly'; ?>></td>
                         <?php endif; ?>
                         <?php endif; ?>
                     </tr>

@@ -44,7 +44,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     <link rel="icon" href="assets/favicon.png?v=2" type="image/png" sizes="32x32">
     <?php endif; ?>
     <link rel="apple-touch-icon" href="<?php echo e($brandIcon !== '' ? $brandIcon : 'assets/apple-touch-icon.png?v=2'); ?>">
-    <link rel="stylesheet" href="assets/style.css?v=ui18">
+    <link rel="stylesheet" href="assets/style.css?v=ui19">
     <style>
         <?php if ($bgMode === 'image' && $bgUrl !== ''): ?>
         body.app-bg-image {
@@ -731,16 +731,44 @@ body.nav-pending .nav-progress { display: block; }
   function hideBar() {
     bar.hidden = true;
     bar.classList.add('wa-conn-hidden');
-    lastKey = 'ok';
-    failStreak = 0;
+  }
+  function stickyWa(msg) {
+    var old = document.getElementById('waLinkToast');
+    if (old) {
+      var held = old.querySelector('.sas-toast-text');
+      if (held && held.textContent === msg) return;
+      if (old.parentNode) old.parentNode.removeChild(old);
+    }
+    hideBar();
+    var el = document.createElement('div');
+    el.id = 'waLinkToast';
+    el.className = 'sas-toast sas-toast-error sas-toast-stay';
+    el.setAttribute('role', 'status');
+    var span = document.createElement('span');
+    span.className = 'sas-toast-text';
+    span.textContent = msg;
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'sas-toast-x';
+    btn.setAttribute('aria-label', isEn ? 'Close' : 'إغلاق');
+    btn.textContent = '×';
+    btn.addEventListener('click', function () {
+      if (el.parentNode) el.parentNode.removeChild(el);
+    });
+    el.appendChild(span);
+    el.appendChild(btn);
+    document.body.appendChild(el);
+    if (window.placeCornerToast) window.placeCornerToast(el);
+  }
+  function clearWaToast() {
+    var old = document.getElementById('waLinkToast');
+    if (old && old.parentNode) old.parentNode.removeChild(old);
   }
   function setProblem(cls, msg) {
     var key = cls + '|' + msg;
-    if (key === lastKey && !bar.hidden) return;
+    if (key === lastKey) return;
     lastKey = key;
-    showBar();
-    bar.className = 'wa-conn-bar ' + cls;
-    if (text) text.textContent = msg;
+    stickyWa(msg);
   }
 
   function check() {
@@ -757,6 +785,9 @@ body.nav-pending .nav-progress { display: block; }
       failStreak = 0;
       if (data.ready === true) {
         hideBar();
+        clearWaToast();
+        lastKey = 'ok';
+        failStreak = 0;
         return;
       }
       if (data.has_qr || data.status === 'qr_ready' || data.status === 'closed_401' || data.status === 'need_link') {
@@ -776,8 +807,7 @@ body.nav-pending .nav-progress { display: block; }
     xhr.send();
   }
 
-  // لا تفحص واتساب فور فتح الصفحة — يقلل صفنة التنقل
-  setTimeout(check, 12000);
+  setTimeout(check, 1500);
   setInterval(check, 60000);
 })();
 

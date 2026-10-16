@@ -148,6 +148,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $ids = isset($_POST['ids']) && is_array($_POST['ids']) ? $_POST['ids'] : array();
         $payMode = post('pay_mode') === 'credit' ? 'credit' : 'cash';
         $sendWa = post('send_whatsapp') === '1';
+        $sendOld = post('send_old_debts') === '1';
         $cleanIds = array();
         foreach ($ids as $rawId) {
             $sid = (int) $rawId;
@@ -168,7 +169,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'plan_id' => 0,
                 'pay_mode' => $payMode,
                 'send_whatsapp' => $sendWa,
-                'send_old_debts' => false,
+                'send_old_debts' => $sendOld,
                 'carry_days' => true,
             ));
             if ($ok) {
@@ -818,6 +819,8 @@ function render_subscriber_table_row($row, $n, $config, $lang)
         . ' data-name="' . e($row['name']) . '"'
         . ' data-debt="' . ($debt > 0 ? '1' : '0') . '"'
         . ' data-debt-amount="' . (int) round($debt) . '"'
+        . ' data-price="' . (int) round(isset($row['active_price']) ? (float) $row['active_price'] : 0) . '"'
+        . ' data-pkg="' . e($pkgLabel) . '"'
         . ' data-active="' . ($hasActive ? '1' : '0') . '"'
         . ' data-msg-fail="' . $msgFail . '"'
         . ' data-log-id="' . $logId . '"'
@@ -1197,20 +1200,33 @@ function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
 #subsTable.table-compact td {
   border-radius: 0 !important;
 }
+#subsTable td.col-msg,
+#subsTable th.col-msg {
+  text-align: center;
+}
 #subsTable .dot-msg {
-  display: inline-block;
-  width: 11px;
-  height: 11px;
+  display: block;
+  width: 12px;
+  height: 12px;
   border-radius: 3px;
-  vertical-align: middle;
+  justify-self: center;
 }
 #subsTable .dot-msg.ok { background: #34c759; }
 #subsTable .dot-msg.fail { background: #ff9f0a; }
 #subsTable .dot-msg.off { background: #cbd5e1; }
 #subsTable .msg-status-row {
-  display: inline-flex;
+  display: inline-grid;
+  grid-template-columns: 22px 12px;
+  column-gap: 6px;
   align-items: center;
-  gap: 6px;
+  justify-items: center;
+  direction: ltr;
+  width: 40px;
+}
+#subsTable .msg-retry-slot {
+  width: 22px;
+  height: 22px;
+  display: block;
 }
 #subsTable .msg-retry-btn {
   width: 22px;
@@ -1235,6 +1251,7 @@ function subs_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw)
 #subsTable .msg-nowa {
   display: inline-flex;
   align-items: center;
+  grid-column: 1 / -1;
   height: 20px;
   padding: 0 7px;
   border-radius: 999px;
@@ -1786,13 +1803,13 @@ window.DEBT_ENTRY = {
 <?php endif; ?>
 
 <div class="modal-backdrop hidden" id="opsBulkModal">
-    <div class="modal-card ops-modal-card">
+    <div class="modal-card ops-modal-card bulk-act-card">
         <div class="ops-modal-head">
             <h3><?php echo e(t('bulk_activate')); ?></h3>
             <button type="button" class="btn ghost sm" id="opsBulkModalClose">×</button>
         </div>
-        <p class="meta" style="margin:0 0 8px"><?php echo e($lang === 'en' ? 'Selected subscribers' : 'المشتركون المحددون'); ?></p>
-        <ul class="ops-selected-list" id="opsSelectedList"></ul>
+        <div class="bulk-act-people" id="opsBulkPeople"></div>
+        <div class="bulk-act-grand" id="opsBulkGrand"></div>
         <div class="ops-section" style="border-top:0;padding-top:0;margin-top:0">
             <div class="pay-mode-label"><?php echo e(t('pay_mode')); ?></div>
             <div class="pay-mode-row" id="opsPayModeRow">
@@ -1818,6 +1835,11 @@ window.DEBT_ENTRY = {
                     <input type="checkbox" name="send_whatsapp" value="1" checked>
                     <span class="toggle-ui"></span>
                     <span class="toggle-text"><?php echo e(t('send_message')); ?></span>
+                </label>
+                <label class="toggle" style="margin:0 0 12px">
+                    <input type="checkbox" name="send_old_debts" value="1" checked>
+                    <span class="toggle-ui"></span>
+                    <span class="toggle-text"><?php echo e($lang === 'en' ? 'Include each person\'s old debts in the message' : 'أرفق ديون كل شخص برسالته'); ?></span>
                 </label>
                 <button class="btn" type="submit" style="width:100%"><?php echo e(t('bulk_activate')); ?></button>
             </form>
@@ -1900,6 +1922,8 @@ window.DEBT_ENTRY = {
         name: tr.getAttribute('data-name') || '',
         debt: tr.getAttribute('data-debt') === '1',
         debtAmount: parseFloat(tr.getAttribute('data-debt-amount') || '0') || 0,
+        price: parseFloat(tr.getAttribute('data-price') || '0') || 0,
+        pkg: tr.getAttribute('data-pkg') || '',
         active: tr.getAttribute('data-active') === '1',
         msgFail: tr.getAttribute('data-msg-fail') === '1',
         logId: tr.getAttribute('data-log-id') || '0',
@@ -2049,11 +2073,46 @@ window.DEBT_ENTRY = {
   function openBulkActivateModal() {
     var rows = selectedRows();
     if (rows.length < 1 || !bulkModal) return;
-    if (opsList) {
-      opsList.innerHTML = rows.map(function (r) {
-        return '<li><strong>' + r.name + '</strong></li>';
-      }).join('');
+    var box = document.getElementById('opsBulkPeople');
+    var grand = document.getElementById('opsBulkGrand');
+    function money(n) {
+      var v = Math.round(Number(n) || 0);
+      return String(v).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
     }
+    function esc(s) {
+      return String(s || '').replace(/[&<>"']/g, function (ch) {
+        return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch];
+      });
+    }
+    function paint() {
+      var creditEl = document.querySelector('#opsBulkModal input[name="pay_mode"]:checked');
+      var credit = !!(creditEl && creditEl.value === 'credit');
+      var sumOld = 0;
+      var sumNew = 0;
+      var html = '';
+      rows.forEach(function (r) {
+        var oldSum = Number(r.debtAmount) || 0;
+        var charge = Number(r.price) || 0;
+        sumOld += oldSum;
+        sumNew += charge;
+        var after = credit ? (oldSum + charge) : oldSum;
+        html += '<article class="bulk-act-person"><header><strong>' + esc(r.name) + '</strong></header>';
+        if (r.pkg) html += '<div class="bulk-act-line"><span>الباقة</span><span>' + esc(r.pkg) + '</span></div>';
+        html += '<div class="bulk-act-line debt"><span>ديون سابقة</span><span>' + (oldSum > 0 ? money(oldSum) : 'ماكو') + '</span></div>';
+        html += '<div class="bulk-act-line"><span>هذا التفعيل</span><span>' + money(charge) + '</span></div>';
+        html += '<div class="bulk-act-line total"><span>' + (credit ? 'بعد التفعيل بالآجل' : 'يبقى عليه') + '</span><span>' + money(after) + '</span></div>';
+        html += '</article>';
+      });
+      if (box) box.innerHTML = html;
+      if (grand) {
+        var afterAll = credit ? (sumOld + sumNew) : sumOld;
+        grand.innerHTML = '<span>المجموع</span><span>ديون ' + money(sumOld) + ' · تفعيل ' + money(sumNew) + ' · ' + (credit ? 'بعد الآجل ' : 'يبقى ') + money(afterAll) + '</span>';
+      }
+    }
+    paint();
+    document.querySelectorAll('#opsBulkModal input[name="pay_mode"]').forEach(function (el) {
+      el.onchange = paint;
+    });
     fillHiddenIds(document.getElementById('opsBulkActivateForm'));
     bulkModal.classList.remove('hidden');
   }

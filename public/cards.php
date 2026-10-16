@@ -380,13 +380,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
                 $foreignOwners = array(-1);
             }
         }
+        $toName = $toRow && !empty($toRow['display_name']) ? $toRow['display_name'] : ('#' . $toAgentId);
+        $fromRowLog = ($fromAgentId === $homeId) ? $homeRow : (function_exists('get_admin_user') ? get_admin_user($pdo, $fromAgentId) : null);
+        $fromName = $fromRowLog && !empty($fromRowLog['display_name']) ? $fromRowLog['display_name'] : ('#' . $fromAgentId);
+        $xferTitle = (int) $qty . ' — ' . $profileName . ' من ' . $fromName . ' إلى ' . $toName;
+        flash('info', $isEn
+            ? 'Transfer started. You can close the page. The result is in the log.'
+            : 'بدأ التحويل. تقدر تسكر الصفحة. النتيجة باللوك.');
+        if (function_exists('app_finish_and_continue')) {
+            app_finish_and_continue('cards.php#card-transfer');
+        }
         $move = $apiMove->moveUnusedCardsToOwner($profileId, $profileName, $qty, $toMid, $fromMid, $foreignOwners);
         if (empty($move['ok'])) {
             if (function_exists('card_sas_stock_forget')) {
                 card_sas_stock_forget();
             }
-            flash('error', card_sas_move_error($move, $lang));
-            redirect('cards.php#card-transfer');
+            $failMsg = function_exists('card_sas_move_error') ? card_sas_move_error($move, $lang) : 'فشل التحويل';
+            if (function_exists('activity_log')) {
+                activity_log($pdo, 0, 'card_transfer', $toAgentId, 'card_transfer_fail', 'فشل تحويل ' . $xferTitle, $failMsg . "\nالكروت ما انتقلت وما انسجل تحويل.");
+            }
+            exit;
         }
 
         list($ok, $code) = transfer_cards(
@@ -458,27 +471,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
                 }
             }
             if (function_exists('activity_log')) {
-                $toName = $toRow && !empty($toRow['display_name']) ? $toRow['display_name'] : ('#' . $toAgentId);
-                $fromRowLog = ($fromAgentId === $homeId) ? $homeRow : (function_exists('get_admin_user') ? get_admin_user($pdo, $fromAgentId) : null);
-                $fromName = $fromRowLog && !empty($fromRowLog['display_name']) ? $fromRowLog['display_name'] : ('#' . $fromAgentId);
+                $doneDetails = (string) $note;
+                if ($waNote !== '') {
+                    $doneDetails .= ($doneDetails !== '' ? "\n" : '') . trim($waNote);
+                }
                 activity_log(
                     $pdo,
                     0,
                     'card_transfer',
                     $toAgentId,
                     'card_transfer',
-                    'تحويل ' . (int) $qty . ' — ' . $profileName . ' من ' . $fromName . ' إلى ' . $toName,
-                    $note
+                    'تم تحويل ' . $xferTitle,
+                    $doneDetails
                 );
             }
-            $returnedUp = ($fromAgentId !== $homeId && $toAgentId === $parentId && $parentId > 0);
-            flash('success', $returnedUp
-                ? ($isEn ? 'This category was returned.' : 'تم استرجاع هذه الفئة.') . $waNote
-                : ($isEn ? 'Transferred — the cards moved in SAS' : 'تم التحويل — الكروت انتقلت بالساس'));
         } else {
-            flash('error', card_transfer_error_message($code, $lang));
+            $failMsg = function_exists('card_transfer_error_message') ? card_transfer_error_message($code, $lang) : (string) $code;
+            if (function_exists('activity_log')) {
+                activity_log($pdo, 0, 'card_transfer', $toAgentId, 'card_transfer_fail', 'فشل تحويل ' . $xferTitle, $failMsg . "\nتمت محاولة إرجاع الكروت للمصدر.");
+            }
         }
-        redirect('cards.php#card-transfer');
+        exit;
     }
 }
 
