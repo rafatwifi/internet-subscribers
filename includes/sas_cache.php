@@ -1113,6 +1113,84 @@ function sas_icmp_many($hosts)
     return $out;
 }
 
+function sas_ping_na_path($tid)
+{
+    $tid = (int) $tid;
+    if ($tid <= 0) {
+        $tid = 1;
+    }
+    return dirname(__DIR__) . '/storage/cache/sub_ping_na_t' . $tid . '.json';
+}
+
+function sas_ping_na_load($tid)
+{
+    $tid = (int) $tid;
+    if ($tid <= 0) {
+        $tid = 1;
+    }
+    if (isset($GLOBALS['sas_ping_na_map'][$tid]) && is_array($GLOBALS['sas_ping_na_map'][$tid])) {
+        return $GLOBALS['sas_ping_na_map'][$tid];
+    }
+    $map = array();
+    $file = sas_ping_na_path($tid);
+    if (is_file($file)) {
+        $raw = json_decode((string) @file_get_contents($file), true);
+        if (is_array($raw)) {
+            $now = time();
+            foreach ($raw as $u => $at) {
+                $u = strtolower(trim((string) $u));
+                if ($u === '' || ($now - (int) $at) > 300) {
+                    continue;
+                }
+                $map[$u] = (int) $at;
+            }
+        }
+    }
+    if (!isset($GLOBALS['sas_ping_na_map']) || !is_array($GLOBALS['sas_ping_na_map'])) {
+        $GLOBALS['sas_ping_na_map'] = array();
+    }
+    $GLOBALS['sas_ping_na_map'][$tid] = $map;
+    return $map;
+}
+
+function sas_ping_na_mark($tid, $user, $on)
+{
+    $user = strtolower(trim((string) $user));
+    if ($user === '') {
+        return;
+    }
+    $tid = (int) $tid;
+    if ($tid <= 0) {
+        $tid = 1;
+    }
+    $map = sas_ping_na_load($tid);
+    if ($on) {
+        $map[$user] = time();
+    } else {
+        unset($map[$user]);
+    }
+    $GLOBALS['sas_ping_na_map'][$tid] = $map;
+    $dir = dirname(sas_ping_na_path($tid));
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0775, true);
+    }
+    @file_put_contents(sas_ping_na_path($tid), json_encode($map));
+}
+
+function sas_ping_user_is_na($username)
+{
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tid <= 0) {
+        $tid = 1;
+    }
+    $user = strtolower(trim((string) $username));
+    if ($user === '') {
+        return false;
+    }
+    $map = sas_ping_na_load($tid);
+    return isset($map[$user]);
+}
+
 function sas_ping_warm($pdo)
 {
     if (!$pdo || !function_exists('sas_ping_mode') || sas_ping_mode($pdo) === 'off') {
@@ -1137,8 +1215,30 @@ function sas_ping_warm($pdo)
     }
     try {
         $scope = function_exists('sas_agent_scope_sql') ? sas_agent_scope_sql('c') : '';
-        $sql = 'SELECT c.username, c.is_online, c.framed_ip FROM sas_users_cache c WHERE c.tenant_id = ' . $tid . ' AND c.is_online = 1' . $scope . ' LIMIT 40';
+        $offFile = $dir . '/sub_ping_warm_t' . $tid . '.off';
+        $off = is_file($offFile) ? (int) trim((string) @file_get_contents($offFile)) : 0;
+        if ($off < 0) {
+            $off = 0;
+        }
+        $missing = 0;
+        try {
+            $cntSql = 'SELECT COUNT(*) FROM sas_users_cache c WHERE c.tenant_id = ' . $tid
+                . ' AND c.is_online = 1 AND (c.online_ping IS NULL OR c.online_ping = 0)' . $scope;
+            $missing = (int) $pdo->query($cntSql)->fetchColumn();
+        } catch (Exception $e) {
+            $missing = 0;
+        }
+        if ($missing > 0) {
+            $off = 0;
+        }
+        $sql = 'SELECT c.username, c.is_online, c.framed_ip, c.online_ping FROM sas_users_cache c WHERE c.tenant_id = ' . $tid . ' AND c.is_online = 1' . $scope
+            . ' ORDER BY (c.online_ping IS NULL OR c.online_ping = 0) DESC, c.username ASC LIMIT 40 OFFSET ' . $off;
         $rows = $pdo->query($sql)->fetchAll();
+        if ($missing > 0 || !is_array($rows) || count($rows) < 40) {
+            @file_put_contents($offFile, '0');
+        } else {
+            @file_put_contents($offFile, (string) ($off + 40));
+        }
         if (is_array($rows) && $rows) {
             sas_fill_online_pings($pdo, $rows);
         }
@@ -1246,6 +1346,9 @@ function sas_ping_icmp_missing($pdo, $rows)
                     $upd->execute(array(':ms' => $ms, ':t' => $tid, ':u' => $user));
                 } catch (Exception $e) {
                 }
+                if (function_exists('sas_ping_na_mark')) {
+                    sas_ping_na_mark($tid, $user, false);
+                }
             }
         }
     }
@@ -1292,8 +1395,8 @@ function sas_fill_sas_pings($pdo, $rows)
             $rows[$i]['_ping_fresh'] = 0;
             continue;
         }
-        $storedPing = isset($row['online_ping']) ? (int) $row['online_ping'] : 0;
-        if ($storedPing <= 0) {
+        $storedRaw = isset($row['online_ping']) ? $row['online_ping'] : null;
+        if ($storedRaw === null || $storedRaw === '') {
             $rows[$i]['online_ping'] = null;
             $rows[$i]['_ping_fresh'] = 0;
         }
@@ -1391,13 +1494,26 @@ function sas_fill_sas_pings($pdo, $rows)
         foreach ($hit as $user => $ms) {
             $user = strtolower(trim((string) $user));
             $ms = (int) $ms;
-            if ($user === '' || $ms <= 0 || !isset($pairIndex[$user])) {
+            if ($user === '' || !isset($pairIndex[$user])) {
                 continue;
             }
             $i = $pairIndex[$user];
+            if ($ms <= 0) {
+                $rows[$i]['online_ping'] = 0;
+                if ($pdo) {
+                    try {
+                        $updNa = $pdo->prepare('UPDATE sas_users_cache SET online_ping = 0 WHERE tenant_id = :t AND LOWER(username) = :u');
+                        $updNa->execute(array(':t' => $tid, ':u' => $user));
+                    } catch (Exception $e) {
+                    }
+                }
+                sas_ping_na_mark($tid, $user, true);
+                continue;
+            }
             $rows[$i]['online_ping'] = $ms;
             $rows[$i]['_ping_fresh'] = 1;
             $saved[$user] = array('ms' => $ms, 'at' => $now);
+            sas_ping_na_mark($tid, $user, false);
             if ($pdo) {
                 try {
                     $updSas = $pdo->prepare('UPDATE sas_users_cache SET online_ping = :ms WHERE tenant_id = :t AND LOWER(username) = :u');
@@ -1478,12 +1594,12 @@ function sas_fill_portal_pings($pdo, $rows)
             $ms = isset($hit[$ip]) ? (int) $hit[$ip] : 0;
             foreach ($indexes as $i) {
                 $rows[$i]['_ping_attempted'] = 1;
-                if ($ms <= 0) {
+                $user = strtolower(trim((string) $rows[$i]['username']));
+                if ($ms <= 0 || $user === '') {
                     continue;
                 }
                 $rows[$i]['online_ping'] = $ms;
                 $rows[$i]['_ping_fresh'] = 1;
-                $user = strtolower(trim((string) $rows[$i]['username']));
                 $saved[$user] = array('ms' => $ms, 'at' => $now, 'ip' => $ip);
                 if ($upd) {
                     try {
@@ -1491,6 +1607,7 @@ function sas_fill_portal_pings($pdo, $rows)
                     } catch (Exception $e) {
                     }
                 }
+                sas_ping_na_mark($tid, $user, false);
             }
         }
     }
@@ -1658,7 +1775,7 @@ function sas_refresh_online_flags($pdo, $config)
         if ($tidOnline <= 0) {
             $tidOnline = 1;
         }
-        $pdo->exec('UPDATE sas_users_cache SET is_online = 0, online_ping = NULL WHERE tenant_id = ' . $tidOnline . ' AND is_online = 1');
+        $pdo->exec('UPDATE sas_users_cache SET is_online = 0 WHERE tenant_id = ' . $tidOnline . ' AND is_online = 1');
         if ($names) {
             $onlineKeys = array_keys($names);
             $chunks = array_chunk($onlineKeys, 40);
@@ -1714,9 +1831,7 @@ function sas_refresh_online_flags($pdo, $config)
                     $set .= ', daily_traffic = ' . $caseTr . ' ELSE daily_traffic END';
                 }
                 if ($hasPing) {
-                    $set .= ', online_ping = ' . $casePing . ' ELSE NULL END';
-                } else {
-                    $set .= ', online_ping = NULL';
+                    $set .= ', online_ping = ' . $casePing . ' ELSE online_ping END';
                 }
                 $sqlUp = 'UPDATE sas_users_cache SET ' . $set
                     . ' WHERE tenant_id = ' . $tidOnline
@@ -2651,12 +2766,12 @@ function sas_cards_tenant_suffix()
 
 function sas_cards_server_cache_path()
 {
-    return sas_cards_server_cache_dir() . '/dash_cards_' . sas_cards_tenant_suffix() . '.json';
+    return sas_cards_server_cache_dir() . '/dash_cards_page_' . sas_cards_tenant_suffix() . '.json';
 }
 
 function sas_cards_inventory_cache_path()
 {
-    return sas_cards_server_cache_dir() . '/cards_inventory_' . sas_cards_tenant_suffix() . '.json';
+    return sas_cards_server_cache_dir() . '/cards_inventory_own_' . sas_cards_tenant_suffix() . '.json';
 }
 
 function sas_dash_cards_build_payload($groups, $source = 'dash')
@@ -2710,7 +2825,8 @@ function sas_dash_cards_load_persisted()
 function sas_dash_cards_preferred_persisted()
 {
     $cur = sas_dash_cards_load_persisted();
-    if ($cur && !empty($cur['groups']) && is_array($cur['groups'])) {
+    $curTotal = ($cur && isset($cur['card_total'])) ? (int) $cur['card_total'] : 0;
+    if ($cur && $curTotal > 0 && !empty($cur['groups']) && is_array($cur['groups'])) {
         return $cur;
     }
     $inv = function_exists('sas_cards_inventory_load_persisted')
@@ -2718,11 +2834,16 @@ function sas_dash_cards_preferred_persisted()
         : null;
     if ($inv && !empty($inv['groups']) && is_array($inv['groups'])) {
         $groups = sas_dash_groups_from_inventory($inv['groups']);
-        $payload = sas_dash_cards_build_payload($groups, 'inventory');
-        $payload['updated_at'] = isset($inv['updated_at']) ? (int) $inv['updated_at'] : time();
-        return $payload;
+        if ($groups) {
+            $payload = sas_dash_cards_build_payload($groups, 'inventory');
+            $payload['updated_at'] = isset($inv['updated_at']) ? (int) $inv['updated_at'] : time();
+            return $payload;
+        }
     }
-    return sas_dash_cards_load_persisted();
+    if ($cur && isset($cur['groups']) && is_array($cur['groups'])) {
+        return $cur;
+    }
+    return null;
 }
 
 function sas_dash_cards_save_persisted($groups, $source = 'dash')
@@ -3059,10 +3180,6 @@ function sas_dash_card_groups($api, $force = false)
             $groups = sas_dash_groups_from_inventory($inv);
             $source = 'inventory';
         }
-    }
-    if (!$groups && $api && method_exists($api, 'listDashUnusedCardGroups')) {
-        $groups = $api->listDashUnusedCardGroups(40);
-        $source = 'dash';
     }
     if (!is_array($groups)) {
         $groups = array();
@@ -5618,17 +5735,20 @@ function sas_render_table_row($row, $n, $config, $lang)
     $html .= '<td class="sub-check-cell"><label class="sub-check-lab"><input type="checkbox" class="sub-check" value="' . e($username) . '"></label></td>';
     $html .= '<td class="col-num">' . (int) $n . '</td>';
     $html .= '<td class="status-cell col-status" title="' . e($statusTitle) . '">' . $statusHtml . '</td>';
-    $pingHtml = '<span class="sub-ping-na" dir="ltr">N/A</span>';
+    $pingHtml = '';
     $pingMode = 'off';
     if (isset($GLOBALS['pdo']) && function_exists('sas_ping_mode')) {
         $pingMode = sas_ping_mode($GLOBALS['pdo']);
     }
-    if ($isOnline && isset($row['online_ping']) && $row['online_ping'] !== null && $row['online_ping'] !== '' && (int) $row['online_ping'] > 0) {
+    $pingConfirmedNa = $isOnline && function_exists('sas_ping_user_is_na') && sas_ping_user_is_na($username);
+    if ($pingConfirmedNa) {
+        $pingHtml = '<span class="sub-ping-na" dir="ltr">N/A</span>';
+    } elseif ($isOnline && isset($row['online_ping']) && $row['online_ping'] !== null && $row['online_ping'] !== '' && (int) $row['online_ping'] > 0) {
         $ms = (int) $row['online_ping'];
         $tone = ($ms <= 80) ? '' : (($ms <= 180) ? ' is-mid' : ' is-slow');
         $pingHtml = '<span class="sub-ping' . $tone . '" dir="ltr">' . $ms . '<small>ms</small></span>';
-    } elseif ($pingMode !== 'off' && $isOnline && empty($row['_ping_checked'])) {
-        $pingHtml = '<span class="sub-ping-wait" aria-hidden="true"></span>';
+    } elseif ($pingMode !== 'off' && $isOnline) {
+        $pingHtml = '';
     } elseif (!$isOnline) {
         $ago = !empty($row['last_online']) ? sas_ago_label($row['last_online'], $lang === 'en') : '';
         if ($ago !== '') {

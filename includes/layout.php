@@ -502,7 +502,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
         <main class="container">
             <?php if ($flash): ?>
                 <?php $flashStay = !empty($flash['sticky']); ?>
-                <div class="sas-toast sas-toast-<?php echo e($flash['type']); ?><?php echo $flashStay ? ' sas-toast-stay' : ''; ?>" role="status">
+                <div class="sas-toast sas-toast-<?php echo e($flash['type']); ?><?php echo $flashStay ? ' sas-toast-stay' : ' sas-toast-mid'; ?>" role="status">
                     <span class="sas-toast-text"><?php echo e($flash['message']); ?></span>
                     <?php if ($flashStay): ?>
                         <button type="button" class="sas-toast-x" aria-label="<?php echo e($isEn ? 'Close' : 'إغلاق'); ?>">×</button>
@@ -539,33 +539,66 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
                 stroke-dashoffset: 0;
                 transition: stroke-dashoffset .22s ease;
             }
-            .sas-toast {
-                position: fixed; top: 12px; bottom: auto; inset-inline-end: 220px; inset-inline-start: auto; z-index: 100003;
-                width: min(320px, 42vw);
-                padding: 12px 14px; border-radius: 14px; font-weight: 700; text-align: start;
+            .sas-toast,
+            .sas-toast.sas-toast-mid {
+                position: fixed !important;
+                top: 8px !important;
+                bottom: auto !important;
+                z-index: 100003 !important;
+                margin: 0 !important;
+                inset-inline-start: auto !important;
+                inset-inline-end: auto !important;
+                left: auto !important;
+                right: calc(250px + 16px) !important;
+                width: min(340px, 42vw);
+                max-width: min(420px, calc(100vw - 24px));
+                padding: 12px 14px; border-radius: 14px; font-weight: 700;
+                text-align: start !important;
+                justify-content: flex-start !important;
                 box-shadow: 0 14px 40px rgba(15, 23, 42, .22);
                 display: flex; align-items: flex-start; gap: 10px;
-                opacity: 1; transform: translateY(0);
-                transition: opacity .8s ease, transform .8s ease;
+                opacity: 1;
+                transform: translateY(0);
+                transition: opacity .7s ease, transform .7s ease;
+            }
+            body.ltr .sas-toast,
+            body.ltr .sas-toast.sas-toast-mid {
+                left: 16px !important;
+                right: auto !important;
+            }
+            .app.sidebar-collapsed .sas-toast,
+            .app.sidebar-collapsed .sas-toast.sas-toast-mid {
+                right: 16px !important;
+            }
+            body.ltr .app.sidebar-collapsed .sas-toast,
+            body.ltr .app.sidebar-collapsed .sas-toast.sas-toast-mid {
+                left: 16px !important;
+                right: auto !important;
             }
             .sas-toast[hidden] { display: none !important; }
-            .sas-toast.is-out { opacity: 0; transform: translateY(-10px); }
-            .sas-toast.sas-toast-mid {
-                inset-inline-start: auto;
-                inset-inline-end: auto;
-                right: auto;
+            .sas-toast.is-out,
+            .sas-toast.sas-toast-mid.is-out {
+                opacity: 0 !important;
+                transform: translateY(-56px) !important;
             }
-            .sas-toast.sas-toast-mid.is-out { transform: translate(-50%, calc(-50% - 12px)) !important; }
-            .sas-toast.sas-toast-mid.sas-toast-scrolled.is-out { transform: translateX(-50%) translateY(-12px) !important; }
             .sas-toast-text { flex: 1; line-height: 1.45; }
             .sas-toast-x {
                 border: 0; background: transparent; color: inherit; font-size: 20px;
                 line-height: 1; cursor: pointer; padding: 0 2px;
             }
             @media (max-width: 640px) {
-                .sas-toast {
-                    top: 10px; bottom: auto; inset-inline-start: 12px; inset-inline-end: 12px;
-                    width: auto; max-width: none;
+                .sas-toast,
+                .sas-toast.sas-toast-mid,
+                body.ltr .sas-toast,
+                body.ltr .sas-toast.sas-toast-mid,
+                .app.sidebar-collapsed .sas-toast,
+                .app.sidebar-collapsed .sas-toast.sas-toast-mid {
+                    top: 10px !important;
+                    bottom: auto !important;
+                    left: 12px !important;
+                    right: 12px !important;
+                    width: auto !important;
+                    max-width: none !important;
                 }
             }
             .sas-toast-success { background: #146c43; color: #fff; }
@@ -838,69 +871,47 @@ body.nav-pending .nav-progress { display: block; }
 
 window.placeCornerToast = function (el) {
   if (!el || !el.style) return;
+  if (el.parentNode && el.parentNode !== document.body) document.body.appendChild(el);
   function set(prop, val) { el.style.setProperty(prop, val, 'important'); }
+  set('position', 'fixed');
   set('z-index', '100003');
-  if (!el.classList.contains('sas-toast-stay')) {
+  var fading = !el.classList.contains('sas-toast-stay');
+  if (fading && el.classList.contains('is-out')) return;
+  if (el.id === 'sasSyncOkBanner') {
+    el.classList.remove('sas-toast-mid', 'is-in');
+  } else if (fading) {
     el.classList.add('sas-toast-mid');
-    var main = document.querySelector('.main');
-    var bar = document.querySelector('.main-top');
-    var mr = main ? main.getBoundingClientRect() : null;
-    var br = bar ? bar.getBoundingClientRect() : null;
-    var cx = mr ? (mr.left + mr.width / 2) : (window.innerWidth / 2);
-    var inBar = br && br.height > 24 && br.bottom > 8;
-    if (inBar) el.classList.remove('sas-toast-scrolled');
-    else el.classList.add('sas-toast-scrolled');
-    set('right', 'auto');
-    set('bottom', 'auto');
-    set('width', 'max-content');
-    set('max-width', mr ? Math.max(180, Math.min(420, mr.width - 240)) + 'px' : '420px');
-    set('text-align', 'center');
-    set('justify-content', 'center');
-    if (inBar) {
-      set('top', (br.top + br.height / 2) + 'px');
-      set('transform', 'translate(-50%, -50%)');
-    } else {
-      set('top', '12px');
-      set('transform', 'translateX(-50%)');
-    }
-    set('left', cx + 'px');
-    return;
+    el.classList.remove('is-in');
   }
+  ['opacity', 'transform', 'inset-inline-start', 'inset-inline-end', 'bottom', 'margin'].forEach(function (prop) {
+    el.style.removeProperty(prop);
+  });
   var phone = window.matchMedia && window.matchMedia('(max-width: 640px)').matches;
   set('bottom', 'auto');
+  set('top', phone ? '10px' : '8px');
   if (phone) {
-    set('top', '10px');
     set('left', '12px');
     set('right', '12px');
     set('width', 'auto');
     set('max-width', 'none');
-    set('inset-inline-start', '12px');
-    set('inset-inline-end', '12px');
     return;
   }
-  var cluster = document.querySelector('.main-top-end');
-  set('width', 'min(320px, 42vw)');
-  set('max-width', '320px');
-  if (!cluster) {
-    set('top', '12px');
-    set('inset-inline-end', '16px');
-    set('inset-inline-start', 'auto');
-    return;
-  }
-  var r = cluster.getBoundingClientRect();
-  var h = el.offsetHeight || 44;
-  var top = Math.round(r.top + Math.max(0, (r.height - h) / 2));
-  if (top < 6) top = 6;
-  set('top', top + 'px');
-  if (document.body.classList.contains('rtl')) {
-    set('left', Math.round(r.right + 10) + 'px');
+  var main = document.querySelector('.main');
+  var r = main ? main.getBoundingClientRect() : null;
+  set('width', 'min(340px, 42vw)');
+  set('max-width', '340px');
+  if (!r || r.width < 80) {
+    set('left', '16px');
     set('right', 'auto');
-  } else {
-    set('right', Math.round(window.innerWidth - r.left + 10) + 'px');
-    set('left', 'auto');
+    return;
   }
-  set('inset-inline-start', 'auto');
-  set('inset-inline-end', 'auto');
+  if (document.body.classList.contains('rtl')) {
+    set('right', Math.max(12, Math.round(window.innerWidth - r.right + 14)) + 'px');
+    set('left', 'auto');
+  } else {
+    set('left', Math.max(12, Math.round(r.left + 14)) + 'px');
+    set('right', 'auto');
+  }
 };
 window.showCornerToast = function (msg, kind) {
   var text = String(msg || '').replace(/^\s+|\s+$/g, '');
@@ -909,7 +920,7 @@ window.showCornerToast = function (msg, kind) {
   if (old && old.parentNode) old.parentNode.removeChild(old);
   var el = document.createElement('div');
   el.id = 'appCornerToast';
-  el.className = 'sas-toast ' + (kind === 'error' ? 'sas-toast-error' : 'sas-toast-success');
+  el.className = 'sas-toast sas-toast-mid ' + (kind === 'error' ? 'sas-toast-error' : 'sas-toast-success');
   el.setAttribute('role', 'status');
   var span = document.createElement('span');
   span.className = 'sas-toast-text';

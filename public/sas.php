@@ -1282,6 +1282,63 @@ try {
     }
 }
 
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'ping_visible') {
+    header('Content-Type: application/json; charset=utf-8');
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
+    try {
+        if (function_exists('sas_ping_mode') && sas_ping_mode($pdo) === 'off') {
+            echo json_encode(array('ok' => true));
+            exit;
+        }
+        $rawUsers = isset($_GET['users']) ? (string) $_GET['users'] : '';
+        $wantUsers = array();
+        foreach (explode(',', $rawUsers) as $oneUser) {
+            $oneUser = trim($oneUser);
+            if ($oneUser === '' || isset($wantUsers[$oneUser])) {
+                continue;
+            }
+            $wantUsers[$oneUser] = 1;
+            if (count($wantUsers) >= 40) {
+                break;
+            }
+        }
+        if ($wantUsers && function_exists('sas_fill_online_pings')) {
+            $tidLive = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+            if ($tidLive <= 0) {
+                $tidLive = 1;
+            }
+            $ph = array();
+            $bind = array(':t' => $tidLive);
+            $i = 0;
+            foreach (array_keys($wantUsers) as $oneUser) {
+                $ph[] = ':u' . $i;
+                $bind[':u' . $i] = $oneUser;
+                $i++;
+            }
+            $scope = function_exists('sas_agent_scope_sql') ? sas_agent_scope_sql('c') : '';
+            $stPing = $pdo->prepare(
+                'SELECT c.username, c.is_online, c.framed_ip, c.online_ping
+                 FROM sas_users_cache c
+                 WHERE c.tenant_id = :t AND c.is_online = 1
+                   AND (c.online_ping IS NULL OR c.online_ping = 0)
+                   AND c.username IN (' . implode(',', $ph) . ')' . $scope . '
+                 LIMIT 40'
+            );
+            $stPing->execute($bind);
+            $pingRows = $stPing->fetchAll();
+            if (is_array($pingRows) && $pingRows) {
+                sas_fill_online_pings($pdo, $pingRows);
+            }
+        }
+        echo json_encode(array('ok' => true));
+    } catch (Exception $e) {
+        echo json_encode(array('ok' => false));
+    }
+    exit;
+}
+
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'live_online') {
     header('Content-Type: application/json; charset=utf-8');
     if (function_exists('app_session_close')) {
@@ -1318,7 +1375,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'live_online') {
                 $i++;
             }
             $stLive = $pdo->prepare(
-                'SELECT username, is_online, framed_ip, mac_address, daily_traffic
+                'SELECT username, is_online, framed_ip, mac_address, daily_traffic, online_ping
                  FROM sas_users_cache
                  WHERE tenant_id = :t AND username IN (' . implode(',', $ph) . ')'
             );
@@ -1334,11 +1391,16 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'live_online') {
                     $ip = ($on && isset($lr['framed_ip'])) ? trim((string) $lr['framed_ip']) : '';
                     $mac = isset($lr['mac_address']) ? trim((string) $lr['mac_address']) : '';
                     $traf = isset($lr['daily_traffic']) ? trim((string) $lr['daily_traffic']) : '';
+                    $pingKnown = isset($lr['online_ping']) && $lr['online_ping'] !== null && $lr['online_ping'] !== '';
+                    $pingMs = $pingKnown ? (int) $lr['online_ping'] : 0;
+                    $pingNa = ($on && function_exists('sas_ping_user_is_na') && sas_ping_user_is_na($un)) ? 1 : 0;
                     $liveMap[$un] = array(
                         'on' => $on,
                         'ip' => $ip,
                         'mac' => $mac,
                         'traf' => $traf,
+                        'ping' => ($pingMs > 0) ? $pingMs : null,
+                        'ping_na' => $pingNa,
                     );
                 }
             }
@@ -1777,22 +1839,26 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   margin: 10px 12px 16px !important;
   padding-bottom: 4px;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   justify-content: center;
   gap: 8px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 .subs-pager-pages,
 .subs-pager-sizes {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 6px;
+  flex: 0 0 auto;
 }
 #subsPager .btn.sm {
-  height: 28px; min-width: 28px; padding: 0 11px; font-size: 12px;
-  border-radius: 999px; font-weight: 600;
+  height: 32px; min-width: 32px; padding: 0 10px; font-size: 12px;
+  border-radius: 999px; font-weight: 700;
+  flex: 0 0 auto;
 }
 .sas-row-flash td { background: #fff6d6 !important; }
 .sas-act-wa { margin-top: 8px; width: 100%; }
@@ -2377,6 +2443,13 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   overflow: auto;
   box-sizing: border-box;
 }
+.sas-radius-page .modal-backdrop {
+  z-index: 100010;
+}
+body:has(#sasActModal:not(.hidden)) .main-top {
+  visibility: hidden;
+  pointer-events: none;
+}
 @media (max-width: 560px) {
   .sas-radius-page #sasActModal:not(.hidden) {
     padding: 0;
@@ -2744,30 +2817,31 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 }
 #sasSyncOkBanner {
   position: fixed !important;
-  top: 12px !important;
+  top: 8px !important;
   bottom: auto !important;
   left: auto !important;
-  right: auto !important;
   inset-inline-start: auto !important;
-  inset-inline-end: 220px !important;
-  transform: none;
+  inset-inline-end: auto !important;
+  right: calc(250px + 16px) !important;
   z-index: 100003;
   cursor: pointer;
   max-height: 140px;
   overflow: hidden;
   width: min(320px, 42vw);
-  transition: opacity .8s ease, transform .8s ease;
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity .7s ease, transform .7s ease;
 }
 #sasSyncOkBanner.is-out {
-  opacity: 0;
-  transform: translateY(-8px);
+  opacity: 0 !important;
+  transform: translateY(-56px) !important;
 }
 @media (max-width: 640px) {
   #sasSyncOkBanner {
     top: 10px !important;
     bottom: auto !important;
-    inset-inline-start: 12px !important;
-    inset-inline-end: 12px !important;
+    left: 12px !important;
+    right: 12px !important;
     width: auto !important;
   }
 }
@@ -2790,6 +2864,15 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 .sas-radius-page a.sas-ip-link:hover { text-decoration: underline; }
 .sas-radius-page .th-sort { color: inherit; text-decoration: none; }
 .ops-item.is-on { background: rgba(60, 141, 188, 0.12); font-weight: 800; }
+#autoRefreshDropdown .sas-refresh-live {
+  color: #15803d;
+  font-weight: 800;
+}
+#autoRefreshDropdown .sas-refresh-live.is-on,
+#autoRefreshBtn.is-live {
+  background: #16a34a;
+  color: #fff;
+}
 #subsTable .debt-amt {
   display: inline !important;
   padding: 0 !important;
@@ -2928,7 +3011,8 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   }
   #subsPager {
     margin: 10px 8px 0 !important;
-    padding: 4px 8px calc(28px + env(safe-area-inset-bottom)) !important;
+    padding: 8px 8px calc(76px + env(safe-area-inset-bottom)) !important;
+    justify-content: flex-start;
   }
   body:has(.sas-radius-page) .container {
     margin-bottom: calc(96px + env(safe-area-inset-bottom));
@@ -3200,27 +3284,33 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
             }
             $baseStr = count($baseQs) ? '&' . implode('&', $baseQs) : '';
             $extraQs = $keepStr;
-            $window = 9;
-            $winStart = (int) (floor(($page - 1) / $window) * $window) + 1;
-            if ($winStart < 1) {
+            $window = 3;
+            if ($totalPages <= $window) {
                 $winStart = 1;
-            }
-            $winEnd = $winStart + $window - 1;
-            if ($winEnd > $totalPages) {
                 $winEnd = $totalPages;
+            } else {
+                $winStart = $page - 1;
+                if ($winStart < 1) {
+                    $winStart = 1;
+                }
+                $winEnd = $winStart + $window - 1;
+                if ($winEnd > $totalPages) {
+                    $winEnd = $totalPages;
+                    $winStart = $winEnd - $window + 1;
+                }
             }
-            $prevPage = $winStart - $window;
+            $prevPage = $page - 1;
             if ($prevPage < 1) {
                 $prevPage = 1;
             }
-            $nextPage = $winEnd + 1;
+            $nextPage = $page + 1;
             if ($nextPage > $totalPages) {
                 $nextPage = $totalPages;
             }
             ?>
             <?php if ($totalPages > 1): ?>
             <div class="subs-pager-pages">
-            <?php if ($winStart > 1): ?>
+            <?php if ($page > 1): ?>
                 <a class="btn ghost sm" href="?page=<?php echo $prevPage . $baseStr; ?>" aria-label="prev">&gt;&gt;</a>
             <?php else: ?>
                 <span class="btn ghost sm" style="opacity:.35;pointer-events:none" aria-hidden="true">&gt;&gt;</span>
@@ -3228,7 +3318,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
             <?php for ($p = $winStart; $p <= $winEnd; $p++): ?>
                 <a class="btn <?php echo $p === $page ? '' : 'ghost'; ?> sm" href="?page=<?php echo $p . $baseStr; ?>"><?php echo $p; ?></a>
             <?php endfor; ?>
-            <?php if ($winEnd < $totalPages): ?>
+            <?php if ($page < $totalPages): ?>
                 <a class="btn ghost sm" href="?page=<?php echo $nextPage . $baseStr; ?>" aria-label="next">&lt;&lt;</a>
             <?php else: ?>
                 <span class="btn ghost sm" style="opacity:.35;pointer-events:none" aria-hidden="true">&lt;&lt;</span>
@@ -3399,6 +3489,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     </div>
 </div>
 <div class="ops-dropdown hidden" id="autoRefreshDropdown">
+    <button type="button" class="ops-item sas-refresh-live" data-refresh="2">Live</button>
     <button type="button" class="ops-item" data-refresh="0"><?php echo e($lang === 'en' ? 'Off' : 'إيقاف'); ?></button>
     <button type="button" class="ops-item" data-refresh="30"><?php echo e($lang === 'en' ? 'Every 30s' : 'كل 30 ثانية'); ?></button>
     <button type="button" class="ops-item" data-refresh="60"><?php echo e($lang === 'en' ? 'Every 1 min' : 'كل دقيقة'); ?></button>
@@ -4426,7 +4517,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
       window._sasToastT = setTimeout(function () {
         b.hidden = true;
         b.classList.remove('is-out');
-      }, 800);
+      }, 720);
     }, 3000);
   }
   function rememberActFlash(msg, kind) {
@@ -5601,9 +5692,33 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
           }
           var trafCell = tr.querySelector('.col-traf');
           if (trafCell && info.traf && trafCell.textContent !== info.traf) trafCell.textContent = info.traf;
+          paintPingCell(tr, info);
         });
       })
       .catch(function () { liveOnlineBusy = false; });
+  }
+  function paintPingCell(tr, info) {
+    if (!tr || !info || !info.on) return;
+    var cell = tr.querySelector('.col-ping');
+    if (!cell) return;
+    if (info.ping_na) {
+      if (cell.getAttribute('data-ping') === 'na') return;
+      cell.setAttribute('data-ping', 'na');
+      cell.innerHTML = '<span class="sub-ping-na" dir="ltr">N/A</span>';
+      return;
+    }
+    var ms = parseInt(info.ping, 10) || 0;
+    if (ms <= 0) {
+      if (cell.getAttribute('data-ping') === 'na' || cell.querySelector('.sub-ping-na')) {
+        cell.removeAttribute('data-ping');
+        cell.innerHTML = '';
+      }
+      return;
+    }
+    if (cell.getAttribute('data-ping') === String(ms)) return;
+    var tone = ms <= 80 ? '' : (ms <= 180 ? ' is-mid' : ' is-slow');
+    cell.setAttribute('data-ping', String(ms));
+    cell.innerHTML = '<span class="sub-ping' + tone + '" dir="ltr">' + ms + '<small>ms</small></span>';
   }
   function refreshTableLive() {
     if (liveBusy || liveSearchBusy || tableIsBusy() || document.hidden) return Promise.resolve(null);
@@ -5613,45 +5728,32 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
     // أثناء الكتابة بالبحث الحي لا تستبدل الجدول بتحديث الأونلاين
     if (typed !== locked) return Promise.resolve(null);
     liveBusy = true;
-    var pingModeNow = pingModeBox ? (pingModeBox.getAttribute('data-mode') || 'off') : 'off';
-    if (pingModeNow !== 'off') {
-      var pingCells = document.querySelectorAll('#subsTable tbody tr[data-online="1"] .col-ping');
-      for (var pi = 0; pi < pingCells.length; pi++) {
-        if (pingCells[pi].querySelector('.sub-ping')) continue;
-        pingCells[pi].innerHTML = '<span class="sub-ping-wait" aria-hidden="true"></span>';
-      }
-    }
     return fetch(liveTableUrl(), { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(function (d) {
         liveBusy = false;
         if (filter && filter.value.trim() !== String((liveQs && liveQs.q) || '')) return null;
         if (d && d.ok && d.html && !tableIsBusy()) replaceTableHtml(d.html);
-        if (d && d.ok && pingModeNow !== 'off' && document.querySelector('#subsTable .sub-ping-wait')) {
-          if (!window._pingPasses) window._pingPasses = 0;
-          if (window._pingPasses < 6) {
-            window._pingPasses += 1;
-            setTimeout(function () { refreshTableLive(); }, 400);
-          }
-        } else {
-          window._pingPasses = 0;
-        }
         return d;
       })
       .catch(function () { liveBusy = false; return null; });
   }
   function applyAutoRefresh(sec, skipSave) {
     refreshSec = parseInt(sec, 10) || 0;
+    var isLive = refreshSec === 2;
     if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
     var autoBtn = document.getElementById('autoRefreshBtn');
-    if (autoBtn) autoBtn.classList.toggle('is-on', refreshSec > 0);
+    if (autoBtn) {
+      autoBtn.classList.toggle('is-on', refreshSec > 0);
+      autoBtn.classList.toggle('is-live', isLive);
+    }
     var autoDrop = document.getElementById('autoRefreshDropdown');
     if (autoDrop) {
       Array.prototype.slice.call(autoDrop.querySelectorAll('[data-refresh]')).forEach(function (b) {
         b.classList.toggle('is-on', String(b.getAttribute('data-refresh')) === String(refreshSec));
       });
     }
-    if (refreshSec > 0) {
+    if (refreshSec > 2) {
       refreshTimer = setInterval(refreshTableLive, refreshSec * 1000);
     }
     if (!skipSave) persistCols();
@@ -5674,6 +5776,26 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   // أول رسم من الكاش، وبعدها الاتصال والايبي والماك يتحدثون بصمت بدون سبنر وبدون ضباب
   setTimeout(function () { paintLiveOnline(); }, 400);
   setInterval(function () { paintLiveOnline(); }, 2000);
+  var pingVisibleBusy = false;
+  function pingVisibleMissing() {
+    if (pingVisibleBusy || document.hidden) return;
+    var names = [];
+    var rows = document.querySelectorAll('#subsTable tbody tr[data-online="1"]');
+    for (var i = 0; i < rows.length && names.length < 40; i++) {
+      var cell = rows[i].querySelector('.col-ping');
+      if (!cell) continue;
+      if (cell.querySelector('.sub-ping') && !cell.querySelector('.sub-ping-na')) continue;
+      var id = rows[i].getAttribute('data-id') || '';
+      if (id) names.push(id);
+    }
+    if (!names.length) return;
+    pingVisibleBusy = true;
+    fetch('sas.php?ajax=ping_visible&users=' + encodeURIComponent(names.join(',')), { credentials: 'same-origin' })
+      .then(function () { pingVisibleBusy = false; })
+      .catch(function () { pingVisibleBusy = false; });
+  }
+  setTimeout(pingVisibleMissing, 1200);
+  setInterval(pingVisibleMissing, 20000);
 
   function setFoundCount(n, searching) {
     if (!foundLabel) return;

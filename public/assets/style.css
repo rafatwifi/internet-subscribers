@@ -1239,13 +1239,13 @@ th {
 
 .sas-toast {
   position: fixed;
-  top: 12px;
+  top: 8px;
   bottom: auto;
-  inset-inline-end: 220px;
+  inset-inline-end: auto;
   inset-inline-start: auto;
   left: auto;
-  right: auto;
-  transform: none;
+  right: calc(250px + 16px);
+  transform: translateY(0);
   z-index: 100003;
   width: min(320px, 42vw);
   padding: 12px 14px;
@@ -1259,14 +1259,14 @@ th {
 .sas-toast[hidden] { display: none !important; }
 .sas-toast.is-out {
   opacity: 0;
-  transform: translateY(-8px);
+  transform: translateY(-56px);
 }
 @media (max-width: 640px) {
   .sas-toast {
     top: 10px;
     bottom: auto;
-    inset-inline-start: 12px;
-    inset-inline-end: 12px;
+    left: 12px;
+    right: 12px;
     width: auto;
     max-width: none;
   }
@@ -2343,17 +2343,14 @@ body.top-away .main-top {
   right: 18px;
   left: auto;
   z-index: 1300;
-  width: 58px;
-  height: 58px;
+  width: 52px;
+  height: 52px;
   border: 0;
-  border-radius: 18px;
+  border-radius: 16px;
   cursor: pointer;
   color: #fff;
-  background: linear-gradient(145deg, #6d849c 0%, #4a5a6c 55%, #3a4654 100%);
-  box-shadow:
-    0 10px 28px rgba(58, 70, 84, 0.28),
-    0 2px 8px rgba(40, 48, 58, 0.18),
-    inset 0 1px 0 rgba(255,255,255,0.22);
+  background: #243140;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.28);
   align-items: center;
   justify-content: center;
   -webkit-tap-highlight-color: transparent;
@@ -2383,8 +2380,8 @@ body.rtl .fab-menu {
 .fab-menu-bars i:nth-child(2) { width: 70%; align-self: flex-end; }
 body.ltr .fab-menu-bars i:nth-child(2) { align-self: flex-start; }
 .fab-menu.is-open {
-  background: linear-gradient(145deg, #ef4444 0%, #b91c1c 60%, #7f1d1d 100%);
-  box-shadow: 0 10px 28px rgba(185, 28, 28, 0.45);
+  background: #1e293b;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.32);
 }
 .fab-menu.is-open .fab-menu-bars i:nth-child(1) {
   transform: translateY(8px) rotate(45deg);
@@ -2557,6 +2554,14 @@ body.ltr .toggle input:checked + .toggle-ui::after {
     width: min(300px, 88vw);
     z-index: 1200;
     transform: translateX(110%);
+    box-shadow: -16px 0 40px rgba(15, 23, 42, 0.28);
+    padding-top: 6px;
+  }
+  .side-links { gap: 2px; padding: 6px 8px 16px; }
+  .side-links a {
+    border-radius: 12px;
+    border-bottom: 0;
+    padding: 11px 12px;
   }
   body.ltr .sidebar {
     right: auto;

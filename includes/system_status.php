@@ -730,6 +730,61 @@ function dash_reseller_pings($config)
     );
 }
 
+function dash_platform_company_pings($live)
+{
+    global $pdo;
+    $out = array();
+    if (!isset($pdo) || !$pdo || !function_exists('platform_companies_list')) {
+        return array('ok' => true, 'rows' => $out);
+    }
+    $file = dirname(__DIR__) . '/storage/cache/platform_company_pings.json';
+    $saved = array();
+    if (is_file($file)) {
+        $raw = json_decode((string) @file_get_contents($file), true);
+        if (is_array($raw) && !empty($raw['rows']) && is_array($raw['rows'])) {
+            foreach ($raw['rows'] as $old) {
+                if (is_array($old) && isset($old['id'])) {
+                    $saved[(int) $old['id']] = $old;
+                }
+            }
+        }
+    }
+    $companies = platform_companies_list($pdo, true);
+    foreach ($companies as $co) {
+        if (!is_array($co)) {
+            continue;
+        }
+        $id = isset($co['id']) ? (int) $co['id'] : 0;
+        $host = isset($co['sas_host']) ? trim((string) $co['sas_host']) : '';
+        $host = preg_replace('#^https?://#i', '', rtrim($host, '/'));
+        $name = isset($co['name']) ? trim((string) $co['name']) : '';
+        if ($id <= 0 || $host === '' || $name === '') {
+            continue;
+        }
+        $ms = null;
+        if ($live && function_exists('system_latency_to_host')) {
+            $lat = system_latency_to_host($host);
+            if (is_array($lat) && isset($lat['ms']) && $lat['ms'] !== null && $lat['ms'] !== '') {
+                $ms = (int) round((float) $lat['ms']);
+                if ($ms <= 0) {
+                    $ms = null;
+                }
+            }
+        } elseif (isset($saved[$id]['ms']) && $saved[$id]['ms'] !== null && $saved[$id]['ms'] !== '') {
+            $ms = (int) $saved[$id]['ms'];
+        }
+        $out[] = array('id' => $id, 'name' => $name, 'ms' => $ms);
+    }
+    if ($live) {
+        $dir = dirname($file);
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0755, true);
+        }
+        @file_put_contents($file, json_encode(array('at' => time(), 'rows' => $out)));
+    }
+    return array('ok' => true, 'rows' => $out);
+}
+
 function system_sas_latency($config)
 {
     $bank = system_reseller_bank($config);

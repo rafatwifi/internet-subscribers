@@ -10,7 +10,7 @@ function ensure_card_accounting_tables($pdo)
     if ($ready) {
         return;
     }
-    if (function_exists('app_schema_fresh') && app_schema_fresh('card_acc')) {
+    if (function_exists('app_schema_fresh') && app_schema_fresh('card_acc_v2')) {
         $ready = true;
         return;
     }
@@ -44,6 +44,7 @@ function ensure_card_accounting_tables($pdo)
                 created_by INT UNSIGNED NULL DEFAULT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 return_of_id INT UNSIGNED NULL DEFAULT NULL,
+                xfer_state VARCHAR(12) NOT NULL DEFAULT "done",
                 KEY idx_xfer_to (to_agent_id),
                 KEY idx_xfer_from (from_agent_id),
                 KEY idx_xfer_at (created_at)
@@ -67,11 +68,12 @@ function ensure_card_accounting_tables($pdo)
             tenants_ensure_column($pdo, 'agent_card_transfers', 'return_of_id', 'INT UNSIGNED NULL DEFAULT NULL');
             tenants_ensure_column($pdo, 'agent_card_transfers', 'tenant_id', 'INT UNSIGNED NOT NULL DEFAULT 1');
             tenants_ensure_column($pdo, 'agent_card_transfers', 'sas_ranges', 'TEXT NULL');
+            tenants_ensure_column($pdo, 'agent_card_transfers', 'xfer_state', 'VARCHAR(12) NOT NULL DEFAULT \'done\'');
         }
 
         $ready = true;
         if (function_exists('app_schema_touch')) {
-            app_schema_touch('card_acc');
+            app_schema_touch('card_acc_v2');
         }
     } catch (Exception $e) {
         $ready = false;
@@ -667,7 +669,7 @@ function card_sas_stock_file($homeId)
     if (!is_dir($dir)) {
         @mkdir($dir, 0755, true);
     }
-    return $dir . '/card_stock_h' . (int) $homeId . '.json';
+    return $dir . '/card_stock_own_h' . (int) $homeId . '.json';
 }
 
 function card_sas_stock_read($homeId)
@@ -689,7 +691,7 @@ function card_sas_stock_read($homeId)
 function card_sas_stock_map($pdo, $config, $homeId, $allowLive = true)
 {
     $homeId = (int) $homeId;
-    $ck = 'card_sas_stock_map_v2';
+    $ck = 'card_sas_stock_map_v3';
     $cached = null;
     $cachedAt = 0;
     if (!empty($_SESSION[$ck]) && is_array($_SESSION[$ck]) && !empty($_SESSION[$ck . '_at'])) {
@@ -798,19 +800,8 @@ function card_sas_stock_map($pdo, $config, $homeId, $allowLive = true)
     } catch (Exception $e) {
     }
     if ($homeId > 0) {
-        $homeBag = array();
-        foreach ($byOwner as $owner => $names) {
-            if ($owner > 0 && isset($portalByManager[$owner])) {
-                continue;
-            }
-            foreach ($names as $nm => $q) {
-                if (!isset($homeBag[$nm])) {
-                    $homeBag[$nm] = 0;
-                }
-                $homeBag[$nm] += (int) $q;
-            }
-        }
-        $map[$homeId] = $homeBag;
+        $meManager = ($api && method_exists($api, 'loggedManagerId')) ? (int) $api->loggedManagerId() : 0;
+        $map[$homeId] = ($meManager > 0 && isset($byOwner[$meManager])) ? $byOwner[$meManager] : array();
     }
     $savedAt = time();
     @file_put_contents(card_sas_stock_file($homeId), json_encode(array('at' => $savedAt, 'map' => $map)));
@@ -831,9 +822,17 @@ function card_sas_move_error($move, $lang)
 {
     $isEn = ($lang === 'en');
     $msg = (is_array($move) && isset($move['message'])) ? trim((string) $move['message']) : '';
+    if ($msg === 'unavailable') {
+        return $isEn ? 'Not available on this page' : 'غير متوفر';
+    }
     if (strpos($msg, 'short:') === 0) {
         $n = (int) substr($msg, 6);
-        return $isEn ? ('SAS only has ' . $n . ' unused') : ('المتوفر بالساس ' . $n . ' فقط');
+        if ($n <= 0) {
+            return $isEn ? 'Not available on this page' : 'غير متوفر';
+        }
+        return $isEn
+            ? ('Not available. This page only has ' . $n)
+            : ('غير متوفر. المتوفر في هذه الصفحة ' . $n . ' فقط');
     }
     if ($msg === 'login') {
         return $isEn ? 'Could not sign in to SAS' : 'تعذر الدخول إلى الساس';
@@ -1075,7 +1074,20 @@ function card_transfer_history_clear($pdo, $tenantId, $createdBy = null)
     if ($tenantId <= 0) {
         return 0;
     }
-    $sql = 'DELETE FROM agent_card_transfers WHERE tenant_id = :tid';
+    $ids = array();
+    try {
+        $stU = $pdo->prepare('SELECT id FROM admin_users WHERE tenant_id = :t');
+        $stU->execute(array(':t' => $tenantId));
+        foreach ($stU->fetchAll() as $u) {
+            $uid = (int) $u['id'];
+            if ($uid > 0) {
+                $ids[$uid] = $uid;
+            }
+        }
+    } catch (Exception $e) {
+    }
+    $in = $ids ? implode(',', $ids) : '0';
+    $sql = 'DELETE FROM agent_card_transfers WHERE (tenant_id = :tid OR from_agent_id IN (' . $in . ') OR to_agent_id IN (' . $in . '))';
     $params = array(':tid' => $tenantId);
     if ($createdBy !== null && (int) $createdBy > 0) {
         $sql .= ' AND created_by = :by';
@@ -1086,24 +1098,348 @@ function card_transfer_history_clear($pdo, $tenantId, $createdBy = null)
     return (int) $st->rowCount();
 }
 
-function list_recent_card_transfers($pdo, $limit = 30, $agentUserId = null, $createdBy = null)
+function card_transfer_begin($pdo, $fromAgentId, $toAgentId, $profileId, $profileName, $qty, $wholesalePrice, $agentPrice, $note, $createdBy, $returnOfId = 0)
 {
     ensure_card_accounting_tables($pdo);
-    $limit = max(1, min(200, (int) $limit));
-    $sql = 'SELECT t.*,
-                   fa.display_name AS from_name, fa.username AS from_username,
-                   ta.display_name AS to_name, ta.username AS to_username,
-                   cb.display_name AS created_by_name
-            FROM agent_card_transfers t
-            LEFT JOIN admin_users fa ON fa.id = t.from_agent_id
-            JOIN admin_users ta ON ta.id = t.to_agent_id
-            LEFT JOIN admin_users cb ON cb.id = t.created_by';
-    $params = array();
+    $fromAgentId = (int) $fromAgentId;
+    $toAgentId = (int) $toAgentId;
+    $qty = (int) $qty;
+    list($profileId, $profileName) = card_stock_row_key($profileId, $profileName);
+    $note = trim((string) $note);
+    $createdBy = (int) $createdBy;
+    $returnOfId = (int) $returnOfId;
+    if ($toAgentId <= 0 || $qty <= 0) {
+        return 0;
+    }
+    $tenantId = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    try {
+        $ins = $pdo->prepare(
+            'INSERT INTO agent_card_transfers
+             (from_agent_id, to_agent_id, profile_id, profile_name, qty, wholesale_price, agent_price, note, created_by, tenant_id, return_of_id, xfer_state)
+             VALUES (:f, :t, :p, :n, :q, :w, :ap, :note, :by, :tid, :ret, :st)'
+        );
+        $ins->execute(array(
+            ':f' => $fromAgentId > 0 ? $fromAgentId : null,
+            ':t' => $toAgentId,
+            ':p' => $profileId,
+            ':n' => $profileName,
+            ':q' => $qty,
+            ':w' => (float) $wholesalePrice,
+            ':ap' => (float) $agentPrice,
+            ':note' => $note !== '' ? $note : null,
+            ':by' => $createdBy > 0 ? $createdBy : null,
+            ':tid' => $tenantId,
+            ':ret' => $returnOfId > 0 ? $returnOfId : null,
+            ':st' => 'pending',
+        ));
+        return (int) $pdo->lastInsertId();
+    } catch (Exception $e) {
+        return 0;
+    }
+}
+
+function card_transfer_fail($pdo, $id, $reason)
+{
+    $id = (int) $id;
+    if ($id <= 0) {
+        return;
+    }
+    $reason = trim((string) $reason);
+    if (function_exists('mb_substr')) {
+        $reason = mb_substr($reason, 0, 180, 'UTF-8');
+    } elseif (strlen($reason) > 180) {
+        $reason = substr($reason, 0, 180);
+    }
+    try {
+        $st = $pdo->prepare('SELECT note FROM agent_card_transfers WHERE id = :id LIMIT 1');
+        $st->execute(array(':id' => $id));
+        $cur = trim((string) $st->fetchColumn());
+        if ($cur === 'استرجاع') {
+            $cur = '';
+        }
+        $note = $reason;
+        if ($cur !== '' && $reason !== '' && $cur !== $reason) {
+            $note = $cur . ' — ' . $reason;
+        } elseif ($reason === '') {
+            $note = $cur;
+        }
+        $up = $pdo->prepare('UPDATE agent_card_transfers SET xfer_state = :st, note = :n WHERE id = :id AND xfer_state = :p');
+        $up->execute(array(
+            ':st' => 'failed',
+            ':n' => $note !== '' ? $note : null,
+            ':id' => $id,
+            ':p' => 'pending',
+        ));
+    } catch (Exception $e) {
+    }
+}
+
+function card_transfer_finish($pdo, $id, $sasRanges = null)
+{
+    ensure_card_accounting_tables($pdo);
+    $id = (int) $id;
+    if ($id <= 0) {
+        return array(false, 'not_returnable');
+    }
+    $st = $pdo->prepare('SELECT * FROM agent_card_transfers WHERE id = :id LIMIT 1');
+    $st->execute(array(':id' => $id));
+    $row = $st->fetch();
+    if (!$row || (isset($row['xfer_state']) && (string) $row['xfer_state'] !== 'pending') || !empty($row['return_of_id'])) {
+        return array(false, 'not_returnable');
+    }
+    $fromAgentId = isset($row['from_agent_id']) ? (int) $row['from_agent_id'] : 0;
+    $toAgentId = (int) $row['to_agent_id'];
+    $qty = (int) $row['qty'];
+    $profileId = (int) $row['profile_id'];
+    $profileName = (string) $row['profile_name'];
+    $wholesalePrice = (float) $row['wholesale_price'];
+    $agentPrice = (float) $row['agent_price'];
+    $rangesJson = '';
+    if (is_array($sasRanges)) {
+        $rangesJson = json_encode(array_values($sasRanges));
+    }
+    $sasBacked = ($rangesJson !== '' && $rangesJson !== '[]' && $rangesJson !== 'null');
+    try {
+        $pdo->beginTransaction();
+        if ($fromAgentId > 0) {
+            $srcNow = card_stock_match($pdo, $fromAgentId, $profileId, $profileName);
+            if ($srcNow && (int) $srcNow['qty'] >= $qty) {
+                $profileId = (int) $srcNow['profile_id'];
+                $profileName = (string) $srcNow['profile_name'];
+                $ok = card_stock_adjust($pdo, $fromAgentId, $profileId, $profileName, -$qty, $wholesalePrice, $agentPrice);
+                if (!$ok && !$sasBacked) {
+                    $pdo->rollBack();
+                    return array(false, 'insufficient_stock');
+                }
+            } elseif (!$sasBacked) {
+                $pdo->rollBack();
+                return array(false, 'insufficient_stock');
+            }
+        }
+        $okTo = card_stock_adjust($pdo, $toAgentId, $profileId, $profileName, $qty, $wholesalePrice, $agentPrice);
+        if (!$okTo) {
+            $pdo->rollBack();
+            return array(false, 'stock_update_failed');
+        }
+        $up = $pdo->prepare(
+            'UPDATE agent_card_transfers
+             SET xfer_state = :st, sas_ranges = :sas, profile_id = :p, profile_name = :n
+             WHERE id = :id AND xfer_state = :pend'
+        );
+        $up->execute(array(
+            ':st' => 'done',
+            ':sas' => $sasBacked ? $rangesJson : null,
+            ':p' => $profileId,
+            ':n' => $profileName,
+            ':id' => $id,
+            ':pend' => 'pending',
+        ));
+        $pdo->commit();
+        if (function_exists('card_sas_stock_forget')) {
+            card_sas_stock_forget();
+        }
+        return array(true, 'ok');
+    } catch (Exception $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        return array(false, 'stock_update_failed');
+    }
+}
+
+function card_transfer_begin_return($pdo, $transferId, $homeId, $createdBy)
+{
+    ensure_card_accounting_tables($pdo);
+    $transferId = (int) $transferId;
+    $homeId = (int) $homeId;
+    $createdBy = (int) $createdBy;
+    if ($transferId <= 0 || $homeId <= 0) {
+        return array(false, 'not_returnable', 0);
+    }
+    $st = $pdo->prepare('SELECT * FROM agent_card_transfers WHERE id = :id LIMIT 1');
+    $st->execute(array(':id' => $transferId));
+    $row = $st->fetch();
+    if (!$row || !empty($row['return_of_id'])) {
+        return array(false, 'not_returnable', 0);
+    }
+    if (isset($row['xfer_state']) && (string) $row['xfer_state'] === 'pending') {
+        return array(false, 'not_returnable', 0);
+    }
+    $chk = $pdo->prepare(
+        'SELECT id, xfer_state FROM agent_card_transfers WHERE return_of_id = :id'
+    );
+    $chk->execute(array(':id' => $transferId));
+    foreach ($chk->fetchAll() as $old) {
+        $stOld = isset($old['xfer_state']) ? (string) $old['xfer_state'] : 'done';
+        if ($stOld === '' || $stOld === 'done' || $stOld === 'pending') {
+            return array(false, 'already_returned', 0);
+        }
+    }
+    $toId = (int) $row['to_agent_id'];
+    $fromId = isset($row['from_agent_id']) ? (int) $row['from_agent_id'] : 0;
+    if ($toId <= 0 || $toId === $homeId || ($fromId > 0 && $fromId !== $homeId)) {
+        return array(false, 'not_returnable', 0);
+    }
+    if (!card_transfer_party_allowed($pdo, $toId) || !card_transfer_party_allowed($pdo, $homeId)) {
+        return array(false, 'not_returnable', 0);
+    }
+    $rangesRaw = isset($row['sas_ranges']) ? trim((string) $row['sas_ranges']) : '';
+    $ranges = ($rangesRaw !== '') ? json_decode($rangesRaw, true) : null;
+    if (!is_array($ranges) || !$ranges) {
+        return array(false, 'sas_not_recorded', 0);
+    }
+    $newId = card_transfer_begin(
+        $pdo,
+        $toId,
+        $homeId,
+        isset($row['profile_id']) ? (int) $row['profile_id'] : 0,
+        isset($row['profile_name']) ? (string) $row['profile_name'] : '',
+        (int) $row['qty'],
+        (float) $row['wholesale_price'],
+        (float) $row['agent_price'],
+        'استرجاع',
+        $createdBy,
+        $transferId
+    );
+    if ($newId <= 0) {
+        return array(false, 'stock_update_failed', 0);
+    }
+    return array(true, 'ok', $newId);
+}
+
+function card_transfer_finish_return($pdo, $pendingId, $homeId, $config = null)
+{
+    ensure_card_accounting_tables($pdo);
+    $pendingId = (int) $pendingId;
+    $homeId = (int) $homeId;
+    if ($pendingId <= 0 || $homeId <= 0) {
+        return array(false, 'not_returnable');
+    }
+    $stP = $pdo->prepare('SELECT * FROM agent_card_transfers WHERE id = :id LIMIT 1');
+    $stP->execute(array(':id' => $pendingId));
+    $pending = $stP->fetch();
+    if (!$pending || (string) $pending['xfer_state'] !== 'pending' || empty($pending['return_of_id'])) {
+        return array(false, 'not_returnable');
+    }
+    $transferId = (int) $pending['return_of_id'];
+    $st = $pdo->prepare('SELECT * FROM agent_card_transfers WHERE id = :id LIMIT 1');
+    $st->execute(array(':id' => $transferId));
+    $row = $st->fetch();
+    if (!$row) {
+        card_transfer_fail($pdo, $pendingId, 'ما رجع');
+        return array(false, 'not_returnable');
+    }
+    $toId = (int) $row['to_agent_id'];
+    $qty = (int) $row['qty'];
+    $pid = isset($row['profile_id']) ? (int) $row['profile_id'] : 0;
+    $pname = isset($row['profile_name']) ? (string) $row['profile_name'] : '';
+    $rangesRaw = isset($row['sas_ranges']) ? trim((string) $row['sas_ranges']) : '';
+    $ranges = ($rangesRaw !== '') ? json_decode($rangesRaw, true) : null;
+    if (!is_array($ranges) || !$ranges) {
+        card_transfer_fail($pdo, $pendingId, 'ما انسجل النقل');
+        return array(false, 'sas_not_recorded');
+    }
+    if (!$config || !function_exists('sas_make_connector') || !function_exists('sas_is_ready') || !sas_is_ready($config)) {
+        card_transfer_fail($pdo, $pendingId, 'الساس مو جاهز');
+        return array(false, 'sas_not_ready');
+    }
+    $api = sas_make_connector($config);
+    if (!$api || !method_exists($api, 'restoreCardRanges')) {
+        card_transfer_fail($pdo, $pendingId, 'الساس مو جاهز');
+        return array(false, 'sas_not_ready');
+    }
+    if (method_exists($api, 'setTimeout')) {
+        $api->setTimeout(50);
+    }
+    $homeMid = card_user_sas_manager_id($pdo, $homeId, $homeId, $api);
+    $childMid = card_user_sas_manager_id($pdo, $toId, $homeId, $api);
+    if ($homeMid <= 0) {
+        $rangeOwner = 0;
+        foreach ($ranges as $rOwner) {
+            if (is_array($rOwner) && !empty($rOwner['owner'])) {
+                $rangeOwner = (int) $rOwner['owner'];
+                break;
+            }
+        }
+        if ($rangeOwner <= 0) {
+            card_transfer_fail($pdo, $pendingId, 'ما لقى وكالتك بالساس');
+            return array(false, 'sas_home_missing');
+        }
+    }
+    if ($childMid <= 0) {
+        card_transfer_fail($pdo, $pendingId, 'ما لقى الوكيل بالساس');
+        return array(false, 'sas_manager_missing');
+    }
+    if (!$api->restoreCardRanges($ranges, $homeMid)) {
+        $err = method_exists($api, 'getLastError') ? trim((string) $api->getLastError()) : '';
+        if ($err === 'prefix') {
+            card_transfer_fail($pdo, $pendingId, 'السلسلة ما بقت تبدأ بأول كارت');
+            return array(false, 'sas_prefix_lost');
+        }
+        card_transfer_fail($pdo, $pendingId, 'الساس ما رجّع الكروت');
+        return array(false, 'sas_move_failed');
+    }
+    $tail = method_exists($api, 'getLastError') ? trim((string) $api->getLastError()) : '';
+    if ($tail === 'already_home') {
+        card_transfer_fail($pdo, $pendingId, 'الكروت أصلاً عند وكالتك');
+        return array(false, 'already_home');
+    }
+    $src = card_stock_match($pdo, $toId, $pid, $pname);
+    if ($src) {
+        $pid = (int) $src['profile_id'];
+        $pname = (string) $src['profile_name'];
+    }
+    $w = (float) $row['wholesale_price'];
+    $ap = (float) $row['agent_price'];
+    try {
+        $pdo->beginTransaction();
+        if ($src && (int) $src['qty'] >= $qty) {
+            if (!card_stock_adjust($pdo, $toId, $pid, $pname, -$qty, $w, $ap)) {
+                $pdo->rollBack();
+                $api->restoreCardRanges($ranges, $childMid, $childMid);
+                card_transfer_fail($pdo, $pendingId, 'ما تحدث المخزون');
+                return array(false, 'stock_update_failed');
+            }
+        }
+        card_stock_adjust($pdo, $homeId, $pid, $pname, $qty, $w, $ap);
+        $up = $pdo->prepare(
+            'UPDATE agent_card_transfers
+             SET xfer_state = :st, profile_id = :p, profile_name = :n, note = :note
+             WHERE id = :id AND xfer_state = :pend'
+        );
+        $up->execute(array(
+            ':st' => 'done',
+            ':p' => $pid,
+            ':n' => $pname,
+            ':note' => 'استرجاع',
+            ':id' => $pendingId,
+            ':pend' => 'pending',
+        ));
+        $pdo->commit();
+        if (function_exists('card_sas_stock_forget')) {
+            card_sas_stock_forget();
+        }
+        return array(true, 'ok', $pname, $qty, $toId);
+    } catch (Exception $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        $api->restoreCardRanges($ranges, $childMid, $childMid);
+        card_transfer_fail($pdo, $pendingId, 'ما تحدث المخزون');
+        return array(false, 'stock_update_failed');
+    }
+}
+
+function card_transfer_where($agentUserId, $createdBy, &$params)
+{
     $where = array();
+    $params = array();
     $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
     if ($tid > 0) {
-        $where[] = 't.tenant_id = :tid';
+        $where[] = '(t.tenant_id = :tid OR t.from_agent_id IN (SELECT id FROM admin_users WHERE tenant_id = :tidf) OR t.to_agent_id IN (SELECT id FROM admin_users WHERE tenant_id = :tidt))';
         $params[':tid'] = $tid;
+        $params[':tidf'] = $tid;
+        $params[':tidt'] = $tid;
     }
     if ($agentUserId !== null && (int) $agentUserId > 0) {
         $where[] = '(t.to_agent_id = :a OR t.from_agent_id = :a2)';
@@ -1114,10 +1450,126 @@ function list_recent_card_transfers($pdo, $limit = 30, $agentUserId = null, $cre
         $where[] = 't.created_by = :by';
         $params[':by'] = (int) $createdBy;
     }
+    return $where;
+}
+
+function count_card_transfers($pdo, $agentUserId = null, $createdBy = null)
+{
+    ensure_card_accounting_tables($pdo);
+    $params = array();
+    $where = card_transfer_where($agentUserId, $createdBy, $params);
+    $sql = 'SELECT COUNT(*) FROM agent_card_transfers t';
     if ($where) {
         $sql .= ' WHERE ' . implode(' AND ', $where);
     }
-    $sql .= ' ORDER BY t.created_at DESC, t.id DESC LIMIT ' . $limit;
+    try {
+        $st = $pdo->prepare($sql);
+        $st->execute($params);
+        return (int) $st->fetchColumn();
+    } catch (Exception $e) {
+        return 0;
+    }
+}
+
+function card_transfer_return_flags($pdo, $ids)
+{
+    $done = array();
+    $pending = array();
+    $clean = array();
+    if (!is_array($ids)) {
+        return array($done, $pending);
+    }
+    foreach ($ids as $id) {
+        $id = (int) $id;
+        if ($id > 0) {
+            $clean[$id] = $id;
+        }
+    }
+    if (!$clean) {
+        return array($done, $pending);
+    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+    $sql = 'SELECT return_of_id, xfer_state FROM agent_card_transfers WHERE return_of_id IN (' . implode(',', $clean) . ')';
+    if ($tid > 0) {
+        $sql .= ' AND tenant_id = ' . $tid;
+    }
+    try {
+        foreach ($pdo->query($sql)->fetchAll() as $r) {
+            $oid = isset($r['return_of_id']) ? (int) $r['return_of_id'] : 0;
+            if ($oid <= 0) {
+                continue;
+            }
+            $st = isset($r['xfer_state']) ? (string) $r['xfer_state'] : 'done';
+            if ($st === 'pending') {
+                $pending[$oid] = true;
+            } elseif ($st === '' || $st === 'done') {
+                $done[$oid] = true;
+            }
+        }
+    } catch (Exception $e) {
+    }
+    return array($done, $pending);
+}
+
+function list_card_transfers_by_ids($pdo, $ids, $createdBy = null)
+{
+    ensure_card_accounting_tables($pdo);
+    $clean = array();
+    if (!is_array($ids)) {
+        return array();
+    }
+    foreach ($ids as $id) {
+        $id = (int) $id;
+        if ($id > 0) {
+            $clean[$id] = $id;
+        }
+        if (count($clean) >= 120) {
+            break;
+        }
+    }
+    if (!$clean) {
+        return array();
+    }
+    $params = array();
+    $where = card_transfer_where(null, $createdBy, $params);
+    $where[] = 't.id IN (' . implode(',', $clean) . ')';
+    $sql = 'SELECT t.*,
+                   fa.display_name AS from_name, fa.username AS from_username,
+                   ta.display_name AS to_name, ta.username AS to_username,
+                   cb.display_name AS created_by_name
+            FROM agent_card_transfers t
+            LEFT JOIN admin_users fa ON fa.id = t.from_agent_id
+            JOIN admin_users ta ON ta.id = t.to_agent_id
+            LEFT JOIN admin_users cb ON cb.id = t.created_by
+            WHERE ' . implode(' AND ', $where);
+    try {
+        $st = $pdo->prepare($sql);
+        $st->execute($params);
+        return $st->fetchAll();
+    } catch (Exception $e) {
+        return array();
+    }
+}
+
+function list_recent_card_transfers($pdo, $limit = 30, $agentUserId = null, $createdBy = null, $offset = 0)
+{
+    ensure_card_accounting_tables($pdo);
+    $limit = max(1, min(200, (int) $limit));
+    $offset = max(0, (int) $offset);
+    $sql = 'SELECT t.*,
+                   fa.display_name AS from_name, fa.username AS from_username,
+                   ta.display_name AS to_name, ta.username AS to_username,
+                   cb.display_name AS created_by_name
+            FROM agent_card_transfers t
+            LEFT JOIN admin_users fa ON fa.id = t.from_agent_id
+            JOIN admin_users ta ON ta.id = t.to_agent_id
+            LEFT JOIN admin_users cb ON cb.id = t.created_by';
+    $params = array();
+    $where = card_transfer_where($agentUserId, $createdBy, $params);
+    if ($where) {
+        $sql .= ' WHERE ' . implode(' AND ', $where);
+    }
+    $sql .= ' ORDER BY t.created_at DESC, t.id DESC LIMIT ' . $limit . ' OFFSET ' . $offset;
     try {
     $st = $pdo->prepare($sql);
     $st->execute($params);

@@ -159,6 +159,22 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_ping') {
     exit;
 }
 
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_company_pings') {
+    header('Content-Type: application/json; charset=utf-8');
+    if (!function_exists('is_super_admin_user') || !is_super_admin_user()) {
+        echo json_encode(array('ok' => false, 'rows' => array()));
+        exit;
+    }
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
+    $coOut = function_exists('dash_platform_company_pings')
+        ? dash_platform_company_pings(true)
+        : array('ok' => true, 'rows' => array());
+    echo json_encode($coOut);
+    exit;
+}
+
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_points') {
     header('Content-Type: application/json; charset=utf-8');
     $ptsOut = array('ok' => false, 'points' => '');
@@ -189,7 +205,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
         'sas_ms' => null,
         'cards' => array(),
         'card_total' => 0,
-        'card_sub' => $en ? 'Unused' : 'شاغرة',
+        'card_sub' => $en ? 'No free cards' : 'ماكو كروت شاغرة',
         'from_cache' => false,
     );
 
@@ -311,16 +327,119 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
                     $out['card_total'] = isset($payload['card_total']) ? (int) $payload['card_total'] : 0;
                     $out['card_sub'] = !empty($payload['card_sub'])
                         ? (string) $payload['card_sub']
-                        : ($en ? 'Unused' : 'شاغرة');
+                        : ($en ? 'No free cards' : 'ماكو كروت شاغرة');
                     $out['from_cache'] = false;
                 }
             } catch (Exception $e) {
             }
         }
     }
+    if ($viewerOwnsSasWarehouse && (int) $out['card_total'] <= 0) {
+        $out['card_total'] = 0;
+        $out['cards'] = array();
+        $out['card_sub'] = $en ? 'No free cards' : 'ماكو كروت شاغرة';
+    }
     echo json_encode($out);
     exit;
 }
+
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_stats') {
+    header('Content-Type: application/json; charset=utf-8');
+    $enStats = (isset($lang) && $lang === 'en');
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
+    $stats = array(
+        'ok' => true,
+        'total' => 0,
+        'active' => 0,
+        'online' => 0,
+        'expired' => 0,
+        'soon' => 0,
+        'today' => 0,
+    );
+    if (function_exists('sas_dash_user_counts')) {
+        $counts = sas_dash_user_counts($pdo);
+        if (is_array($counts)) {
+            foreach (array('total', 'active', 'online', 'expired', 'soon', 'today') as $sk) {
+                if (isset($counts[$sk])) {
+                    $stats[$sk] = (int) $counts[$sk];
+                }
+            }
+        }
+    }
+    $scopeStats = function_exists('subscriber_agent_scope_sql') ? subscriber_agent_scope_sql('s') : '';
+    $monthA = date('Y-m-01 00:00:00');
+    $monthB = date('Y-m-01 00:00:00', strtotime(date('Y-m-01') . ' +1 month'));
+    $debtN = 0.0;
+    $gotN = 0.0;
+    $profitN = 0.0;
+    $salesN = 0.0;
+    $actN = 0;
+    try {
+        $debtN = (float) $pdo->query(
+            "SELECT COALESCE(SUM(i.amount),0) FROM invoices i
+             JOIN subscribers s ON s.id = i.subscriber_id
+             WHERE i.status = 'unpaid'" . $scopeStats
+        )->fetchColumn();
+        $gotN = (float) $pdo->query(
+            "SELECT COALESCE(SUM(i.amount),0) FROM invoices i
+             JOIN subscribers s ON s.id = i.subscriber_id
+             WHERE i.status = 'paid' AND i.paid_at >= " . $pdo->quote($monthA) . " AND i.paid_at < " . $pdo->quote($monthB) . $scopeStats
+        )->fetchColumn();
+        $profitN = (float) $pdo->query(
+            "SELECT COALESCE(SUM(i.profit),0) FROM invoices i
+             JOIN subscribers s ON s.id = i.subscriber_id
+             WHERE i.status = 'paid' AND i.paid_at >= " . $pdo->quote($monthA) . " AND i.paid_at < " . $pdo->quote($monthB) . $scopeStats
+        )->fetchColumn();
+        $salesN = (float) $pdo->query(
+            "SELECT COALESCE(SUM(sub.monthly_price),0) FROM subscriptions sub
+             JOIN subscribers s ON s.id = sub.subscriber_id
+             WHERE sub.created_at >= " . $pdo->quote($monthA) . " AND sub.created_at < " . $pdo->quote($monthB) . $scopeStats
+        )->fetchColumn();
+        $actN = (int) $pdo->query(
+            "SELECT COUNT(*) FROM subscriptions sub
+             JOIN subscribers s ON s.id = sub.subscriber_id
+             WHERE sub.created_at >= " . $pdo->quote($monthA) . " AND sub.created_at < " . $pdo->quote($monthB) . $scopeStats
+        )->fetchColumn();
+    } catch (Exception $e) {
+    }
+    $curcy = isset($config['currency']) ? $config['currency'] : 'د.ع';
+    $stats['collected'] = function_exists('money_format_iqd') ? money_format_iqd($gotN, $curcy) : (string) $gotN;
+    $stats['debts'] = function_exists('money_format_iqd') ? money_format_iqd($debtN, $curcy) : (string) $debtN;
+    $stats['profit'] = function_exists('money_format_iqd') ? money_format_iqd($profitN, $curcy) : (string) $profitN;
+    $stats['capital'] = function_exists('money_format_iqd') ? money_format_iqd($profitN + $debtN, $curcy) : (string) ($profitN + $debtN);
+    $stats['sales'] = function_exists('money_format_iqd') ? money_format_iqd($salesN, $curcy) : (string) $salesN;
+    $stats['activations'] = (int) $actN;
+    $cardBits = array();
+    $cardSum = 0;
+    if (!empty($viewerOwnsSasWarehouse) && function_exists('sas_dash_cards_preferred_persisted')) {
+        $cardSaved = sas_dash_cards_preferred_persisted();
+        if ($cardSaved && !empty($cardSaved['groups']) && is_array($cardSaved['groups'])) {
+            foreach ($cardSaved['groups'] as $cg) {
+                if (!is_array($cg)) {
+                    continue;
+                }
+                $cn = isset($cg['count']) ? (int) $cg['count'] : 0;
+                if ($cn <= 0) {
+                    continue;
+                }
+                $cardSum += $cn;
+                $nm = isset($cg['name']) ? trim((string) $cg['name']) : '';
+                if ($nm !== '') {
+                    $cardBits[] = $nm . ' ' . $cn;
+                }
+            }
+        }
+        $stats['card_total'] = $cardSum;
+        $stats['card_sub'] = $cardBits
+            ? implode(' · ', $cardBits)
+            : ($enStats ? 'No free cards' : 'ماكو كروت شاغرة');
+    }
+    echo json_encode($stats);
+    exit;
+}
+
 
 $expDir = dirname(__DIR__) . '/storage/cache';
 if (!is_dir($expDir)) {
@@ -544,11 +663,6 @@ if ($sasReadyDash) {
                 $sasCardGroups = $persistedCards['groups'];
             }
         }
-        if (!$sasCardGroups && isset($_SESSION['sas_card_groups_v5']) && is_array($_SESSION['sas_card_groups_v5'])) {
-            $sasCardGroups = $_SESSION['sas_card_groups_v5'];
-        } elseif (!$sasCardGroups && isset($_SESSION['sas_card_groups_v2']) && is_array($_SESSION['sas_card_groups_v2'])) {
-            $sasCardGroups = $_SESSION['sas_card_groups_v2'];
-        }
     }
     if (isset($_SESSION['sas_rp_val']) && $_SESSION['sas_rp_val'] !== null) {
         $sasPointsOk = true;
@@ -716,6 +830,20 @@ if ($isPlatformDash && function_exists('platform_admin_dashboard_stats')):
     dash_sas_box('saas_agents.php?view=expired', 'tone-red', $en ? 'Expired' : 'المنتهين', '', (string) (int) $pad['users_expired'], '⏱');
     dash_sas_box('settings.php', 'tone-navy', $en ? 'System version' : 'إصدار النظام', '', 'v' . (string) $pad['version'], '📦');
     dash_sas_box('settings.php', 'tone-lime', $en ? 'Google bank' : 'البنك على كوكل', $pad['google_ok'] ? ($en ? 'OK' : 'شغال') : ($en ? 'Down' : 'توقف'), $fmtMs($pad['google_ms']), '🌐');
+    $coPings = function_exists('dash_platform_company_pings') ? dash_platform_company_pings(false) : array('rows' => array());
+    $coRows = (is_array($coPings) && !empty($coPings['rows']) && is_array($coPings['rows'])) ? $coPings['rows'] : array();
+    $coTones = array('tone-teal', 'tone-aqua', 'tone-blue', 'tone-green', 'tone-navy');
+    $coi = 0;
+    foreach ($coRows as $coRow) {
+        $coId = isset($coRow['id']) ? (int) $coRow['id'] : 0;
+        $coName = isset($coRow['name']) ? (string) $coRow['name'] : '';
+        if ($coId <= 0 || $coName === '') {
+            continue;
+        }
+        $coMs = (isset($coRow['ms']) && $coRow['ms'] !== null && $coRow['ms'] !== '') ? ((int) $coRow['ms'] . ' ms') : '—';
+        dash_sas_box('companies.php', $coTones[$coi % 5], $coName, $en ? 'Ping' : 'بنك', $coMs, '📡', 'dashCo' . $coId);
+        $coi++;
+    }
     dash_sas_box('index.php', 'tone-teal', $en ? 'Date & time' : 'الوقت والتاريخ', '', (string) $pad['datetime'], '🕒');
     dash_sas_box('saas_agents.php', 'tone-purple', $en ? 'Sales' : 'المبيعات', $en ? 'Portal membership' : 'عضوية البوابة', money_format_iqd($pad['sales'], $config['currency']), '🧾');
     dash_sas_box('saas_agents.php', 'tone-aqua', $en ? 'Received' : 'المستلم', '', money_format_iqd($pad['received'], $config['currency']), '💵');
@@ -723,6 +851,26 @@ if ($isPlatformDash && function_exists('platform_admin_dashboard_stats')):
     ?>
     </div>
 </div>
+<script>
+(function () {
+  var x = new XMLHttpRequest();
+  x.open('GET', 'index.php?ajax=dash_company_pings', true);
+  x.timeout = 20000;
+  x.onload = function () {
+    if (x.status !== 200) return;
+    var data = null;
+    try { data = JSON.parse(x.responseText); } catch (e) { return; }
+    if (!data || !data.rows) return;
+    for (var i = 0; i < data.rows.length; i++) {
+      var row = data.rows[i];
+      var el = document.getElementById('dashCo' + row.id + 'Val');
+      if (!el) continue;
+      el.textContent = (row.ms !== null && row.ms !== '') ? (row.ms + ' ms') : '—';
+    }
+  };
+  x.send();
+})();
+</script>
 <?php
     render_footer();
     return;
@@ -997,7 +1145,7 @@ if ($isAccDash) {
         $cardTotal += $pn;
         $cardParts[] = trim($pnm . ' ' . $pn);
     }
-    $cardSub = $cardParts ? implode(' · ', $cardParts) : ($en ? 'Unused' : 'شاغرة');
+    $cardSub = $cardParts ? implode(' · ', $cardParts) : ($en ? 'No free cards' : 'ماكو كروت شاغرة');
     $usersHome = 'sas.php';
     echo '<div class="sas-boxes">';
     foreach ($order as $wid) {
@@ -1010,17 +1158,17 @@ if ($isAccDash) {
             continue;
         }
         if ($wid === 'subscribers') {
-            dash_sas_box($usersHome, 'tone-blue', $en ? 'Subscribers' : 'المشتركين', '', (string) (int) $sasCounts['total'], '👤');
+            dash_sas_box($usersHome, 'tone-blue', $en ? 'Subscribers' : 'المشتركين', '', (string) (int) $sasCounts['total'], '👤', 'dashUsers');
         } elseif ($wid === 'active') {
-            dash_sas_box('sas.php?sub=active', 'tone-green', $en ? 'Active users' : 'فعال', '', (string) (int) $sasCounts['active'], '☺');
+            dash_sas_box('sas.php?sub=active', 'tone-green', $en ? 'Active users' : 'فعال', '', (string) (int) $sasCounts['active'], '☺', 'dashActive');
         } elseif ($wid === 'online') {
-            dash_sas_box('sas.php?sub=online', 'tone-aqua', $en ? 'Online users' : 'متصل حاليا', $en ? 'Connected' : '', (string) (int) $sasCounts['online'], '💡');
+            dash_sas_box('sas.php?sub=online', 'tone-aqua', $en ? 'Online users' : 'متصل حاليا', $en ? 'Connected' : '', (string) (int) $sasCounts['online'], '💡', 'dashOnline');
         } elseif ($wid === 'expired') {
-            dash_sas_box('sas.php?sub=expired', 'tone-red', $en ? 'Expired users' : 'منتهي', '', (string) (int) $sasCounts['expired'], '☹');
+            dash_sas_box('sas.php?sub=expired', 'tone-red', $en ? 'Expired users' : 'منتهي', '', (string) (int) $sasCounts['expired'], '☹', 'dashExpired');
         } elseif ($wid === 'soon') {
-            dash_sas_box('sas.php?sub=soon', 'tone-yellow', $en ? 'About to expire' : 'على وشك الانتهاء', $en ? 'In 3 days' : '', (string) (int) $sasCounts['soon'], '📅');
+            dash_sas_box('sas.php?sub=soon', 'tone-yellow', $en ? 'About to expire' : 'على وشك الانتهاء', $en ? 'In 3 days' : '', (string) (int) $sasCounts['soon'], '📅', 'dashSoon');
         } elseif ($wid === 'today') {
-            dash_sas_box('sas.php?sub=today', 'tone-teal', $en ? 'Expiring today' : 'ينتهي اليوم', '', (string) (int) $sasCounts['today'], '📅');
+            dash_sas_box('sas.php?sub=today', 'tone-teal', $en ? 'Expiring today' : 'ينتهي اليوم', '', (string) (int) $sasCounts['today'], '📅', 'dashToday');
         } elseif ($wid === 'agents' && $agentN > 0) {
             dash_sas_box('agents.php', 'tone-purple', $en ? 'Agents' : 'الوكلاء', '', (string) (int) $agentN, '👥');
         } elseif ($wid === 'cards' && $sasReadyDash) {
@@ -1036,17 +1184,17 @@ if ($isAccDash) {
         } elseif ($wid === 'card_due') {
             dash_sas_box('cards.php', 'tone-red', $en ? 'Remaining' : 'المتبقي', $en ? 'To collect' : 'باقي التحصيل', money_format_iqd($cardDue, $config['currency']), '📄');
         } elseif ($wid === 'collected') {
-            dash_sas_box('reports.php', 'tone-yellow', $en ? 'Collected' : 'المقبوض', '', money_format_iqd($receivedMonth, $config['currency']), '💵');
+            dash_sas_box('reports.php', 'tone-yellow', $en ? 'Collected' : 'المقبوض', '', money_format_iqd($receivedMonth, $config['currency']), '💵', 'dashCollected');
         } elseif ($wid === 'debts') {
-            dash_sas_box('debts.php?status=unpaid', 'tone-red', $en ? 'Debts' : 'الديون', '', money_format_iqd($totalDebt, $config['currency']), '📄');
+            dash_sas_box('debts.php?status=unpaid', 'tone-red', $en ? 'Debts' : 'الديون', '', money_format_iqd($totalDebt, $config['currency']), '📄', 'dashDebts');
         } elseif ($wid === 'profit') {
-            dash_sas_box('reports.php', 'tone-green', $en ? 'Profit' : 'الربح', '', money_format_iqd($profitMonth, $config['currency']), '📈');
+            dash_sas_box('reports.php', 'tone-green', $en ? 'Profit' : 'الربح', '', money_format_iqd($profitMonth, $config['currency']), '📈', 'dashProfit');
         } elseif ($wid === 'capital') {
-            dash_sas_box('reports.php', 'tone-teal', $en ? 'Capital' : 'رأس المال', $en ? 'Profit + debts' : 'الربح + الديون', money_format_iqd($capitalMonth, $config['currency']), '🏦');
+            dash_sas_box('reports.php', 'tone-teal', $en ? 'Capital' : 'رأس المال', $en ? 'Profit + debts' : 'الربح + الديون', money_format_iqd($capitalMonth, $config['currency']), '🏦', 'dashCapital');
         } elseif ($wid === 'sales') {
-            dash_sas_box('subscriptions.php', 'tone-purple', $en ? 'Sales' : 'المبيعات', '', money_format_iqd($salesMonth, $config['currency']), '🧾');
+            dash_sas_box('subscriptions.php', 'tone-purple', $en ? 'Sales' : 'المبيعات', '', money_format_iqd($salesMonth, $config['currency']), '🧾', 'dashSales');
         } elseif ($wid === 'activations') {
-            dash_sas_box('subscriptions.php', 'tone-aqua', $en ? 'Activations' : 'تفعيلات الشهر', '', (string) (int) $activatedMonth, '⚡');
+            dash_sas_box('subscriptions.php', 'tone-aqua', $en ? 'Activations' : 'تفعيلات الشهر', '', (string) (int) $activatedMonth, '⚡', 'dashActs');
         } elseif ($wid === 'rentals') {
             dash_sas_box('rentals.php', 'tone-navy', $en ? 'Rental towers' : 'أبراج الإيجار', $en ? 'Active of total' : 'فعال من أصل الكل', ((int) $rentalActiveCount) . '\\' . (int) $rentalTotalCount, '📡');
         } elseif ($wid === 'points' && $sasReadyDash) {
@@ -1065,12 +1213,12 @@ if (!$accLocked || $showWid('subscribers')) {
     if ($accLocked) {
         dash_sas_box($usersHome, 'tone-blue', $en ? 'Subscribers' : 'المشتركين', '', (string) (int) $sasCounts['total'], '👤');
     } else {
-        dash_sas_box($usersHome, 'tone-blue', $en ? 'Total users' : 'كل المشتركين', $en ? 'Registered users' : 'مسجّلين', (string) (int) $sasCounts['total'], '👤');
-        dash_sas_box('sas.php?sub=active', 'tone-green', $en ? 'Active users' : 'فعال', $en ? 'Running line' : 'خط شغال', (string) (int) $sasCounts['active'], '☺');
-        dash_sas_box('sas.php?sub=online', 'tone-aqua', $en ? 'Online users' : 'متصل حاليا', $en ? 'Connected' : 'على الخط', (string) (int) $sasCounts['online'], '💡');
-        dash_sas_box('sas.php?sub=expired', 'tone-red', $en ? 'Expired users' : 'منتهي', $en ? 'Ended' : 'انتهى الخط', (string) (int) $sasCounts['expired'], '☹');
-        dash_sas_box('sas.php?sub=soon', 'tone-yellow', $en ? 'About to expire' : 'على وشك الانتهاء', $en ? 'In 3 days' : 'خلال 3 أيام', (string) (int) $sasCounts['soon'], '📅');
-        dash_sas_box('sas.php?sub=today', 'tone-teal', $en ? 'Expiring today' : 'ينتهي اليوم', $en ? 'Today' : 'اليوم', (string) (int) $sasCounts['today'], '📅');
+        dash_sas_box($usersHome, 'tone-blue', $en ? 'Total users' : 'كل المشتركين', $en ? 'Registered users' : 'مسجّلين', (string) (int) $sasCounts['total'], '👤', 'dashUsers');
+        dash_sas_box('sas.php?sub=active', 'tone-green', $en ? 'Active users' : 'فعال', $en ? 'Running line' : 'خط شغال', (string) (int) $sasCounts['active'], '☺', 'dashActive');
+        dash_sas_box('sas.php?sub=online', 'tone-aqua', $en ? 'Online users' : 'متصل حاليا', $en ? 'Connected' : 'على الخط', (string) (int) $sasCounts['online'], '💡', 'dashOnline');
+        dash_sas_box('sas.php?sub=expired', 'tone-red', $en ? 'Expired users' : 'منتهي', $en ? 'Ended' : 'انتهى الخط', (string) (int) $sasCounts['expired'], '☹', 'dashExpired');
+        dash_sas_box('sas.php?sub=soon', 'tone-yellow', $en ? 'About to expire' : 'على وشك الانتهاء', $en ? 'In 3 days' : 'خلال 3 أيام', (string) (int) $sasCounts['soon'], '📅', 'dashSoon');
+        dash_sas_box('sas.php?sub=today', 'tone-teal', $en ? 'Expiring today' : 'ينتهي اليوم', $en ? 'Today' : 'اليوم', (string) (int) $sasCounts['today'], '📅', 'dashToday');
     }
 }
 if ($isAccDash && $showWid('agents') && $accLocked) {
@@ -1084,18 +1232,18 @@ if (!$accLocked) {
     dash_ping_box($dashPingRows, $en, $dashPingSeed);
 }
 if ($showWid('collected')) {
-    dash_sas_box('reports.php', 'tone-yellow', $en ? 'Collected' : 'المقبوض', $en ? 'This month' : 'هذا الشهر', money_format_iqd($receivedMonth, $config['currency']), '💵');
+    dash_sas_box('reports.php', 'tone-yellow', $en ? 'Collected' : 'المقبوض', $en ? 'This month' : 'هذا الشهر', money_format_iqd($receivedMonth, $config['currency']), '💵', 'dashCollected');
 }
 if ($showWid('debts')) {
-    dash_sas_box('debts.php?status=unpaid', 'tone-red', $en ? 'Debts' : 'الديون', $en ? 'Unpaid' : 'غير مدفوع', money_format_iqd($totalDebt, $config['currency']), '📄');
+    dash_sas_box('debts.php?status=unpaid', 'tone-red', $en ? 'Debts' : 'الديون', $en ? 'Unpaid' : 'غير مدفوع', money_format_iqd($totalDebt, $config['currency']), '📄', 'dashDebts');
 }
 if ($showWid('profit')) {
-    dash_sas_box('reports.php', 'tone-green', $en ? 'Profit' : 'الربح', $en ? 'This month' : 'هذا الشهر', money_format_iqd($profitMonth, $config['currency']), '📈');
-    dash_sas_box('reports.php', 'tone-teal', $en ? 'Capital' : 'رأس المال', $en ? 'Profit + debts' : 'الربح + الديون', money_format_iqd($capitalMonth, $config['currency']), '🏦');
+    dash_sas_box('reports.php', 'tone-green', $en ? 'Profit' : 'الربح', $en ? 'This month' : 'هذا الشهر', money_format_iqd($profitMonth, $config['currency']), '📈', 'dashProfit');
+    dash_sas_box('reports.php', 'tone-teal', $en ? 'Capital' : 'رأس المال', $en ? 'Profit + debts' : 'الربح + الديون', money_format_iqd($capitalMonth, $config['currency']), '🏦', 'dashCapital');
 }
 if ($showWid('activations')) {
-    dash_sas_box('subscriptions.php', 'tone-purple', $en ? 'Sales' : 'المبيعات', $en ? 'This month' : 'هذا الشهر', money_format_iqd($salesMonth, $config['currency']), '🧾');
-    dash_sas_box('subscriptions.php', 'tone-aqua', $en ? 'Activations' : 'تفعيلات الشهر', $en ? 'This month' : 'هذا الشهر', (string) (int) $activatedMonth, '⚡');
+    dash_sas_box('subscriptions.php', 'tone-purple', $en ? 'Sales' : 'المبيعات', $en ? 'This month' : 'هذا الشهر', money_format_iqd($salesMonth, $config['currency']), '🧾', 'dashSales');
+    dash_sas_box('subscriptions.php', 'tone-aqua', $en ? 'Activations' : 'تفعيلات الشهر', $en ? 'This month' : 'هذا الشهر', (string) (int) $activatedMonth, '⚡', 'dashActs');
 }
 if ($showWid('rentals')) {
     dash_sas_box('rentals.php', 'tone-navy', $en ? 'Rental towers' : 'أبراج الإيجار', $en ? 'Active of total' : 'فعال من أصل الكل', ((int) $rentalActiveCount) . '\\' . (int) $rentalTotalCount, '📡');
@@ -1114,7 +1262,7 @@ if ($sasReadyDash && $showWid('cards')) {
             $cardParts[] = trim($nm . ' ' . $n);
         }
     }
-    $cardSub = $cardParts ? implode(' · ', $cardParts) : ($en ? 'Unused' : 'شاغرة');
+    $cardSub = $cardParts ? implode(' · ', $cardParts) : ($en ? 'No free cards' : 'ماكو كروت شاغرة');
     dash_sas_box('cards.php', 'tone-navy', $en ? 'Cards' : 'الكروت', $cardSub, (string) (int) $cardTotal, '🃏', 'dashCards');
 }
 if (!$accLocked) {
@@ -1158,15 +1306,9 @@ if (!$accLocked) {
     var b = document.getElementById('dashBankVal');
     if (b && d.balance && d.balance !== '—') b.textContent = d.balance;
     var c = document.getElementById('dashCardsVal');
-    if (c && typeof d.card_total === 'number') {
-      var cur = parseInt(c.textContent, 10) || 0;
-      if (!d.from_cache || d.card_total > 0 || cur <= 0) {
-        c.textContent = String(d.card_total);
-      }
-    }
+    if (c && typeof d.card_total === 'number') c.textContent = String(d.card_total);
     var cs = document.getElementById('dashCardsSub');
-    if (cs && d.card_sub && !d.from_cache) cs.textContent = d.card_sub;
-    else if (cs && d.card_sub && !cs.textContent) cs.textContent = d.card_sub;
+    if (cs && d.card_sub) cs.textContent = d.card_sub;
   }
   function loadDash(force, quiet) {
     var box = document.getElementById('dashCards');
@@ -1243,11 +1385,42 @@ if (!$accLocked) {
       })
       .catch(function () {});
   }
+  function paintStats(d) {
+    if (!d || !d.ok) return;
+    function setVal(id, value) {
+      var el = document.getElementById(id);
+      if (!el || value === undefined || value === null || value === '') return;
+      el.textContent = String(value);
+    }
+    setVal('dashUsersVal', d.total);
+    setVal('dashActiveVal', d.active);
+    setVal('dashOnlineVal', d.online);
+    setVal('dashExpiredVal', d.expired);
+    setVal('dashSoonVal', d.soon);
+    setVal('dashTodayVal', d.today);
+    setVal('dashCollectedVal', d.collected);
+    setVal('dashDebtsVal', d.debts);
+    setVal('dashProfitVal', d.profit);
+    setVal('dashCapitalVal', d.capital);
+    setVal('dashSalesVal', d.sales);
+    setVal('dashActsVal', d.activations);
+    if (typeof d.card_total === 'number') setVal('dashCardsVal', d.card_total);
+    if (d.card_sub) setVal('dashCardsSub', d.card_sub);
+  }
+  function loadStats() {
+    return fetch('index.php?ajax=dash_stats', { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(paintStats)
+      .catch(function () {});
+  }
   loadDash(false, true);
+  loadStats();
   loadPoints();
   loadBank();
+  loadDash(true, true);
   setInterval(loadPoints, 20000);
-  setInterval(function () { loadDash(false, true); loadBank(); }, 180000);
+  setInterval(loadStats, 8000);
+  setInterval(function () { loadDash(true, true); loadBank(); }, 40000);
 })();
 </script>
 <?php endif; ?>

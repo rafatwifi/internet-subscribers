@@ -1188,12 +1188,6 @@ class SASConnector
         if (isset($decoded['data']) && is_array($decoded['data'])) {
             $block = $decoded['data'];
         }
-        if (isset($block['packet-loss'])) {
-            $loss = (int) preg_replace('/\D+/', '', (string) $block['packet-loss']);
-            if ($loss >= 100) {
-                return null;
-            }
-        }
         foreach (array('avg', 'min-rtt', 'max-rtt') as $k) {
             if (!isset($block[$k]) || is_array($block[$k])) {
                 continue;
@@ -1203,6 +1197,45 @@ class SASConnector
                 if ($n !== null) {
                     return $n;
                 }
+            }
+        }
+        $fromText = $this->pingMsFromText($decoded);
+        if ($fromText !== null && $fromText > 0) {
+            return $fromText;
+        }
+        if (isset($block['packet-loss'])) {
+            $loss = (int) preg_replace('/\D+/', '', (string) $block['packet-loss']);
+            if ($loss >= 100) {
+                return 0;
+            }
+        }
+        return null;
+    }
+
+    private function pingMsFromText($node)
+    {
+        if (is_string($node)) {
+            if (preg_match('/time[=<]\s*([\d.]+)\s*ms/i', $node, $m)) {
+                $n = (int) round((float) $m[1]);
+                if ($n > 0 && $n < 10000) {
+                    return $n;
+                }
+            }
+            if (preg_match('/=\s*([\d.]+)\/([\d.]+)\/([\d.]+)\s*ms/i', $node, $m)) {
+                $n = (int) round((float) $m[2]);
+                if ($n > 0 && $n < 10000) {
+                    return $n;
+                }
+            }
+            return null;
+        }
+        if (!is_array($node)) {
+            return null;
+        }
+        foreach ($node as $v) {
+            $n = $this->pingMsFromText($v);
+            if ($n !== null && $n > 0) {
+                return $n;
             }
         }
         return null;
@@ -1824,12 +1857,17 @@ class SASConnector
             'search' => '',
         );
         $series = $this->sasCardFetchPaged(array('index/series', 'index/card', 'index/cards', 'index/cardSeries'), $payload, 12);
+        $me = $this->loggedManagerId();
         $candidates = array();
         foreach ($series as $srow) {
             if (!is_array($srow)) {
                 continue;
             }
             if (!empty($srow['suspended']) && (string) $srow['suspended'] === '1') {
+                continue;
+            }
+            $owner = $this->sasSeriesOwnerId($srow);
+            if ($me <= 0 || $owner !== $me) {
                 continue;
             }
             $hint = $this->sasCardSeriesUnusedCount($srow);
@@ -2043,7 +2081,7 @@ class SASConnector
                 continue;
             }
             $owner = $this->sasSeriesOwnerId($srow);
-            if ($me > 0 && $owner > 0 && $owner !== $me) {
+            if ($me <= 0 || $owner !== $me) {
                 continue;
             }
             $name = $this->sasRowProfileName($srow);
@@ -2134,8 +2172,10 @@ class SASConnector
             }
             $g['used'] = $u;
             $exactKey = strtolower(isset($g['name']) ? (string) $g['name'] : '');
-            if ($exactKey !== '' && isset($ownUnused[$exactKey])) {
+            if ($nu === 0 && $exactKey !== '' && isset($ownUnused[$exactKey]) && !$g['cards']) {
                 $nu = (int) $ownUnused[$exactKey]['n'];
+            }
+            if ($exactKey !== '' && isset($ownUnused[$exactKey])) {
                 unset($ownUnused[$exactKey]);
             }
             $g['unused'] = $nu;
@@ -2155,14 +2195,9 @@ class SASConnector
                 continue;
             }
             if (!isset($groups[$leftKey])) {
-                $groups[$leftKey] = array(
-                    'name' => $leftName,
-                    'profile_id' => 0,
-                    'total' => $leftN,
-                    'used' => 0,
-                    'unused' => $leftN,
-                    'cards' => array(),
-                );
+                continue;
+            }
+            if (!empty($groups[$leftKey]['cards'])) {
                 continue;
             }
             $groups[$leftKey]['unused'] = $leftN;
@@ -2440,9 +2475,6 @@ class SASConnector
             }
             $seenSeries[$seriesKey] = true;
             $owner = $this->sasSeriesOwnerId($srow);
-            if ($owner <= 0) {
-                $owner = $me;
-            }
             $name = $this->sasRowProfileName($srow);
             if ($name === '' && !empty($srow['profile']['name']) && !is_array($srow['profile']['name'])) {
                 $name = trim((string) $srow['profile']['name']);
@@ -2791,8 +2823,7 @@ class SASConnector
                 return array(false, $msgC);
             }
         }
-        $me = (int) $this->loggedManagerId();
-        if (!$denied || $toOwnerId !== $me || $this->reclaimUser === '' || $this->reclaimPass === '') {
+        if (!$denied || $this->reclaimUser === '' || $this->reclaimPass === '') {
             return array(false, $msg !== '' ? $msg : 'sas');
         }
         $lift = new self($this->host, $this->reclaimUser, $this->reclaimPass, $this->portal);
@@ -3116,7 +3147,97 @@ class SASConnector
     }
 
     /**
-     * ينقل كروت شاغرة من مالك إلى مالك داخل الساس.
+     * سلاسل مالك واحد وفئة واحدة، ويتوقف أول ما يلقى العدد المطلوب.
+     * null إذا تعذر الاتصال.
+     */
+    private function sasCollectOwnerSeries($ownerId, $profileId, $profileName, $needQty)
+    {
+        $ownerId = (int) $ownerId;
+        $profileId = (int) $profileId;
+        $needQty = (int) $needQty;
+        $wantKey = $this->sasNameKey($profileName);
+        $out = array();
+        $have = 0;
+        $seen = array();
+        if ($ownerId <= 0) {
+            return $out;
+        }
+        $payload = array(
+            'page' => 1,
+            'count' => 100,
+            'sortBy' => 'series_date',
+            'direction' => 'desc',
+            'search' => '',
+        );
+        $page = 1;
+        while ($page <= 8 && $have < $needQty) {
+            $payload['page'] = $page;
+            $full = $this->decodeApiBody($this->post('index/series', $payload, true), false);
+            if (!is_array($full) || isset($full['__http_error']) || isset($full['__auth_error']) || isset($full['__curl_error'])) {
+                return ($page === 1 && !$out) ? null : $out;
+            }
+            $rows = $this->sasCardRowsFromDecoded($full);
+            if (!$rows) {
+                break;
+            }
+            foreach ($rows as $srow) {
+                if (!is_array($srow)) {
+                    continue;
+                }
+                if (!empty($srow['suspended']) && (string) $srow['suspended'] === '1') {
+                    continue;
+                }
+                if ($this->sasSeriesOwnerId($srow) !== $ownerId) {
+                    continue;
+                }
+                $seriesKey = '';
+                if (!empty($srow['series']) && !is_array($srow['series'])) {
+                    $seriesKey = trim((string) $srow['series']);
+                }
+                if ($seriesKey === '') {
+                    $seriesKey = $this->sasCardSeriesCode($srow);
+                }
+                if ($seriesKey === '' || isset($seen[$seriesKey])) {
+                    continue;
+                }
+                $name = $this->sasRowProfileName($srow);
+                if ($name === '' && !empty($srow['profile']['name']) && !is_array($srow['profile']['name'])) {
+                    $name = trim((string) $srow['profile']['name']);
+                }
+                $pid = $this->sasCardSeriesProfileId($srow);
+                $nameOk = ($wantKey !== '' && $this->sasNameKey($name) === $wantKey);
+                $idOk = ($profileId > 0 && $pid > 0 && $pid === $profileId);
+                if (!$nameOk && !$idOk) {
+                    continue;
+                }
+                $unused = $this->sasCardSeriesUnusedCount($srow);
+                if ($unused <= 0) {
+                    continue;
+                }
+                $seen[$seriesKey] = true;
+                $out[] = array(
+                    'series' => $seriesKey,
+                    'owner' => $ownerId,
+                    'name' => $name,
+                    'profile_id' => $pid,
+                    'unused' => (int) $unused,
+                    'used' => 0,
+                );
+                $have += (int) $unused;
+                if ($have >= $needQty) {
+                    return $out;
+                }
+            }
+            if (count($rows) < 100) {
+                break;
+            }
+            $page++;
+        }
+        return $out;
+    }
+
+    /**
+     * ينقل كروت شاغرة من مالك واحد فقط. ما يسحب من صفحة أو وكيل ثاني.
      * @return array ok, message, moved, ranges
      */
     public function moveUnusedCardsToOwner($profileId, $profileName, $qty, $toOwnerId, $fromOwnerId, $foreignOwnerIds = array())
@@ -3137,87 +3258,50 @@ class SASConnector
         if ($fromOwnerId <= 0) {
             $fromOwnerId = $me;
         }
-        $wantKey = $this->sasNameKey($profileName);
-        $seriesRows = $this->listSeriesStock();
-        if (!is_array($seriesRows)) {
+        if ($fromOwnerId <= 0) {
             $empty['message'] = 'login';
             return $empty;
         }
-        $foreign = array();
-        $homePool = is_array($foreignOwnerIds) && count($foreignOwnerIds) > 0;
-        if ($homePool) {
-            foreach ($foreignOwnerIds as $fid) {
-                $fid = (int) $fid;
-                if ($fid > 0 && $fid !== $me && $fid !== $fromOwnerId) {
-                    $foreign[$fid] = true;
-                }
-            }
-        }
-        if (!$homePool && $fromOwnerId <= 0) {
+        $picked = $this->sasCollectOwnerSeries($fromOwnerId, $profileId, $profileName, $qty);
+        if ($picked === null) {
             $empty['message'] = 'login';
             return $empty;
         }
-        $picked = array();
         $have = 0;
-        $pickSeries = function ($s, $ignoreOwner) use (&$picked, &$have, $wantKey, $profileId, $homePool, $fromOwnerId, $foreign) {
-            if (!is_array($s) || $s['series'] === '') {
-                return;
-            }
-            $owner = (int) $s['owner'];
-            if (!$ignoreOwner) {
-                if ($homePool) {
-                    if ($owner > 0 && !empty($foreign[$owner])) {
-                        return;
-                    }
-                } elseif ($owner !== $fromOwnerId) {
-                    return;
-                }
-            }
-            $nameOk = ($wantKey !== '' && $this->sasNameKey($s['name']) === $wantKey);
-            $idOk = ($profileId > 0 && (int) $s['profile_id'] > 0 && (int) $s['profile_id'] === $profileId);
-            if (!$nameOk && !$idOk) {
-                return;
-            }
-            foreach ($picked as $already) {
-                if ($already['series'] === $s['series']) {
-                    return;
-                }
-            }
-            $n = (int) $s['unused'];
-            $freeIds = array();
-            if ($n <= 0) {
-                $free = $this->sasFreeCardIds($s['series']);
-                if (!empty($free['ok']) && !empty($free['ids'])) {
-                    $freeIds = $free['ids'];
-                    $n = count($freeIds);
-                }
-            }
-            if ($n <= 0) {
-                return;
-            }
-            $s['unused'] = $n;
-            if ($freeIds) {
-                $s['free_ids'] = $freeIds;
-            }
-            $picked[] = $s;
-            $have += $n;
-        };
-        foreach ($seriesRows as $s) {
-            $pickSeries($s, false);
+        foreach ($picked as $s) {
+            $have += isset($s['unused']) ? (int) $s['unused'] : 0;
         }
-        if ($have < $qty && $homePool) {
-            foreach ($seriesRows as $s) {
-                $pickSeries($s, true);
-            }
-        }
-        if ($have < $qty && !$homePool && $fromOwnerId > 0) {
+        if ($have < $qty && $fromOwnerId !== $me) {
             $pinlessRows = $this->listPinlessOwnerSeries($fromOwnerId);
+            $wantKey = $this->sasNameKey($profileName);
             foreach ($pinlessRows as $s) {
-                $pickSeries($s, false);
+                if (!is_array($s) || empty($s['series']) || (int) $s['owner'] !== $fromOwnerId) {
+                    continue;
+                }
+                $nameOk = ($wantKey !== '' && $this->sasNameKey(isset($s['name']) ? $s['name'] : '') === $wantKey);
+                $idOk = ($profileId > 0 && (int) $s['profile_id'] > 0 && (int) $s['profile_id'] === $profileId);
+                if (!$nameOk && !$idOk) {
+                    continue;
+                }
+                $dup = false;
+                foreach ($picked as $already) {
+                    if ($already['series'] === $s['series']) {
+                        $dup = true;
+                        break;
+                    }
+                }
+                if ($dup || (int) $s['unused'] <= 0) {
+                    continue;
+                }
+                $picked[] = $s;
+                $have += (int) $s['unused'];
+                if ($have >= $qty) {
+                    break;
+                }
             }
         }
         if ($have < $qty) {
-            $empty['message'] = 'short:' . $have;
+            $empty['message'] = ($have <= 0) ? 'unavailable' : ('short:' . $have);
             return $empty;
         }
         $need = $qty;
@@ -3227,11 +3311,14 @@ class SASConnector
                 break;
             }
             $owner = (int) $s['owner'];
+            if ($owner !== $fromOwnerId) {
+                continue;
+            }
             $take = min($need, (int) $s['unused']);
             if ($take < 1) {
                 continue;
             }
-            $backOwner = $owner > 0 ? $owner : $fromOwnerId;
+            $backOwner = $fromOwnerId;
             if (!empty($s['pinless'])) {
                 if ($take !== (int) $s['unused']) {
                     continue;

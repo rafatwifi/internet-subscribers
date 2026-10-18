@@ -306,6 +306,9 @@ function portal_warm_run($pdo, $config)
             if (function_exists('sas_refresh_online_flags')) {
                 sas_refresh_online_flags($pdo, $config);
             }
+            if (function_exists('sas_ping_warm')) {
+                sas_ping_warm($pdo);
+            }
         } catch (Exception $e) {
         }
         break;
