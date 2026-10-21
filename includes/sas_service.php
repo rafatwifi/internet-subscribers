@@ -1184,9 +1184,18 @@ function sas_find_manager_balance($node, $depth = 0)
  */
 function sas_manager_reward_points($config, $pdo = null)
 {
+    $forcePts = !empty($GLOBALS['sas_points_force']);
+    $ptsTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    $ptsFile = dirname(__DIR__) . '/storage/cache/sas_points_t' . $ptsTid . '.json';
+    if (!$forcePts && is_file($ptsFile)) {
+        $ptsSaved = json_decode((string) @file_get_contents($ptsFile), true);
+        if (is_array($ptsSaved) && isset($ptsSaved['at'], $ptsSaved['points']) && (time() - (int) $ptsSaved['at']) < 12) {
+            return array(true, $ptsSaved['points'], '');
+        }
+    }
     $cachedAt = isset($_SESSION['sas_rp_at']) ? (int) $_SESSION['sas_rp_at'] : 0;
     $haveBal = array_key_exists('sas_balance_disp', $_SESSION);
-    if ($cachedAt > 0 && (time() - $cachedAt) < 8 && array_key_exists('sas_rp_val', $_SESSION)
+    if (!$forcePts && $cachedAt > 0 && (time() - $cachedAt) < 3 && array_key_exists('sas_rp_val', $_SESSION)
         && $_SESSION['sas_rp_val'] !== null && $haveBal) {
         return array(true, $_SESSION['sas_rp_val'], '');
     }
@@ -1315,6 +1324,11 @@ function sas_manager_reward_points($config, $pdo = null)
             $_SESSION['sas_rp_at'] = time();
             $_SESSION['sas_points_val'] = $points;
             $_SESSION['sas_points_at'] = time();
+            $ptsDir = dirname($ptsFile);
+            if (!is_dir($ptsDir)) {
+                @mkdir($ptsDir, 0775, true);
+            }
+            @file_put_contents($ptsFile, json_encode(array('at' => time(), 'points' => $points)));
             return array(true, $points, '');
         }
 

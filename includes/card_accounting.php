@@ -519,6 +519,39 @@ function card_agent_remaining_balance($pdo, $agentUserId)
     return (float) $incoming['sale_total'] - $paid;
 }
 
+function card_agent_running_debt($pdo, $agentUserId)
+{
+    $agentUserId = (int) $agentUserId;
+    $base = card_agent_remaining_balance($pdo, $agentUserId);
+    if ($agentUserId <= 0 || !$pdo) {
+        return $base;
+    }
+    $parentId = 0;
+    try {
+        $stP = $pdo->prepare('SELECT reports_to_user_id FROM admin_users WHERE id = :id LIMIT 1');
+        $stP->execute(array(':id' => $agentUserId));
+        $parentId = (int) $stP->fetchColumn();
+    } catch (Exception $e) {
+        $parentId = 0;
+    }
+    if ($parentId <= 0) {
+        return $base;
+    }
+    try {
+        $st = $pdo->prepare(
+            'SELECT COALESCE(SUM(agent_price * qty),0)
+             FROM agent_card_transfers
+             WHERE from_agent_id = :a AND to_agent_id = :p
+               AND (return_of_id IS NULL OR return_of_id = 0)
+               AND (xfer_state IS NULL OR xfer_state = \'\' OR xfer_state = \'done\')'
+        );
+        $st->execute(array(':a' => $agentUserId, ':p' => $parentId));
+        $base -= (float) $st->fetchColumn();
+    } catch (Exception $e) {
+    }
+    return $base;
+}
+
 function card_child_sas_manager_ids($pdo, $homeId)
 {
     $homeId = (int) $homeId;
@@ -669,7 +702,7 @@ function card_sas_stock_file($homeId)
     if (!is_dir($dir)) {
         @mkdir($dir, 0755, true);
     }
-    return $dir . '/card_stock_own_h' . (int) $homeId . '.json';
+    return $dir . '/card_stock_recent_h' . (int) $homeId . '.json';
 }
 
 function card_sas_stock_read($homeId)
@@ -688,10 +721,249 @@ function card_sas_stock_read($homeId)
     );
 }
 
-function card_sas_stock_map($pdo, $config, $homeId, $allowLive = true)
+function card_sas_stock_remember($homeId, $userId, $bag)
 {
     $homeId = (int) $homeId;
-    $ck = 'card_sas_stock_map_v3';
+    $userId = (int) $userId;
+    if ($homeId <= 0 || $userId <= 0 || !is_array($bag)) {
+        return;
+    }
+    $hit = card_sas_stock_read($homeId);
+    $map = ($hit && isset($hit['map']) && is_array($hit['map'])) ? $hit['map'] : array();
+    $map[$userId] = $bag;
+    @file_put_contents(card_sas_stock_file($homeId), json_encode(array('at' => time(), 'map' => $map)));
+}
+
+function card_bag_unused_sum($bag)
+{
+    $n = 0;
+    if (!is_array($bag)) {
+        return 0;
+    }
+    foreach ($bag as $q) {
+        $n += (int) $q;
+    }
+    return $n;
+}
+
+function card_bag_take_higher($base, $extra)
+{
+    if (!is_array($base)) {
+        $base = array();
+    }
+    if (!is_array($extra)) {
+        return $base;
+    }
+    foreach ($extra as $nm => $q) {
+        $q = (int) $q;
+        $nm = trim((string) $nm);
+        if ($nm === '' || $q < 1) {
+            continue;
+        }
+        $hit = null;
+        $soft = function_exists('card_price_soft_key') ? card_price_soft_key($nm) : '';
+        foreach ($base as $bn => $bq) {
+            if ((string) $bn === $nm) {
+                $hit = (string) $bn;
+                break;
+            }
+            if ($soft !== '' && function_exists('card_price_soft_key') && card_price_soft_key($bn) === $soft) {
+                $hit = (string) $bn;
+                break;
+            }
+        }
+        if ($hit === null) {
+            $base[$nm] = $q;
+            continue;
+        }
+        if ($q > (int) $base[$hit]) {
+            $base[$hit] = $q;
+        }
+    }
+    return $base;
+}
+
+/** جرد وكالة ثانية (مثل wifi@office) عندما سلسلة الأب ما تعرض كروتها. */
+function card_portal_admin_unused_bag($pdo, $userId, $homeId)
+{
+    $userId = (int) $userId;
+    $homeId = (int) $homeId;
+    if (!$pdo || $userId <= 0 || $userId === $homeId) {
+        return null;
+    }
+    static $memo = array();
+    $mk = $userId . ':' . $homeId;
+    if (array_key_exists($mk, $memo)) {
+        return $memo[$mk];
+    }
+    $memo[$mk] = null;
+    $tid = 0;
+    try {
+        $st = $pdo->prepare('SELECT tenant_id, role FROM admin_users WHERE id = :id LIMIT 1');
+        $st->execute(array(':id' => $userId));
+        $row = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$row) {
+            return null;
+        }
+        $tid = isset($row['tenant_id']) ? (int) $row['tenant_id'] : 0;
+        $role = function_exists('normalize_admin_role')
+            ? normalize_admin_role(isset($row['role']) ? $row['role'] : '')
+            : (string) $row['role'];
+        if ($tid <= 1 || $role !== 'admin') {
+            return null;
+        }
+        $homeTid = 0;
+        if ($homeId > 0) {
+            $st = $pdo->prepare('SELECT tenant_id FROM admin_users WHERE id = :id LIMIT 1');
+            $st->execute(array(':id' => $homeId));
+            $homeTid = (int) $st->fetchColumn();
+        }
+        if ($homeTid > 0 && $homeTid === $tid) {
+            return null;
+        }
+    } catch (Exception $e) {
+        return null;
+    }
+    $path = dirname(__DIR__) . '/storage/cache/cards_inventory_own_t' . $tid . '.json';
+    if (!is_file($path)) {
+        return null;
+    }
+    $j = @json_decode((string) @file_get_contents($path), true);
+    if (!is_array($j) || empty($j['groups']) || !is_array($j['groups'])) {
+        return null;
+    }
+    $bag = array();
+    foreach ($j['groups'] as $g) {
+        if (!is_array($g)) {
+            continue;
+        }
+        $name = isset($g['name']) ? trim((string) $g['name']) : '';
+        $q = isset($g['unused']) ? (int) $g['unused'] : 0;
+        if ($name === '' || $q <= 0) {
+            continue;
+        }
+        if (!isset($bag[$name])) {
+            $bag[$name] = 0;
+        }
+        $bag[$name] += $q;
+    }
+    if (!$bag) {
+        return null;
+    }
+    $memo[$mk] = $bag;
+    return $bag;
+}
+
+/** عدد الشاغر المحفوظ، أو قراءة صفحة واحدة من الساس إذا الناقص هذا الوكيل فقط */
+function card_sas_stock_owner_bag($pdo, $config, $homeId, $agentId)
+{
+    $homeId = (int) $homeId;
+    $agentId = (int) $agentId;
+    if ($homeId <= 0 || $agentId <= 0) {
+        return null;
+    }
+    $hit = card_sas_stock_read($homeId);
+    if ($hit && isset($hit['map'][$agentId]) && is_array($hit['map'][$agentId])) {
+        $bag = $hit['map'][$agentId];
+        $ownBag = card_portal_admin_unused_bag($pdo, $agentId, $homeId);
+        if (is_array($ownBag)) {
+            $bag = card_bag_take_higher($bag, $ownBag);
+        }
+        if (card_bag_unused_sum($bag) > 0) {
+            return $bag;
+        }
+        return $hit['map'][$agentId];
+    }
+    if ($agentId === $homeId) {
+        return array();
+    }
+    $ownBag = card_portal_admin_unused_bag($pdo, $agentId, $homeId);
+    if (is_array($ownBag) && card_bag_unused_sum($ownBag) > 0) {
+        return $ownBag;
+    }
+    if (!function_exists('sas_make_connector') || !function_exists('sas_is_ready') || !sas_is_ready($config)) {
+        return null;
+    }
+    $api = sas_make_connector($config);
+    if (!$api || !method_exists($api, 'listSeriesStock')) {
+        return null;
+    }
+    if (method_exists($api, 'setTimeout')) {
+        $api->setTimeout(12);
+    }
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
+    $mid = function_exists('card_user_sas_manager_id') ? (int) card_user_sas_manager_id($pdo, $agentId, $homeId, $api) : 0;
+    if ($mid <= 0) {
+        $ownBag = card_portal_admin_unused_bag($pdo, $agentId, $homeId);
+        if (is_array($ownBag) && card_bag_unused_sum($ownBag) > 0) {
+            return $ownBag;
+        }
+        card_sas_stock_remember($homeId, $agentId, array());
+        return array();
+    }
+    $rows = $api->listSeriesStock(1);
+    if (!is_array($rows)) {
+        return null;
+    }
+    $bag = array();
+    $seen = 0;
+    foreach ($rows as $r) {
+        if (!is_array($r)) {
+            continue;
+        }
+        if (!isset($r['owner']) || (int) $r['owner'] !== $mid) {
+            continue;
+        }
+        if ($seen >= 14) {
+            break;
+        }
+        $seen++;
+        $name = isset($r['name']) ? trim((string) $r['name']) : '';
+        if ($name === '') {
+            continue;
+        }
+        if (!isset($bag[$name])) {
+            $bag[$name] = 0;
+        }
+        $bag[$name] += isset($r['unused']) ? (int) $r['unused'] : 0;
+    }
+    $ownBag = card_portal_admin_unused_bag($pdo, $agentId, $homeId);
+    if (is_array($ownBag)) {
+        $bag = card_bag_take_higher($bag, $ownBag);
+    }
+    card_sas_stock_remember($homeId, $agentId, $bag);
+    return $bag;
+}
+
+function card_sas_stock_users_missing($map, $users, $homeId)
+{
+    $missing = array();
+    if (!is_array($users)) {
+        return $missing;
+    }
+    if (!is_array($map)) {
+        $map = array();
+    }
+    $homeId = (int) $homeId;
+    foreach ($users as $u) {
+        if (!is_array($u)) {
+            continue;
+        }
+        $id = isset($u['id']) ? (int) $u['id'] : 0;
+        if ($id <= 0 || $id === $homeId || (isset($map[$id]) && is_array($map[$id]))) {
+            continue;
+        }
+        $missing[] = $u;
+    }
+    return $missing;
+}
+
+function card_sas_stock_map($pdo, $config, $homeId, $allowLive = true, $alsoUsers = array())
+{
+    $homeId = (int) $homeId;
+    $ck = 'card_sas_stock_map_v5';
     $cached = null;
     $cachedAt = 0;
     if (!empty($_SESSION[$ck]) && is_array($_SESSION[$ck]) && !empty($_SESSION[$ck . '_at'])) {
@@ -704,7 +976,8 @@ function card_sas_stock_map($pdo, $config, $homeId, $allowLive = true)
         $cachedAt = (int) $fileHit['at'];
     }
     $fresh = ($cached !== null && $cachedAt > 0 && (time() - $cachedAt) < 180);
-    if ($cached !== null && ($fresh || !$allowLive)) {
+    $missingUsers = card_sas_stock_users_missing($cached, $alsoUsers, $homeId);
+    if ($cached !== null && ($fresh || !$allowLive) && !$missingUsers) {
         return $cached;
     }
     if (!$allowLive) {
@@ -719,16 +992,17 @@ function card_sas_stock_map($pdo, $config, $homeId, $allowLive = true)
         return $map;
     }
     if (method_exists($api, 'setTimeout')) {
-        $api->setTimeout(8);
+        $api->setTimeout(20);
     }
     if (function_exists('app_session_close')) {
         app_session_close();
     }
-    $rows = $api->listSeriesStock(4);
+    $rows = $api->listSeriesStock(1);
     if (!is_array($rows)) {
         return $map;
     }
     $byOwner = array();
+    $seenOwner = array();
     foreach ($rows as $r) {
         if (!is_array($r)) {
             continue;
@@ -738,6 +1012,13 @@ function card_sas_stock_map($pdo, $config, $homeId, $allowLive = true)
         if ($name === '') {
             continue;
         }
+        if (!isset($seenOwner[$owner])) {
+            $seenOwner[$owner] = 0;
+        }
+        if ($seenOwner[$owner] >= 14) {
+            continue;
+        }
+        $seenOwner[$owner]++;
         if (!isset($byOwner[$owner])) {
             $byOwner[$owner] = array();
         }
@@ -796,6 +1077,49 @@ function card_sas_stock_map($pdo, $config, $homeId, $allowLive = true)
             }
             $portalByManager[$mid] = $uid;
             $map[$uid] = isset($byOwner[$mid]) ? $byOwner[$mid] : array();
+        }
+        $stOpen = $pdo->query(
+            'SELECT id, username, display_name FROM admin_users
+             WHERE sas_manager_id IS NULL OR sas_manager_id = 0'
+        );
+        foreach ($stOpen->fetchAll() as $uOpen) {
+            $uidOpen = (int) $uOpen['id'];
+            if ($uidOpen <= 0 || $uidOpen === $homeId || isset($map[$uidOpen])) {
+                continue;
+            }
+            $openNames = array();
+            if (!empty($uOpen['username'])) {
+                $openNames[] = (string) $uOpen['username'];
+            }
+            if (!empty($uOpen['display_name'])) {
+                $openNames[] = (string) $uOpen['display_name'];
+            }
+            $openMid = card_sas_id_from_tree_names($openNames);
+            if ($openMid <= 0 || empty($byOwner[$openMid]) || !is_array($byOwner[$openMid])) {
+                continue;
+            }
+            $map[$uidOpen] = $byOwner[$openMid];
+        }
+        $leftAlso = 6;
+        if (is_array($alsoUsers)) {
+            foreach ($alsoUsers as $au) {
+                if ($leftAlso <= 0) {
+                    break;
+                }
+                if (!is_array($au)) {
+                    continue;
+                }
+                $aidAlso = isset($au['id']) ? (int) $au['id'] : 0;
+                if ($aidAlso <= 0 || $aidAlso === $homeId || isset($map[$aidAlso])) {
+                    continue;
+                }
+                $leftAlso--;
+                $midAlso = card_user_sas_manager_id($pdo, $aidAlso, $homeId, $api);
+                if ($midAlso <= 0) {
+                    continue;
+                }
+                $map[$aidAlso] = (isset($byOwner[$midAlso]) && is_array($byOwner[$midAlso])) ? $byOwner[$midAlso] : array();
+            }
         }
     } catch (Exception $e) {
     }
@@ -2733,6 +3057,14 @@ function card_agent_payment_remind($pdo, $config, $agentUserId, $lang = 'ar')
     if ($waSession === '' || $waSession === 'default') {
         return array(false, $isEn ? 'Link this agency WhatsApp first' : 'اربط واتساب هذه الوكالة أولاً');
     }
+    $senderId = function_exists('whatsapp_session_user_id') ? whatsapp_session_user_id($waSession) : 0;
+    if ($senderId <= 0 && function_exists('current_admin')) {
+        $meRemind = current_admin();
+        $senderId = $meRemind ? (int) $meRemind['id'] : 0;
+    }
+    if (!function_exists('whatsapp_agent_notice_allowed') || !whatsapp_agent_notice_allowed($pdo, $senderId, $agentUserId)) {
+        return array(false, $isEn ? 'This number is not set to message this agent' : 'هذا الرقم مو مخصص لإشعار هذا الوكيل');
+    }
     $result = whatsapp_send($config, $phone, $msg, 'card_debt_remind', $waSession);
     $ok = is_array($result) ? !empty($result['success']) : (bool) $result;
     return array($ok, $ok
@@ -2749,6 +3081,9 @@ function run_card_debt_reminders($pdo, $config, $limit = 40)
     ensure_card_accounting_tables($pdo);
     $limit = max(1, min(200, (int) $limit));
     $out = array('checked' => 0, 'sent' => 0, 'failed' => 0);
+    if (empty($GLOBALS['card_debt_remind_manual'])) {
+        return $out;
+    }
     try {
         $rows = $pdo->query(
             'SELECT t.to_agent_id AS agent_id,

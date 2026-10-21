@@ -1,0 +1,19 @@
+# الرابط الظاهر بلا .php والملف نفسه يبقى PHP
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteCond %{REQUEST_FILENAME}.php -f
+    RewriteRule ^(.+?)/?$ $1.php [L]
+
+    RewriteCond %{REQUEST_METHOD} =GET
+    RewriteCond %{HTTP_ACCEPT} text/html
+    RewriteCond %{QUERY_STRING} !(^|&)ajax=
+    RewriteCond %{THE_REQUEST} \s[^\s]*\.php[?\s] [NC]
+    RewriteRule ^index\.php$ /internet-subscribers/public/ [R=302,L,QSA]
+    RewriteCond %{REQUEST_METHOD} =GET
+    RewriteCond %{HTTP_ACCEPT} text/html
+    RewriteCond %{QUERY_STRING} !(^|&)ajax=
+    RewriteCond %{THE_REQUEST} \s[^\s]*\.php[?\s] [NC]
+    RewriteRule ^(.+)\.php$ /internet-subscribers/public/$1 [R=302,L,QSA,NE]
+</IfModule>

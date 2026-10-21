@@ -1875,6 +1875,16 @@ window.DEBT_ENTRY = {
     <input type="hidden" name="action" value="give_test">
     <input type="hidden" name="id" value="">
 </form>
+<div class="modal-backdrop hidden" id="subsTestAsk" role="dialog" aria-modal="true" style="z-index:100070">
+    <div class="modal-card">
+        <h3 id="subsTestTitle"><?php echo e(t('give_test')); ?></h3>
+        <p class="meta" id="subsTestText" style="margin:0 0 14px"></p>
+        <div style="display:flex;gap:8px">
+            <button type="button" class="btn ghost" id="subsTestNo" style="flex:1"><?php echo e($lang === 'en' ? 'Cancel' : 'إلغاء'); ?></button>
+            <button type="button" class="btn" id="subsTestYes" style="flex:1"><?php echo e($lang === 'en' ? 'Add the day' : 'إضافة اليوم'); ?></button>
+        </div>
+    </div>
+</div>
 <form method="post" id="opsDeleteForm" class="hidden" hidden onsubmit="return confirm(<?php echo json_encode(t('confirm_delete')); ?>);">
     <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
     <input type="hidden" name="action" value="delete">
@@ -2135,12 +2145,32 @@ window.DEBT_ENTRY = {
       return;
     }
     if (action === 'give_test' && one) {
-      if (!window.confirm(confirmTest)) return;
-      if (window.appBusySet) window.appBusySet({ force: true });
-      var ft = document.getElementById('opsGiveTestForm');
-      var tid = ft && ft.querySelector('input[name="id"]');
-      if (tid) tid.value = one.id;
-      if (ft) ft.submit();
+      var box = document.getElementById('subsTestAsk');
+      var text = document.getElementById('subsTestText');
+      var yes = document.getElementById('subsTestYes');
+      var no = document.getElementById('subsTestNo');
+      if (!box || !yes) {
+        if (window.appBusySet) window.appBusySet({ force: true });
+        var ft0 = document.getElementById('opsGiveTestForm');
+        var tid0 = ft0 && ft0.querySelector('input[name="id"]');
+        if (tid0) tid0.value = one.id;
+        if (ft0) ft0.submit();
+        return;
+      }
+      if (box.parentNode !== document.body) document.body.appendChild(box);
+      if (text) text.textContent = ((one.name || one.id || '') ? ((one.name || one.id) + ' — ') : '') + confirmTest;
+      box.classList.remove('hidden');
+      function shut() { box.classList.add('hidden'); }
+      if (no) no.onclick = shut;
+      box.onclick = function (ev) { if (ev.target === box) shut(); };
+      yes.onclick = function () {
+        shut();
+        if (window.appBusySet) window.appBusySet({ force: true });
+        var ft = document.getElementById('opsGiveTestForm');
+        var tid = ft && ft.querySelector('input[name="id"]');
+        if (tid) tid.value = one.id;
+        if (ft) ft.submit();
+      };
       return;
     }
     if (action === 'bulk_activate') {

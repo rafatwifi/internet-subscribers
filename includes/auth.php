@@ -1159,6 +1159,10 @@ function ensure_admin_users_table($pdo, $config = null)
             if (!$col) {
                 $pdo->exec('ALTER TABLE admin_users ADD COLUMN wa_notify TINYINT(1) NOT NULL DEFAULT 1');
             }
+            $col = $pdo->query("SHOW COLUMNS FROM admin_users LIKE 'wa_audience'")->fetch();
+            if (!$col) {
+                $pdo->exec("ALTER TABLE admin_users ADD COLUMN wa_audience VARCHAR(12) NOT NULL DEFAULT 'agents'");
+            }
         } catch (Exception $e) {
         }
         try {
@@ -1311,17 +1315,38 @@ function impersonation_real_admin_id()
  * فلترة كاش الساس حسب وكيل SAS المرتبط بالمستخدم الحالي.
  * الأدمن/المشرف يشوف الكل. الوكيل يشوف يوزرات parent_id = sas_manager_id.
  */
-function sas_agent_scope_sql($alias = 'c')
+function sas_agent_scope_sql($alias = 'c', $forSearch = false)
 {
     $a = preg_replace('/[^a-zA-Z0-9_]/', '', (string) $alias);
     if ($a === '') {
         $a = 'c';
     }
+    $forSearch = ($forSearch === true);
     $tenantSql = '';
     if (function_exists('current_tenant_id')) {
         $tenantSql = ' AND ' . $a . '.tenant_id = ' . (int) current_tenant_id();
     }
-    $hideSql = function_exists('sas_ownership_hide_sql') ? sas_ownership_hide_sql($a) : '';
+    global $pdo;
+    if ($forSearch && $pdo && function_exists('sas_ownership_search_tenant_ids')
+        && !is_agent_user() && !is_group_manager_user()
+        && !(function_exists('account_viewer_is_leaf_child') && account_viewer_is_leaf_child($pdo))
+    ) {
+        $ids = sas_ownership_search_tenant_ids($pdo);
+        $in = array();
+        foreach ($ids as $tid) {
+            $tid = (int) $tid;
+            if ($tid > 0) {
+                $in[$tid] = $tid;
+            }
+        }
+        if (!$in && function_exists('current_tenant_id')) {
+            $in[(int) current_tenant_id()] = (int) current_tenant_id();
+        }
+        if ($in) {
+            return ' AND ' . $a . '.tenant_id IN (' . implode(',', $in) . ')';
+        }
+    }
+    $hideSql = (!$forSearch && function_exists('sas_ownership_hide_sql')) ? sas_ownership_hide_sql($a) : '';
     $tenantSql .= $hideSql;
     if (!is_agent_user() && !is_group_manager_user()) {
         global $pdo;

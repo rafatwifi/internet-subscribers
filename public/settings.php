@@ -189,9 +189,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $keepCover[] = $pid;
             }
         }
+        $aud = isset($_POST['wa_audience']) ? strtolower(trim((string) $_POST['wa_audience'])) : 'agents';
+        if ($aud !== 'subscribers' && $aud !== 'agents' && $aud !== 'both') {
+            $aud = 'agents';
+        }
         try {
-            $pdo->prepare('UPDATE admin_users SET wa_cover_ids = :c WHERE id = :id')
-                ->execute(array(':c' => implode(',', $keepCover), ':id' => $meCoverId));
+            $pdo->prepare('UPDATE admin_users SET wa_cover_ids = :c, wa_audience = :a WHERE id = :id')
+                ->execute(array(
+                    ':c' => implode(',', $keepCover),
+                    ':a' => $aud,
+                    ':id' => $meCoverId,
+                ));
             flash('success', $lang === 'en' ? 'Saved' : 'تم الحفظ');
         } catch (Exception $e) {
             flash('error', $lang === 'en' ? 'Could not save' : 'ما انحفظ');
@@ -1842,8 +1850,20 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
 .wa-notify .btn { margin-bottom:1px; }
 .wa-cover-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:8px; }
 .wa-cover-item { display:flex; gap:8px; align-items:center; padding:10px 12px; border:1px solid #e2e8f0; border-radius:12px; background:#fff; font-weight:750; }
-.wa-cover-item.stopped { background:#f8fafc; color:#64748b; }
+.wa-cover-item.stopped { color:#64748b; }
+.wa-cover-item.has-wa { border-color:#86efac; background:#f0fdf4; }
+.wa-cover-item.has-wa input { accent-color:#16a34a; }
+.wa-cover-item.no-wa { border-color:#fca5a5; background:#fef2f2; }
+.wa-cover-item.no-wa input { accent-color:#dc2626; }
+.wa-cover-item .wa-mark { margin-inline-start:auto; font-size:11px; font-weight:700; }
+.wa-cover-item.has-wa .wa-mark { color:#166534; }
+.wa-cover-item.no-wa .wa-mark { color:#b91c1c; }
 .wa-cover-head { margin:14px 0 8px; font-size:12px; font-weight:800; color:#64748b; }
+.wa-aud { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0 4px; }
+.wa-aud label { display:flex; align-items:center; gap:8px; padding:10px 14px; border:1px solid #e2e8f0; border-radius:12px; background:#fff; font-weight:800; cursor:pointer; }
+.wa-aud input { accent-color:#0f766e; width:16px; height:16px; }
+.wa-cover-tools { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0 4px; }
+.wa-cover-tools button { border:1px solid #cbd5e1; background:#fff; color:#0f172a; border-radius:10px; padding:8px 12px; font-weight:800; cursor:pointer; }
 .wa-switch-row { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:12px 14px; border:1px solid #e2e8f0; border-radius:14px; background:#fff; }
 .wa-switch-row p { margin:0; color:#334155; font-weight:750; font-size:13.5px; line-height:1.55; }
 .wa-switch-side { display:flex; align-items:center; gap:10px; flex:0 0 auto; }
@@ -1934,7 +1954,8 @@ $waCoverTargets = ($waNotifyOn && function_exists('whatsapp_cover_targets')) ? w
 $waMe = function_exists('current_admin') ? current_admin() : null;
 $waMeId = $waMe ? (int) $waMe['id'] : 0;
 $waCoverOn = ($waMeId > 0 && function_exists('whatsapp_cover_selected')) ? whatsapp_cover_selected($pdo, $waMeId) : array();
-if ($waCoverTargets):
+$waAud = ($waMeId > 0 && function_exists('whatsapp_audience_mode')) ? whatsapp_audience_mode($pdo, $waMeId) : 'agents';
+if ($waNotifyOn):
     usort($waCoverTargets, function ($a, $b) {
         $an = isset($a['display_name']) && trim((string) $a['display_name']) !== '' ? (string) $a['display_name'] : (string) $a['username'];
         $bn = isset($b['display_name']) && trim((string) $b['display_name']) !== '' ? (string) $b['display_name'] : (string) $b['username'];
@@ -1959,11 +1980,22 @@ $waCoverGroups = array(
 <div class="wa-card">
     <h2><?php echo e($lang === 'en' ? 'Who this number covers' : 'من يشملهم هذا الرقم'); ?></h2>
     <p class="wa-lead"><?php echo e($lang === 'en'
-        ? 'Every box starts off. Your number messages only your own subscribers until you tick an agent and save.'
-        : 'كل المربعات تبدأ مطفية. رقمك يرسل لمشتركيك فقط، وعلّم الوكيل إذا تريد هذا الرقم يرسل لمشتركيه ثم احفظ.'); ?></p>
-    <form method="post">
+        ? 'Pick who this linked number notifies. Agent boxes are for a card-transfer message and a short statement. Subscriber notices go out a few at a time.'
+        : 'اختر من يوصلهم هذا الرقم بعد الربط. مربعات الوكلاء لإشعار تحويل الكروت وكشف حساب قصير. إشعار المشتركين ينرسل على دفعات صغيرة حتى ما يثقل الصفحة.'); ?></p>
+    <form method="post" id="waCoverForm">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="section" value="wa_cover">
+        <div class="wa-aud">
+            <label><input type="radio" name="wa_audience" value="subscribers" <?php echo $waAud === 'subscribers' ? 'checked' : ''; ?>><?php echo e($lang === 'en' ? 'Subscriber notices' : 'إشعار المشتركين'); ?></label>
+            <label><input type="radio" name="wa_audience" value="agents" <?php echo $waAud === 'agents' ? 'checked' : ''; ?>><?php echo e($lang === 'en' ? 'Agent notices' : 'إشعار الوكلاء'); ?></label>
+            <label><input type="radio" name="wa_audience" value="both" <?php echo $waAud === 'both' ? 'checked' : ''; ?>><?php echo e($lang === 'en' ? 'Both' : 'كلاهما'); ?></label>
+        </div>
+        <?php if ($waCoverTargets): ?>
+        <div class="wa-cover-tools">
+            <button type="button" id="waCoverAll"><?php echo e($lang === 'en' ? 'Select all' : 'تحديد الكل'); ?></button>
+            <button type="button" id="waCoverNone"><?php echo e($lang === 'en' ? 'Clear all' : 'إلغاء تحديد الكل'); ?></button>
+        </div>
+        <?php endif; ?>
         <?php foreach ($waCoverGroups as $grp):
             if (!$grp['rows']) {
                 continue;
@@ -1975,10 +2007,13 @@ $waCoverGroups = array(
                 $tidOpt = (int) $tgt['id'];
                 $tlabel = (isset($tgt['display_name']) && trim((string) $tgt['display_name']) !== '')
                     ? (string) $tgt['display_name'] : (string) $tgt['username'];
+                $hasWa = isset($tgt['phone']) && trim((string) $tgt['phone']) !== '';
+                $coverCls = 'wa-cover-item' . ($grp['stopped'] ? ' stopped' : '') . ($hasWa ? ' has-wa' : ' no-wa');
                 ?>
-                <label class="wa-cover-item<?php echo $grp['stopped'] ? ' stopped' : ''; ?>">
+                <label class="<?php echo e($coverCls); ?>">
                     <input type="checkbox" name="wa_cover[]" value="<?php echo $tidOpt; ?>" <?php echo !empty($waCoverOn[$tidOpt]) ? 'checked' : ''; ?>>
                     <span><?php echo e($tlabel); ?><?php echo $grp['stopped'] ? e($lang === 'en' ? ' · stopped' : ' · موقوف') : ''; ?></span>
+                    <span class="wa-mark"><?php echo e($hasWa ? ($lang === 'en' ? 'WhatsApp' : 'واتساب') : ($lang === 'en' ? 'No WhatsApp' : 'بدون واتساب')); ?></span>
                 </label>
             <?php endforeach; ?>
             </div>
@@ -2006,6 +2041,14 @@ $waCoverGroups = array(
     }
   }
   if (urlInput) urlInput.addEventListener('input', syncHost);
+  var coverAll = document.getElementById('waCoverAll');
+  var coverNone = document.getElementById('waCoverNone');
+  function setCover(on) {
+    var boxes = document.querySelectorAll('#waCoverForm input[name="wa_cover[]"]');
+    for (var i = 0; i < boxes.length; i++) boxes[i].checked = on;
+  }
+  if (coverAll) coverAll.addEventListener('click', function () { setCover(true); });
+  if (coverNone) coverNone.addEventListener('click', function () { setCover(false); });
 })();
 
 var waBusy = false;

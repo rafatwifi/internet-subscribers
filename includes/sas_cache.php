@@ -920,14 +920,17 @@ function sas_ping_mode_style()
     $done = true;
     return '<style>
 .ping-mode{display:inline-flex;direction:ltr;align-items:stretch;border:1px solid #dbe3ee;border-radius:999px;overflow:hidden;background:#f8fafc;max-width:100%}
-.ping-mode-btn{border:0;background:transparent;color:#64748b;font-weight:800;font-size:12px;line-height:1.2;padding:7px 10px;cursor:pointer;font-family:inherit}
+.ping-mode-btn{border:0;background:transparent;color:#64748b;font-weight:600;font-size:12px;line-height:1.2;padding:7px 10px;cursor:pointer;font-family:inherit}
 .ping-mode-btn + .ping-mode-btn{border-inline-start:1px solid #e2e8f0}
+.ping-mode-btn .ping-short{display:none}
 .ping-mode-btn.is-on[data-ping-mode="portal"]{background:#0f766e;color:#fff}
 .ping-mode-btn.is-on[data-ping-mode="off"]{background:#e2e8f0;color:#334155}
 .ping-mode-btn.is-on[data-ping-mode="sas"]{background:#0284c7;color:#fff}
-@media(max-width:640px){
-  .ping-mode{display:flex;width:100%}
-  .ping-mode-btn{flex:1 1 0;font-size:11px;padding:8px 4px}
+@media(max-width:760px){
+  .ping-mode{display:inline-flex;width:auto;margin-inline:auto}
+  .ping-mode-btn{flex:0 0 auto;font-size:12px;font-weight:500;padding:6px 12px}
+  .ping-mode-btn .ping-long{display:none}
+  .ping-mode-btn .ping-short{display:inline}
 }
 </style>';
 }
@@ -936,14 +939,17 @@ function sas_ping_mode_buttons($en, $mode)
 {
     $mode = sas_ping_mode_normalize($mode);
     $opts = array(
-        array('portal', $en ? 'Portal ping' : 'البنك من خلال البوابة'),
-        array('off', $en ? 'Off' : 'طافي'),
-        array('sas', $en ? 'SAS ping' : 'البنك من خلال الساس'),
+        array('portal', $en ? 'Portal ping' : 'البنك من خلال البوابة', $en ? 'Portal' : 'البوابة'),
+        array('off', $en ? 'Off' : 'طافي', $en ? 'Off' : 'طافي'),
+        array('sas', $en ? 'SAS ping' : 'البنك من خلال الساس', $en ? 'SAS' : 'الساس'),
     );
     $html = '<div class="ping-mode" id="subPingMode" dir="ltr" role="radiogroup" data-mode="' . e($mode) . '">';
     foreach ($opts as $opt) {
         $on = ($mode === $opt[0]) ? ' is-on' : '';
-        $html .= '<button type="button" class="ping-mode-btn' . $on . '" data-ping-mode="' . e($opt[0]) . '">' . e($opt[1]) . '</button>';
+        $html .= '<button type="button" class="ping-mode-btn' . $on . '" data-ping-mode="' . e($opt[0]) . '" title="' . e($opt[1]) . '">'
+            . '<span class="ping-long">' . e($opt[1]) . '</span>'
+            . '<span class="ping-short">' . e($opt[2]) . '</span>'
+            . '</button>';
     }
     $html .= '</div>';
     return $html;
@@ -1248,11 +1254,12 @@ function sas_ping_warm($pdo)
     fclose($fh);
 }
 
-function sas_fill_online_pings($pdo, $rows)
+function sas_fill_online_pings($pdo, $rows, $maxAge = 30)
 {
     if (!$pdo || !is_array($rows) || !$rows) {
         return is_array($rows) ? $rows : array();
     }
+    $maxAge = (int) $maxAge;
     $mode = function_exists('sas_ping_mode') ? sas_ping_mode($pdo) : 'off';
     if ($mode === 'off') {
         foreach ($rows as $i => $row) {
@@ -1265,10 +1272,10 @@ function sas_fill_online_pings($pdo, $rows)
         return $rows;
     }
     if ($mode === 'sas') {
-        $rows = sas_fill_sas_pings($pdo, $rows);
+        $rows = sas_fill_sas_pings($pdo, $rows, $maxAge);
         $rows = sas_ping_icmp_missing($pdo, $rows);
     } else {
-        $rows = sas_fill_portal_pings($pdo, $rows);
+        $rows = sas_fill_portal_pings($pdo, $rows, $maxAge);
     }
     if (!is_array($rows)) {
         return array();
@@ -1355,7 +1362,7 @@ function sas_ping_icmp_missing($pdo, $rows)
     return $rows;
 }
 
-function sas_fill_sas_pings($pdo, $rows)
+function sas_fill_sas_pings($pdo, $rows, $maxAge = 30)
 {
     if (function_exists('set_time_limit')) {
         @set_time_limit(40);
@@ -1404,8 +1411,8 @@ function sas_fill_sas_pings($pdo, $rows)
         if ($user === '') {
             continue;
         }
-        if (isset($saved[$user]) && is_array($saved[$user])
-            && isset($saved[$user]['at']) && ($now - (int) $saved[$user]['at']) < 30
+        if ($maxAge > 0 && isset($saved[$user]) && is_array($saved[$user])
+            && isset($saved[$user]['at']) && ($now - (int) $saved[$user]['at']) < $maxAge
             && !empty($saved[$user]['ms'])) {
             $rows[$i]['online_ping'] = (int) $saved[$user]['ms'];
             $rows[$i]['_ping_fresh'] = 1;
@@ -1534,7 +1541,7 @@ function sas_fill_sas_pings($pdo, $rows)
     return $rows;
 }
 
-function sas_fill_portal_pings($pdo, $rows)
+function sas_fill_portal_pings($pdo, $rows, $maxAge = 30)
 {
     $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
     if ($tid <= 0) {
@@ -1563,9 +1570,9 @@ function sas_fill_portal_pings($pdo, $rows)
         if ($user === '' || !filter_var($ip, FILTER_VALIDATE_IP)) {
             continue;
         }
-        if (isset($saved[$user]) && is_array($saved[$user])
+        if ($maxAge > 0 && isset($saved[$user]) && is_array($saved[$user])
             && isset($saved[$user]['ip']) && (string) $saved[$user]['ip'] === $ip
-            && isset($saved[$user]['at']) && ($now - (int) $saved[$user]['at']) < 30
+            && isset($saved[$user]['at']) && ($now - (int) $saved[$user]['at']) < $maxAge
             && !empty($saved[$user]['ms'])) {
             $rows[$i]['online_ping'] = (int) $saved[$user]['ms'];
             $rows[$i]['_ping_fresh'] = 1;
@@ -2009,11 +2016,14 @@ function sas_subscriber_identity_ok($row, $username, $sasUserId)
     return true;
 }
 
-function sas_cache_pick_local($pdo, $username, $sasUserId, $phone)
+function sas_cache_pick_local($pdo, $username, $sasUserId, $phone, $tenantId = 0)
 {
     $username = trim((string) $username);
     $sasUserId = (int) $sasUserId;
-    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    $tid = (int) $tenantId;
+    if ($tid <= 0) {
+        $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    }
     if ($tid <= 0) {
         $tid = 1;
     }
@@ -2185,6 +2195,7 @@ function sas_cache_ensure_local($pdo, $config, $cacheRow)
     }
     $sasUserId = isset($cacheRow['sas_user_id']) ? (int) $cacheRow['sas_user_id'] : 0;
     $phone = isset($cacheRow['phone']) ? (string) $cacheRow['phone'] : '';
+    $rowTid = sas_cache_row_tenant($cacheRow);
     if (!empty($cacheRow['local_subscriber_id'])) {
         try {
             $stKeep = $pdo->prepare('SELECT * FROM subscribers WHERE id = :id LIMIT 1');
@@ -2197,10 +2208,10 @@ function sas_cache_ensure_local($pdo, $config, $cacheRow)
         } catch (Exception $e) {
         }
     }
-    $local = sas_cache_pick_local($pdo, $username, $sasUserId, $phone);
+    $local = sas_cache_pick_local($pdo, $username, $sasUserId, $phone, $rowTid);
     if ($local) {
         $id = sas_cache_link_local_fields($pdo, $local, $username, $sasUserId);
-        $tidLink = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        $tidLink = $rowTid;
         try {
             $pdo->prepare('UPDATE sas_users_cache SET local_subscriber_id = :lid WHERE username = :u AND tenant_id = :t')
                 ->execute(array(':lid' => $id, ':u' => $username, ':t' => $tidLink));
@@ -2233,7 +2244,7 @@ function sas_cache_ensure_local($pdo, $config, $cacheRow)
     $parentId = isset($cacheRow['parent_id']) ? (int) $cacheRow['parent_id'] : 0;
     if ($parentId > 0) {
         try {
-            $tidScope = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+            $tidScope = $rowTid;
             $stAg = $pdo->prepare(
                 'SELECT id FROM admin_users
                  WHERE role = "agent" AND sas_manager_id = :m AND is_active = 1
@@ -2254,10 +2265,7 @@ function sas_cache_ensure_local($pdo, $config, $cacheRow)
     }
 
     $graceDef = null; // حسب النظام
-    $tidIns = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
-    if ($tidIns <= 0) {
-        $tidIns = 1;
-    }
+    $tidIns = $rowTid;
     $params = array(
         ':name' => $name,
         ':phone' => $phoneStore,
@@ -2298,6 +2306,64 @@ function sas_cache_ensure_local($pdo, $config, $cacheRow)
     return array($newId, '');
 }
 
+function sas_cache_row_tenant($cacheRow)
+{
+    $tid = (is_array($cacheRow) && isset($cacheRow['tenant_id'])) ? (int) $cacheRow['tenant_id'] : 0;
+    if ($tid > 0) {
+        return $tid;
+    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    return $tid > 0 ? $tid : 1;
+}
+
+function sas_cache_visible_tenant_ids($pdo)
+{
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tid <= 0) {
+        $tid = 1;
+    }
+    $ids = array($tid => $tid);
+    if (!$pdo) {
+        return array_values($ids);
+    }
+    $locked = (function_exists('is_agent_user') && is_agent_user())
+        || (function_exists('is_group_manager_user') && is_group_manager_user())
+        || (function_exists('account_viewer_is_leaf_child') && account_viewer_is_leaf_child($pdo));
+    if ($locked || !function_exists('sas_ownership_search_tenant_ids')) {
+        return array_values($ids);
+    }
+    $extra = sas_ownership_search_tenant_ids($pdo);
+    if (is_array($extra)) {
+        foreach ($extra as $x) {
+            $x = (int) $x;
+            if ($x > 0) {
+                $ids[$x] = $x;
+            }
+        }
+    }
+    return array_values($ids);
+}
+
+function sas_cache_pick_visible_row($rows)
+{
+    if (!$rows || !is_array($rows)) {
+        return null;
+    }
+    if (count($rows) === 1) {
+        return $rows[0];
+    }
+    $withLocal = array();
+    foreach ($rows as $row) {
+        if (is_array($row) && !empty($row['local_subscriber_id'])) {
+            $withLocal[] = $row;
+        }
+    }
+    if (count($withLocal) === 1) {
+        return $withLocal[0];
+    }
+    return null;
+}
+
 function sas_cache_get($pdo, $username)
 {
     $username = trim((string) $username);
@@ -2317,18 +2383,37 @@ function sas_cache_get($pdo, $username)
         }
     } catch (Exception $e) {
     }
-    // توافق قديم بدون tenant_id على الاستعلام
-    try {
-        $st = $pdo->prepare('SELECT * FROM sas_users_cache WHERE username = :u LIMIT 1');
-        $st->execute(array(':u' => $username));
-        $row = $st->fetch();
-        if ($row) {
-            $rowTid = isset($row['tenant_id']) ? (int) $row['tenant_id'] : 1;
-            if ($rowTid === $tid || $tid === 1) {
-                return $row;
-            }
+    $ids = sas_cache_visible_tenant_ids($pdo);
+    $in = array();
+    foreach ($ids as $x) {
+        $x = (int) $x;
+        if ($x > 0 && $x !== $tid) {
+            $in[$x] = $x;
         }
-    } catch (Exception $e) {
+    }
+    if ($in) {
+        try {
+            $st = $pdo->prepare(
+                'SELECT * FROM sas_users_cache WHERE username = :u AND tenant_id IN (' . implode(',', $in) . ')'
+            );
+            $st->execute(array(':u' => $username));
+            $picked = sas_cache_pick_visible_row($st->fetchAll());
+            if ($picked) {
+                return $picked;
+            }
+        } catch (Exception $e) {
+        }
+    }
+    if ($tid === 1) {
+        try {
+            $st = $pdo->prepare('SELECT * FROM sas_users_cache WHERE username = :u');
+            $st->execute(array(':u' => $username));
+            $picked = sas_cache_pick_visible_row($st->fetchAll());
+            if ($picked) {
+                return $picked;
+            }
+        } catch (Exception $e) {
+        }
     }
     return null;
 }
@@ -2697,16 +2782,25 @@ function sas_mark_card_pin_used($pin)
                     }
                 }
                 if ($groupChanged) {
-                    $unused = 0;
-                    foreach ($groups[$gi]['cards'] as $c2) {
-                        if (is_array($c2) && empty($c2['used'])) {
-                            $p2 = isset($c2['pin']) ? trim((string) $c2['pin']) : '';
-                            if ($p2 !== '' && strlen($p2) >= 6 && !sas_pin_is_recently_used($p2)) {
-                                $unused++;
+                    $curFree = isset($groups[$gi]['unused']) ? (int) $groups[$gi]['unused'] : 0;
+                    $sample = isset($groups[$gi]['cards']) && is_array($groups[$gi]['cards']) ? count($groups[$gi]['cards']) : 0;
+                    if (!empty($groups[$gi]['counts_only']) || $curFree > $sample) {
+                        $groups[$gi]['unused'] = max(0, $curFree - 1);
+                        if (isset($groups[$gi]['used'])) {
+                            $groups[$gi]['used'] = (int) $groups[$gi]['used'] + 1;
+                        }
+                    } else {
+                        $unused = 0;
+                        foreach ($groups[$gi]['cards'] as $c2) {
+                            if (is_array($c2) && empty($c2['used'])) {
+                                $p2 = isset($c2['pin']) ? trim((string) $c2['pin']) : '';
+                                if ($p2 !== '' && strlen($p2) >= 6 && !sas_pin_is_recently_used($p2)) {
+                                    $unused++;
+                                }
                             }
                         }
+                        $groups[$gi]['unused'] = $unused;
                     }
-                    $groups[$gi]['unused'] = $unused;
                 }
             }
             if ($changed) {
@@ -2892,11 +2986,141 @@ function sas_cards_inventory_load_persisted($maxAge = 300)
     return $data;
 }
 
+function sas_groups_keep_known_pins($groups, $prev)
+{
+    if (!is_array($groups) || !$prev || empty($prev['groups']) || !is_array($prev['groups'])) {
+        return is_array($groups) ? $groups : array();
+    }
+    $old = array();
+    foreach ($prev['groups'] as $g) {
+        if (!is_array($g) || empty($g['cards']) || !is_array($g['cards'])) {
+            continue;
+        }
+        $name = isset($g['name']) ? strtolower(trim((string) $g['name'])) : '';
+        $soft = function_exists('card_price_soft_key') ? card_price_soft_key($name) : $name;
+        if ($soft === '') {
+            continue;
+        }
+        $pins = array();
+        foreach ($g['cards'] as $c) {
+            if (!is_array($c) || !empty($c['used'])) {
+                continue;
+            }
+            $pin = isset($c['pin']) ? trim((string) $c['pin']) : '';
+            if ($pin !== '' && strlen($pin) >= 6) {
+                $pins[] = $c;
+            }
+        }
+        if ($pins && !isset($old[$soft])) {
+            $old[$soft] = $pins;
+        }
+    }
+    foreach ($groups as $i => $g) {
+        if (!is_array($g)) {
+            continue;
+        }
+        $unused = isset($g['unused']) ? (int) $g['unused'] : 0;
+        if ($unused < 1) {
+            continue;
+        }
+        $name = isset($g['name']) ? strtolower(trim((string) $g['name'])) : '';
+        $soft = function_exists('card_price_soft_key') ? card_price_soft_key($name) : $name;
+        if ($soft === '' || empty($old[$soft])) {
+            continue;
+        }
+        $have = 0;
+        if (!empty($g['cards']) && is_array($g['cards'])) {
+            foreach ($g['cards'] as $c) {
+                if (is_array($c) && empty($c['used']) && !empty($c['pin']) && strlen(trim((string) $c['pin'])) >= 6) {
+                    $have++;
+                }
+            }
+        }
+        if ($have > 0) {
+            continue;
+        }
+        $keep = array_slice($old[$soft], 0, $unused);
+        if (!$keep) {
+            continue;
+        }
+        if (!isset($groups[$i]['cards']) || !is_array($groups[$i]['cards'])) {
+            $groups[$i]['cards'] = array();
+        }
+        $groups[$i]['cards'] = array_merge($keep, $groups[$i]['cards']);
+    }
+    return $groups;
+}
+
+function sas_inventory_ensure_free_pins($api, $groups)
+{
+    if (!is_array($groups)) {
+        $groups = array();
+    }
+    $prev = function_exists('sas_cards_inventory_load_persisted') ? sas_cards_inventory_load_persisted(0) : null;
+    $groups = sas_groups_keep_known_pins($groups, $prev);
+    $pack = array('groups' => $groups);
+    if (!function_exists('sas_inventory_needs_free_pins') || !sas_inventory_needs_free_pins($pack)) {
+        return $groups;
+    }
+    if (!$api || !method_exists($api, 'listOwnedFreePins')) {
+        return $groups;
+    }
+    $live = sas_cards_rows_to_ui($api->listOwnedFreePins(20));
+    if (function_exists('sas_pins_capped_by_inventory')) {
+        $live = sas_pins_capped_by_inventory($live, $pack);
+    }
+    if (!is_array($live) || !$live) {
+        return $groups;
+    }
+    foreach ($live as $pinRow) {
+        if (!is_array($pinRow)) {
+            continue;
+        }
+        $pin = isset($pinRow['pin']) ? trim((string) $pinRow['pin']) : '';
+        $name = isset($pinRow['profile_name']) ? strtolower(trim((string) $pinRow['profile_name'])) : '';
+        $soft = function_exists('card_price_soft_key') ? card_price_soft_key($name) : $name;
+        if ($pin === '' || $soft === '') {
+            continue;
+        }
+        foreach ($groups as $i => $g) {
+            if (!is_array($g)) {
+                continue;
+            }
+            $gName = isset($g['name']) ? strtolower(trim((string) $g['name'])) : '';
+            $gSoft = function_exists('card_price_soft_key') ? card_price_soft_key($gName) : $gName;
+            if ($gSoft !== $soft) {
+                continue;
+            }
+            if (!isset($groups[$i]['cards']) || !is_array($groups[$i]['cards'])) {
+                $groups[$i]['cards'] = array();
+            }
+            $exists = false;
+            foreach ($groups[$i]['cards'] as $c) {
+                if (is_array($c) && isset($c['pin']) && strcasecmp((string) $c['pin'], $pin) === 0) {
+                    $exists = true;
+                    break;
+                }
+            }
+            if (!$exists) {
+                $groups[$i]['cards'][] = array(
+                    'pin' => $pin,
+                    'used' => 0,
+                    'profile_id' => isset($pinRow['profile_id']) ? (int) $pinRow['profile_id'] : 0,
+                );
+            }
+            break;
+        }
+    }
+    return $groups;
+}
+
 function sas_cards_inventory_save_persisted($groups)
 {
     if (!is_array($groups)) {
         $groups = array();
     }
+    $prev = sas_cards_inventory_load_persisted(0);
+    $groups = sas_groups_keep_known_pins($groups, $prev);
     $payload = array(
         'updated_at' => time(),
         'groups' => array_values($groups),
@@ -2965,6 +3189,134 @@ function sas_dash_groups_from_inventory($inventory)
     return $groups;
 }
 
+function sas_inventory_needs_free_pins($inv)
+{
+    if (!$inv || empty($inv['groups']) || !is_array($inv['groups'])) {
+        return false;
+    }
+    foreach ($inv['groups'] as $g) {
+        if (!is_array($g)) {
+            continue;
+        }
+        $unused = isset($g['unused']) ? (int) $g['unused'] : 0;
+        if ($unused <= 0) {
+            continue;
+        }
+        $freePins = 0;
+        if (!empty($g['cards']) && is_array($g['cards'])) {
+            foreach ($g['cards'] as $c) {
+                if (!is_array($c) || !empty($c['used'])) {
+                    continue;
+                }
+                $pin = isset($c['pin']) ? trim((string) $c['pin']) : '';
+                if ($pin !== '' && strlen($pin) >= 6) {
+                    $freePins++;
+                }
+            }
+        }
+        if ($freePins < 1) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function sas_pins_capped_by_inventory($pins, $inv)
+{
+    if (!is_array($pins) || !$inv || empty($inv['groups']) || !is_array($inv['groups'])) {
+        return array();
+    }
+    $allow = array();
+    foreach ($inv['groups'] as $g) {
+        if (!is_array($g)) {
+            continue;
+        }
+        $unused = isset($g['unused']) ? (int) $g['unused'] : 0;
+        $name = isset($g['name']) ? strtolower(trim((string) $g['name'])) : '';
+        if ($unused <= 0 || $name === '') {
+            continue;
+        }
+        $soft = function_exists('card_price_soft_key') ? card_price_soft_key($name) : $name;
+        if (!isset($allow[$soft])) {
+            $allow[$soft] = 0;
+        }
+        $allow[$soft] += $unused;
+    }
+    $out = array();
+    $used = array();
+    foreach ($pins as $pinRow) {
+        if (!is_array($pinRow)) {
+            continue;
+        }
+        $name = isset($pinRow['profile_name']) ? strtolower(trim((string) $pinRow['profile_name'])) : '';
+        $soft = function_exists('card_price_soft_key') ? card_price_soft_key($name) : $name;
+        if ($soft === '' || !isset($allow[$soft])) {
+            continue;
+        }
+        if (!isset($used[$soft])) {
+            $used[$soft] = 0;
+        }
+        if ($used[$soft] >= $allow[$soft]) {
+            continue;
+        }
+        $out[] = $pinRow;
+        $used[$soft]++;
+    }
+    return $out;
+}
+
+function sas_inventory_store_free_pins($pins)
+{
+    if (!is_array($pins) || !$pins || !function_exists('sas_cards_inventory_load_persisted')) {
+        return;
+    }
+    $inv = sas_cards_inventory_load_persisted(0);
+    if (!$inv || empty($inv['groups']) || !is_array($inv['groups'])) {
+        return;
+    }
+    $groups = $inv['groups'];
+    foreach ($pins as $pinRow) {
+        if (!is_array($pinRow)) {
+            continue;
+        }
+        $pin = isset($pinRow['pin']) ? trim((string) $pinRow['pin']) : '';
+        $name = isset($pinRow['profile_name']) ? strtolower(trim((string) $pinRow['profile_name'])) : '';
+        if ($pin === '' || $name === '') {
+            continue;
+        }
+        foreach ($groups as $i => $g) {
+            if (!is_array($g)) {
+                continue;
+            }
+            $gName = isset($g['name']) ? strtolower(trim((string) $g['name'])) : '';
+            if ($gName !== $name) {
+                continue;
+            }
+            if (!isset($groups[$i]['cards']) || !is_array($groups[$i]['cards'])) {
+                $groups[$i]['cards'] = array();
+            }
+            $exists = false;
+            foreach ($groups[$i]['cards'] as $c) {
+                if (is_array($c) && isset($c['pin']) && strcasecmp((string) $c['pin'], $pin) === 0) {
+                    $exists = true;
+                    break;
+                }
+            }
+            if (!$exists) {
+                $groups[$i]['cards'][] = array(
+                    'pin' => $pin,
+                    'used' => 0,
+                    'profile_id' => isset($pinRow['profile_id']) ? (int) $pinRow['profile_id'] : 0,
+                );
+            }
+            break;
+        }
+    }
+    if (function_exists('sas_cards_inventory_save_persisted')) {
+        sas_cards_inventory_save_persisted($groups);
+    }
+}
+
 function sas_unused_pins_from_inventory_cache()
 {
     if (!function_exists('sas_cards_inventory_load_persisted')) {
@@ -3017,7 +3369,12 @@ function sas_unused_cards_cached($api, $force = false)
     if (!$force && $at > 0 && isset($_SESSION['sas_unused_ui_v6']) && is_array($_SESSION['sas_unused_ui_v6'])) {
         $age = time() - $at;
         $empty = !$_SESSION['sas_unused_ui_v6'];
-        if ((!$empty && $age < $ttl) || ($empty && $age < 20)) {
+        $needsPins = false;
+        if ($empty && function_exists('sas_cards_inventory_load_persisted') && function_exists('sas_inventory_needs_free_pins')) {
+            $gapInv = sas_cards_inventory_load_persisted(0);
+            $needsPins = sas_inventory_needs_free_pins($gapInv);
+        }
+        if (!$needsPins && ((!$empty && $age < $ttl) || ($empty && $age < 20))) {
             $sess = function_exists('sas_filter_recently_used_cards')
                 ? sas_filter_recently_used_cards($_SESSION['sas_unused_ui_v6'])
                 : $_SESSION['sas_unused_ui_v6'];
@@ -3032,6 +3389,19 @@ function sas_unused_cards_cached($api, $force = false)
         if ($invFile && isset($invFile['groups']) && is_array($invFile['groups'])) {
             $fromInv = sas_unused_pins_from_inventory_cache();
             $out = is_array($fromInv) ? $fromInv : array();
+            if (!$out && function_exists('sas_inventory_needs_free_pins') && sas_inventory_needs_free_pins($invFile)
+                && $api && method_exists($api, 'listOwnedFreePins')) {
+                $livePins = sas_cards_rows_to_ui($api->listOwnedFreePins(20));
+                if (function_exists('sas_pins_capped_by_inventory')) {
+                    $livePins = sas_pins_capped_by_inventory($livePins, $invFile);
+                }
+                if (is_array($livePins) && $livePins) {
+                    $out = $livePins;
+                    if (function_exists('sas_inventory_store_free_pins')) {
+                        sas_inventory_store_free_pins($out);
+                    }
+                }
+            }
             $_SESSION['sas_unused_ui_v6'] = $out;
             $_SESSION['sas_unused_ui_v6_at'] = time();
             if (session_status() !== PHP_SESSION_ACTIVE && function_exists('app_session_touch')) {
@@ -3073,6 +3443,21 @@ function sas_unused_cards_cached($api, $force = false)
     if ($fromInventory) {
         $fromInv = sas_unused_pins_from_inventory_cache();
         $out = is_array($fromInv) ? $fromInv : array();
+        if (!$out && $api && method_exists($api, 'listOwnedFreePins') && function_exists('sas_inventory_needs_free_pins')) {
+            $gapInv = function_exists('sas_cards_inventory_load_persisted') ? sas_cards_inventory_load_persisted(0) : null;
+            if (sas_inventory_needs_free_pins($gapInv)) {
+                $livePins = sas_cards_rows_to_ui($api->listOwnedFreePins(20));
+                if (function_exists('sas_pins_capped_by_inventory')) {
+                    $livePins = sas_pins_capped_by_inventory($livePins, $gapInv);
+                }
+                if (is_array($livePins) && $livePins) {
+                    $out = $livePins;
+                    if (function_exists('sas_inventory_store_free_pins')) {
+                        sas_inventory_store_free_pins($out);
+                    }
+                }
+            }
+        }
     }
     if (!is_array($out)) {
         $out = array();
@@ -3507,6 +3892,132 @@ function shop_restore_sep22_if_empty($pdo)
     return $sum > 0;
 }
 
+function sas_dash_live_file($tenantId)
+{
+    $dir = dirname(__DIR__) . '/storage/cache';
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0775, true);
+    }
+    return $dir . '/sas_dash_live_t' . (int) $tenantId . '.json';
+}
+
+function sas_dash_live_allowed()
+{
+    if (function_exists('is_agent_user') && is_agent_user()) {
+        return false;
+    }
+    if (function_exists('is_group_manager_user') && is_group_manager_user()) {
+        return false;
+    }
+    if (function_exists('is_accountant_user') && is_accountant_user()) {
+        return false;
+    }
+    global $pdo;
+    if ($pdo && function_exists('account_viewer_is_leaf_child') && account_viewer_is_leaf_child($pdo)) {
+        return false;
+    }
+    return true;
+}
+
+function sas_dash_live_read($tenantId, $maxAge)
+{
+    $file = sas_dash_live_file($tenantId);
+    if (!is_file($file)) {
+        return null;
+    }
+    $age = time() - (int) @filemtime($file);
+    if ($maxAge > 0 && $age > $maxAge) {
+        return null;
+    }
+    $raw = @file_get_contents($file);
+    $data = $raw ? json_decode($raw, true) : null;
+    if (!is_array($data) || empty($data['total'])) {
+        return null;
+    }
+    return $data;
+}
+
+function sas_dash_live_add($tenantId, $key, $delta)
+{
+    $data = sas_dash_live_read($tenantId, 0);
+    if (!is_array($data) || !isset($data[$key])) {
+        return;
+    }
+    $data[$key] = max(0, (int) $data[$key] + (int) $delta);
+    $data['at'] = time();
+    @file_put_contents(sas_dash_live_file($tenantId), json_encode($data));
+}
+
+function sas_dash_live_refresh($pdo, $config, $force = false, $withSoon = null)
+{
+    if (!sas_dash_live_allowed()) {
+        return null;
+    }
+    if (!function_exists('sas_is_ready') || !sas_is_ready($config)) {
+        return null;
+    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tid <= 0) {
+        $tid = 1;
+    }
+    if (!$force) {
+        $fresh = sas_dash_live_read($tid, 8);
+        if ($fresh) {
+            return $fresh;
+        }
+    }
+    $lockPath = dirname(sas_dash_live_file($tid)) . '/sas_dash_live_lock_t' . $tid;
+    $lockFh = @fopen($lockPath, 'c');
+    if ($lockFh && !@flock($lockFh, LOCK_EX | LOCK_NB)) {
+        @fclose($lockFh);
+        return sas_dash_live_read($tid, 0);
+    }
+    $api = function_exists('sas_make_connector') ? sas_make_connector($config) : null;
+    if (!$api || !method_exists($api, 'dashboardCounts')) {
+        if ($lockFh) {
+            @flock($lockFh, LOCK_UN);
+            @fclose($lockFh);
+        }
+        return sas_dash_live_read($tid, 0);
+    }
+    try {
+        if (method_exists($api, 'setTimeout')) {
+            $api->setTimeout(8);
+        }
+        if ($withSoon === null) {
+            $withSoon = !$force;
+        }
+        $live = $api->dashboardCounts($withSoon ? true : false);
+    } catch (Exception $e) {
+        $live = null;
+    }
+    if ($lockFh) {
+        @flock($lockFh, LOCK_UN);
+        @fclose($lockFh);
+    }
+    if (!is_array($live) || empty($live['total'])) {
+        return sas_dash_live_read($tid, 0);
+    }
+    if ($live['soon'] === null) {
+        $prevSoon = sas_dash_live_read($tid, 0);
+        $live['soon'] = is_array($prevSoon) && isset($prevSoon['soon']) ? (int) $prevSoon['soon'] : 0;
+    }
+    $out = array(
+        'total' => (int) $live['total'],
+        'active' => (int) $live['active'],
+        'expired' => (int) $live['expired'],
+        'online' => (int) $live['online'],
+        'today' => (int) $live['today'],
+        'soon' => (int) $live['soon'],
+        'at' => time(),
+    );
+    if ($out['active'] <= 0 || $out['expired'] <= 0) {
+        return sas_dash_live_read($tid, 0);
+    }
+    @file_put_contents(sas_dash_live_file($tid), json_encode($out));
+    return $out;
+}
+
 function sas_dash_user_counts($pdo)
 {
     ensure_sas_users_cache_table($pdo);
@@ -3520,27 +4031,51 @@ function sas_dash_user_counts($pdo)
         'disabled' => 0,
     );
     $scope = function_exists('sas_agent_scope_sql') ? sas_agent_scope_sql('c') : '';
+    if (sas_dash_live_allowed() && function_exists('sas_ownership_search_tenant_ids')) {
+        $wide = sas_ownership_search_tenant_ids($pdo);
+        $in = array();
+        foreach ($wide as $wid) {
+            $wid = (int) $wid;
+            if ($wid > 0) {
+                $in[$wid] = $wid;
+            }
+        }
+        if (count($in) > 1) {
+            $scope = ' AND c.tenant_id IN (' . implode(',', $in) . ')';
+        }
+    }
+    $countExpr = (strpos($scope, ' IN (') !== false) ? 'COUNT(DISTINCT c.username)' : 'COUNT(*)';
     try {
-        $out['total'] = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache c WHERE 1=1' . $scope)->fetchColumn();
-        $out['disabled'] = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache c WHERE c.enabled = 0' . $scope)->fetchColumn();
-        $out['online'] = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache c WHERE c.is_online = 1' . $scope)->fetchColumn();
+        $out['total'] = (int) $pdo->query('SELECT ' . $countExpr . ' FROM sas_users_cache c WHERE 1=1' . $scope)->fetchColumn();
+        $out['disabled'] = (int) $pdo->query('SELECT ' . $countExpr . ' FROM sas_users_cache c WHERE c.enabled = 0' . $scope)->fetchColumn();
+        $out['online'] = (int) $pdo->query('SELECT ' . $countExpr . ' FROM sas_users_cache c WHERE c.is_online = 1' . $scope)->fetchColumn();
         $out['active'] = (int) $pdo->query(
-            'SELECT COUNT(*) FROM sas_users_cache c
+            'SELECT ' . $countExpr . ' FROM sas_users_cache c
              WHERE c.enabled = 1 AND c.expire_at IS NOT NULL AND c.expire_at >= NOW()' . $scope
         )->fetchColumn();
         $out['expired'] = (int) $pdo->query(
-            'SELECT COUNT(*) FROM sas_users_cache c
-             WHERE c.enabled = 1 AND c.expire_at IS NOT NULL AND c.expire_at < NOW()' . $scope
+            'SELECT ' . $countExpr . ' FROM sas_users_cache c
+             WHERE NOT (c.enabled = 1 AND c.expire_at IS NOT NULL AND c.expire_at >= NOW())' . $scope
         )->fetchColumn();
         $out['soon'] = (int) $pdo->query(
-            'SELECT COUNT(*) FROM sas_users_cache c
-             WHERE c.enabled = 1 AND c.expire_at > NOW() AND c.expire_at <= DATE_ADD(NOW(), INTERVAL 3 DAY)' . $scope
+            'SELECT ' . $countExpr . ' FROM sas_users_cache c
+             WHERE c.expire_at IS NOT NULL AND DATE(c.expire_at) > CURDATE()
+               AND DATE(c.expire_at) <= DATE_ADD(CURDATE(), INTERVAL 3 DAY)' . $scope
         )->fetchColumn();
         $out['today'] = (int) $pdo->query(
-            'SELECT COUNT(*) FROM sas_users_cache c
-             WHERE c.enabled = 1 AND DATE(c.expire_at) = CURDATE()' . $scope
+            'SELECT ' . $countExpr . ' FROM sas_users_cache c
+             WHERE c.expire_at IS NOT NULL AND DATE(c.expire_at) = CURDATE()' . $scope
         )->fetchColumn();
     } catch (Exception $e) {
+    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    $live = sas_dash_live_allowed() ? sas_dash_live_read($tid, 8) : null;
+    if (is_array($live)) {
+        foreach (array('total', 'active', 'online', 'expired', 'soon', 'today') as $key) {
+            if (isset($live[$key])) {
+                $out[$key] = (int) $live[$key];
+            }
+        }
     }
     return $out;
 }
@@ -4465,6 +5000,10 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
         if (function_exists('sas_sessions_mark_user_closed')) {
             sas_sessions_mark_user_closed($pdo, $username);
         }
+        $dashTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+        if ($dashTid > 0 && function_exists('sas_dash_live_add')) {
+            sas_dash_live_add($dashTid, 'online', -1);
+        }
         return array(true, 'تم قطع اتصال المشترك (Disconnect)', array(
             'is_online' => 0,
             'framed_ip' => '',
@@ -4681,6 +5220,104 @@ function sas_clip($s, $max)
     return substr($s, 0, $max);
 }
 
+function sas_cache_touch_owner_row($pdo, $viewerTenant, $username, $parentName, $params)
+{
+    if (!$pdo || !is_array($params) || !function_exists('sas_ownership_index')) {
+        return false;
+    }
+    $idx = sas_ownership_index($pdo, (int) $viewerTenant);
+    if (!$idx || empty($idx['logins']) || !is_array($idx['logins'])) {
+        return false;
+    }
+    $hid = 0;
+    $names = array(strtolower(trim((string) $parentName)), strtolower(trim((string) $username)));
+    foreach ($names as $name) {
+        if ($name === '') {
+            continue;
+        }
+        if (isset($idx['logins'][$name])) {
+            $hid = (int) $idx['logins'][$name];
+            break;
+        }
+        $flat = str_replace('@', '', $name);
+        if ($flat !== '' && isset($idx['logins'][$flat])) {
+            $hid = (int) $idx['logins'][$flat];
+            break;
+        }
+    }
+    if ($hid <= 0 || $hid === (int) $viewerTenant) {
+        return false;
+    }
+    $username = strtolower(trim((string) $username));
+    try {
+        $ex = $pdo->prepare('SELECT 1 FROM sas_users_cache WHERE tenant_id = :t AND username = :u LIMIT 1');
+        $ex->execute(array(':t' => $hid, ':u' => $username));
+        if ($ex->fetchColumn()) {
+            $pdo->prepare(
+                'UPDATE sas_users_cache SET
+                    sas_user_id = :sas_user_id,
+                    enabled = :enabled,
+                    expire_at = :expire_at,
+                    profile_id = :profile_id,
+                    profile_name = :profile_name,
+                    parent_id = :parent_id,
+                    parent_name = :parent_name,
+                    is_online = :is_online,
+                    synced_at = :synced_at
+                 WHERE tenant_id = :tenant_id AND username = :username'
+            )->execute(array(
+                ':sas_user_id' => $params[':sas_user_id'],
+                ':enabled' => $params[':enabled'],
+                ':expire_at' => $params[':expire_at'],
+                ':profile_id' => $params[':profile_id'],
+                ':profile_name' => $params[':profile_name'],
+                ':parent_id' => $params[':parent_id'],
+                ':parent_name' => $params[':parent_name'],
+                ':is_online' => $params[':is_online'],
+                ':synced_at' => $params[':synced_at'],
+                ':tenant_id' => $hid,
+                ':username' => $username,
+            ));
+            return true;
+        }
+        $ins = array(
+            ':tenant_id' => $hid,
+            ':username' => $username,
+            ':sas_user_id' => $params[':sas_user_id'],
+            ':firstname' => $params[':firstname'],
+            ':lastname' => $params[':lastname'],
+            ':display_name' => $params[':display_name'],
+            ':phone' => $params[':phone'],
+            ':profile_id' => $params[':profile_id'],
+            ':profile_name' => $params[':profile_name'],
+            ':enabled' => $params[':enabled'],
+            ':expire_at' => $params[':expire_at'],
+            ':parent_id' => $params[':parent_id'],
+            ':parent_name' => $params[':parent_name'],
+            ':city' => $params[':city'],
+            ':email' => $params[':email'],
+            ':company' => $params[':company'],
+            ':last_online' => $params[':last_online'],
+            ':is_online' => $params[':is_online'],
+            ':framed_ip' => $params[':framed_ip'],
+            ':mac_address' => $params[':mac_address'],
+            ':daily_traffic' => $params[':daily_traffic'],
+            ':synced_at' => $params[':synced_at'],
+        );
+        $pdo->prepare(
+            'INSERT INTO sas_users_cache
+                (tenant_id, username, sas_user_id, firstname, lastname, display_name, phone, profile_id, profile_name,
+                 enabled, expire_at, parent_id, parent_name, city, email, company, last_online, is_online, framed_ip, mac_address, daily_traffic, local_subscriber_id, synced_at)
+             VALUES
+                (:tenant_id, :username, :sas_user_id, :firstname, :lastname, :display_name, :phone, :profile_id, :profile_name,
+                 :enabled, :expire_at, :parent_id, :parent_name, :city, :email, :company, :last_online, :is_online, :framed_ip, :mac_address, :daily_traffic, NULL, :synced_at)'
+        )->execute($ins);
+        return true;
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
 function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
 {
     if (!is_array($row)) {
@@ -4749,6 +5386,13 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
         if (function_exists('sas_cache_skip_owned_elsewhere')
             && sas_cache_skip_owned_elsewhere($pdo, $tenantId, $username, isset($params[':parent_name']) ? $params[':parent_name'] : '')
         ) {
+            sas_cache_touch_owner_row(
+                $pdo,
+                $tenantId,
+                $username,
+                isset($params[':parent_name']) ? (string) $params[':parent_name'] : '',
+                $params
+            );
             if ($exists) {
                 try {
                     $pdo->prepare('DELETE FROM sas_users_cache WHERE tenant_id = :t AND username = :u')
@@ -4756,7 +5400,7 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
                 } catch (Exception $eDel) {
                 }
             }
-            return false;
+            return true;
         }
         if ($exists) {
             // تحديث صف هذه الشركة فقط — لا تلمس tenant آخر حتى لو PK قديم على username فقط
@@ -5458,14 +6102,14 @@ function sas_cache_filter_sql($subFilter)
         return ' AND c.enabled = 0';
     }
     if ($subFilter === 'expired') {
-        return ' AND c.enabled = 1 AND c.expire_at IS NOT NULL AND c.expire_at < NOW()';
+        return ' AND NOT (c.enabled = 1 AND c.expire_at IS NOT NULL AND c.expire_at >= NOW())';
     }
     if ($subFilter === 'today') {
         return ' AND c.expire_at IS NOT NULL AND DATE(c.expire_at) = CURDATE()';
     }
     if ($subFilter === 'soon') {
-        return ' AND c.expire_at IS NOT NULL AND c.expire_at > NOW()
-                 AND c.expire_at <= DATE_ADD(NOW(), INTERVAL 3 DAY)';
+        return ' AND c.expire_at IS NOT NULL AND DATE(c.expire_at) > CURDATE()
+                 AND DATE(c.expire_at) <= DATE_ADD(CURDATE(), INTERVAL 3 DAY)';
     }
     if ($subFilter === 'debt') {
         return ' AND EXISTS (

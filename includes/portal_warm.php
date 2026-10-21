@@ -221,6 +221,9 @@ function portal_warm_cards($pdo, $config, $tenantId)
     if ($api && method_exists($api, 'login') && $api->login() && method_exists($api, 'listCardsInventory')) {
         $inv = $api->listCardsInventory(14);
         if (is_array($inv)) {
+            if (function_exists('sas_inventory_ensure_free_pins')) {
+                $inv = sas_inventory_ensure_free_pins($api, $inv);
+            }
             if (function_exists('sas_cards_inventory_save_persisted')) {
                 sas_cards_inventory_save_persisted($inv);
             }

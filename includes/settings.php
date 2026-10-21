@@ -594,6 +594,8 @@ function apply_settings_to_config($config, $settings)
         'unpaid_overdue' => 'unpaid_overdue',
         'reminder_auto' => 'debt_remind',
         'schedule_cut' => 'schedule_cut',
+        'card_transfer' => '',
+        'card_pull' => '',
     );
     $config['wa_cases'] = array();
     $config['wa_case_issues'] = array();
@@ -601,6 +603,18 @@ function apply_settings_to_config($config, $settings)
         $raw = isset($settings['wa_case_' . $case]) ? trim((string) $settings['wa_case_' . $case]) : $def;
         if ($raw === '__none__') {
             $raw = '';
+        }
+        if (function_exists('wa_case_optional') && wa_case_optional($case)) {
+            if ($raw === '' || !in_array($raw, $tplKeys, true)) {
+                $config['wa_cases'][$case] = '';
+                continue;
+            }
+            if (isset($config['templates'][$raw]) && trim((string) $config['templates'][$raw]) === '') {
+                $config['wa_cases'][$case] = '';
+                continue;
+            }
+            $config['wa_cases'][$case] = $raw;
+            continue;
         }
         if ($raw !== '' && !in_array($raw, $tplKeys, true)) {
             // Deleted template still referenced.

@@ -92,7 +92,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['card_payment']) && $s
                 if ($agentRow && !empty($agentRow['phone'])) {
                     $phone = trim((string) $agentRow['phone']);
                 }
-                if ($phone !== '') {
+                $payAllowed = function_exists('whatsapp_agent_notice_allowed')
+                    && whatsapp_agent_notice_allowed($pdo, $meId, $payAgentId);
+                if ($phone !== '' && $payAllowed) {
                     $msg = $isEn
                         ? ('Payment recorded: ' . money_format_iqd($amount, $config['currency']))
                         : ('تم تسجيل دفعة: ' . money_format_iqd($amount, $config['currency']));
@@ -358,6 +360,12 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_stats') {
         'soon' => 0,
         'today' => 0,
     );
+    if (function_exists('sas_dash_live_refresh')) {
+        try {
+            sas_dash_live_refresh($pdo, $config);
+        } catch (Exception $e) {
+        }
+    }
     if (function_exists('sas_dash_user_counts')) {
         $counts = sas_dash_user_counts($pdo);
         if (is_array($counts)) {
@@ -960,6 +968,28 @@ body:has(.sas-dash) .container {
   .dash-ping.is-multi .ping-name { font-size: 12px; }
   .dash-ping.is-multi .ping-ms { font-size: 14px; }
 }
+@media (max-width: 760px) {
+  .sas-dash .sas-boxes { display: flex; flex-direction: column; }
+  .sas-dash .dash-ping {
+    order: -1;
+    min-height: 0;
+    padding: 8px 12px;
+    border-radius: 12px;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .sas-dash .dash-ping .sas-box-ico { display: none; }
+  .sas-dash .dash-ping .sas-box-title { font-size: 12px; font-weight: 600; }
+  .sas-dash .dash-ping .sas-box-sub { display: none; }
+  .sas-dash .dash-ping .sas-box-val,
+  .sas-dash .dash-ping[data-count="1"] .ping-ms { margin-top: 0; font-size: 15px; font-weight: 600; }
+  .sas-dash .dash-ping .ping-list { margin-top: 0; gap: 0; }
+  .sas-dash .dash-ping.is-multi .ping-line { padding: 2px 0; }
+  .sas-dash .dash-ping.is-multi .ping-name { font-size: 12px; font-weight: 500; }
+  .sas-dash .dash-ping.is-multi .ping-ms { font-size: 13px; font-weight: 600; }
+}
 .sas-box-ico { position: absolute; inset-inline-end: 14px; inset-block-start: 12px; font-size: 22px; opacity: .35; }
 .sas-box.tone-blue { --c1: #38bdf8; --c2: #0369a1; }
 .sas-box.tone-green { --c1: #4ade80; --c2: #15803d; }
@@ -1417,10 +1447,9 @@ if (!$accLocked) {
   loadStats();
   loadPoints();
   loadBank();
-  loadDash(true, true);
-  setInterval(loadPoints, 20000);
-  setInterval(loadStats, 8000);
-  setInterval(function () { loadDash(true, true); loadBank(); }, 40000);
+  setInterval(loadPoints, 2000);
+  setInterval(loadStats, 2000);
+  setInterval(function () { loadDash(false, true); loadBank(); }, 2000);
 })();
 </script>
 <?php endif; ?>

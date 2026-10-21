@@ -41,9 +41,14 @@ if (isset($_GET['ajax']) && (string) $_GET['ajax'] === 'log_ring') {
     if ($ids) {
         $whereRing = 'm.id IN (' . implode(',', array_map('intval', $ids)) . ')';
         $mineSess = function_exists('whatsapp_session_id') ? whatsapp_session_id() : '';
-        $scopeRing = ($mineSess !== '' && $mineSess !== 'default' && function_exists('whatsapp_log_scope_sql'))
+        $scopeRing = ($mineSess !== '' && $mineSess !== 'default'
+            && function_exists('whatsapp_log_uses_parent_scope') && whatsapp_log_uses_parent_scope()
+            && function_exists('whatsapp_log_scope_sql'))
             ? whatsapp_log_scope_sql('s')
             : '';
+        if (strpos($scopeRing, '1=0') !== false) {
+            $scopeRing = '';
+        }
         if ($scopeRing !== '') {
             $whereRing .= ' AND m.subscriber_id IS NOT NULL' . $scopeRing;
         }
@@ -111,7 +116,15 @@ if ($logStatus !== '0' && $logStatus !== '1') {
     $logStatus = '';
 }
 $logPage = isset($_GET['page']) ? max(1, (int) $_GET['page']) : 1;
-$logPerPage = 40;
+$logSize = isset($_GET['n']) ? (string) $_GET['n'] : 'all';
+if ($logSize === '40') {
+    $logPerPage = 40;
+} elseif ($logSize === '100') {
+    $logPerPage = 100;
+} else {
+    $logSize = 'all';
+    $logPerPage = 5000;
+}
 
 $daysMax = isset($_GET['days']) ? (int) $_GET['days'] : 7;
 if ($daysMax < 0) {
@@ -188,7 +201,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $caseKeys = array(
             'activation_cash', 'activation_credit', 'activation_debts', 'activation_credit_debts',
             'debt_created', 'payment_ok', 'debt_remind', 'reminder_auto', 'days_left',
-            'expiry_soon', 'schedule_cut'
+            'expiry_soon', 'schedule_cut', 'card_transfer', 'card_pull'
         );
 
         $keysIn = isset($_POST['tpl_key']) && is_array($_POST['tpl_key']) ? $_POST['tpl_key'] : array();
@@ -792,9 +805,14 @@ if ($mode === 'log') {
     $where = '1=1';
     $params = array();
     $mineSess = function_exists('whatsapp_session_id') ? whatsapp_session_id() : '';
-    $waLogScope = ($mineSess !== '' && $mineSess !== 'default' && function_exists('whatsapp_log_scope_sql'))
+    $waLogScope = ($mineSess !== '' && $mineSess !== 'default'
+        && function_exists('whatsapp_log_uses_parent_scope') && whatsapp_log_uses_parent_scope()
+        && function_exists('whatsapp_log_scope_sql'))
         ? whatsapp_log_scope_sql('s')
         : '';
+    if (strpos($waLogScope, '1=0') !== false) {
+        $waLogScope = '';
+    }
     if ($waLogScope !== '') {
         $where .= ' AND m.subscriber_id IS NOT NULL' . $waLogScope;
     } elseif (function_exists('subscriber_agent_scope_sql')) {
@@ -1157,6 +1175,9 @@ $sendFilters = array(
     foreach ($sysGroups as $g) {
         foreach ($g['cases'] as $c) {
             $ck = $c['key'];
+            if (empty($c['required'])) {
+                continue;
+            }
             if (is_array($packCases) && array_key_exists($ck, $packCases)) {
                 $stored = trim((string) $packCases[$ck]);
             } else {
@@ -1200,7 +1221,7 @@ $sendFilters = array(
         }
         $usedBy[$tk][] = $ck;
     }
-    $commonVars = '{name} {package} {from} {to} {amount} {debt} {month} {notes} {days} {days_passed} {remaining} {grace}';
+    $commonVars = '{name} {package} {qty} {price} {total} {debt} {from} {to} {amount} {month} {notes} {days} {days_passed} {remaining} {grace}';
     ?>
     <p class="meta tpl-lead">
         <?php echo e($isEnMsg
@@ -1517,6 +1538,9 @@ $sendFilters = array(
 <?php elseif ($mode === 'log'): ?>
     <?php
     $logQs = '';
+    if ($logSize !== 'all') {
+        $logQs .= '&n=' . rawurlencode($logSize);
+    }
     if ($logQ !== '') {
         $logQs .= '&q=' . rawurlencode($logQ);
     }
@@ -1548,6 +1572,28 @@ $sendFilters = array(
             <a class="btn ghost sm" href="messages.php?mode=log"><?php echo e(t('show_all')); ?></a>
         <?php endif; ?>
         <span class="meta msg-count"><?php echo (int) $logTotal; ?> <?php echo e($isEnMsg ? 'messages' : 'رسالة'); ?></span>
+        <span class="meta msg-size">
+            <?php
+            $sizeLinks = array('all' => ($isEnMsg ? 'All' : 'الكل'), '100' => '100', '40' => '40');
+            foreach ($sizeLinks as $sk => $sl) {
+                $on = ($logSize === $sk);
+                $href = 'messages.php?mode=log' . ($sk === 'all' ? '' : '&n=' . rawurlencode($sk));
+                if ($logQ !== '') {
+                    $href .= '&q=' . rawurlencode($logQ);
+                }
+                if ($logType !== '') {
+                    $href .= '&type=' . rawurlencode($logType);
+                }
+                if ($logStatus === '0' || $logStatus === '1') {
+                    $href .= '&status=' . rawurlencode($logStatus);
+                }
+                echo $on
+                    ? '<strong>' . e($sl) . '</strong>'
+                    : '<a href="' . e($href) . '">' . e($sl) . '</a>';
+                echo ' ';
+            }
+            ?>
+        </span>
     </form>
     <form method="post" id="msgLogBulkForm">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
@@ -1603,8 +1649,18 @@ $sendFilters = array(
                     data-log-id="<?php echo (int) $row['id']; ?>"
                     data-log-fail="<?php echo (!$ok && !$resolved) ? '1' : '0'; ?>">
                     <td class="sub-check-cell"><input type="checkbox" class="log-check" name="ids[]" value="<?php echo (int) $row['id']; ?>"></td>
-                    <td class="nowrap"><?php echo e($row['created_at']); ?></td>
-                    <td>
+                    <td class="nowrap log-when" title="<?php echo e($row['created_at']); ?>">
+                        <span class="log-when-full"><?php echo e($row['created_at']); ?></span>
+                        <span class="log-when-short"><?php
+                        $whenRaw = (string) $row['created_at'];
+                        $whenShort = $whenRaw;
+                        if (preg_match('/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}:\d{2})/', $whenRaw, $whenM)) {
+                            $whenShort = $whenM[3] . '-' . $whenM[2] . ' ' . $whenM[4];
+                        }
+                        echo e($whenShort);
+                        ?></span>
+                    </td>
+                    <td class="log-name">
                         <?php if (!empty($row['subscriber_id'])): ?>
                             <a href="subscriber.php?id=<?php echo (int) $row['subscriber_id']; ?>">
                                 <?php echo e($row['subscriber_name'] ? $row['subscriber_name'] : ('#' . $row['subscriber_id'])); ?>
@@ -1613,13 +1669,13 @@ $sendFilters = array(
                             —
                         <?php endif; ?>
                     </td>
-                    <td class="nowrap">
+                    <td class="nowrap log-phone">
                         <?php echo e(format_phone_display($row['phone'])); ?>
                         <?php if (!empty($row['from_phone'])): ?>
                             <div class="msg-from-line"><?php echo e(($isEnMsg ? 'From ' : 'من ') . format_phone_display($row['from_phone'])); ?></div>
                         <?php endif; ?>
                     </td>
-                    <td><small><?php echo e(message_type_title($row['message_type'])); ?></small></td>
+                    <td class="log-type"><small><?php echo e(message_type_title($row['message_type'])); ?></small></td>
                     <td class="msg-status-log" data-log-live="<?php echo (!$ok && !$resolved) ? (int) $row['id'] : 0; ?>">
                         <?php
                         $tryN = isset($row['attempt']) ? (int) $row['attempt'] : 0;
@@ -1653,7 +1709,7 @@ $sendFilters = array(
                         <?php endif; ?>
                     </td>
                     <td class="log-details msg-log-body" title="<?php echo e($bodyFull); ?>">
-                        <?php echo e($bodyShort); ?>
+                        <div class="msg-log-clip"><?php echo e($bodyShort); ?></div>
                         <?php if ($bodyShort !== str_replace(array("\r\n", "\n", "\r"), ' ', $bodyFull)): ?>
                             <details class="msg-log-more">
                                 <summary><?php echo e($isEnMsg ? 'Full' : 'كامل'); ?></summary>
@@ -1738,11 +1794,70 @@ $sendFilters = array(
       .msg-live.is-nophone { color: #64748b; }
       .msg-live.is-nophone .msg-ring { border-color: #e2e8f0; border-top-color: #e2e8f0; animation: none; }
       @keyframes msgRingSpin { to { transform: rotate(360deg); } }
+      .log-when-short { display: none; }
+      #msgLogTable .msg-log-clip {
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        line-height: 1.45;
+        max-height: 2.9em;
+      }
       @media (max-width: 640px) {
         .msg-live { font-size: 11px; gap: 4px; }
         .msg-ring { width: 16px; height: 16px; }
-        #msgLogTable .msg-status-log { white-space: normal; }
-        .msg-live-note { font-size: 12px; }
+        .msg-live-note {
+          font-size: 12px;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+        }
+        .msg-table-wrap { overflow: visible; }
+        #msgLogTable { width: 100%; min-width: 0; }
+        #msgLogTable thead { display: none; }
+        #msgLogTable tbody tr {
+          display: grid;
+          grid-template-columns: 22px minmax(0, 1fr) auto;
+          grid-template-areas:
+            "chk type status"
+            "chk when phone"
+            "name name name"
+            "body body body"
+            "act act act";
+          gap: 2px 8px;
+          padding: 8px 10px;
+          border-bottom: 1px solid #e8eef5;
+        }
+        #msgLogTable td {
+          display: block;
+          width: auto !important;
+          max-width: none !important;
+          padding: 0 !important;
+          border: 0 !important;
+          background: transparent !important;
+          font-size: 12px;
+        }
+        #msgLogTable td.sub-check-cell { grid-area: chk; align-self: start; }
+        #msgLogTable td.log-type { grid-area: type; }
+        #msgLogTable td.log-type small { font-size: 12.5px; font-weight: 800; color: #0f172a; }
+        #msgLogTable td.msg-status-log { grid-area: status; justify-self: end; white-space: nowrap; }
+        #msgLogTable td.log-when { grid-area: when; color: #64748b; font-size: 11px; }
+        #msgLogTable .log-when-full { display: none; }
+        #msgLogTable .log-when-short { display: inline; }
+        #msgLogTable td.log-phone { grid-area: phone; justify-self: end; font-size: 11px; direction: ltr; text-align: end; }
+        #msgLogTable td.log-name {
+          grid-area: name;
+          font-weight: 800;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        #msgLogTable td.msg-log-body { grid-area: body; }
+        #msgLogTable td.acts-cell { grid-area: act; }
+        #msgLogTable td.acts-cell:not(:has(button)) { display: none; }
+        #msgLogTable .msg-fail-why { max-width: none; }
+        #msgLogTable .msg-from-line { margin-top: 0; }
       }
       .msg-st-line { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; vertical-align: middle; }
       .msg-ok-word { color: #15803d; font-weight: 800; }

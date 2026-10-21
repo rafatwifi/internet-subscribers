@@ -148,10 +148,13 @@ if (isset($_GET['ajax']) && ($_GET['ajax'] === 'profiles' || $_GET['ajax'] === '
         $invHit = sas_cards_inventory_load_persisted($cardMaxAge);
         if ($invHit && isset($invHit['groups']) && is_array($invHit['groups']) && function_exists('sas_unused_pins_from_inventory_cache')) {
             $pins = sas_unused_pins_from_inventory_cache();
-            sas_json_out(true, '', array(
-                'cards' => is_array($pins) ? $pins : array(),
-                'profile_id' => 0,
-            ));
+            $needPins = function_exists('sas_inventory_needs_free_pins') && sas_inventory_needs_free_pins($invHit);
+            if (!$needPins || (is_array($pins) && $pins)) {
+                sas_json_out(true, '', array(
+                    'cards' => is_array($pins) ? $pins : array(),
+                    'profile_id' => 0,
+                ));
+            }
         }
     }
     if (function_exists('app_session_close')) {
@@ -413,12 +416,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'wa_template' => post('wa_template', 'activation'),
         );
         $bgActivate = in_array($action, array('sas_activate_card', 'sas_activate_credit', 'sas_activate_reward'), true);
-        if ($bgActivate && function_exists('app_finish_json')) {
-            app_finish_json(true, 'بدأ التفعيل. تقدر تسكر الصفحة. النتيجة باللوك.');
+        if ($bgActivate && function_exists('app_session_close')) {
+            app_session_close();
         }
         list($ok, $msg, $extra) = sas_write_user($pdo, $config, $action, $username, $fields);
-        if ($bgActivate) {
-            if (!$ok && function_exists('activity_log')) {
+        if ($bgActivate && !$ok && function_exists('activity_log')) {
                 $sid = 0;
                 $cacheLog = function_exists('sas_cache_get') ? sas_cache_get($pdo, $username) : null;
                 if ($cacheLog && !empty($cacheLog['local_subscriber_id'])) {
@@ -433,8 +435,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $username . ': ما تفعّل وما انسجل بيع',
                     ($msg !== '' ? $msg : 'الساس ما أكد التفعيل') . "\nما انحسبت فلوس وما انفتحت فاتورة."
                 );
-            }
-            exit;
         }
         sas_json_out($ok, $msg, is_array($extra) ? $extra : array());
     }
@@ -736,7 +736,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 sas_page_redirect();
             }
         }
-        flash('info', 'بدأ التفعيل. تقدر تسكر الصفحة. النتيجة باللوك.');
         if (function_exists('app_finish_and_continue')) {
             app_finish_and_continue('sas.php');
         }
@@ -957,6 +956,24 @@ $parentFilter = isset($_GET['parent']) ? trim((string) $_GET['parent']) : '';
 if (strlen($parentFilter) > 80) {
     $parentFilter = '';
 }
+$withSubs = !isset($_GET['subs']) || (string) $_GET['subs'] !== '0';
+$profFilter = isset($_GET['prof']) ? trim((string) $_GET['prof']) : '';
+if (strlen($profFilter) > 150) {
+    $profFilter = '';
+}
+$connFilter = isset($_GET['conn']) ? (string) $_GET['conn'] : '';
+if ($connFilter !== 'online' && $connFilter !== 'offline') {
+    $connFilter = '';
+}
+$rentFilter = isset($_GET['rent']) ? (string) $_GET['rent'] : '';
+if ($rentFilter !== '1' && $rentFilter !== '0') {
+    $rentFilter = '';
+}
+$GLOBALS['parentFilter'] = $parentFilter;
+$GLOBALS['sasWithSubs'] = $withSubs;
+$GLOBALS['sasProfFilter'] = $profFilter;
+$GLOBALS['sasConnFilter'] = $connFilter;
+$GLOBALS['sasRentFilter'] = $rentFilter;
 
 $cacheCount = 0;
 $sasAjaxEarly = isset($_GET['ajax']) ? (string) $_GET['ajax'] : '';
@@ -1002,23 +1019,40 @@ if (function_exists('sas_cache_filter_sql')) {
     $where .= sas_cache_filter_sql($subFilter);
 }
 if (function_exists('sas_agent_scope_sql')) {
-    $where .= sas_agent_scope_sql('c');
+    $where .= sas_agent_scope_sql('c', $withSubs || $q !== '');
+}
+if ($profFilter !== '') {
+    $where .= ' AND c.profile_name = :prof';
+    $params[':prof'] = $profFilter;
+}
+if ($connFilter === 'online') {
+    $where .= ' AND c.is_online = 1';
+} elseif ($connFilter === 'offline') {
+    $where .= ' AND (c.is_online = 0 OR c.is_online IS NULL)';
+}
+if ($rentFilter === '1') {
+    $where .= ' AND s.rental_enabled = 1 AND s.rental_device_id IS NOT NULL AND s.rental_device_id <> ""';
+} elseif ($rentFilter === '0') {
+    $where .= ' AND (s.rental_enabled IS NULL OR s.rental_enabled = 0 OR s.rental_device_id IS NULL OR s.rental_device_id = "")';
 }
 if ($parentFilter !== '') {
     $selfLab = function_exists('sas_owner_parent_label') ? sas_owner_parent_label($pdo) : '';
-    if ($selfLab !== '' && $parentFilter === $selfLab) {
-        $where .= ' AND (c.parent_name IS NULL OR c.parent_name = "" OR c.parent_name = :parent_name)';
+    if ($selfLab !== '' && strtolower($parentFilter) === strtolower($selfLab)) {
+        $where .= ' AND (c.parent_name IS NULL OR c.parent_name = "" OR LOWER(c.parent_name) = :parent_name)';
     } else {
-        $where .= ' AND c.parent_name = :parent_name';
+        $where .= ' AND LOWER(c.parent_name) = :parent_name';
     }
-    $params[':parent_name'] = $parentFilter;
+    $params[':parent_name'] = strtolower($parentFilter);
 }
 
 $isLiveReq = isset($_GET['live']) && $_GET['live'] === '1';
 if ($sasReady && !$isLiveReq && $q !== '' && strlen($q) >= 2 && function_exists('sas_cache_pull_search')) {
     $localHits = 0;
     try {
-        $cntSql = 'SELECT COUNT(*) FROM sas_users_cache c WHERE ' . $where;
+        $cntFrom = function_exists('sas_cache_list_from_sql')
+            ? sas_cache_list_from_sql()
+            : ' FROM sas_users_cache c LEFT JOIN subscribers s ON s.id = c.local_subscriber_id';
+        $cntSql = 'SELECT COUNT(*)' . $cntFrom . ' WHERE ' . $where;
         $cntSt = $pdo->prepare($cntSql);
         $cntSt->execute($params);
         $localHits = (int) $cntSt->fetchColumn();
@@ -1179,7 +1213,7 @@ if (isset($_GET['live']) && $_GET['live'] === '1') {
 }
 
 $page = isset($_GET['page']) ? max(1, (int) $_GET['page']) : 1;
-$perAllowed = array(10, 50, 100, 500);
+$perAllowed = array(5, 10, 50, 100, 500);
 $perPageRaw = isset($_GET['per_page']) ? (string) $_GET['per_page'] : '10';
 if ($perPageRaw === 'all') {
     $showAll = true;
@@ -1319,20 +1353,43 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'ping_visible') {
             }
             $scope = function_exists('sas_agent_scope_sql') ? sas_agent_scope_sql('c') : '';
             $stPing = $pdo->prepare(
-                'SELECT c.username, c.is_online, c.framed_ip, c.online_ping
+                'SELECT c.username, c.is_online, c.framed_ip, c.mac_address, c.daily_traffic, c.online_ping
                  FROM sas_users_cache c
                  WHERE c.tenant_id = :t AND c.is_online = 1
-                   AND (c.online_ping IS NULL OR c.online_ping = 0)
                    AND c.username IN (' . implode(',', $ph) . ')' . $scope . '
                  LIMIT 40'
             );
             $stPing->execute($bind);
             $pingRows = $stPing->fetchAll();
             if (is_array($pingRows) && $pingRows) {
-                sas_fill_online_pings($pdo, $pingRows);
+                $pingRows = sas_fill_online_pings($pdo, $pingRows, 0);
             }
+            $outRows = array();
+            if (is_array($pingRows)) {
+                foreach ($pingRows as $lr) {
+                    if (!is_array($lr)) {
+                        continue;
+                    }
+                    $un = isset($lr['username']) ? (string) $lr['username'] : '';
+                    if ($un === '') {
+                        continue;
+                    }
+                    $on = !empty($lr['is_online']) ? 1 : 0;
+                    $ms = isset($lr['online_ping']) ? (int) $lr['online_ping'] : 0;
+                    $outRows[$un] = array(
+                        'on' => $on,
+                        'ip' => ($on && isset($lr['framed_ip'])) ? trim((string) $lr['framed_ip']) : '',
+                        'mac' => isset($lr['mac_address']) ? trim((string) $lr['mac_address']) : '',
+                        'traf' => isset($lr['daily_traffic']) ? trim((string) $lr['daily_traffic']) : '',
+                        'ping' => ($ms > 0) ? $ms : null,
+                        'ping_na' => ($on && function_exists('sas_ping_user_is_na') && sas_ping_user_is_na($un)) ? 1 : 0,
+                    );
+                }
+            }
+            echo json_encode(array('ok' => true, 'rows' => $outRows));
+            exit;
         }
-        echo json_encode(array('ok' => true));
+        echo json_encode(array('ok' => true, 'rows' => array()));
     } catch (Exception $e) {
         echo json_encode(array('ok' => false));
     }
@@ -1475,6 +1532,18 @@ function sas_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw, 
     if (!empty($GLOBALS['parentFilter'])) {
         $qs[] = 'parent=' . urlencode((string) $GLOBALS['parentFilter']);
     }
+    if (isset($GLOBALS['sasWithSubs']) && $GLOBALS['sasWithSubs'] === false) {
+        $qs[] = 'subs=0';
+    }
+    if (!empty($GLOBALS['sasProfFilter'])) {
+        $qs[] = 'prof=' . urlencode((string) $GLOBALS['sasProfFilter']);
+    }
+    if (!empty($GLOBALS['sasConnFilter'])) {
+        $qs[] = 'conn=' . urlencode((string) $GLOBALS['sasConnFilter']);
+    }
+    if (!empty($GLOBALS['sasRentFilter'])) {
+        $qs[] = 'rent=' . urlencode((string) $GLOBALS['sasRentFilter']);
+    }
     $arrow = '';
     if ($currentKey === $key) {
         $arrow = $currentDir === 'asc' ? ' ↑' : ' ↓';
@@ -1508,23 +1577,74 @@ if ($savedRefreshSec < 0) {
     $savedRefreshSec = 0;
 }
 $parentNames = array();
+$profileNames = array();
 try {
-    $parentScope = function_exists('sas_agent_scope_sql') ? sas_agent_scope_sql('c') : '';
-    $parentNames = $pdo->query(
-        'SELECT DISTINCT c.parent_name FROM sas_users_cache c
-         WHERE c.parent_name IS NOT NULL AND c.parent_name <> ""' . $parentScope . '
-         ORDER BY c.parent_name ASC LIMIT 100'
-    )->fetchAll(PDO::FETCH_COLUMN);
+    $wideIds = function_exists('sas_ownership_search_tenant_ids')
+        ? sas_ownership_search_tenant_ids($pdo)
+        : array(function_exists('current_tenant_id') ? (int) current_tenant_id() : 1);
+    $wideIn = array();
+    foreach ($wideIds as $wid) {
+        $wid = (int) $wid;
+        if ($wid > 0) {
+            $wideIn[$wid] = $wid;
+        }
+    }
+    if (!$wideIn && function_exists('current_tenant_id')) {
+        $wideIn[(int) current_tenant_id()] = (int) current_tenant_id();
+    }
+    $wideSql = implode(',', $wideIn);
+    if ($wideSql !== '') {
+        $parentNames = $pdo->query(
+            'SELECT DISTINCT c.parent_name FROM sas_users_cache c
+             WHERE c.tenant_id IN (' . $wideSql . ')
+               AND c.parent_name IS NOT NULL AND c.parent_name <> ""
+             ORDER BY c.parent_name ASC'
+        )->fetchAll(PDO::FETCH_COLUMN);
+        $profileNames = $pdo->query(
+            'SELECT DISTINCT c.profile_name FROM sas_users_cache c
+             WHERE c.tenant_id IN (' . $wideSql . ')
+               AND c.profile_name IS NOT NULL AND c.profile_name <> ""
+             ORDER BY c.profile_name ASC'
+        )->fetchAll(PDO::FETCH_COLUMN);
+    }
     if (!is_array($parentNames)) {
         $parentNames = array();
     }
+    if (!is_array($profileNames)) {
+        $profileNames = array();
+    }
+    if (function_exists('sas_ownership_index') && function_exists('current_tenant_id')) {
+        $ownIdx = sas_ownership_index($pdo, (int) current_tenant_id());
+        if (!empty($ownIdx['logins']) && is_array($ownIdx['logins'])) {
+            foreach ($ownIdx['logins'] as $loginName => $hid) {
+                $loginName = trim((string) $loginName);
+                if ($loginName !== '') {
+                    $parentNames[] = $loginName;
+                }
+            }
+        }
+    }
+    $seenParents = array();
+    $parentClean = array();
+    foreach ($parentNames as $pn) {
+        $pn = trim((string) $pn);
+        $key = strtolower($pn);
+        if ($pn === '' || isset($seenParents[$key])) {
+            continue;
+        }
+        $seenParents[$key] = true;
+        $parentClean[] = $pn;
+    }
+    natcasesort($parentClean);
+    $parentNames = array_values($parentClean);
     $selfLab = function_exists('sas_owner_parent_label') ? sas_owner_parent_label($pdo) : '';
-    if ($selfLab !== '') {
+    if ($selfLab !== '' && $wideSql !== '') {
         $emptyParents = 0;
         try {
             $emptyParents = (int) $pdo->query(
                 'SELECT COUNT(*) FROM sas_users_cache c
-                 WHERE (c.parent_name IS NULL OR c.parent_name = "")' . $parentScope
+                 WHERE c.tenant_id IN (' . $wideSql . ')
+                   AND (c.parent_name IS NULL OR c.parent_name = "")'
             )->fetchColumn();
         } catch (Exception $e) {
             $emptyParents = 0;
@@ -1554,6 +1674,18 @@ function sas_filter_href($sub, $parent, $q, $perPageRaw)
     if ($perPageRaw !== '10') {
         $qs[] = 'per_page=' . urlencode($perPageRaw);
     }
+    if (isset($GLOBALS['sasWithSubs']) && $GLOBALS['sasWithSubs'] === false) {
+        $qs[] = 'subs=0';
+    }
+    if (!empty($GLOBALS['sasProfFilter'])) {
+        $qs[] = 'prof=' . urlencode((string) $GLOBALS['sasProfFilter']);
+    }
+    if (!empty($GLOBALS['sasConnFilter'])) {
+        $qs[] = 'conn=' . urlencode((string) $GLOBALS['sasConnFilter']);
+    }
+    if (!empty($GLOBALS['sasRentFilter'])) {
+        $qs[] = 'rent=' . urlencode((string) $GLOBALS['sasRentFilter']);
+    }
     return 'sas.php' . (count($qs) ? ('?' . implode('&', $qs)) : '');
 }
 
@@ -1563,7 +1695,8 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 ?>
 <style>
 .sas-radius-page { font-family: inherit; overflow-anchor: none; }
-.sas-radius-page .sas-legend { display: flex; gap: 18px; flex-wrap: wrap; margin: 0 0 12px; font-size: 14px; color: #444; }
+.sas-radius-page .sas-legend { display: flex; gap: 18px; flex-wrap: wrap; margin: 0 0 12px; font-size: 14px; color: #444; align-items: center; }
+.sas-legend-states { display: contents; }
 .sas-radius-page .sas-legend > span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; flex: 0 0 auto; }
 .sas-radius-page .status-sq {
   display: inline-block;
@@ -1788,19 +1921,17 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0;
 }
 .sas-table-tools {
-  display: flex; align-items: stretch; flex: 0 0 auto;
-  border: 1px solid #c5d0da; border-radius: 4px; overflow: hidden;
-  background: #fff;
+  display: flex; align-items: center; flex: 0 0 auto; gap: 1px;
+  border: 0; background: transparent; overflow: visible;
 }
 .sas-table-tools .tool-ico {
-  appearance: none; border: 0; background: transparent; color: #475569;
-  width: 36px; height: 30px; cursor: pointer; padding: 0;
+  appearance: none; border: 0; background: transparent; color: #9aa8b6;
+  width: 32px; height: 32px; cursor: pointer; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
-  border-inline-end: 1px solid #e2e8f0;
+  border-radius: 6px;
 }
-.sas-table-tools .tool-ico:last-child { border-inline-end: 0; }
-.sas-table-tools .tool-ico:hover { color: #0f172a; background: #e8eef3; }
-.sas-table-tools .tool-ico.is-on { color: #1d4ed8; background: #dbeafe; }
+.sas-table-tools .tool-ico:hover { color: #3c8dbc; background: #f3f7fa; }
+.sas-table-tools .tool-ico.is-on { color: #3c8dbc; background: transparent; }
 .sas-table-tools .tool-ico svg { display: block; }
 .sas-table-headbar .sas-search-wrap { flex: 1 1 280px; width: auto; min-width: 180px; max-width: none; align-self: center; }
 .sas-table-headbar .sas-search-wrap input {
@@ -1836,15 +1967,14 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 }
 .sas-table-card { padding-bottom: 8px; }
 #subsPager {
-  margin: 10px 12px 16px !important;
+  margin: 12px 12px 16px !important;
   padding-bottom: 4px;
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
+  gap: 10px;
+  direction: ltr;
 }
 .subs-pager-pages,
 .subs-pager-sizes {
@@ -1852,14 +1982,36 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   flex-wrap: nowrap;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 2px;
   flex: 0 0 auto;
+  background: #f7f9fb;
+  border: 1px solid #e6edf3;
+  border-radius: 10px;
+  padding: 3px;
 }
-#subsPager .btn.sm {
-  height: 32px; min-width: 32px; padding: 0 10px; font-size: 12px;
-  border-radius: 999px; font-weight: 700;
-  flex: 0 0 auto;
+.pager-n {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 7px;
+  border-radius: 7px;
+  color: #7b8794;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1;
+  text-decoration: none;
+  font-family: "Segoe UI", Tahoma, Arial, sans-serif;
 }
+.pager-n:hover { color: #334155; background: rgba(255,255,255,.7); }
+.pager-n.is-on {
+  background: #fff;
+  color: #1e293b;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .06);
+}
+.pager-n.is-off { opacity: .28; pointer-events: none; }
+.pager-n.pager-arrow { font-size: 15px; color: #94a3b8; min-width: 26px; }
 .sas-row-flash td { background: #fff6d6 !important; }
 .sas-act-wa { margin-top: 8px; width: 100%; }
 .sas-radius-page #sasActModal .sas-act-opts {
@@ -2624,7 +2776,9 @@ body:has(#sasActModal:not(.hidden)) .main-top {
   white-space: nowrap;
 }
 .sas-radius-page #subsTable th {
-  background: #f4f4f4; color: #222; font-size: 13px; font-weight: 800;
+  background: #f4f4f4; color: #222;
+  font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+  font-size: 13px; font-weight: 600;
   padding: 5px 6px; border-bottom: 1px solid #e5e5e5;
   line-height: 1.3;
 }
@@ -2633,8 +2787,18 @@ body:has(#sasActModal:not(.hidden)) .main-top {
   white-space: nowrap;
 }
 .sas-radius-page #subsTable td {
-  padding: 4px 6px; font-size: 14px; font-weight: 600;
+  padding: 4px 6px;
+  font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+  font-size: 13px; font-weight: 400;
   border-bottom: 1px solid #ececec;
+}
+.sas-radius-page #subsTable td a,
+.sas-radius-page #subsTable td .cell-edit,
+.sas-radius-page #subsTable td .sub-ping,
+.sas-radius-page #subsTable td .sub-ago,
+.sas-radius-page #subsTable td strong {
+  font-weight: 400;
+  font-size: 13px;
 }
 .sas-radius-page #subsTable td.col-user,
 .sas-radius-page #subsTable th.col-user,
@@ -2721,7 +2885,6 @@ body:has(#sasActModal:not(.hidden)) .main-top {
   font-weight: 700;
   opacity: .7;
 }
-.sas-radius-page .sas-legend .ping-mode { margin-inline-start: auto; }
 .sas-radius-page #subsTable .sub-ping.is-mid { color: #b45309; background: #fffbeb; }
 .sas-radius-page #subsTable .sub-ping.is-slow { color: #be123c; background: #fff1f2; }
 .sas-radius-page #subsTable .sub-ago {
@@ -2782,6 +2945,42 @@ body:has(#sasActModal:not(.hidden)) .main-top {
   animation: subPingSpin .7s linear infinite;
   vertical-align: middle;
 }
+.sas-radius-page #subsTable .sub-act-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-inline-start: 8px;
+  font-size: 12px;
+  font-weight: 800;
+  color: #0f766e;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.sas-radius-page #subsTable .sub-act-spin {
+  width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 2px solid #dbe4ee;
+  border-top-color: #0f766e;
+  animation: subActSpin .7s linear infinite;
+  flex: 0 0 auto;
+}
+.sas-radius-page #subsTable .sub-act-check {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #16a34a;
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 900;
+  flex: 0 0 auto;
+}
+@keyframes subActSpin { to { transform: rotate(360deg); } }
 @keyframes subPingSpin { to { transform: rotate(360deg); } }
 .sas-radius-page #subsTable .sas-rent-mini .rent-badge {
   width: 22px;
@@ -2805,7 +3004,18 @@ body:has(#sasActModal:not(.hidden)) .main-top {
   padding: 8px 10px 4px; letter-spacing: .02em;
 }
 .sas-filter-parents { max-height: 200px; overflow-y: auto; }
-#filterDropdown { min-width: min(280px, calc(100vw - 20px)); max-height: min(72vh, 520px); overflow: auto; }
+#filterDropdown { min-width: min(340px, calc(100vw - 16px)); max-width: calc(100vw - 16px); overflow: auto; background: #fff; }
+#filterDropdown .sas-adv-actions { position: sticky; bottom: 0; background: #fff; padding-top: 8px; z-index: 2; }
+.sas-adv-filter { display: flex; flex-direction: column; gap: 8px; padding: 10px; }
+.sas-adv-filter label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 800; color: #475569; }
+.sas-adv-filter select,
+.sas-adv-filter input[type="search"],
+.sas-adv-filter input[type="text"] {
+  width: 100%; min-height: 36px; border: 1px solid #d8dee8; border-radius: 8px;
+  padding: 6px 8px; font: inherit; font-weight: 700; background: #fff;
+}
+.sas-adv-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.sas-adv-actions { display: flex; gap: 8px; }
 .sas-radius-page #subsTable .rent-cell-empty {
   min-height: 26px;
   min-width: 22px;
@@ -2908,13 +3118,19 @@ body:has(#sasActModal:not(.hidden)) .main-top {
 }
 @media (max-width: 760px) {
   .sas-radius-page .sas-legend {
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    overflow-y: hidden;
-    gap: 10px 14px;
+    flex-wrap: wrap;
+    overflow: visible;
+    gap: 8px 12px;
     font-size: 12px;
     margin-bottom: 8px;
-    padding-bottom: 2px;
+    justify-content: center;
+  }
+  .sas-legend-states {
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    gap: 10px 14px;
+    width: 100%;
     -webkit-overflow-scrolling: touch;
   }
   .sas-table-headbar {
@@ -3012,7 +3228,13 @@ body:has(#sasActModal:not(.hidden)) .main-top {
   #subsPager {
     margin: 10px 8px 0 !important;
     padding: 8px 8px calc(76px + env(safe-area-inset-bottom)) !important;
-    justify-content: flex-start;
+    justify-content: center;
+  }
+  .sas-radius-page #subsTable td,
+  .sas-radius-page #subsTable td a,
+  .sas-radius-page #subsTable td .sub-ping {
+    font-weight: 400;
+    font-size: 13px;
   }
   body:has(.sas-radius-page) .container {
     margin-bottom: calc(96px + env(safe-area-inset-bottom));
@@ -3144,20 +3366,14 @@ body:has(#sasActModal:not(.hidden)) .main-top {
     <?php endif; ?>
 
     <div class="sas-legend">
-        <?php
-        $pingModeNow = function_exists('sas_ping_mode') ? sas_ping_mode($pdo) : 'off';
-        if (function_exists('sas_ping_mode_style')) {
-            echo sas_ping_mode_style();
-        }
-        if (function_exists('sas_ping_mode_buttons')) {
-            echo sas_ping_mode_buttons($lang === 'en', $pingModeNow);
-        }
-        ?>
+        <?php $pingModeNow = function_exists('sas_ping_mode') ? sas_ping_mode($pdo) : 'off'; ?>
+        <div class="sas-legend-states">
         <span><i class="status-sq status-online"></i> <?php echo e($lang === 'en' ? 'Active + connected' : 'فعال ومتصل'); ?></span>
         <span><i class="status-sq status-active"></i> <?php echo e($lang === 'en' ? 'Active' : 'فعال غير متصل'); ?></span>
         <span><i class="status-sq status-expired"></i> <?php echo e($lang === 'en' ? 'Expired' : 'منتهي'); ?></span>
         <span><i class="status-sq status-expired-online"></i> <?php echo e($lang === 'en' ? 'Expired + connected' : 'منتهي ومتصل'); ?></span>
         <span><i class="status-sq status-left"></i> <?php echo e($lang === 'en' ? 'Disabled' : 'معطل'); ?></span>
+        </div>
     </div>
 
     <div class="sas-table-card">
@@ -3204,6 +3420,9 @@ body:has(#sasActModal:not(.hidden)) .main-top {
                 </button>
                 <button type="button" class="tool-ico" id="filterToggleBtn" title="<?php echo e($lang === 'en' ? 'Filter' : 'فلترة'); ?>">
                     <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M3 5h18l-7 8v5l-4 2v-7z"/></svg>
+                </button>
+                <button type="button" class="tool-ico<?php echo ($pingModeNow !== 'off') ? ' is-on' : ''; ?>" id="pingModeBtn" title="<?php echo e($pingModeNow === 'sas' ? ($lang === 'en' ? 'Ping via SAS' : 'البنك من خلال الساس') : ($pingModeNow === 'portal' ? ($lang === 'en' ? 'Ping via portal' : 'البنك من خلال البوابة') : ($lang === 'en' ? 'Ping off' : 'البنك طافي'))); ?>">
+                    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M12 14.2a2.2 2.2 0 1 0 0-4.4 2.2 2.2 0 0 0 0 4.4zM7.1 16.9a6.9 6.9 0 0 1 0-9.8l1.4 1.4a4.9 4.9 0 0 0 0 7l-1.4 1.4zm9.8 0-1.4-1.4a4.9 4.9 0 0 0 0-7l1.4-1.4a6.9 6.9 0 0 1 0 9.8z"/></svg>
                 </button>
                 <button type="button" class="tool-ico" id="refreshTableBtn" title="<?php echo e($lang === 'en' ? 'Refresh from SAS' : 'تحديث من الساس'); ?>">
                     <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M12 6V3L8 7l4 4V8a4 4 0 1 1-4 4H6a6 6 0 1 0 6-6z"/></svg>
@@ -3277,6 +3496,18 @@ body:has(#sasActModal:not(.hidden)) .main-top {
             if ($parentFilter !== '') {
                 $keepQs[] = 'parent=' . urlencode($parentFilter);
             }
+            if (!$withSubs) {
+                $keepQs[] = 'subs=0';
+            }
+            if ($profFilter !== '') {
+                $keepQs[] = 'prof=' . urlencode($profFilter);
+            }
+            if ($connFilter !== '') {
+                $keepQs[] = 'conn=' . urlencode($connFilter);
+            }
+            if ($rentFilter !== '') {
+                $keepQs[] = 'rent=' . urlencode($rentFilter);
+            }
             $keepStr = count($keepQs) ? '&' . implode('&', $keepQs) : '';
             $baseQs = $keepQs;
             if ($perPageRaw !== '10') {
@@ -3308,29 +3539,32 @@ body:has(#sasActModal:not(.hidden)) .main-top {
                 $nextPage = $totalPages;
             }
             ?>
+            <div class="subs-pager-sizes">
+            <?php foreach (array(5, 10, 50, 100) as $perChoice): ?>
+                <a class="pager-n<?php echo (!$showAll && (int) $perPageRaw === $perChoice) ? ' is-on' : ''; ?>" href="?per_page=<?php echo (int) $perChoice . $extraQs; ?>"><?php echo (int) $perChoice; ?></a>
+            <?php endforeach; ?>
+            </div>
             <?php if ($totalPages > 1): ?>
             <div class="subs-pager-pages">
             <?php if ($page > 1): ?>
-                <a class="btn ghost sm" href="?page=<?php echo $prevPage . $baseStr; ?>" aria-label="prev">&gt;&gt;</a>
+                <a class="pager-n pager-arrow" href="?page=1<?php echo $baseStr; ?>" aria-label="first">&laquo;</a>
+                <a class="pager-n pager-arrow" href="?page=<?php echo $prevPage . $baseStr; ?>" aria-label="prev">&lsaquo;</a>
             <?php else: ?>
-                <span class="btn ghost sm" style="opacity:.35;pointer-events:none" aria-hidden="true">&gt;&gt;</span>
+                <span class="pager-n pager-arrow is-off" aria-hidden="true">&laquo;</span>
+                <span class="pager-n pager-arrow is-off" aria-hidden="true">&lsaquo;</span>
             <?php endif; ?>
             <?php for ($p = $winStart; $p <= $winEnd; $p++): ?>
-                <a class="btn <?php echo $p === $page ? '' : 'ghost'; ?> sm" href="?page=<?php echo $p . $baseStr; ?>"><?php echo $p; ?></a>
+                <a class="pager-n<?php echo $p === $page ? ' is-on' : ''; ?>" href="?page=<?php echo $p . $baseStr; ?>"><?php echo $p; ?></a>
             <?php endfor; ?>
             <?php if ($page < $totalPages): ?>
-                <a class="btn ghost sm" href="?page=<?php echo $nextPage . $baseStr; ?>" aria-label="next">&lt;&lt;</a>
+                <a class="pager-n pager-arrow" href="?page=<?php echo $nextPage . $baseStr; ?>" aria-label="next">&rsaquo;</a>
+                <a class="pager-n pager-arrow" href="?page=<?php echo (int) $totalPages . $baseStr; ?>" aria-label="last">&raquo;</a>
             <?php else: ?>
-                <span class="btn ghost sm" style="opacity:.35;pointer-events:none" aria-hidden="true">&lt;&lt;</span>
+                <span class="pager-n pager-arrow is-off" aria-hidden="true">&rsaquo;</span>
+                <span class="pager-n pager-arrow is-off" aria-hidden="true">&raquo;</span>
             <?php endif; ?>
             </div>
             <?php endif; ?>
-            <div class="subs-pager-sizes">
-            <?php foreach (array(500, 100, 50, 10) as $perChoice): ?>
-                <a class="btn <?php echo (!$showAll && (int) $perPageRaw === $perChoice) ? '' : 'ghost'; ?> sm" href="?per_page=<?php echo (int) $perChoice . $extraQs; ?>"><?php echo (int) $perChoice; ?></a>
-            <?php endforeach; ?>
-            <a class="btn <?php echo $showAll ? '' : 'ghost'; ?> sm" href="?per_page=all<?php echo $extraQs; ?>"><?php echo e(t('show_all')); ?></a>
-            </div>
         </div>
     <?php endif; ?>
     </div>
@@ -3467,25 +3701,66 @@ body:has(#sasActModal:not(.hidden)) .main-top {
     </div>
 </div>
 <div class="ops-dropdown hidden" id="filterDropdown">
-    <div class="sas-filter-label"><?php echo e($lang === 'en' ? 'Status' : 'الحالة'); ?></div>
-    <a class="ops-item<?php echo $subFilter === '' ? ' is-on' : ''; ?>" href="<?php echo e(sas_filter_href('', $parentFilter, $q, $perPageRaw)); ?>"><?php echo e($lang === 'en' ? 'All' : 'الكل'); ?></a>
-    <a class="ops-item<?php echo $subFilter === 'active' ? ' is-on' : ''; ?>" href="<?php echo e(sas_filter_href('active', $parentFilter, $q, $perPageRaw)); ?>"><?php echo e($lang === 'en' ? 'Active' : 'فعال'); ?></a>
-    <a class="ops-item<?php echo $subFilter === 'online' ? ' is-on' : ''; ?>" href="<?php echo e(sas_filter_href('online', $parentFilter, $q, $perPageRaw)); ?>"><?php echo e($lang === 'en' ? 'Connected' : 'متصل حاليا'); ?></a>
-    <a class="ops-item<?php echo $subFilter === 'expired' ? ' is-on' : ''; ?>" href="<?php echo e(sas_filter_href('expired', $parentFilter, $q, $perPageRaw)); ?>"><?php echo e($lang === 'en' ? 'Expired' : 'منتهي'); ?></a>
-    <a class="ops-item<?php echo $subFilter === 'disabled' ? ' is-on' : ''; ?>" href="<?php echo e(sas_filter_href('disabled', $parentFilter, $q, $perPageRaw)); ?>"><?php echo e($lang === 'en' ? 'Disabled' : 'معطل'); ?></a>
-    <a class="ops-item<?php echo $subFilter === 'soon' ? ' is-on' : ''; ?>" href="<?php echo e(sas_filter_href('soon', $parentFilter, $q, $perPageRaw)); ?>"><?php echo e($lang === 'en' ? 'Expiring soon' : 'قرب ينتهي'); ?></a>
-    <a class="ops-item<?php echo $subFilter === 'today' ? ' is-on' : ''; ?>" href="<?php echo e(sas_filter_href('today', $parentFilter, $q, $perPageRaw)); ?>"><?php echo e($lang === 'en' ? 'Ends today' : 'ينتهي اليوم'); ?></a>
-    <a class="ops-item<?php echo $subFilter === 'debt' ? ' is-on' : ''; ?>" href="<?php echo e(sas_filter_href('debt', $parentFilter, $q, $perPageRaw)); ?>"><?php echo e($lang === 'en' ? 'Has debt' : 'عليهم دين'); ?></a>
-    <a class="ops-item<?php echo $subFilter === 'rental' ? ' is-on' : ''; ?>" href="<?php echo e(sas_filter_href('rental', $parentFilter, $q, $perPageRaw)); ?>"><?php echo e($lang === 'en' ? 'Has rental' : 'عليهم إيجار'); ?></a>
-    <div class="sas-filter-label"><?php echo e($lang === 'en' ? 'Parent' : 'تابع الى'); ?></div>
-    <a class="ops-item<?php echo $parentFilter === '' ? ' is-on' : ''; ?>" href="<?php echo e(sas_filter_href($subFilter, '', $q, $perPageRaw)); ?>"><?php echo e($lang === 'en' ? 'All parents' : 'كل التوابع'); ?></a>
-    <div class="sas-filter-parents">
-        <?php foreach ($parentNames as $pn): ?>
-            <a class="ops-item<?php echo $parentFilter === (string) $pn ? ' is-on' : ''; ?>" href="<?php echo e(sas_filter_href($subFilter, (string) $pn, $q, $perPageRaw)); ?>"><?php echo e((string) $pn); ?></a>
-        <?php endforeach; ?>
-        <?php if (!$parentNames): ?>
-            <div class="ops-item" style="cursor:default;color:#94a3b8"><?php echo e($lang === 'en' ? 'No parents yet' : 'ماكو تابع الى بعد'); ?></div>
-        <?php endif; ?>
+    <form method="get" action="sas.php" class="sas-adv-filter" id="sasAdvFilter">
+        <?php if ($q !== ''): ?><input type="hidden" name="q" value="<?php echo e($q); ?>"><?php endif; ?>
+        <?php if ($perPageRaw !== '10'): ?><input type="hidden" name="per_page" value="<?php echo e($perPageRaw); ?>"><?php endif; ?>
+        <label><?php echo e($lang === 'en' ? 'Status' : 'الحالة'); ?>
+            <select name="sub">
+                <option value=""><?php echo e($lang === 'en' ? 'Any' : 'الكل'); ?></option>
+                <option value="active"<?php echo $subFilter === 'active' ? ' selected' : ''; ?>><?php echo e($lang === 'en' ? 'Active' : 'فعال'); ?></option>
+                <option value="expired"<?php echo $subFilter === 'expired' ? ' selected' : ''; ?>><?php echo e($lang === 'en' ? 'Expired' : 'منتهي'); ?></option>
+                <option value="disabled"<?php echo $subFilter === 'disabled' ? ' selected' : ''; ?>><?php echo e($lang === 'en' ? 'Disabled' : 'معطل'); ?></option>
+                <option value="soon"<?php echo $subFilter === 'soon' ? ' selected' : ''; ?>><?php echo e($lang === 'en' ? 'Expiring soon' : 'قرب ينتهي'); ?></option>
+                <option value="today"<?php echo $subFilter === 'today' ? ' selected' : ''; ?>><?php echo e($lang === 'en' ? 'Ends today' : 'ينتهي اليوم'); ?></option>
+                <option value="debt"<?php echo $subFilter === 'debt' ? ' selected' : ''; ?>><?php echo e($lang === 'en' ? 'Has debt' : 'عليهم دين'); ?></option>
+            </select>
+        </label>
+        <label><?php echo e($lang === 'en' ? 'Connection' : 'الاتصال'); ?>
+            <select name="conn">
+                <option value=""><?php echo e($lang === 'en' ? 'Any' : 'الكل'); ?></option>
+                <option value="online"<?php echo $connFilter === 'online' ? ' selected' : ''; ?>><?php echo e($lang === 'en' ? 'Online' : 'متصل'); ?></option>
+                <option value="offline"<?php echo $connFilter === 'offline' ? ' selected' : ''; ?>><?php echo e($lang === 'en' ? 'Offline' : 'غير متصل'); ?></option>
+            </select>
+        </label>
+        <label><?php echo e($lang === 'en' ? 'Profile' : 'الباقة'); ?>
+            <select name="prof">
+                <option value=""><?php echo e($lang === 'en' ? 'Any' : 'الكل'); ?></option>
+                <?php foreach ($profileNames as $prName): ?>
+                    <option value="<?php echo e((string) $prName); ?>"<?php echo $profFilter === (string) $prName ? ' selected' : ''; ?>><?php echo e((string) $prName); ?></option>
+                <?php endforeach; ?>
+            </select>
+        </label>
+        <label><?php echo e($lang === 'en' ? 'Parent' : 'تابع إلى'); ?>
+            <select name="parent">
+                <option value=""><?php echo e($lang === 'en' ? 'Any' : 'الكل'); ?></option>
+                <?php foreach ($parentNames as $pn): ?>
+                    <option value="<?php echo e((string) $pn); ?>"<?php echo strtolower($parentFilter) === strtolower((string) $pn) ? ' selected' : ''; ?>><?php echo e((string) $pn); ?></option>
+                <?php endforeach; ?>
+            </select>
+        </label>
+        <label><?php echo e($lang === 'en' ? 'Rental' : 'الإيجار'); ?>
+            <select name="rent">
+                <option value=""><?php echo e($lang === 'en' ? 'Any' : 'الكل'); ?></option>
+                <option value="1"<?php echo $rentFilter === '1' ? ' selected' : ''; ?>><?php echo e($lang === 'en' ? 'Has rental' : 'عندهم إيجار'); ?></option>
+                <option value="0"<?php echo $rentFilter === '0' ? ' selected' : ''; ?>><?php echo e($lang === 'en' ? 'No rental' : 'بدون إيجار'); ?></option>
+            </select>
+        </label>
+        <div class="sas-adv-row">
+            <span><?php echo e($lang === 'en' ? 'Include agency subscribers' : 'تابعين الوكالات'); ?></span>
+            <input type="hidden" name="subs" value="0">
+            <input type="checkbox" name="subs" value="1" <?php echo $withSubs ? 'checked' : ''; ?>>
+        </div>
+        <div class="sas-adv-actions">
+            <button class="btn" type="submit"><?php echo e($lang === 'en' ? 'Apply' : 'تطبيق'); ?></button>
+            <a class="btn ghost" href="sas.php"><?php echo e($lang === 'en' ? 'Clear' : 'مسح'); ?></a>
+        </div>
+    </form>
+</div>
+<div class="ops-dropdown hidden" id="pingModeDropdown">
+    <div id="subPingMode" data-mode="<?php echo e($pingModeNow); ?>">
+        <button type="button" class="ops-item<?php echo $pingModeNow === 'portal' ? ' is-on' : ''; ?>" data-ping-mode="portal"><?php echo e($lang === 'en' ? 'Ping via portal' : 'البنك من خلال البوابة'); ?></button>
+        <button type="button" class="ops-item<?php echo $pingModeNow === 'off' ? ' is-on' : ''; ?>" data-ping-mode="off"><?php echo e($lang === 'en' ? 'Off' : 'طافي'); ?></button>
+        <button type="button" class="ops-item<?php echo $pingModeNow === 'sas' ? ' is-on' : ''; ?>" data-ping-mode="sas"><?php echo e($lang === 'en' ? 'Ping via SAS' : 'البنك من خلال الساس'); ?></button>
     </div>
 </div>
 <div class="ops-dropdown hidden" id="autoRefreshDropdown">
@@ -3741,7 +4016,7 @@ body:has(#sasActModal:not(.hidden)) .main-top {
     </div>
 </div>
 
-<div class="modal-backdrop hidden" id="sasAskModal" role="dialog" aria-modal="true">
+<div class="modal-backdrop hidden" id="sasAskModal" role="dialog" aria-modal="true" style="z-index:100070">
     <div class="modal-card">
         <h3 id="sasAskTitle"></h3>
         <p class="meta" id="sasAskText" style="margin:0 0 14px"></p>
@@ -4153,10 +4428,33 @@ body:has(#sasActModal:not(.hidden)) .main-top {
   function placeMenu(drop, anchor) {
     if (!drop || !anchor) return;
     drop.classList.remove('hidden');
-    var r = anchor.getBoundingClientRect();
     drop.style.position = 'fixed';
-    drop.style.top = Math.round(r.bottom + 6) + 'px';
-    drop.style.left = Math.round(r.left) + 'px';
+    drop.style.right = 'auto';
+    drop.style.maxHeight = '';
+    drop.style.overflowY = '';
+    drop.style.visibility = 'hidden';
+    drop.style.left = '0px';
+    drop.style.top = '0px';
+    var r = anchor.getBoundingClientRect();
+    var w = drop.offsetWidth || 280;
+    var h = drop.offsetHeight || 240;
+    var x = r.left;
+    if (x + w > window.innerWidth - 8) x = r.right - w;
+    if (x < 8) x = 8;
+    if (x + w > window.innerWidth - 8) x = Math.max(8, window.innerWidth - w - 8);
+    var y = Math.round(r.bottom + 6);
+    var room = window.innerHeight - y - 8;
+    if (h > room && r.top > room + 40) {
+      y = Math.max(8, Math.round(r.top - Math.min(h, r.top - 8) - 6));
+      room = window.innerHeight - y - 8;
+    }
+    if (h > room) {
+      drop.style.maxHeight = Math.max(180, Math.round(room)) + 'px';
+      drop.style.overflowY = 'auto';
+    }
+    drop.style.left = Math.round(x) + 'px';
+    drop.style.top = y + 'px';
+    drop.style.visibility = 'visible';
   }
   function placeMenuAt(el, clientX, clientY, anchorBtn) {
     if (!el) return;
@@ -4236,16 +4534,20 @@ body:has(#sasActModal:not(.hidden)) .main-top {
     if (m) m.classList.add('hidden');
     askRun = null;
   }
-  function openAsk(title, text, onYes) {
+  var askYesDefault = <?php echo json_encode($lang === 'en' ? 'Disconnect' : 'فصل'); ?>;
+  function openAsk(title, text, onYes, yesLabel) {
     var m = document.getElementById('sasAskModal');
     var h = document.getElementById('sasAskTitle');
     var p = document.getElementById('sasAskText');
+    var yes = document.getElementById('sasAskYes');
     if (!m || !h || !p) {
       if (onYes) onYes();
       return;
     }
+    if (m.parentNode !== document.body) document.body.appendChild(m);
     h.textContent = title || '';
     p.textContent = text || '';
+    if (yes) yes.textContent = yesLabel || askYesDefault;
     askRun = onYes || null;
     m.classList.remove('hidden');
   }
@@ -4342,20 +4644,27 @@ body:has(#sasActModal:not(.hidden)) .main-top {
       return;
     }
     if (action === 'give_test' && one) {
-      if (!window.confirm(confirmTest)) return;
-      if (window.appBusySet) window.appBusySet({ force: true });
-      postSas('give_test', { id: one.id }).then(function (d) {
-        if (window.appBusyDone) window.appBusyDone();
-        if (d && d.ok) {
-          rememberActFlash((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Test given' : 'تم إعطاء التست'); ?>, 'ok');
-          window.location.reload();
-        } else {
-          showAppToast((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Request failed' : 'فشل الطلب'); ?>, 'error');
-        }
-      }).catch(function () {
-        if (window.appBusyDone) window.appBusyDone();
-        showAppToast(<?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>, 'error');
-      });
+      var who = one.name || one.username || one.id || '';
+      openAsk(
+        <?php echo json_encode(t('give_test')); ?>,
+        (who ? who + ' — ' : '') + confirmTest,
+        function () {
+          if (window.appBusySet) window.appBusySet({ force: true });
+          postSas('give_test', { id: one.id }).then(function (d) {
+            if (window.appBusyDone) window.appBusyDone();
+            if (d && d.ok) {
+              rememberActFlash((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Test given' : 'تم إعطاء التست'); ?>, 'ok');
+              window.location.reload();
+            } else {
+              showAppToast((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Request failed' : 'فشل الطلب'); ?>, 'error');
+            }
+          }).catch(function () {
+            if (window.appBusyDone) window.appBusyDone();
+            showAppToast(<?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>, 'error');
+          });
+        },
+        <?php echo json_encode($lang === 'en' ? 'Add the day' : 'إضافة اليوم'); ?>
+      );
       return;
     }
     if (action === 'bulk_activate') {
@@ -4757,6 +5066,19 @@ body:has(#sasActModal:not(.hidden)) .main-top {
     var sel = document.getElementById('sasActCardSelect');
     var hint = document.getElementById('sasActCardHint');
     if (!sel) return;
+    if ((!cards || !cards.length) && window.sasCardsLoading) {
+      sel.innerHTML = '';
+      var waitOpt = document.createElement('option');
+      waitOpt.value = '';
+      waitOpt.textContent = <?php echo json_encode($lang === 'en' ? 'Loading unused cards…' : 'جاري جلب الكروت الشاغرة…'); ?>;
+      sel.appendChild(waitOpt);
+      sel.disabled = true;
+      if (hint) {
+        hint.className = 'sas-sync-note';
+        hint.textContent = <?php echo json_encode($lang === 'en' ? 'Loading unused cards…' : 'جاري جلب الكروت الشاغرة…'); ?>;
+      }
+      return;
+    }
     sel.innerHTML = '';
     if (!cards.length) {
       var empty = document.createElement('option');
@@ -4826,6 +5148,8 @@ body:has(#sasActModal:not(.hidden)) .main-top {
     paintRewardPts(rewardPtsDisp);
     loadQuote(row.id, row.profileId, row.profileName);
     // اعرض كروت الجرد فوراً (نفس صفحة الكروت) — بدون تفريغ القائمة
+    var cardsReady = Array.isArray(cardsCacheAll) && cardsCacheAll.length;
+    window.sasCardsLoading = !cardsReady;
     renderCards(cardsForProfile(row.profileId, row.profileName));
     loadProfiles().then(function (ps) {
       fillSelect(document.getElementById('sasActProfile'), ps, row.profileId);
@@ -4834,13 +5158,13 @@ body:has(#sasActModal:not(.hidden)) .main-top {
     }).catch(function () {
       renderCards(cardsForProfile(row.profileId, row.profileName));
     });
-    if (!Array.isArray(cardsCacheAll) || !cardsCacheAll.length) {
-      if (hint) {
-        hint.className = 'sas-sync-note';
-        hint.textContent = <?php echo json_encode($lang === 'en' ? 'Loading unused cards…' : 'جاري جلب الكروت الشاغرة…'); ?>;
-      }
-    }
-    softRefreshCards(true).then(function () { refreshActCardsIfOpen(); });
+    softRefreshCards(false).then(function () {
+      window.sasCardsLoading = false;
+      refreshActCardsIfOpen();
+    }).catch(function () {
+      window.sasCardsLoading = false;
+      refreshActCardsIfOpen();
+    });
     syncActWa();
   }
   function paintRowStatus(tr, d) {
@@ -4886,11 +5210,11 @@ body:has(#sasActModal:not(.hidden)) .main-top {
     if (!window.confirm(msg)) return;
     postSas('sas_enable', { id: row.id, enabled: on ? '1' : '0' }).then(function (d) {
       if (!d || !d.ok) {
-        alert((d && d.message) || <?php echo json_encode($lang === 'en' ? 'SAS update failed' : 'فشل التعديل بالساس'); ?>);
+        showAppToast((d && d.message) || <?php echo json_encode($lang === 'en' ? 'SAS update failed' : 'فشل التعديل بالساس'); ?>, 'error');
         return;
       }
       paintRowStatus(row.tr, d);
-    }).catch(function () { alert(<?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>); });
+    }).catch(function () { showAppToast(<?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>, 'error'); });
   }
   function openProfModal(row) {
     actUser = row;
@@ -5234,9 +5558,16 @@ body:has(#sasActModal:not(.hidden)) .main-top {
       };
       var req;
       var actModeNow = currentActMode();
+      var actName = actUser.username || actUser.id || '';
+      hideActFab();
+      var actModal = document.getElementById('sasActModal');
+      if (actModal) {
+        actModal.classList.remove('is-locking');
+        actModal.classList.add('hidden');
+      }
+      paintActMark(actName, 'wait');
       if (actModeNow === 'credit' || actModeNow === 'reward') {
         var units = document.getElementById('sasActUnits');
-        setActBusy(true);
         req = postSas(actModeNow === 'reward' ? 'sas_activate_reward' : 'sas_activate_credit', {
           id: actUser.id,
           profile_id: profileId,
@@ -5257,11 +5588,11 @@ body:has(#sasActModal:not(.hidden)) .main-top {
           cardProfileId = opt.getAttribute('data-profile-id') || '0';
         }
         if (!pin) {
+          paintActMark(actName, '');
+          if (actModal) actModal.classList.remove('hidden');
           if (err) err.textContent = <?php echo json_encode($lang === 'en' ? 'No unused cards' : 'ماكو كروت شاغرة'); ?>;
-          setActBusy(false);
           return;
         }
-        setActBusy(true);
         req = postSas('sas_activate_card', {
           id: actUser.id,
           pin: pin,
@@ -5278,7 +5609,7 @@ body:has(#sasActModal:not(.hidden)) .main-top {
           cardsCacheAll = d.cards;
         }
         if (!d || !d.ok) {
-          setActBusy(false);
+          paintActMark(actName, '');
           var failMsg = (d && d.message) || <?php echo json_encode($lang === 'en' ? 'Activate failed' : 'فشل التفعيل'); ?>;
           // كرت مرفوض/مستخدم: حدّث القائمة واختر الكرت التالي تلقائياً
           if (actModeNow === 'card' && pin) {
@@ -5300,10 +5631,10 @@ body:has(#sasActModal:not(.hidden)) .main-top {
           showAppToast(failMsg, 'error');
           return;
         }
-        rememberActFlash((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Subscriber activated' : 'تم تفعيل المشترك'); ?>, 'ok');
-        window.location.reload();
+        paintActMark(actName, 'ok');
+        refreshTableLive();
       }).catch(function () {
-        setActBusy(false);
+        paintActMark(actName, '');
         var netMsg = <?php echo json_encode($lang === 'en' ? 'Activation timed out or network error — check SAS, money was NOT recorded if activate failed' : 'انتهت مهلة التفعيل أو فشل الاتصال — تحقق من الساس؛ المبلغ ما ينسجل إذا التفعيل فشل'); ?>;
         if (err) err.textContent = netMsg;
         showAppToast(netMsg, 'error');
@@ -5402,6 +5733,7 @@ body:has(#sasActModal:not(.hidden)) .main-top {
   }
   bindDrop('colsToggleBtn', 'colsDropdown');
   bindDrop('filterToggleBtn', 'filterDropdown');
+  bindDrop('pingModeBtn', 'pingModeDropdown');
   bindDrop('autoRefreshBtn', 'autoRefreshDropdown');
   document.addEventListener('click', function (e) {
     if (Date.now() < opsIgnoreCloseUntil) return;
@@ -5573,6 +5905,7 @@ body:has(#sasActModal:not(.hidden)) .main-top {
       wrap.scrollLeft = wrapLeft;
     }
     if (window.scrollTo) window.scrollTo(0, y);
+    repaintActMarks();
   }
   var pingModeBox = document.getElementById('subPingMode');
   if (pingModeBox) {
@@ -5580,11 +5913,18 @@ body:has(#sasActModal:not(.hidden)) .main-top {
       var btn = e.target && e.target.closest ? e.target.closest('[data-ping-mode]') : null;
       if (!btn || !pingModeBox.contains(btn)) return;
       var mode = btn.getAttribute('data-ping-mode') || 'off';
+      closeMenus();
       if (pingModeBox.getAttribute('data-mode') === mode) return;
       var all = pingModeBox.querySelectorAll('[data-ping-mode]');
       for (var i = 0; i < all.length; i++) all[i].classList.remove('is-on');
       btn.classList.add('is-on');
       pingModeBox.setAttribute('data-mode', mode);
+      var pingIco = document.getElementById('pingModeBtn');
+      if (pingIco) {
+        if (mode === 'off') pingIco.classList.remove('is-on');
+        else pingIco.classList.add('is-on');
+        pingIco.title = (btn.textContent || '').replace(/\s+/g, ' ').trim();
+      }
       var body = new FormData();
       body.append('csrf', csrf);
       body.append('action', 'sas_ping_mode');
@@ -5777,25 +6117,55 @@ body:has(#sasActModal:not(.hidden)) .main-top {
   setTimeout(function () { paintLiveOnline(); }, 400);
   setInterval(function () { paintLiveOnline(); }, 2000);
   var pingVisibleBusy = false;
-  function pingVisibleMissing() {
-    if (pingVisibleBusy || document.hidden) return;
+  function pingVisibleNow() {
+    if (pingVisibleBusy || document.hidden || tableIsBusy()) return;
     var names = [];
     var rows = document.querySelectorAll('#subsTable tbody tr[data-online="1"]');
     for (var i = 0; i < rows.length && names.length < 40; i++) {
-      var cell = rows[i].querySelector('.col-ping');
-      if (!cell) continue;
-      if (cell.querySelector('.sub-ping') && !cell.querySelector('.sub-ping-na')) continue;
       var id = rows[i].getAttribute('data-id') || '';
       if (id) names.push(id);
     }
     if (!names.length) return;
     pingVisibleBusy = true;
-    fetch('sas.php?ajax=ping_visible&users=' + encodeURIComponent(names.join(',')), { credentials: 'same-origin' })
-      .then(function () { pingVisibleBusy = false; })
+    fetch('sas.php?ajax=ping_visible&users=' + encodeURIComponent(names.join(',')), {
+      credentials: 'same-origin',
+      cache: 'no-store'
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        pingVisibleBusy = false;
+        if (!d || !d.ok || !d.rows || tableIsBusy()) return;
+        Object.keys(d.rows).forEach(function (name) {
+          var info = d.rows[name] || {};
+          var tr = null;
+          var all = tbody.querySelectorAll('tr[data-id]');
+          for (var ri = 0; ri < all.length; ri++) {
+            if (all[ri].getAttribute('data-id') === name) { tr = all[ri]; break; }
+          }
+          if (!tr || tr.querySelector('.editing') || tr.querySelector('[contenteditable="true"]')) return;
+          var on = info.on ? '1' : '0';
+          tr.setAttribute('data-online', on);
+          paintStatusSquare(tr, info.on ? 1 : 0);
+          paintIpCell(tr.querySelector('.col-ip'), info.ip || '');
+          var macCell = tr.querySelector('.col-mac');
+          if (macCell) {
+            var mac = info.mac || '';
+            if ((macCell.getAttribute('data-mac') || '') !== mac) {
+              macCell.setAttribute('data-mac', mac);
+              macCell.textContent = mac || '—';
+            }
+          }
+          var trafCell = tr.querySelector('.col-traf');
+          if (trafCell && info.traf && trafCell.textContent !== info.traf) trafCell.textContent = info.traf;
+          var pingCell = tr.querySelector('.col-ping');
+          if (pingCell) pingCell.removeAttribute('data-ping');
+          paintPingCell(tr, info);
+        });
+      })
       .catch(function () { pingVisibleBusy = false; });
   }
-  setTimeout(pingVisibleMissing, 1200);
-  setInterval(pingVisibleMissing, 20000);
+  setTimeout(pingVisibleNow, 800);
+  setInterval(pingVisibleNow, 3000);
 
   function setFoundCount(n, searching) {
     if (!foundLabel) return;
@@ -5810,6 +6180,49 @@ body:has(#sasActModal:not(.hidden)) .main-top {
     foundLabel.textContent = String(foundLabelTpl).replace('{n}', String(n));
   }
 
+  var actMarks = {};
+  var actWaitLabel = <?php echo json_encode($lang === 'en' ? 'Activating…' : 'جاري التفعيل'); ?>;
+  function rowByUser(username) {
+    if (!tbody || !username) return null;
+    var rows = tbody.querySelectorAll('tr[data-id]');
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].getAttribute('data-id') === username) return rows[i];
+    }
+    return null;
+  }
+  function paintActMark(username, state) {
+    username = String(username || '');
+    if (!username) return;
+    if (state) actMarks[username] = state;
+    else delete actMarks[username];
+    var tr = rowByUser(username);
+    if (!tr) return;
+    var host = tr.querySelector('.sas-fn-wrap') || tr.querySelector('.col-fn') || tr.querySelector('.col-user');
+    if (!host) return;
+    var mark = host.querySelector('.sub-act-mark');
+    if (!state) {
+      if (mark && mark.parentNode) mark.parentNode.removeChild(mark);
+      return;
+    }
+    if (!mark) {
+      mark = document.createElement('span');
+      host.appendChild(mark);
+    }
+    if (state === 'ok') {
+      mark.className = 'sub-act-mark is-ok';
+      mark.innerHTML = '<span class="sub-act-check" aria-hidden="true">✓</span>';
+      return;
+    }
+    mark.className = 'sub-act-mark is-wait';
+    mark.innerHTML = '<span class="sub-act-spin"></span><span class="sub-act-txt"></span>';
+    var txt = mark.querySelector('.sub-act-txt');
+    if (txt) txt.textContent = actWaitLabel;
+  }
+  function repaintActMarks() {
+    Object.keys(actMarks).forEach(function (username) {
+      paintActMark(username, actMarks[username]);
+    });
+  }
   function applyLiveRows(html, count) {
     if (!tbody || html == null || html === '') return;
     tbody.innerHTML = html;
@@ -5823,6 +6236,7 @@ body:has(#sasActModal:not(.hidden)) .main-top {
       }
     }
     setFoundCount(typeof count === 'number' ? count : null, false);
+    repaintActMarks();
   }
 
   function liveSearch(force) {
@@ -5851,7 +6265,11 @@ body:has(#sasActModal:not(.hidden)) .main-top {
     }
     var url = 'sas.php?live=1&q=' + encodeURIComponent(q)
       + '&sub=' + encodeURIComponent(<?php echo json_encode($subFilter); ?>)
-      + '&parent=' + encodeURIComponent(<?php echo json_encode($parentFilter); ?>);
+      + '&parent=' + encodeURIComponent(<?php echo json_encode($parentFilter); ?>)
+      + '&subs=' + encodeURIComponent(<?php echo $withSubs ? '1' : '0'; ?>)
+      + '&prof=' + encodeURIComponent(<?php echo json_encode($profFilter); ?>)
+      + '&conn=' + encodeURIComponent(<?php echo json_encode($connFilter); ?>)
+      + '&rent=' + encodeURIComponent(<?php echo json_encode($rentFilter); ?>);
     fetch(url, {
       credentials: 'same-origin',
       signal: ctrl ? ctrl.signal : undefined,
@@ -6080,7 +6498,7 @@ body:has(#sasActModal:not(.hidden)) .main-top {
         .then(function (data) {
           saving = false;
           if (!data || !data.ok) {
-            alert((data && data.message) ? data.message : <?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>);
+            showAppToast((data && data.message) ? data.message : <?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>, 'error');
             el.textContent = el.getAttribute('data-display') || el.getAttribute('data-value') || '';
             return;
           }
@@ -6097,7 +6515,7 @@ body:has(#sasActModal:not(.hidden)) .main-top {
         })
         .catch(function () {
           saving = false;
-          alert(<?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>);
+          showAppToast(<?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>, 'error');
         });
     }
     function beginEdit(el) {
@@ -6160,7 +6578,7 @@ body:has(#sasActModal:not(.hidden)) .main-top {
         if (field === 'phone') {
           var phoneDigits = String(val).replace(/\D/g, '');
           if (phoneDigits.length !== 11) {
-            alert(<?php echo json_encode($lang === 'en' ? 'Phone must be 11 digits' : 'رقم الهاتف لازم يكون 11 رقم'); ?>);
+            showAppToast(<?php echo json_encode($lang === 'en' ? 'Phone must be 11 digits' : 'رقم الهاتف لازم يكون 11 رقم'); ?>, 'error');
             el.textContent = el.getAttribute('data-display') || current || '-';
             return;
           }
@@ -6230,7 +6648,7 @@ body:has(#sasActModal:not(.hidden)) .main-top {
           return;
         }
         if (isNaN(n) || n < 0) {
-          alert(<?php echo json_encode($lang === 'en' ? 'Enter a valid amount' : 'أدخل مبلغ صحيح'); ?>);
+          showAppToast(<?php echo json_encode($lang === 'en' ? 'Enter a valid amount' : 'أدخل مبلغ صحيح'); ?>, 'error');
           btn.textContent = snap;
           return;
         }
@@ -6249,7 +6667,7 @@ body:has(#sasActModal:not(.hidden)) .main-top {
           .then(function (r) { return r.json(); })
           .then(function (data) {
             if (!data || !data.ok) {
-              alert((data && data.message) ? data.message : <?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>);
+              showAppToast((data && data.message) ? data.message : <?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>, 'error');
               btn.textContent = snap;
               return;
             }
@@ -6260,9 +6678,10 @@ body:has(#sasActModal:not(.hidden)) .main-top {
               tr.setAttribute('data-debt', Number(data.debt) > 0 ? '1' : '0');
               if (data.local_id) tr.setAttribute('data-local-id', String(data.local_id));
             }
+            if (data.message) showAppToast(data.message, 'ok');
           })
           .catch(function () {
-            alert(<?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>);
+            showAppToast(<?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>, 'error');
             btn.textContent = snap;
           });
       }
@@ -6326,7 +6745,7 @@ body:has(#sasActModal:not(.hidden)) .main-top {
         .then(function (r) { return r.json(); })
         .then(function (data) {
           if (!data || !data.ok) {
-            alert((data && data.message) ? data.message : <?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>);
+            showAppToast((data && data.message) ? data.message : <?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>, 'error');
             ctx.restore();
             return;
           }
@@ -6350,7 +6769,7 @@ body:has(#sasActModal:not(.hidden)) .main-top {
           if (data.message) showAppToast(data.message, 'ok');
         })
         .catch(function () {
-          alert(<?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>);
+          showAppToast(<?php echo json_encode($lang === 'en' ? 'Could not save' : 'تعذر الحفظ'); ?>, 'error');
           ctx.restore();
         });
     }

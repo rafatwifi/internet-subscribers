@@ -62,6 +62,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!function_exists('run_card_debt_reminders')) {
             flash('error', $isEn ? 'Card remind missing' : 'دالة تذكير الكروت غير موجودة');
         } else {
+            $GLOBALS['card_debt_remind_manual'] = 1;
             $run = run_card_debt_reminders($pdo, $config, 40);
             flash('success', ($isEn ? 'Card debt reminders: checked ' : 'تذكير ديون الكروت: فحص ')
                 . (int) $run['checked']

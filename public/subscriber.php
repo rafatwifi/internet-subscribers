@@ -837,10 +837,10 @@ $isActiveSub = !empty($activeSubCard);
     <a class="btn ghost" href="<?php echo e((!empty($subscriber['sas_username']) && function_exists('sas_user_url')) ? sas_user_url($subscriber['sas_username']) : 'subscribers.php'); ?>"><?php echo e($lang === 'en' ? 'Back' : 'رجوع'); ?></a>
     <a class="btn" href="subscriber.php?id=<?php echo (int) $id; ?>&edit=1"><?php echo e(t('edit')); ?></a>
     <a class="btn secondary" href="activate.php?subscriber_id=<?php echo (int) $id; ?>"><?php echo e(t('activate')); ?></a>
-    <form method="post" style="display:inline" onsubmit="if(!confirm(<?php echo json_encode(t('confirm_give_test')); ?>))return false;if(window.appBusySet)window.appBusySet({force:true});return true;">
+    <form method="post" id="giveTestForm" style="display:inline" data-no-wait="1">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="action" value="give_test">
-        <button class="btn ghost" type="submit"><?php echo e(t('give_test')); ?></button>
+        <button class="btn ghost" type="button" id="giveTestOpen"><?php echo e(t('give_test')); ?></button>
     </form>
     <button type="button" class="btn sub-day-btn" id="addDayOpen"><?php echo e($lang === 'en' ? 'Add 1 day' : 'إضافة 1 يوم'); ?></button>
     <?php if ($canEditDebts): ?>
@@ -849,6 +849,16 @@ $isActiveSub = !empty($activeSubCard);
     <?php if ($unpaid > 0): ?>
     <a class="btn sub-pay-btn" href="subscriber.php?id=<?php echo (int) $id; ?>&tab=pay#debts"><?php echo e(t('pay_debts')); ?></a>
     <?php endif; ?>
+</div>
+<div class="modal-backdrop hidden" id="giveTestAsk" role="dialog" aria-modal="true" style="z-index:100070">
+    <div class="modal-card">
+        <h3><?php echo e(t('give_test')); ?></h3>
+        <p class="meta" style="margin:0 0 14px"><?php echo e(t('confirm_give_test')); ?></p>
+        <div style="display:flex;gap:8px">
+            <button type="button" class="btn ghost" id="giveTestNo" style="flex:1"><?php echo e($lang === 'en' ? 'Cancel' : 'إلغاء'); ?></button>
+            <button type="button" class="btn" id="giveTestYes" style="flex:1"><?php echo e($lang === 'en' ? 'Add the day' : 'إضافة اليوم'); ?></button>
+        </div>
+    </div>
 </div>
 <div class="modal-backdrop hidden" id="addDayAsk" role="dialog" aria-modal="true">
     <div class="modal-card">
@@ -885,6 +895,27 @@ $isActiveSub = !empty($activeSubCard);
   if (openBtn && box) openBtn.addEventListener('click', function () { box.classList.remove('hidden'); });
   if (noBtn) noBtn.addEventListener('click', closeAsk);
   if (box) box.addEventListener('click', function (e) { if (e.target === box) closeAsk(); });
+  var testOpen = document.getElementById('giveTestOpen');
+  var testBox = document.getElementById('giveTestAsk');
+  var testNo = document.getElementById('giveTestNo');
+  var testYes = document.getElementById('giveTestYes');
+  var testForm = document.getElementById('giveTestForm');
+  function closeTest() { if (testBox) testBox.classList.add('hidden'); }
+  if (testOpen && testBox) {
+    testOpen.addEventListener('click', function () {
+      if (testBox.parentNode !== document.body) document.body.appendChild(testBox);
+      testBox.classList.remove('hidden');
+    });
+  }
+  if (testNo) testNo.addEventListener('click', closeTest);
+  if (testBox) testBox.addEventListener('click', function (e) { if (e.target === testBox) closeTest(); });
+  if (testYes && testForm) {
+    testYes.addEventListener('click', function () {
+      closeTest();
+      if (window.appBusySet) window.appBusySet({ force: true });
+      testForm.submit();
+    });
+  }
 })();
 </script>
 

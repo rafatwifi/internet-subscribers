@@ -1065,6 +1065,8 @@ function user_apply_wa_pack_to_config(&$config, $pdo = null)
         'unpaid_overdue' => 'unpaid_overdue',
         'reminder_auto' => 'debt_remind',
         'schedule_cut' => 'schedule_cut',
+        'card_transfer' => '',
+        'card_pull' => '',
     );
     $config['wa_cases'] = array();
     $config['wa_case_issues'] = array();
@@ -1072,6 +1074,18 @@ function user_apply_wa_pack_to_config(&$config, $pdo = null)
         $raw = isset($cases[$case]) ? trim((string) $cases[$case]) : $def;
         if ($raw === '__none__') {
             $raw = '';
+        }
+        if (function_exists('wa_case_optional') && wa_case_optional($case)) {
+            if ($raw === '' || !in_array($raw, $tplKeys, true)) {
+                $config['wa_cases'][$case] = '';
+                continue;
+            }
+            if (isset($config['templates'][$raw]) && trim((string) $config['templates'][$raw]) === '') {
+                $config['wa_cases'][$case] = '';
+                continue;
+            }
+            $config['wa_cases'][$case] = $raw;
+            continue;
         }
         if ($raw !== '' && !in_array($raw, $tplKeys, true)) {
             $config['wa_case_issues'][$case] = 'missing_template';

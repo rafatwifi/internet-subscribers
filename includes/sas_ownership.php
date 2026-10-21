@@ -402,3 +402,62 @@ function sas_ownership_hide_sql($alias)
     }
     return ' AND (' . $a . '.parent_name IS NULL OR LOWER(' . $a . '.parent_name) NOT IN (' . implode(',', $quoted) . '))';
 }
+
+/** صفحات الوكالات المرخّصة على نفس الساس، للبحث فقط */
+function sas_ownership_search_tenant_ids($pdo)
+{
+    $cur = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($cur <= 0) {
+        $cur = 1;
+    }
+    $ids = array($cur => $cur);
+    if (!$pdo || (function_exists('is_agent_user') && is_agent_user()) || (function_exists('is_group_manager_user') && is_group_manager_user())) {
+        return array_values($ids);
+    }
+    $idx = sas_ownership_index($pdo, $cur);
+    $readyIds = array();
+    if (!empty($idx['ready']) && is_array($idx['ready'])) {
+        foreach ($idx['ready'] as $hid => $yes) {
+            $hid = (int) $hid;
+            if ($hid > 1 && $yes) {
+                $readyIds[$hid] = $hid;
+            }
+        }
+    }
+    if (!$readyIds) {
+        return array_values($ids);
+    }
+    $probe = $readyIds;
+    $probe[$cur] = $cur;
+    $inSql = implode(',', array_map('intval', array_values($probe)));
+    $mine = 0;
+    $larger = false;
+    try {
+        $st = $pdo->query('SELECT tenant_id, COUNT(*) AS c FROM sas_users_cache WHERE tenant_id IN (' . $inSql . ') GROUP BY tenant_id');
+        $rows = $st ? $st->fetchAll(PDO::FETCH_ASSOC) : array();
+        foreach ($rows as $row) {
+            $tid = isset($row['tenant_id']) ? (int) $row['tenant_id'] : 0;
+            if ($tid === $cur) {
+                $mine = isset($row['c']) ? (int) $row['c'] : 0;
+                break;
+            }
+        }
+        foreach ($rows as $row) {
+            $tid = isset($row['tenant_id']) ? (int) $row['tenant_id'] : 0;
+            $c = isset($row['c']) ? (int) $row['c'] : 0;
+            if ($tid !== $cur && $c > $mine) {
+                $larger = true;
+                break;
+            }
+        }
+    } catch (Exception $e) {
+        return array_values($ids);
+    }
+    if ($larger) {
+        return array_values($ids);
+    }
+    foreach ($readyIds as $hid) {
+        $ids[$hid] = $hid;
+    }
+    return array_values($ids);
+}

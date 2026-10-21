@@ -184,7 +184,7 @@ function whatsapp_session_for_sas_parent($pdo, $parentId)
         $anc = whatsapp_portal_user_for_sas($pdo, $up);
         if ($anc && $anc !== $owner) {
             $cover = whatsapp_cover_id_set($anc);
-            if (!empty($cover[$ownerId])) {
+            if (!empty($cover[$ownerId]) && whatsapp_audience_allows($pdo, (int) $anc['id'], 'subscribers')) {
                 $sess = whatsapp_session_for_user_row($anc, $pdo);
                 if ($sess !== '' && $sess !== 'default') {
                     return $sess;
@@ -194,7 +194,10 @@ function whatsapp_session_for_sas_parent($pdo, $parentId)
         $cur = $up;
     }
     $own = whatsapp_session_for_user_row($owner, $pdo);
-    if ($own === 'default') {
+    if ($own === 'default' || $own === '') {
+        return '';
+    }
+    if (!whatsapp_audience_allows($pdo, $ownerId, 'subscribers')) {
         return '';
     }
     return $own;
@@ -266,11 +269,72 @@ function whatsapp_my_sas_parent_ids($pdo)
         }
     }
     foreach (array_keys($pool) as $pid) {
-        if ($pid > 0 && whatsapp_session_for_sas_parent($pdo, $pid) === $mine) {
+        if ($pid > 0 && whatsapp_session_bound_to_sas_parent($pdo, $pid) === $mine) {
             $ids[] = (int) $pid;
         }
     }
     return array($ready, $ids);
+}
+
+/** جلسة المالك للعرض والسجل، بدون شرط جمهور الإرسال. */
+function whatsapp_session_bound_to_sas_parent($pdo, $parentId)
+{
+    $parentId = (int) $parentId;
+    $owner = whatsapp_portal_user_for_sas($pdo, $parentId);
+    if (!$owner) {
+        return '';
+    }
+    $ownerId = (int) $owner['id'];
+    $parentOf = array();
+    if (function_exists('portal_sas_tree_maps')) {
+        $maps = portal_sas_tree_maps($pdo);
+        if (!empty($maps['parent_of']) && is_array($maps['parent_of'])) {
+            $parentOf = $maps['parent_of'];
+        }
+    }
+    $cur = $parentId;
+    for ($i = 0; $i < 8; $i++) {
+        if (!isset($parentOf[$cur])) {
+            break;
+        }
+        $up = (int) $parentOf[$cur];
+        if ($up <= 0) {
+            break;
+        }
+        $anc = whatsapp_portal_user_for_sas($pdo, $up);
+        if ($anc && $anc !== $owner) {
+            $cover = whatsapp_cover_id_set($anc);
+            if (!empty($cover[$ownerId]) && whatsapp_audience_allows($pdo, (int) $anc['id'], 'subscribers')) {
+                $sess = whatsapp_session_for_user_row($anc, $pdo);
+                if ($sess !== '' && $sess !== 'default') {
+                    return $sess;
+                }
+            }
+        }
+        $cur = $up;
+    }
+    $own = whatsapp_session_for_user_row($owner, $pdo);
+    if ($own === 'default' || $own === '') {
+        return '';
+    }
+    return $own;
+}
+
+function whatsapp_log_uses_parent_scope()
+{
+    if (!empty($_SESSION['admin_sas_shadow'])) {
+        return true;
+    }
+    if (function_exists('is_agent_user') && is_agent_user()) {
+        return true;
+    }
+    if (function_exists('is_group_manager_user') && is_group_manager_user()) {
+        return true;
+    }
+    if (function_exists('is_accountant_user') && is_accountant_user()) {
+        return true;
+    }
+    return false;
 }
 
 function whatsapp_log_scope_sql($alias = 's')
@@ -359,7 +423,7 @@ function whatsapp_cover_targets($pdo)
             $in = implode(',', array_map('intval', $ids));
             try {
                 foreach ($pdo->query(
-                    'SELECT id, username, display_name, role, is_active, tenant_id FROM admin_users WHERE id IN (' . $in . ')'
+                    'SELECT id, username, display_name, role, is_active, tenant_id, phone FROM admin_users WHERE id IN (' . $in . ')'
                 )->fetchAll() as $row) {
                     $add($row);
                 }
@@ -372,7 +436,7 @@ function whatsapp_cover_targets($pdo)
         $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
         try {
             $st = $pdo->prepare(
-                'SELECT id, username, display_name, role, is_active, tenant_id
+                'SELECT id, username, display_name, role, is_active, tenant_id, phone
                  FROM admin_users WHERE reports_to_user_id = :me AND tenant_id = :t AND is_active = 1'
             );
             $st->execute(array(':me' => $meId, ':t' => $tid));
@@ -397,7 +461,7 @@ function whatsapp_cover_targets($pdo)
     if ($tid > 1) {
         try {
             $st = $pdo->prepare(
-                'SELECT id, username, display_name, role, is_active, tenant_id
+                'SELECT id, username, display_name, role, is_active, tenant_id, phone
                  FROM admin_users WHERE tenant_id = :t AND role = "group_manager"'
             );
             $st->execute(array(':t' => $tid));
@@ -408,6 +472,180 @@ function whatsapp_cover_targets($pdo)
         }
     }
     return $out;
+}
+
+function whatsapp_audience_mode($pdo, $userId)
+{
+    $userId = (int) $userId;
+    $mode = 'agents';
+    if ($userId <= 0 || !$pdo) {
+        return $mode;
+    }
+    if (function_exists('ensure_admin_users_table')) {
+        try {
+            ensure_admin_users_table($pdo);
+        } catch (Exception $e) {
+        }
+    }
+    try {
+        $st = $pdo->prepare('SELECT wa_audience FROM admin_users WHERE id = :id LIMIT 1');
+        $st->execute(array(':id' => $userId));
+        $raw = strtolower(trim((string) $st->fetchColumn()));
+    } catch (Exception $e) {
+        $raw = '';
+    }
+    if ($raw === 'subscribers' || $raw === 'agents' || $raw === 'both') {
+        return $raw;
+    }
+    return $mode;
+}
+
+function whatsapp_audience_allows($pdo, $userId, $kind)
+{
+    $mode = whatsapp_audience_mode($pdo, $userId);
+    $kind = ($kind === 'agents') ? 'agents' : 'subscribers';
+    if ($mode === 'both') {
+        return true;
+    }
+    return $mode === $kind;
+}
+
+function whatsapp_session_user_id($sessionId)
+{
+    $sessionId = trim((string) $sessionId);
+    if (preg_match('/^u(\d+)$/', $sessionId, $m)) {
+        return (int) $m[1];
+    }
+    if (preg_match('/^agent_(\d+)$/', $sessionId, $m)) {
+        return (int) $m[1];
+    }
+    return 0;
+}
+
+function whatsapp_type_audience($type)
+{
+    $type = strtolower(trim((string) $type));
+    if (substr($type, -6) === '_retry') {
+        $type = substr($type, 0, -6);
+    }
+    $agents = array(
+        'card_transfer' => 1,
+        'card_pull' => 1,
+        'card_return' => 1,
+        'card_payment' => 1,
+        'card_debt_remind' => 1,
+    );
+    if (isset($agents[$type])) {
+        return 'agents';
+    }
+    $subs = array(
+        'expiry_auto' => 1,
+        'activation' => 1,
+        'plus_day' => 1,
+        'debt_created' => 1,
+        'debt_updated' => 1,
+        'reminder_debt' => 1,
+        'reminder_auto' => 1,
+        'reminder_manual' => 1,
+        'days_left' => 1,
+        'remind_days' => 1,
+        'unpaid_overdue' => 1,
+        'rental_fee' => 1,
+        'rental_return' => 1,
+        'payment' => 1,
+        'bulk_debt' => 1,
+        'bulk_overdue' => 1,
+        'bulk_filter' => 1,
+        'schedule_cut' => 1,
+    );
+    if (isset($subs[$type])) {
+        return 'subscribers';
+    }
+    return '';
+}
+
+function whatsapp_agent_notice_allowed($pdo, $senderId, $agentId)
+{
+    $senderId = (int) $senderId;
+    $agentId = (int) $agentId;
+    if ($senderId <= 0 || $agentId <= 0 || !$pdo) {
+        return false;
+    }
+    if (!whatsapp_audience_allows($pdo, $senderId, 'agents')) {
+        return false;
+    }
+    $cover = whatsapp_cover_selected($pdo, $senderId);
+    return !empty($cover[$agentId]);
+}
+
+function whatsapp_notify_agent_card($pdo, $config, $senderId, $agentId, $profileName, $qty, $unit, $kind)
+{
+    $senderId = (int) $senderId;
+    $agentId = (int) $agentId;
+    $qty = (int) $qty;
+    $unit = (float) $unit;
+    $kind = ($kind === 'pull') ? 'pull' : 'transfer';
+    if ($senderId <= 0 || $agentId <= 0 || $qty < 1 || $unit <= 0 || !$pdo || !function_exists('whatsapp_send')) {
+        return 'no_price';
+    }
+    if (!whatsapp_agent_notice_allowed($pdo, $senderId, $agentId)) {
+        return 'not_covered';
+    }
+    $phone = '';
+    $agentName = '';
+    try {
+        $st = $pdo->prepare('SELECT phone, display_name, username FROM admin_users WHERE id = :id LIMIT 1');
+        $st->execute(array(':id' => $agentId));
+        $row = $st->fetch();
+        if ($row) {
+            $phone = trim((string) $row['phone']);
+            $agentName = trim((string) $row['display_name']);
+            if ($agentName === '') {
+                $agentName = trim((string) $row['username']);
+            }
+        }
+    } catch (Exception $e) {
+        $phone = '';
+    }
+    if ($phone === '' || (function_exists('phone_is_placeholder') && phone_is_placeholder($phone))) {
+        return 'no_phone';
+    }
+    $case = ($kind === 'pull') ? 'card_pull' : 'card_transfer';
+    $key = function_exists('wa_case_template_key') ? wa_case_template_key($config, $case) : '';
+    $tpl = '';
+    if ($key !== '' && isset($config['templates'][$key])) {
+        $tpl = trim((string) $config['templates'][$key]);
+    }
+    if ($tpl === '') {
+        return 'no_template';
+    }
+    $sum = $unit * $qty;
+    $debt = function_exists('card_agent_running_debt') ? (float) card_agent_running_debt($pdo, $agentId) : $sum;
+    $currency = (is_array($config) && isset($config['currency'])) ? $config['currency'] : 'د.ع';
+    $priceTxt = function_exists('money_format_iqd') ? money_format_iqd($unit, $currency) : number_format($unit, 0, '.', ',');
+    $sumTxt = function_exists('money_format_iqd') ? money_format_iqd($sum, $currency) : number_format($sum, 0, '.', ',');
+    $debtTxt = function_exists('money_format_iqd') ? money_format_iqd($debt, $currency) : number_format($debt, 0, '.', ',');
+    $msg = function_exists('tpl_fill') ? tpl_fill($tpl, array(
+        'name' => $agentName,
+        'package' => (string) $profileName,
+        'qty' => (string) $qty,
+        'price' => $priceTxt,
+        'total' => $sumTxt,
+        'amount' => $sumTxt,
+        'debt' => $debtTxt,
+    )) : $tpl;
+    if (trim($msg) === '') {
+        return 'no_template';
+    }
+    $sender = null;
+    if (function_exists('get_admin_user')) {
+        $sender = get_admin_user($pdo, $senderId);
+    }
+    $sess = ($sender && function_exists('whatsapp_session_for_user_row'))
+        ? whatsapp_session_for_user_row($sender, $pdo)
+        : null;
+    $sent = whatsapp_send($config, $phone, $msg, $kind === 'pull' ? 'card_pull' : 'card_transfer', $sess);
+    return (is_array($sent) && !empty($sent['success'])) ? 'sent' : 'failed';
 }
 
 function whatsapp_cover_selected($pdo, $userId)
@@ -577,6 +815,26 @@ function whatsapp_send($config, $phone, $message, $type = 'text', $sessionId = n
                 'success' => false,
                 'skipped' => true,
                 'response' => 'لا توجد جلسة واتساب لهذا الوكيل',
+                'phone' => $phone,
+                'body' => $message,
+                'type' => $type,
+            );
+        }
+    }
+
+    $audKind = whatsapp_type_audience($type);
+    if ($audKind !== '') {
+        global $pdo;
+        $audUser = whatsapp_session_user_id($sessionId);
+        if ($audUser <= 0 && function_exists('current_admin')) {
+            $audMe = current_admin();
+            $audUser = $audMe ? (int) $audMe['id'] : 0;
+        }
+        if ($audUser > 0 && $pdo && !whatsapp_audience_allows($pdo, $audUser, $audKind)) {
+            return array(
+                'success' => false,
+                'skipped' => true,
+                'response' => 'هذا الرقم غير مخصص لهذا الإشعار',
                 'phone' => $phone,
                 'body' => $message,
                 'type' => $type,
@@ -2629,6 +2887,8 @@ function wa_case_labels($lang = 'ar')
         'unpaid_overdue' => $en ? 'Late payers warning' : 'تحذير المتأخرين بالدفع',
         'expiry_soon' => $en ? 'Expiry soon (auto cron)' : 'قرب الانتهاء (تلقائي)',
         'schedule_cut' => $en ? 'Auto-cut after grace' : 'القطع التلقائي بعد السماح',
+        'card_transfer' => $en ? 'Card transfer to an agent' : 'تحويل كروت لوكيل',
+        'card_pull' => $en ? 'Pull cards from an agent' : 'سحب كروت من وكيل',
     );
 }
 
@@ -2747,7 +3007,35 @@ function wa_system_cases($lang = 'ar')
                 ),
             ),
         ),
+        array(
+            'group' => $en ? 'Card transfer' : 'تحويل الكروت',
+            'cases' => array(
+                array(
+                    'key' => 'card_transfer',
+                    'label' => $labels['card_transfer'],
+                    'vars' => '{name} {package} {qty} {price} {total} {debt}',
+                    'hint' => $en
+                        ? 'Sent only if you tick the notice when giving cards. {price} is the agent price you set. {debt} is the running total.'
+                        : 'ينرسل فقط إذا علّمت الإشعار عند تحويل كروت. {price} هو سعر الوكيل الذي سعّرته أنت. {debt} إجمالي دينه بعد التحويلات.',
+                    'required' => false,
+                ),
+                array(
+                    'key' => 'card_pull',
+                    'label' => $labels['card_pull'],
+                    'vars' => '{name} {package} {qty} {price} {total} {debt}',
+                    'hint' => $en
+                        ? 'Sent only if you tick the notice when pulling cards back. Same agent price, and the total debt goes down.'
+                        : 'ينرسل فقط إذا علّمت الإشعار عند سحب كروت. نفس سعر الوكيل، وإجمالي الدين ينقص.',
+                    'required' => false,
+                ),
+            ),
+        ),
     );
+}
+
+function wa_case_optional($case)
+{
+    return $case === 'card_transfer' || $case === 'card_pull';
 }
 
 function wa_case_issue_message($issue, $caseLabel, $lang = 'ar')
@@ -2797,6 +3085,12 @@ function wa_case_template_key($config, $case)
     $case = trim((string) $case);
     if ($case === '' || $case === 'activation') {
         $case = 'activation_cash';
+    }
+    if (wa_case_optional($case)) {
+        if (!isset($config['wa_cases'][$case]) || trim((string) $config['wa_cases'][$case]) === '') {
+            return '';
+        }
+        return (string) $config['wa_cases'][$case];
     }
     if (isset($config['wa_cases'][$case]) && trim((string) $config['wa_cases'][$case]) !== '') {
         return (string) $config['wa_cases'][$case];
@@ -3709,7 +4003,7 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
         if (!empty($result['success'])) {
             expiry_remind_mark($pdo, $username, $remindTid, $endDate, 0, $sid);
             $out['sent']++;
-            usleep(250000);
+            usleep(700000);
         } elseif (!empty($result['skipped'])) {
             $out['skipped']++;
         } else {
@@ -3807,7 +4101,7 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
             if (!empty($result['success'])) {
                 expiry_remind_mark($pdo, $u, $remindTid, (string) $row['end_date'], (int) $row['sub_id'], (int) $row['subscriber_id']);
                 $out['sent']++;
-                usleep(250000);
+                usleep(700000);
             } elseif (!empty($result['skipped'])) {
                 $out['skipped']++;
             } else {
@@ -3838,7 +4132,7 @@ function maybe_run_expiry_auto_reminders($pdo, $config)
         }
     }
     @file_put_contents($lock, (string) $now);
-    @run_expiry_soon_reminders($pdo, $config, 25);
+    @run_expiry_soon_reminders($pdo, $config, 6);
 }
 
 /**
@@ -3869,7 +4163,7 @@ function maybe_run_auto_schedule_jobs($pdo, $config)
 
     if (!empty($config['expiry_auto_remind_enabled']) && function_exists('run_expiry_soon_reminders')) {
         try {
-            @run_expiry_soon_reminders($pdo, $config, 25);
+            @run_expiry_soon_reminders($pdo, $config, 6);
         } catch (Exception $e) {
             // ignore
         }

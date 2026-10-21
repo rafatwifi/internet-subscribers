@@ -771,7 +771,7 @@ class SASConnector
     /**
      * قائمة المستخدمين — صيغة SAS الرسمية: page / count / sortBy
      */
-    public function listUsersPage($start, $length, $search = '', $parentId = 0)
+    public function listUsersPage($start, $length, $search = '', $parentId = 0, $extra = null)
     {
         if (!$this->token && !$this->login()) {
             return array(
@@ -800,6 +800,14 @@ class SASConnector
         if ($parentId > 0) {
             $payload['parent_id'] = $parentId;
             $payload['manager_id'] = $parentId;
+        }
+        if (is_array($extra)) {
+            if (array_key_exists('status', $extra)) {
+                $payload['status'] = $extra['status'];
+            }
+            if (array_key_exists('connection', $extra)) {
+                $payload['connection'] = $extra['connection'];
+            }
         }
         $full = $this->decodeApiBody($this->post('index/user', $payload, true), false);
         if (isset($full['__http_error']) || isset($full['__auth_error']) || isset($full['__curl_error'])
@@ -2069,7 +2077,7 @@ class SASConnector
             'direction' => 'desc',
             'search' => '',
         );
-        $series = $this->sasCardFetchPaged(array('index/series', 'index/card', 'index/cards', 'index/cardSeries'), $payload, 20);
+        $series = $this->sasCardFetchPaged(array('index/series', 'index/card', 'index/cards', 'index/cardSeries'), $payload, 1);
         $me = $this->loggedManagerId();
         $ownUnused = array();
         $tried = 0;
@@ -2107,34 +2115,11 @@ class SASConnector
             $sid = (isset($srow['id']) && is_numeric($srow['id'])) ? (int) $srow['id'] : 0;
             $scode = $this->sasCardSeriesCode($srow);
             $sPid = $this->sasCardSeriesProfileId($srow);
-            $pins = array();
-            if ($tried < $maxSeries && ($sid > 0 || $scode !== '')) {
-                $tried++;
-                $rawPins = $this->sasCardPinsFromSeries($sid, $sPid, $scode, false);
-                foreach ($rawPins as $pinRow) {
-                    if (!is_array($pinRow)) {
-                        continue;
-                    }
-                    // تجاهل صفوف السلسلة الوصفية (qty/unused_count) حتى لا تظهر أعداد وهمية
-                    if ($this->sasCardLooksLikeSeries($pinRow)) {
-                        continue;
-                    }
-                    $pin = $this->sasCardPinValue($pinRow);
-                    if ($pin === '' || strlen($pin) < 4) {
-                        continue;
-                    }
-                    $pins[] = array(
-                        'pin' => $pin,
-                        'used' => $this->sasCardIsUsed($pinRow) ? 1 : 0,
-                        'used_by' => $this->sasCardUsedBy($pinRow),
-                        'used_at' => $this->sasCardUsedAt($pinRow),
-                    );
-                }
-            }
-            // بدون pins حقيقية لا نعتمد أرقام الساس الوصفية (تسبب عدّ خاطئ مثل 34)
-            if (!$pins) {
+            if ($tried >= $maxSeries) {
                 continue;
             }
+            $tried++;
+            $usedN = (isset($srow['used']) && is_numeric($srow['used'])) ? (int) $srow['used'] : 0;
             $key = strtolower($name);
             if (!isset($groups[$key])) {
                 $groups[$key] = array(
@@ -2146,21 +2131,26 @@ class SASConnector
                     'cards' => array(),
                 );
             }
-            foreach ($pins as $pc) {
-                $pk = $pc['pin'];
-                $dup = false;
-                foreach ($groups[$key]['cards'] as $ex) {
-                    if ($ex['pin'] === $pk) {
-                        $dup = true;
-                        break;
-                    }
-                }
-                if (!$dup) {
-                    $groups[$key]['cards'][] = $pc;
-                }
+            if (!isset($groups[$key]['_nu'])) {
+                $groups[$key]['_nu'] = 0;
+                $groups[$key]['_u'] = 0;
             }
+            $groups[$key]['_nu'] += $hint;
+            $groups[$key]['_u'] += $usedN;
+            if ($sPid > 0 && empty($groups[$key]['profile_id'])) {
+                $groups[$key]['profile_id'] = $sPid;
+            }
+            unset($sid, $scode);
         }
         foreach ($groups as &$g) {
+            if (isset($g['_nu'])) {
+                $g['unused'] = (int) $g['_nu'];
+                $g['used'] = (int) $g['_u'];
+                $g['total'] = $g['unused'] + $g['used'];
+                $g['counts_only'] = 1;
+                unset($g['_nu'], $g['_u']);
+                continue;
+            }
             $u = 0;
             $nu = 0;
             foreach ($g['cards'] as $c) {
@@ -2171,13 +2161,6 @@ class SASConnector
                 }
             }
             $g['used'] = $u;
-            $exactKey = strtolower(isset($g['name']) ? (string) $g['name'] : '');
-            if ($nu === 0 && $exactKey !== '' && isset($ownUnused[$exactKey]) && !$g['cards']) {
-                $nu = (int) $ownUnused[$exactKey]['n'];
-            }
-            if ($exactKey !== '' && isset($ownUnused[$exactKey])) {
-                unset($ownUnused[$exactKey]);
-            }
             $g['unused'] = $nu;
             $g['total'] = $u + $nu;
             usort($g['cards'], function ($a, $b) {
@@ -2188,21 +2171,6 @@ class SASConnector
             });
         }
         unset($g);
-        foreach ($ownUnused as $leftKey => $leftRow) {
-            $leftN = is_array($leftRow) ? (int) $leftRow['n'] : (int) $leftRow;
-            $leftName = (is_array($leftRow) && !empty($leftRow['name'])) ? (string) $leftRow['name'] : $leftKey;
-            if ($leftKey === '') {
-                continue;
-            }
-            if (!isset($groups[$leftKey])) {
-                continue;
-            }
-            if (!empty($groups[$leftKey]['cards'])) {
-                continue;
-            }
-            $groups[$leftKey]['unused'] = $leftN;
-            $groups[$leftKey]['total'] = (int) $groups[$leftKey]['used'] + $leftN;
-        }
         $out = array_values($groups);
         usort($out, function ($a, $b) {
             if ($a['total'] !== $b['total']) {
@@ -2210,6 +2178,89 @@ class SASConnector
             }
             return strcasecmp($a['name'], $b['name']);
         });
+        return $out;
+    }
+
+    /**
+     * أرقام الكروت الشاغرة لمالك الجلسة، بعدد لا يتجاوز عدّاد السلسلة.
+     */
+    public function listOwnedFreePins($maxPins = 20)
+    {
+        if (!$this->token && !$this->login()) {
+            return array();
+        }
+        $maxPins = max(1, min(40, (int) $maxPins));
+        $payload = array(
+            'page' => 1,
+            'count' => 100,
+            'sortBy' => 'series_date',
+            'direction' => 'desc',
+            'search' => '',
+        );
+        $series = $this->sasCardFetchPaged(array('index/series'), $payload, 1);
+        $me = $this->loggedManagerId();
+        $jobs = array();
+        foreach ($series as $srow) {
+            if (!is_array($srow)) {
+                continue;
+            }
+            if (!empty($srow['suspended']) && (string) $srow['suspended'] === '1') {
+                continue;
+            }
+            $owner = $this->sasSeriesOwnerId($srow);
+            if ($me <= 0 || $owner !== $me) {
+                continue;
+            }
+            $hint = $this->sasCardSeriesUnusedCount($srow);
+            if ($hint <= 0) {
+                continue;
+            }
+            $jobs[] = array(
+                'id' => (isset($srow['id']) && is_numeric($srow['id'])) ? (int) $srow['id'] : 0,
+                'code' => $this->sasCardSeriesCode($srow),
+                'pid' => $this->sasCardSeriesProfileId($srow),
+                'name' => $this->sasRowProfileName($srow),
+                'hint' => $hint,
+            );
+        }
+        usort($jobs, function ($a, $b) {
+            if ($a['hint'] === $b['hint']) {
+                return 0;
+            }
+            return ($a['hint'] > $b['hint']) ? -1 : 1;
+        });
+        $out = array();
+        $seen = array();
+        $tried = 0;
+        foreach ($jobs as $job) {
+            if (count($out) >= $maxPins || $tried >= 6) {
+                break;
+            }
+            $tried++;
+            $nested = $this->sasCardPinsFromSeries($job['id'], $job['pid'], $job['code'], false);
+            $kept = 0;
+            foreach ($nested as $pinRow) {
+                if (!is_array($pinRow) || $this->sasCardLooksLikeSeries($pinRow) || $this->sasCardIsUsed($pinRow)) {
+                    continue;
+                }
+                $pin = $this->sasCardPinValue($pinRow);
+                if ($pin === '' || strlen($pin) < 6 || isset($seen[strtolower($pin)])) {
+                    continue;
+                }
+                $seen[strtolower($pin)] = 1;
+                if ($job['name'] !== '' && empty($pinRow['profile_name'])) {
+                    $pinRow['profile_name'] = $job['name'];
+                }
+                if ($job['pid'] > 0 && (empty($pinRow['profile_id']) || !is_numeric($pinRow['profile_id']))) {
+                    $pinRow['profile_id'] = $job['pid'];
+                }
+                $out[] = $pinRow;
+                $kept++;
+                if ($kept >= $job['hint'] || count($out) >= $maxPins) {
+                    break;
+                }
+            }
+        }
         return $out;
     }
 
@@ -2649,49 +2700,71 @@ class SASConnector
         return true;
     }
 
-    private function sasFreeCardIds($seriesCode, $need = 0)
+    private function sasFreeCardIds($seriesCode, $need = 0, $seriesId = 0)
     {
         $seriesCode = trim((string) $seriesCode);
-        if ($seriesCode === '') {
-            return array('ok' => false, 'ids' => array());
+        $seriesId = (int) $seriesId;
+        $need = (int) $need;
+        if ($seriesCode === '' && $seriesId <= 0) {
+            return array('ok' => false, 'ids' => array(), 'first_id' => 0);
         }
-        $page = array(
+        $routes = array();
+        if ($seriesId > 0) {
+            $routes[] = 'index/card/' . $seriesId;
+        }
+        if ($seriesCode !== '' && $this->sasLooksLikeSeriesCode($seriesCode)) {
+            $routes[] = 'index/card/' . $seriesCode;
+        }
+        if (!$routes && $seriesCode !== '') {
+            $routes[] = 'index/card/' . $seriesCode;
+        }
+        $base = array(
             'page' => 1,
             'count' => 100,
             'sortBy' => 'id',
             'direction' => 'asc',
             'search' => '',
-            'used' => 0,
         );
-        $need = (int) $need;
-        $pages = ($need > 0) ? 2 : 8;
-        $routes = array('index/card/' . $seriesCode);
-        $rows = $this->sasCardFetchPaged($routes, $page, $pages, $need);
+        $pages = ($need > 0) ? 1 : 2;
+        $rows = $this->sasCardFetchPaged($routes, $base, $pages, 0);
         if (!$rows) {
-            unset($page['used']);
-            $rows = $this->sasCardFetchPaged($routes, $page, 4);
+            $filtered = $base;
+            $filtered['used'] = 0;
+            $rows = $this->sasCardFetchPaged($routes, $filtered, $pages, $need > 0 ? ($need + 1) : 0);
+        }
+        if (!$rows && $seriesCode !== '') {
+            $rows = $this->sasCardPinsFromSeries($seriesId, 0, $seriesCode, false);
         }
         if (!$rows) {
-            return array('ok' => false, 'ids' => array());
+            return array('ok' => false, 'ids' => array(), 'first_id' => 0);
         }
         $ids = array();
+        $firstId = 0;
         $saw = false;
         foreach ($rows as $row) {
             if (!is_array($row) || $this->sasCardLooksLikeSeries($row)) {
                 continue;
             }
-            $saw = true;
-            if (!$this->sasCardPinIsFree($row)) {
+            $id = 0;
+            if (isset($row['id']) && is_numeric($row['id'])) {
+                $id = (int) $row['id'];
+            } elseif (isset($row['card_id']) && is_numeric($row['card_id'])) {
+                $id = (int) $row['card_id'];
+            }
+            if ($id <= 0) {
                 continue;
             }
-            $id = (isset($row['id']) && is_numeric($row['id'])) ? (int) $row['id'] : 0;
-            if ($id > 0) {
+            $saw = true;
+            if ($firstId <= 0 || $id < $firstId) {
+                $firstId = $id;
+            }
+            if (!$this->sasCardIsUsed($row)) {
                 $ids[$id] = $id;
             }
         }
         $list = array_values($ids);
         sort($list);
-        return array('ok' => $saw || $list, 'ids' => $list);
+        return array('ok' => $saw || $list, 'ids' => $list, 'first_id' => $firstId);
     }
 
     private function sasContiguousIdChunks($ids)
@@ -2887,26 +2960,44 @@ class SASConnector
         return array(false, 'sas');
     }
 
-    private function sasPrefixSnapshot($series, $need = 0)
+    private function sasPrefixSnapshot($series, $need = 0, $seriesId = 0)
     {
         $series = trim((string) $series);
         $need = (int) $need;
-        $idsPack = $this->sasFreeCardIds($series, $need > 0 ? ($need + 1) : 0);
+        $seriesId = (int) $seriesId;
+        $idsPack = $this->sasFreeCardIds($series, $need > 0 ? ($need + 1) : 0, $seriesId);
         $ids = (is_array($idsPack) && !empty($idsPack['ids']) && is_array($idsPack['ids'])) ? $idsPack['ids'] : array();
-        $start = $this->sasSeriesRangeStart($series);
-        if ($series === '' || $start <= 0 || !$ids) {
+        $rangeStart = $this->sasSeriesRangeStart($series);
+        $firstId = (is_array($idsPack) && isset($idsPack['first_id'])) ? (int) $idsPack['first_id'] : 0;
+        $start = $rangeStart;
+        if ($start <= 0 && $firstId > 0 && $ids && (int) $ids[0] === $firstId) {
+            $start = $firstId;
+        }
+        if ($series === '' || !$ids || ($start <= 0 && (int) $ids[0] <= 0)) {
             return array('ok' => false, 'message' => 'pins');
         }
-        if ((int) $ids[0] !== $start) {
-            return array('ok' => false, 'message' => 'not_first');
+        $mid = false;
+        if ($start > 0 && (int) $ids[0] !== $start) {
+            $mid = true;
+            $start = (int) $ids[0];
         }
-        return array('ok' => true, 'message' => '', 'start' => (int) $start, 'ids' => $ids);
+        if ($start <= 0) {
+            return array('ok' => false, 'message' => 'pins');
+        }
+        return array(
+            'ok' => true,
+            'message' => '',
+            'start' => (int) $start,
+            'ids' => $ids,
+            'mid' => $mid,
+            'range_start' => (int) $rangeStart,
+        );
     }
 
     private function sasSeriesOwnerNow($series)
     {
         $series = trim((string) $series);
-        $rows = $this->listSeriesStock();
+        $rows = $this->listSeriesStock(1);
         if (!is_array($rows)) {
             return -1;
         }
@@ -2931,7 +3022,7 @@ class SASConnector
         if ($prefer !== '' && $this->sasSeriesRangeStart($prefer) === $cardId) {
             return $prefer;
         }
-        $rows = $this->listSeriesStock();
+        $rows = $this->listSeriesStock(1);
         if (!is_array($rows)) {
             return '';
         }
@@ -2965,25 +3056,19 @@ class SASConnector
         $count = (int) $count;
         $ids = $snap['ids'];
         $start = (int) $snap['start'];
-        $newStart = $this->sasSeriesRangeStart($series);
+        $info = $this->sasSeriesRangeInfo($series);
+        $newStart = (int) $info['start'];
         $keep = (count($ids) > $count) ? (int) $ids[$count] : 0;
+        if ($newStart <= 0) {
+            return 'unchanged';
+        }
         if ($keep > 0 && $newStart === $keep) {
             return 'exact';
         }
-        if ($keep === 0 && $count === count($ids) && $newStart !== $start && $newStart > 0) {
+        if ($keep === 0 && $count === count($ids) && $newStart !== $start) {
             return 'exact';
         }
         if ($newStart === $start) {
-            $after = $this->sasFreeCardIds($series);
-            $afterIds = (is_array($after) && !empty($after['ids']) && is_array($after['ids'])) ? $after['ids'] : array();
-            $ownerNow = $this->sasSeriesOwnerNow($series);
-            if ($afterIds && count($afterIds) === $count && (int) $afterIds[0] === $start
-                && $ownerNow === (int) $newOwner && (int) $newOwner !== (int) $backOwner) {
-                return 'exact';
-            }
-            if ($ownerNow === (int) $newOwner && (int) $newOwner !== (int) $backOwner) {
-                return 'wrong';
-            }
             return 'unchanged';
         }
         return 'wrong';
@@ -3004,7 +3089,23 @@ class SASConnector
             'series' => array($found),
             'owner' => $backOwner,
         ));
-        return $ok ? true : false;
+        if ($ok) {
+            return true;
+        }
+        $info = $this->sasSeriesRangeInfo($found);
+        $start = (int) $info['start'];
+        $len = (int) $info['length'];
+        if ($start <= 0 || $len < 1 || $len > 500) {
+            return false;
+        }
+        list($okCount,) = $this->sasPostWrite('series/changeOwnerCount', array(
+            'series' => $found,
+            'selected_owner' => $backOwner,
+            'count' => $len,
+            'from_id' => $start,
+            'to_id' => $start + $len - 1,
+        ));
+        return $okCount ? true : false;
     }
 
     /**
@@ -3012,17 +3113,18 @@ class SASConnector
      * إذا الساس نقل عدد ثاني نرجّع السلسلة المنفصلة كاملة ونتوقف.
      * @return array(bool, string, int fromId, int toId, string movedSeries)
      */
-    private function sasMovePrefixExact($series, $count, $newOwner, $backOwner)
+    private function sasMovePrefixExact($series, $count, $newOwner, $backOwner, $seriesId = 0)
     {
         $series = trim((string) $series);
         $count = (int) $count;
         $newOwner = (int) $newOwner;
         $backOwner = (int) $backOwner;
+        $seriesId = (int) $seriesId;
         $fail = array(false, 'range', 0, 0, '');
         if ($series === '' || $count < 1 || $newOwner <= 0 || $backOwner <= 0) {
             return $fail;
         }
-        $snap = $this->sasPrefixSnapshot($series, $count);
+        $snap = $this->sasPrefixSnapshot($series, $count, $seriesId);
         if (empty($snap['ok'])) {
             $fail[1] = !empty($snap['message']) ? $snap['message'] : 'pins';
             return $fail;
@@ -3031,9 +3133,16 @@ class SASConnector
             $fail[1] = 'short:' . count($snap['ids']);
             return $fail;
         }
+        $i = 1;
+        while ($i < $count) {
+            if (!isset($snap['ids'][$i]) || (int) $snap['ids'][$i] !== (int) $snap['start'] + $i) {
+                $fail[1] = 'not_first';
+                return $fail;
+            }
+            $i++;
+        }
         $routes = array(
             array('series/changeOwnerCount', $count),
-            array('series/changeOwnerRange', $count),
         );
         $seriesNow = $series;
         $snapNow = $snap;
@@ -3046,6 +3155,15 @@ class SASConnector
             }
             if (!empty($attempt['message'])) {
                 $lastMsg = $attempt['message'];
+            }
+            if (!empty($attempt['message']) && $attempt['message'] === 'head') {
+                $backAt = !empty($snapNow['range_start']) ? (int) $snapNow['range_start'] : (int) $snapNow['start'];
+                if (!$this->sasUndoPrefix($backAt, $backOwner, $seriesNow)) {
+                    $fail[1] = 'stuck';
+                    return $fail;
+                }
+                $fail[1] = 'undone';
+                return $fail;
             }
             if (empty($attempt['wrote']) || !empty($attempt['unchanged'])) {
                 continue;
@@ -3070,6 +3188,107 @@ class SASConnector
         return $fail;
     }
 
+    /**
+     * بعد نجاح الطلب: هل الكروت المطلوبة غابت عن سلسلة المصدر.
+     * exact = غاب العدد المطلوب فقط. wrong = غاب عدد أكبر. unchanged = لسا موجودة.
+     */
+    private function sasPrefixGone($series, $snap, $count)
+    {
+        $count = (int) $count;
+        $ids = (isset($snap['ids']) && is_array($snap['ids'])) ? $snap['ids'] : array();
+        if ($count < 1 || count($ids) < $count) {
+            return '';
+        }
+        $pack = $this->sasFreeCardIds($series, 0, 0);
+        if (!is_array($pack) || empty($pack['ok'])) {
+            $info = $this->sasSeriesRangeInfo($series);
+            $start = isset($info['start']) ? (int) $info['start'] : 0;
+            $len = isset($info['length']) ? (int) $info['length'] : 0;
+            if ($len === 0 || $start <= 0) {
+                return (count($ids) === $count) ? 'exact' : '';
+            }
+            return '';
+        }
+        $left = array();
+        if (!empty($pack['ids']) && is_array($pack['ids'])) {
+            foreach ($pack['ids'] as $id) {
+                $left[(int) $id] = 1;
+            }
+        }
+        $gone = 0;
+        $i = 0;
+        while ($i < $count) {
+            if (!isset($left[(int) $ids[$i]])) {
+                $gone++;
+            }
+            $i++;
+        }
+        $extra = 0;
+        $n = count($ids);
+        $j = $count;
+        while ($j < $n) {
+            if (!isset($left[(int) $ids[$j]])) {
+                $extra++;
+            }
+            $j++;
+        }
+        if ($gone === $count && $extra === 0) {
+            return 'exact';
+        }
+        if ($gone > 0 || $extra > 0) {
+            return 'wrong';
+        }
+        return 'unchanged';
+    }
+
+    private function sasPrefixConfirmGone($series, $snap, $count)
+    {
+        $gone = $this->sasPrefixGone($series, $snap, $count);
+        if ($gone === 'exact' || $gone === 'wrong') {
+            return $gone;
+        }
+        sleep(1);
+        return $this->sasPrefixGone($series, $snap, $count);
+    }
+
+    private function sasRecentSeriesForOwner($ownerId, $cardId)
+    {
+        $ownerId = (int) $ownerId;
+        $cardId = (int) $cardId;
+        if ($ownerId <= 0 || $cardId <= 0) {
+            return '';
+        }
+        $payload = array(
+            'page' => 1,
+            'count' => 20,
+            'sortBy' => 'id',
+            'direction' => 'desc',
+            'search' => '',
+            'new_owner_id' => $ownerId,
+        );
+        $full = $this->decodeApiBody($this->post('index/cardsTransferLog', $payload, true), false);
+        $rows = (is_array($full) && isset($full['data']) && is_array($full['data'])) ? $full['data'] : array();
+        $checked = 0;
+        foreach ($rows as $row) {
+            if ($checked >= 8) {
+                break;
+            }
+            if (!is_array($row)) {
+                continue;
+            }
+            $newOwner = (isset($row['new_owner_id']) && is_numeric($row['new_owner_id'])) ? (int) $row['new_owner_id'] : 0;
+            $series = isset($row['series']) ? trim((string) $row['series']) : '';
+            if ($newOwner !== $ownerId || $series === '') {
+                continue;
+            }
+            $checked++;
+            if ($this->sasSeriesRangeStart($series) === $cardId) {
+                return $series;
+            }
+        }
+        return '';
+    }
+
     private function sasPrefixAttempt($series, $snap, $count, $newOwner, $backOwner, $route, $payloadCount)
     {
         $start = (int) $snap['start'];
@@ -3091,8 +3310,49 @@ class SASConnector
         if (!$ok) {
             return $out;
         }
+        if (!empty($snap['mid'])) {
+            $head = $this->sasSeriesRangeStart($series);
+            $rangeStart = isset($snap['range_start']) ? (int) $snap['range_start'] : 0;
+            if ($rangeStart > 0 && $head > 0 && $head !== $rangeStart) {
+                $out['message'] = 'head';
+                $out['moved_series'] = $series;
+                return $out;
+            }
+            $found = $this->sasFindSeriesStartingAt($start, '');
+            if ($found !== '' && $this->sasSeriesOwnerNow($found) === (int) $newOwner) {
+                $out['exact'] = true;
+                $out['moved_series'] = $found;
+                return $out;
+            }
+            $gone = $this->sasPrefixConfirmGone($series, $snap, $count);
+            if ($gone === 'exact') {
+                $moved = $this->sasRecentSeriesForOwner((int) $newOwner, $start);
+                $out['exact'] = true;
+                $out['moved_series'] = $moved !== '' ? $moved : $series;
+                return $out;
+            }
+            if ($gone === 'wrong') {
+                $out['message'] = 'wrong';
+                $out['moved_series'] = $series;
+                return $out;
+            }
+            $out['unchanged'] = true;
+            $out['message'] = $msg !== '' ? $msg : 'sas';
+            return $out;
+        }
         $judge = $this->sasPrefixJudge($series, $snap, $count, $newOwner, $backOwner);
         if ($judge === 'unchanged') {
+            $gone = $this->sasPrefixConfirmGone($series, $snap, $count);
+            if ($gone === 'exact') {
+                $moved = $this->sasRecentSeriesForOwner((int) $newOwner, $start);
+                $out['exact'] = true;
+                $out['moved_series'] = $moved !== '' ? $moved : $series;
+                return $out;
+            }
+            if ($gone === 'wrong') {
+                $out['message'] = 'wrong';
+                return $out;
+            }
             $out['unchanged'] = true;
             $out['message'] = $msg !== '' ? $msg : 'sas';
             return $out;
@@ -3170,7 +3430,7 @@ class SASConnector
             'search' => '',
         );
         $page = 1;
-        while ($page <= 8 && $have < $needQty) {
+        while ($page <= 2 && count($out) < 4) {
             $payload['page'] = $page;
             $full = $this->decodeApiBody($this->post('index/series', $payload, true), false);
             if (!is_array($full) || isset($full['__http_error']) || isset($full['__auth_error']) || isset($full['__curl_error'])) {
@@ -3215,8 +3475,10 @@ class SASConnector
                     continue;
                 }
                 $seen[$seriesKey] = true;
+                $seriesNum = (isset($srow['id']) && is_numeric($srow['id'])) ? (int) $srow['id'] : 0;
                 $out[] = array(
                     'series' => $seriesKey,
+                    'series_id' => $seriesNum,
                     'owner' => $ownerId,
                     'name' => $name,
                     'profile_id' => $pid,
@@ -3224,7 +3486,10 @@ class SASConnector
                     'used' => 0,
                 );
                 $have += (int) $unused;
-                if ($have >= $needQty) {
+                if ($needQty > 0 && $have >= $needQty) {
+                    return $out;
+                }
+                if (count($out) >= 4) {
                     return $out;
                 }
             }
@@ -3306,6 +3571,8 @@ class SASConnector
         }
         $need = $qty;
         $ranges = array();
+        $unreadable = false;
+        $unreadKind = '';
         foreach ($picked as $s) {
             if ($need <= 0) {
                 break;
@@ -3333,7 +3600,17 @@ class SASConnector
                 $toCard = isset($s['range_end']) ? (int) $s['range_end'] : $fromCard;
                 $movedSeries = (string) $s['series'];
             } else {
-                list($okM, $msgM, $fromCard, $toCard, $movedSeries) = $this->sasMovePrefixExact($s['series'], $take, $toOwnerId, $backOwner);
+                $seriesNum = isset($s['series_id']) ? (int) $s['series_id'] : 0;
+                list($okM, $msgM, $fromCard, $toCard, $movedSeries) = $this->sasMovePrefixExact($s['series'], $take, $toOwnerId, $backOwner, $seriesNum);
+                if (!$okM && ($msgM === 'pins' || $msgM === 'not_first')) {
+                    $unreadable = true;
+                    if ($msgM === 'pins') {
+                        $unreadKind = 'pins';
+                    } elseif ($unreadKind !== 'pins') {
+                        $unreadKind = 'not_first';
+                    }
+                    continue;
+                }
                 if (!$okM) {
                     $this->restoreCardRanges($ranges, $fromOwnerId);
                     $empty['message'] = $msgM;
@@ -3351,7 +3628,11 @@ class SASConnector
         }
         if ($need > 0) {
             $this->restoreCardRanges($ranges, $fromOwnerId);
-            $empty['message'] = ($have >= $qty) ? 'sas' : ('short:' . $have);
+            if ($unreadable && !$ranges) {
+                $empty['message'] = ($unreadKind !== '') ? $unreadKind : 'pins';
+            } else {
+                $empty['message'] = ($have >= $qty) ? 'sas' : ('short:' . $have);
+            }
             return $empty;
         }
         return array('ok' => true, 'message' => '', 'moved' => $qty, 'ranges' => $ranges);
@@ -3427,6 +3708,203 @@ class SASConnector
             $this->lastError = 'already_home';
         }
         return true;
+    }
+
+    public function postMany($jobs)
+    {
+        if (!$this->token && !$this->login()) {
+            return array();
+        }
+        if (!is_array($jobs) || !$jobs || !function_exists('curl_multi_init')) {
+            $out = array();
+            foreach ($jobs as $key => $job) {
+                $route = isset($job[0]) ? $job[0] : '';
+                $payload = isset($job[1]) && is_array($job[1]) ? $job[1] : array();
+                $out[$key] = $this->post($route, $payload, true);
+            }
+            return $out;
+        }
+        $mh = curl_multi_init();
+        $handles = array();
+        $origin = 'https://' . $this->host;
+        $timeout = isset($this->timeout) ? (int) $this->timeout : 8;
+        if ($timeout < 3) {
+            $timeout = 3;
+        }
+        foreach ($jobs as $key => $job) {
+            $route = isset($job[0]) ? (string) $job[0] : '';
+            $payload = isset($job[1]) && is_array($job[1]) ? $job[1] : array();
+            $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            if ($json === false) {
+                continue;
+            }
+            $e_json = $this->aes->encrypt($json, $this->secretKey);
+            $bodyJson = json_encode(array('payload' => $e_json));
+            $headers = array(
+                'Accept: application/json, text/plain, */*',
+                'Content-Type: application/json',
+                'Accept-Language: en-US,en;q=0.9',
+                'Origin: ' . $origin,
+                'Referer: ' . $origin . '/',
+                'User-Agent: Mozilla/5.0 (compatible; WiFi-Net-SALES/1.0)',
+                'Authorization: Bearer ' . $this->token,
+            );
+            $ch = curl_init($this->base_url . $route);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, min(8, $timeout));
+            curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+            curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+            curl_setopt($ch, CURLOPT_MAXREDIRS, 3);
+            if (defined('CURL_SSLVERSION_TLSv1_2')) {
+                curl_setopt($ch, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+            }
+            curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, $bodyJson);
+            curl_multi_add_handle($mh, $ch);
+            $handles[$key] = $ch;
+        }
+        $running = null;
+        do {
+            $stat = curl_multi_exec($mh, $running);
+            if ($running) {
+                curl_multi_select($mh, 1.0);
+            }
+        } while ($running && $stat === CURLM_OK);
+        $out = array();
+        foreach ($handles as $key => $ch) {
+            $body = curl_multi_getcontent($ch);
+            $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_multi_remove_handle($mh, $ch);
+            curl_close($ch);
+            if ($body === false || $body === null || $body === '') {
+                $out[$key] = array('__curl_error' => true, 'message' => 'empty');
+            } elseif ($status >= 200 && $status < 400) {
+                $out[$key] = $body;
+            } else {
+                $out[$key] = array('__http_error' => true, 'status' => $status, 'body' => $body);
+            }
+        }
+        curl_multi_close($mh);
+        return $out;
+    }
+
+    public function dashboardCounts($withSoon = true)
+    {
+        if (!$this->token && !$this->login()) {
+            return null;
+        }
+        $base = array(
+            'page' => 1,
+            'count' => 1,
+            'sortBy' => 'username',
+            'direction' => 'asc',
+            'search' => '',
+            'sub_users' => 1,
+        );
+        $active = $base;
+        $active['status'] = 1;
+        $expired = $base;
+        $expired['status'] = 2;
+        $today = $base;
+        $today['status'] = 5;
+        $jobs = array(
+            'total' => array('index/user', $base),
+            'active' => array('index/user', $active),
+            'expired' => array('index/user', $expired),
+            'today' => array('index/user', $today),
+            'online' => array('index/online', array(
+                'page' => 1,
+                'count' => 1,
+                'sortBy' => 'username',
+                'direction' => 'asc',
+                'search' => '',
+            )),
+        );
+        if ($withSoon) {
+            $soonPayload = $base;
+            $soonPayload['count'] = 200;
+            $soonPayload['status'] = 4;
+            $soonPayload['sortBy'] = 'expiration';
+            $jobs['soon'] = array('index/user', $soonPayload);
+        }
+        $raws = $this->postMany($jobs);
+        $total = $this->responseTotal(isset($raws['total']) ? $raws['total'] : null);
+        $activeN = $this->responseTotal(isset($raws['active']) ? $raws['active'] : null);
+        $expiredN = $this->responseTotal(isset($raws['expired']) ? $raws['expired'] : null);
+        $todayN = $this->responseTotal(isset($raws['today']) ? $raws['today'] : null);
+        $onlineN = $this->responseTotal(isset($raws['online']) ? $raws['online'] : null);
+        if ($total <= 0 || $activeN < 0 || $expiredN < 0) {
+            return null;
+        }
+        $soon = null;
+        if ($withSoon) {
+            $soon = 0;
+            $todayDate = date('Y-m-d');
+            $soonLimit = date('Y-m-d', strtotime('+3 day'));
+            $soonFull = $this->decodeApiBody(isset($raws['soon']) ? $raws['soon'] : null, false);
+            $soonRows = $this->normalizeUserList($soonFull);
+            if (is_array($soonRows)) {
+                foreach ($soonRows as $row) {
+                    if (!is_array($row) || empty($row['expiration'])) {
+                        continue;
+                    }
+                    $exp = substr((string) $row['expiration'], 0, 10);
+                    if ($exp > $todayDate && $exp <= $soonLimit) {
+                        $soon++;
+                    }
+                }
+            }
+        }
+        return array(
+            'total' => $total,
+            'active' => $activeN,
+            'expired' => $expiredN,
+            'online' => $onlineN >= 0 ? $onlineN : 0,
+            'today' => $todayN >= 0 ? $todayN : 0,
+            'soon' => $soon,
+        );
+    }
+
+    private function responseTotal($raw)
+    {
+        $full = $this->decodeApiBody($raw, false);
+        if (!is_array($full) || isset($full['__http_error']) || isset($full['__auth_error']) || isset($full['__curl_error'])) {
+            return -1;
+        }
+        if (isset($full['total']) && is_numeric($full['total'])) {
+            return (int) $full['total'];
+        }
+        if (isset($full['meta']['total']) && is_numeric($full['meta']['total'])) {
+            return (int) $full['meta']['total'];
+        }
+        return -1;
+    }
+
+    public function countOnlineUsers()
+    {
+        if (!$this->token && !$this->login()) {
+            return -1;
+        }
+        $full = $this->decodeApiBody($this->post('index/online', array(
+            'page' => 1,
+            'count' => 1,
+            'sortBy' => 'username',
+            'direction' => 'asc',
+            'search' => '',
+        ), true), false);
+        if (!is_array($full) || isset($full['__http_error']) || isset($full['__auth_error']) || isset($full['__curl_error'])) {
+            return -1;
+        }
+        if (isset($full['total']) && is_numeric($full['total'])) {
+            return (int) $full['total'];
+        }
+        if (isset($full['meta']['total']) && is_numeric($full['meta']['total'])) {
+            return (int) $full['meta']['total'];
+        }
+        return -1;
     }
 
     public function listOnlineUsers()
@@ -4200,7 +4678,11 @@ class SASConnector
                         $hint .= ' (' . $route . ')';
                     }
                     if ($st === 403) {
-                        $hint .= ' — ماكو صلاحية تست في حساب SAS';
+                        if (strpos($route, 'series/changeOwner') === 0) {
+                            $hint .= ' — حساب SAS هذا ما يقدر يغيّر مالك السلسلة';
+                        } else {
+                            $hint .= ' — ماكو صلاحية تست في حساب SAS';
+                        }
                     } elseif ($st === 404) {
                         $hint .= ' — المسار غير موجود';
                     } elseif ($st === 405) {

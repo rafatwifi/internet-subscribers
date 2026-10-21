@@ -5,9 +5,32 @@ function e($value)
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
+function app_public_url($path)
+{
+    $path = (string) $path;
+    if ($path === '' || preg_match('#^[a-z][a-z0-9+\-.]*:#i', $path) || strpos($path, '//') === 0) {
+        return $path;
+    }
+    $tail = '';
+    $cut = strcspn($path, '?#');
+    if ($cut < strlen($path)) {
+        $tail = substr($path, $cut);
+        $path = substr($path, 0, $cut);
+    }
+    if (strlen($path) >= 9 && substr($path, -9) === 'index.php') {
+        $path = substr($path, 0, -9);
+        if ($path === '') {
+            $path = './';
+        }
+    } elseif (strlen($path) >= 4 && substr($path, -4) === '.php') {
+        $path = substr($path, 0, -4);
+    }
+    return $path . $tail;
+}
+
 function redirect($path)
 {
-    header('Location: ' . $path);
+    header('Location: ' . app_public_url($path));
     exit;
 }
 
@@ -31,7 +54,7 @@ function app_finish_and_continue($path)
 {
     app_detach_client();
     if (!headers_sent()) {
-        header('Location: ' . $path);
+        header('Location: ' . app_public_url($path));
         header('Content-Length: 0');
         header('Connection: close');
     }

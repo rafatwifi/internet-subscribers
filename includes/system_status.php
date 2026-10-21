@@ -692,8 +692,16 @@ function dash_linked_resellers($config)
     return $out;
 }
 
-function dash_reseller_pings($config)
+function dash_reseller_pings($config, $force = false)
 {
+    $pingTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    $pingFile = dirname(__DIR__) . '/storage/cache/sas_ping_t' . $pingTid . '.json';
+    if (!$force && is_file($pingFile) && (time() - (int) @filemtime($pingFile)) < 8) {
+        $pingSaved = json_decode((string) @file_get_contents($pingFile), true);
+        if (is_array($pingSaved) && !empty($pingSaved['ok'])) {
+            return $pingSaved;
+        }
+    }
     $rows = dash_linked_resellers($config);
     if (!$rows) {
         return array('ok' => true, 'balance' => '-', 'sub' => '', 'count' => 0);
@@ -721,13 +729,19 @@ function dash_reseller_pings($config)
             'ms' => $ms,
         );
     }
-    return array(
+    $pingOut = array(
         'ok' => true,
         'balance' => implode(' · ', $bits),
         'sub' => implode(' · ', $names),
         'count' => count($outRows),
         'rows' => $outRows,
     );
+    $pingDir = dirname($pingFile);
+    if (!is_dir($pingDir)) {
+        @mkdir($pingDir, 0775, true);
+    }
+    @file_put_contents($pingFile, json_encode($pingOut));
+    return $pingOut;
 }
 
 function dash_platform_company_pings($live)
