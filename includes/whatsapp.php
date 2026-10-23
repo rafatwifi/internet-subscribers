@@ -578,17 +578,31 @@ function whatsapp_agent_notice_allowed($pdo, $senderId, $agentId)
     return !empty($cover[$agentId]);
 }
 
-function whatsapp_notify_agent_card($pdo, $config, $senderId, $agentId, $profileName, $qty, $unit, $kind)
+function whatsapp_notify_agent_card($pdo, $config, $senderId, $agentId, $profileName, $qty, $unit, $kind, $extra = '')
 {
     $senderId = (int) $senderId;
     $agentId = (int) $agentId;
     $qty = (int) $qty;
     $unit = (float) $unit;
     $kind = ($kind === 'pull') ? 'pull' : 'transfer';
+    $case = ($kind === 'pull') ? 'card_pull' : 'card_transfer';
+    $logNotice = function ($ok, $phone, $body, $note) use ($pdo, $case) {
+        if (!$pdo || !function_exists('log_message')) {
+            return;
+        }
+        log_message($pdo, null, array(
+            'success' => $ok ? true : false,
+            'phone' => (string) $phone,
+            'body' => trim((string) $body) !== '' ? (string) $body : (string) $note,
+            'type' => $case,
+            'response' => (string) $note,
+        ));
+    };
     if ($senderId <= 0 || $agentId <= 0 || $qty < 1 || $unit <= 0 || !$pdo || !function_exists('whatsapp_send')) {
         return 'no_price';
     }
     if (!whatsapp_agent_notice_allowed($pdo, $senderId, $agentId)) {
+        $logNotice(false, '', '', 'الوكيل مو ضمن تغطية إشعار التحويل');
         return 'not_covered';
     }
     $phone = '';
@@ -608,15 +622,16 @@ function whatsapp_notify_agent_card($pdo, $config, $senderId, $agentId, $profile
         $phone = '';
     }
     if ($phone === '' || (function_exists('phone_is_placeholder') && phone_is_placeholder($phone))) {
+        $logNotice(false, '', '', 'ما انرسل إشعار التحويل: ماكو رقم واتساب للوكيل');
         return 'no_phone';
     }
-    $case = ($kind === 'pull') ? 'card_pull' : 'card_transfer';
     $key = function_exists('wa_case_template_key') ? wa_case_template_key($config, $case) : '';
     $tpl = '';
     if ($key !== '' && isset($config['templates'][$key])) {
         $tpl = trim((string) $config['templates'][$key]);
     }
     if ($tpl === '') {
+        $logNotice(false, $phone, '', 'ما انرسل إشعار التحويل: القالب مو معيّن');
         return 'no_template';
     }
     $sum = $unit * $qty;
@@ -635,7 +650,17 @@ function whatsapp_notify_agent_card($pdo, $config, $senderId, $agentId, $profile
         'debt' => $debtTxt,
     )) : $tpl;
     if (trim($msg) === '') {
+        $logNotice(false, $phone, '', 'ما انرسل إشعار التحويل: القالب فارغ');
         return 'no_template';
+    }
+    $extra = trim((string) $extra);
+    if (function_exists('mb_substr')) {
+        $extra = mb_substr($extra, 0, 400, 'UTF-8');
+    } elseif (strlen($extra) > 400) {
+        $extra = substr($extra, 0, 400);
+    }
+    if ($extra !== '') {
+        $msg = rtrim($msg) . "\n" . $extra;
     }
     $sender = null;
     if (function_exists('get_admin_user')) {
@@ -644,8 +669,18 @@ function whatsapp_notify_agent_card($pdo, $config, $senderId, $agentId, $profile
     $sess = ($sender && function_exists('whatsapp_session_for_user_row'))
         ? whatsapp_session_for_user_row($sender, $pdo)
         : null;
-    $sent = whatsapp_send($config, $phone, $msg, $kind === 'pull' ? 'card_pull' : 'card_transfer', $sess);
-    return (is_array($sent) && !empty($sent['success'])) ? 'sent' : 'failed';
+    $sent = whatsapp_send($config, $phone, $msg, $case, $sess);
+    if (!is_array($sent)) {
+        $sent = array('success' => false, 'response' => 'failed');
+    }
+    $sent['phone'] = $phone;
+    $sent['body'] = $msg;
+    $sent['type'] = $case;
+    if (empty($sent['response'])) {
+        $sent['response'] = !empty($sent['success']) ? 'sent' : 'failed';
+    }
+    $logNotice(!empty($sent['success']), $phone, $msg, isset($sent['response']) ? (string) $sent['response'] : '');
+    return !empty($sent['success']) ? 'sent' : 'failed';
 }
 
 function whatsapp_cover_selected($pdo, $userId)

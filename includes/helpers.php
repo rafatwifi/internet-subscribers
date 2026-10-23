@@ -578,6 +578,8 @@ function message_type_title($type)
         'expiry_auto' => $en ? 'expiry reminder' : 'تذكير قرب الانتهاء',
         'reminder_auto' => $en ? 'auto debt reminder' : 'تذكير دين تلقائي',
         'text' => $en ? 'message' : 'رسالة',
+        'card_transfer' => $en ? 'card transfer' : 'تحويل كروت',
+        'card_pull' => $en ? 'card pull' : 'سحب كروت',
     );
     $type = message_type_base($type);
     return isset($map[$type]) ? $map[$type] : ($en ? 'message' : 'رسالة');

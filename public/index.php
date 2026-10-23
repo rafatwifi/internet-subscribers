@@ -970,25 +970,7 @@ body:has(.sas-dash) .container {
 }
 @media (max-width: 760px) {
   .sas-dash .sas-boxes { display: flex; flex-direction: column; }
-  .sas-dash .dash-ping {
-    order: -1;
-    min-height: 0;
-    padding: 8px 12px;
-    border-radius: 12px;
-    flex-direction: row;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-  }
-  .sas-dash .dash-ping .sas-box-ico { display: none; }
-  .sas-dash .dash-ping .sas-box-title { font-size: 12px; font-weight: 600; }
-  .sas-dash .dash-ping .sas-box-sub { display: none; }
-  .sas-dash .dash-ping .sas-box-val,
-  .sas-dash .dash-ping[data-count="1"] .ping-ms { margin-top: 0; font-size: 15px; font-weight: 600; }
-  .sas-dash .dash-ping .ping-list { margin-top: 0; gap: 0; }
-  .sas-dash .dash-ping.is-multi .ping-line { padding: 2px 0; }
-  .sas-dash .dash-ping.is-multi .ping-name { font-size: 12px; font-weight: 500; }
-  .sas-dash .dash-ping.is-multi .ping-ms { font-size: 13px; font-weight: 600; }
+  .sas-dash .dash-ping { order: -1; }
 }
 .sas-box-ico { position: absolute; inset-inline-end: 14px; inset-block-start: 12px; font-size: 22px; opacity: .35; }
 .sas-box.tone-blue { --c1: #38bdf8; --c2: #0369a1; }

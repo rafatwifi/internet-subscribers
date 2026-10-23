@@ -411,7 +411,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $canTransfer) {
             if (!is_dir($flagDir)) {
                 @mkdir($flagDir, 0775, true);
             }
-            @file_put_contents($flagDir . '/xfer_notify_' . (int) $pendingId . '.flag', '1');
+            $extraNote = trim((string) post('notice_extra'));
+            if (function_exists('mb_substr')) {
+                $extraNote = mb_substr($extraNote, 0, 400, 'UTF-8');
+            } elseif (strlen($extraNote) > 400) {
+                $extraNote = substr($extraNote, 0, 400);
+            }
+            @file_put_contents($flagDir . '/xfer_notify_' . (int) $pendingId . '.flag', $extraNote);
         }
         if ($ajaxXfer) {
             header('Content-Type: application/json; charset=utf-8');
@@ -648,7 +654,12 @@ function cards_execute_pending_transfer($pdo, $config, $pendingId, $homeId, $lan
     }
     $flag = dirname(__DIR__) . '/storage/cache/xfer_notify_' . (int) $pendingId . '.flag';
     $notifyOn = is_file($flag);
+    $extraNote = '';
     if ($notifyOn) {
+        $extraNote = trim((string) @file_get_contents($flag));
+        if ($extraNote === '1') {
+            $extraNote = '';
+        }
         @unlink($flag);
     }
     $waNote = '';
@@ -678,7 +689,8 @@ function cards_execute_pending_transfer($pdo, $config, $pendingId, $homeId, $lan
                 $profileName,
                 (int) $qty,
                 $unitNote,
-                $noticeKind
+                $noticeKind,
+                $extraNote
             );
             if ($waCode !== 'sent') {
                 $waNote = $isEn ? ' The transfer is saved. The WhatsApp notice was not sent.' : ' التحويل تم. إشعار الواتساب ما انرسل.';
@@ -1617,6 +1629,7 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 .cards-page .sas-box {
   --c1: #0f766e; --c2: #115e59; --ink: #ffffff;
   position: relative; overflow: hidden; display: flex; flex-direction: column; justify-content: space-between;
+  touch-action: pan-y;
   color: var(--ink); text-decoration: none; border: 0; border-radius: 2px 20px 2px 16px;
   min-height: 112px; padding: 16px 16px 14px 18px; width: 100%; text-align: inherit; font: inherit;
   cursor: pointer;
@@ -1757,15 +1770,129 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 .cards-page .xfer-panel h2 { margin: 0 0 6px; font-size: 18px; }
 .cards-page .xfer-head {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  margin: 16px 0 8px;
+  margin: 0 0 12px;
 }
-.cards-page .xfer-head h3 { margin: 0; font-size: 14px; }
+.cards-page .xfer-head h3 { margin: 0; font-size: 18px; }
 .cards-page .xfer-scroll {
-  border: 1px solid #eef2f6; border-radius: 12px;
+  border: 0; border-radius: 0;
   max-width: 100%;
-  overflow-x: hidden;
+  overflow: visible;
 }
-.cards-page .xfer-compact { display: none; }
+.cards-page .xfer-panel > h2,
+.cards-page .xfer-panel > p.meta { display: none; }
+.cards-page .xfer-table thead,
+.cards-page .xfer-full { display: none; }
+.cards-page .xfer-table,
+.cards-page .xfer-table tbody,
+.cards-page .xfer-table tr { display: block; width: 100%; }
+.cards-page .xfer-table tr {
+  border: 1px solid #e8edf3; border-radius: 14px; margin: 0 0 8px; padding: 12px 14px;
+  background: #fff; box-shadow: 0 6px 16px rgba(15, 23, 42, 0.04);
+}
+.cards-page .xfer-compact {
+  display: grid; width: 100%; box-sizing: border-box; text-align: start;
+  grid-template-columns: 148px minmax(0, 1.4fr) minmax(0, 1fr) auto;
+  grid-template-areas: "when route pack act" "when note by act";
+  align-items: center; column-gap: 14px; row-gap: 2px;
+}
+.cards-page .xfer-c-top { grid-area: when; direction: ltr; font-size: 12px; color: #64748b; }
+.cards-page .xfer-c-route,
+.cards-page .xfer-c-pack { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cards-page .xfer-c-route { grid-area: route; font-size: 14px; font-weight: 800; }
+.cards-page .xfer-c-pack { grid-area: pack; font-size: 13px; font-weight: 700; color: #334155; }
+.cards-page .xfer-c-note { grid-area: note; font-size: 12px; color: #64748b; }
+.cards-page .xfer-c-note:empty { display: none; }
+.cards-page .xfer-c-by { grid-area: by; font-size: 11px; color: #94a3b8; }
+.cards-page .xfer-c-act { grid-area: act; justify-self: end; margin: 0; }
+.cards-page .cards-swipe-hint {
+  margin: 0 0 10px; color: #475569; font-size: 13px; font-weight: 700;
+}
+.cards-page .card-xfer-go {
+  position: relative; z-index: 2; margin-top: 8px; align-self: flex-start;
+  display: inline-flex; align-items: center; height: 26px; padding: 0 10px;
+  border-radius: 999px; background: rgba(255,255,255,.22); font-size: 12px; font-weight: 800;
+}
+.cards-page .sas-box.is-dragging { transition: none; }
+#cardXferForm:not(.is-sheet) .xfer-sheet-body { display: none; }
+#cardXferForm.is-sheet {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  right: auto; bottom: auto; z-index: 100200; margin: 0; padding: 0; border: 0;
+  background: rgba(15, 23, 42, .48);
+  display: flex; align-items: flex-end; justify-content: center;
+  overflow: hidden; box-sizing: border-box;
+}
+#cardXferForm.is-sheet .xfer-sheet-body {
+  display: block; width: 100%; max-width: 560px; max-height: 100%;
+  overflow: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
+  background: #fff; border-radius: 18px 18px 0 0;
+  padding: 0 16px calc(18px + env(safe-area-inset-bottom));
+  box-shadow: 0 -12px 40px rgba(15, 23, 42, .22); text-align: start; box-sizing: border-box;
+}
+#cardXferForm.is-sheet .xfer-sheet-head {
+  position: sticky; top: 0; z-index: 2; background: #fff; padding-top: 14px; margin-bottom: 10px;
+}
+#cardXferForm.is-sheet .xfer-grid { grid-template-columns: 1fr; width: 100%; min-width: 0; }
+#cardXferForm.is-sheet .xfer-grid > div { min-width: 0; overflow: visible; }
+#cardXferForm.is-sheet .xfer-grid label {
+  overflow: visible; line-height: 1.45; min-height: 0; text-align: start;
+}
+#cardXferForm.is-sheet input,
+#cardXferForm.is-sheet select,
+#cardXferForm.is-sheet .xfer-pick-btn {
+  height: auto !important; min-height: 44px; font-size: 16px; line-height: 1.35;
+  box-sizing: border-box; max-width: 100%;
+}
+#cardXferForm #xferQty::-webkit-outer-spin-button,
+#cardXferForm #xferQty::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+#cardXferForm #xferQty { -moz-appearance: textfield; appearance: textfield; }
+.cards-page .xfer-sheet-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px;
+}
+.cards-page .xfer-sheet-head h3 { margin: 0; font-size: 18px; }
+.cards-page .xfer-sheet-x {
+  border: 0; background: #f1f5f9; width: 36px; height: 36px; border-radius: 10px;
+  font-size: 20px; cursor: pointer; color: #0f172a;
+}
+#cardXferForm .xfer-extra[hidden],
+#cardXferForm #xferExtra[hidden] { display: none !important; }
+#cardXferForm.is-sheet #xferExtra {
+  width: 100%; min-height: 88px; height: auto !important; margin-top: 8px;
+  padding: 10px 12px; font-size: 16px; line-height: 1.45; resize: vertical; box-sizing: border-box;
+}
+#cardXferForm #xferSubmit {
+  width: 100%;
+  height: 56px;
+  margin-top: 6px;
+  border: 0;
+  border-radius: 16px;
+  font-size: 18px;
+  font-weight: 800;
+  color: #fff;
+  background: linear-gradient(115deg, #166534 0%, #16a34a 32%, #4ade80 50%, #16a34a 68%, #166534 100%);
+  background-size: 240% 100%;
+  box-shadow: 0 10px 24px rgba(22, 163, 74, 0.34);
+  animation: xferLiveShift 2.8s ease-in-out infinite, xferLiveGlow 2.2s ease-in-out infinite;
+}
+#cardXferForm #xferSubmit:disabled {
+  background: #e2e8f0;
+  color: #94a3b8;
+  box-shadow: none;
+  animation: none;
+  cursor: not-allowed;
+}
+@keyframes xferLiveShift {
+  0% { background-position: 100% 50%; }
+  50% { background-position: 0% 50%; }
+  100% { background-position: 100% 50%; }
+}
+@keyframes xferLiveGlow {
+  0%, 100% { box-shadow: 0 8px 18px rgba(22, 163, 74, 0.28); }
+  50% { box-shadow: 0 14px 30px rgba(34, 197, 94, 0.5); }
+}
+@media (min-width: 761px) {
+  #cardXferForm.is-sheet { align-items: center; padding: 16px; }
+  #cardXferForm.is-sheet .xfer-sheet-body { border-radius: 18px; }
+}
 .cards-page .xfer-pager {
   display: flex; align-items: center; justify-content: center; gap: 8px;
   margin: 12px 2px 8px; flex-wrap: wrap;
@@ -1845,35 +1972,71 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 }
 @media (max-width: 760px) {
   .cards-page { align-items: stretch; }
-  .cards-page .cards-section-title,
-  .cards-page .xfer-head { text-align: center; justify-content: center; }
-  .cards-page .sas-box { text-align: center; align-items: center; min-height: 86px; padding: 12px; }
+  .cards-page .cards-section-title { text-align: start; }
+  .cards-page .sas-box { text-align: start; align-items: flex-start; min-height: 86px; padding: 12px; }
   .cards-page .sas-box-val { margin-top: 4px; }
-  .cards-page .xfer-panel { margin-inline: auto; text-align: center; }
+  .cards-page .cat-head {
+    flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 8px;
+  }
+  .cards-page .cat-head h3 { width: 100%; min-width: 0; }
+  .cards-page .cat-meta { width: 100%; }
+  .cards-page .xfer-panel { margin-inline: 0; text-align: start; padding: 14px 12px 8px; }
   .cards-page .xfer-grid { grid-template-columns: 1fr; }
   .cards-page .xfer-grid label,
   .cards-page .xfer-grid input,
-  .cards-page .xfer-grid select { text-align: center; }
+  .cards-page .xfer-grid select,
+  .cards-page .xfer-pick-btn { text-align: start; }
+  .cards-page #cardXferForm .toggle {
+    display: flex; width: 100%; justify-content: space-between; margin-top: 14px;
+  }
+  .cards-page #cardXferForm .actions { display: block; }
+  .cards-page #cardXferForm .actions .btn { width: 100%; }
+  .cards-page .xfer-head {
+    justify-content: space-between; text-align: start; width: 100%; gap: 8px;
+  }
   .cards-page .xfer-scroll { overflow: visible; border: 0; }
-  .cards-page .xfer-table { table-layout: auto; margin-inline: auto; }
+  .cards-page .xfer-table { table-layout: auto; margin-inline: 0; }
   .cards-page .xfer-table thead,
   .cards-page .xfer-full { display: none; }
   .cards-page .xfer-table,
   .cards-page .xfer-table tbody,
-  .cards-page .xfer-table tr,
-  .cards-page .xfer-compact { display: block; width: 100%; }
-  .cards-page .xfer-table tr {
-    border: 1px solid #e8edf3; border-radius: 12px; margin: 0 auto 8px; padding: 8px 10px;
-    background: #fff; text-align: center; max-width: 420px;
+  .cards-page .xfer-table tr { display: block; width: 100%; }
+  .cards-page .xfer-compact {
+    display: grid; width: 100%; box-sizing: border-box;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "when act"
+      "route route"
+      "pack pack"
+      "note note"
+      "by by";
+    column-gap: 8px; row-gap: 2px; text-align: start;
   }
-  .cards-page .xfer-c-top { font-size: 12px; color: #64748b; }
-  .cards-page .xfer-c-mid { font-size: 13px; font-weight: 500; line-height: 1.45; }
+  .cards-page .xfer-table tr {
+    border: 1px solid #e8edf3; border-radius: 12px; margin: 0 0 8px; padding: 10px 12px;
+    background: #fff; text-align: start; max-width: none;
+  }
+  .cards-page .xfer-table tr:not(:has(.xfer-compact)) td {
+    display: block; width: 100%; border: 0; padding: 2px 0; text-align: start;
+    word-break: normal; overflow-wrap: break-word;
+  }
+  .cards-page .xfer-table tr:not(:has(.xfer-compact)) td:empty { display: none; }
+  .cards-page .xfer-c-top { grid-area: when; font-size: 12px; color: #64748b; direction: ltr; text-align: end; }
+  .cards-page .xfer-c-act { grid-area: act; margin-top: 0; justify-self: end; }
+  .cards-page .xfer-c-route { grid-area: route; }
+  .cards-page .xfer-c-pack { grid-area: pack; }
+  .cards-page .xfer-c-note { grid-area: note; }
+  .cards-page .xfer-c-by { grid-area: by; }
+  .cards-page .xfer-c-mid {
+    font-size: 13px; font-weight: 700; line-height: 1.45;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
   .cards-page .xfer-c-note {
     font-size: 12px; color: #64748b; line-height: 1.35; margin-top: 2px;
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   }
+  .cards-page .xfer-c-note:empty { display: none; }
   .cards-page .xfer-c-by { font-size: 11px; color: #94a3b8; }
-  .cards-page .xfer-c-act { margin-top: 4px; }
 }
 .cards-page .xfer-native {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
@@ -1932,10 +2095,15 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
             return $opt;
         };
         ?>
-        <form method="post" id="cardXferForm" data-no-wait="1">
+        <form method="post" class="cards-page" id="cardXferForm" data-no-wait="1">
             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
             <input type="hidden" name="action" value="transfer">
             <input type="hidden" name="xfer_n" value="<?php echo (int) $xferPer; ?>">
+            <div class="xfer-sheet-body">
+            <div class="xfer-sheet-head">
+                <h3 id="xferSheetTitle"><?php echo e($isEn ? 'Transfer cards' : 'تحويل الكروت'); ?></h3>
+                <button type="button" class="xfer-sheet-x" id="xferSheetClose" aria-label="<?php echo e($isEn ? 'Close' : 'إغلاق'); ?>">×</button>
+            </div>
             <div class="xfer-grid">
                 <div>
                     <label><?php echo e($isEn ? 'From' : 'من'); ?></label>
@@ -2003,12 +2171,21 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
                 </div>
             </div>
             <label class="toggle" style="display:flex;align-items:center;gap:8px;margin-top:12px">
-                <input type="checkbox" name="notify_parent" value="1" checked>
+                <input type="checkbox" name="notify_parent" value="1" id="xferNotify" checked>
                 <span class="toggle-ui" aria-hidden="true"></span>
                 <span><?php echo e($isEn ? 'Send a WhatsApp notice to this agent' : 'أرسل إشعار واتساب لهذا الوكيل'); ?></span>
             </label>
+            <div class="xfer-extra" id="xferExtraWrap">
+                <label class="toggle" style="display:flex;align-items:center;gap:8px;margin-top:10px">
+                    <input type="checkbox" id="xferExtraOn">
+                    <span class="toggle-ui" aria-hidden="true"></span>
+                    <span><?php echo e($isEn ? 'Extra text' : 'نص إضافي'); ?></span>
+                </label>
+                <textarea name="notice_extra" id="xferExtra" maxlength="400" rows="3" hidden disabled placeholder="<?php echo e($isEn ? 'Write the extra text…' : 'اكتب النص اللي تريد يوصل ويا الإشعار…'); ?>"></textarea>
+            </div>
             <div class="actions" style="margin-top:12px">
                 <button class="btn" type="submit" id="xferSubmit" disabled><?php echo e($isEn ? 'Record transfer' : 'تسجيل التحويل'); ?></button>
+            </div>
             </div>
         </form>
         <script>
@@ -2293,13 +2470,14 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
             var old = document.querySelector('.sas-toast.xfer-toast');
             if (old && old.parentNode) old.parentNode.removeChild(old);
             var box = document.createElement('div');
-            box.className = 'sas-toast sas-toast-error sas-toast-mid xfer-toast';
+            box.className = 'sas-toast sas-toast-error xfer-toast';
             box.setAttribute('role', 'status');
             var span = document.createElement('span');
             span.className = 'sas-toast-text';
             span.textContent = message;
             box.appendChild(span);
             document.body.appendChild(box);
+            if (window.placeCornerToast) window.placeCornerToast(box);
             setTimeout(function () {
               box.style.opacity = '0';
               box.style.transform = 'translateY(-56px)';
@@ -2308,6 +2486,9 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
               if (box.parentNode) box.parentNode.removeChild(box);
             }, 3800);
           }
+          function xferTrim(v) {
+            return String(v || '').replace(/^\s+|\s+$/g, '');
+          }
           function insertPendingRow() {
             var table = document.getElementById('xferTable');
             var body = table ? table.querySelector('tbody') : null;
@@ -2315,23 +2496,11 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
             var fromBtn = document.getElementById('xferFromBtn');
             var toBtn = document.getElementById('xferToBtn');
             var profOpt = profile && profile.options[profile.selectedIndex] ? profile.options[profile.selectedIndex] : null;
-            var tr = document.createElement('tr');
-            tr.setAttribute('data-state', 'pending');
-            tr.setAttribute('data-from', fromSel.value);
-            tr.setAttribute('data-profile', profile ? profile.value : '');
-            tr.setAttribute('data-qty', qty ? qty.value : '1');
-            var whenCell = xferCell('', <?php echo json_encode($isEn ? 'Date' : 'التاريخ'); ?>);
-            whenCell.setAttribute('data-col', 'when');
-            tr.appendChild(whenCell);
-            tr.appendChild(xferCell(fromBtn ? fromBtn.textContent : '', <?php echo json_encode($isEn ? 'From' : 'من'); ?>));
-            tr.appendChild(xferCell(toBtn ? toBtn.textContent : '', <?php echo json_encode($isEn ? 'To' : 'إلى'); ?>));
-            tr.appendChild(xferCell(profOpt ? profOpt.textContent : '', <?php echo json_encode($isEn ? 'Package' : 'الفئة'); ?>));
-            tr.appendChild(xferCell(qty ? qty.value : '', <?php echo json_encode($isEn ? 'Qty' : 'كم'); ?>));
-            tr.appendChild(xferCell('', <?php echo json_encode($isEn ? 'Profit' : 'ربح'); ?>));
-            var note = xferCell('', <?php echo json_encode($isEn ? 'Note' : 'ملاحظة'); ?>);
-            note.setAttribute('data-col', 'note');
-            tr.appendChild(note);
-            tr.appendChild(xferCell(<?php
+            var fromName = xferTrim(fromBtn ? fromBtn.textContent : '');
+            var toName = xferTrim(toBtn ? toBtn.textContent : '');
+            var profName = xferTrim(profOpt ? profOpt.textContent : '');
+            var qtyVal = qty ? qty.value : '1';
+            var actorName = <?php
               $xferActorName = '';
               if (is_array($me)) {
                   $xferActorName = isset($me['display_name']) ? trim((string) $me['display_name']) : '';
@@ -2340,12 +2509,61 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
                   }
               }
               echo json_encode($xferActorName);
-            ?>, <?php echo json_encode($isEn ? 'By' : 'بواسطة'); ?>));
+            ?>;
+            var waitHtml = '<span class="xfer-live" aria-hidden="true"></span><span class="xfer-wait">'
+              + <?php echo json_encode($isEn ? 'Transferring' : 'جاري التحويل'); ?> + '</span>';
+            var tr = document.createElement('tr');
+            tr.setAttribute('data-state', 'pending');
+            tr.setAttribute('data-from', fromSel.value);
+            tr.setAttribute('data-profile', profile ? profile.value : '');
+            tr.setAttribute('data-qty', qtyVal);
+            var compact = document.createElement('td');
+            compact.className = 'xfer-compact';
+            var top = document.createElement('div');
+            top.className = 'xfer-c-top';
+            top.setAttribute('data-col', 'when');
+            var route = document.createElement('div');
+            route.className = 'xfer-c-mid xfer-c-route';
+            route.textContent = fromName + ' ← ' + toName;
+            var pack = document.createElement('div');
+            pack.className = 'xfer-c-mid xfer-c-pack';
+            pack.textContent = profName + ' · ' + qtyVal;
+            var noteC = document.createElement('div');
+            noteC.className = 'xfer-c-note';
+            noteC.setAttribute('data-col', 'note');
+            var by = document.createElement('div');
+            by.className = 'xfer-c-by';
+            by.textContent = actorName;
+            var actC = document.createElement('div');
+            actC.className = 'xfer-c-act';
+            actC.setAttribute('data-col', 'act');
+            actC.innerHTML = waitHtml;
+            compact.appendChild(top);
+            compact.appendChild(route);
+            compact.appendChild(pack);
+            compact.appendChild(noteC);
+            compact.appendChild(by);
+            compact.appendChild(actC);
+            tr.appendChild(compact);
+            function fullCell(text, label, col) {
+              var td = xferCell(text, label);
+              td.className = 'xfer-full';
+              if (col) td.setAttribute('data-col', col);
+              return td;
+            }
+            tr.appendChild(fullCell('', <?php echo json_encode($isEn ? 'Date' : 'التاريخ'); ?>, 'when'));
+            tr.appendChild(fullCell(fromName, <?php echo json_encode($isEn ? 'From' : 'من'); ?>, ''));
+            tr.appendChild(fullCell(toName, <?php echo json_encode($isEn ? 'To' : 'إلى'); ?>, ''));
+            tr.appendChild(fullCell(profName, <?php echo json_encode($isEn ? 'Package' : 'الفئة'); ?>, ''));
+            tr.appendChild(fullCell(qtyVal, <?php echo json_encode($isEn ? 'Qty' : 'كم'); ?>, ''));
+            tr.appendChild(fullCell('', <?php echo json_encode($isEn ? 'Profit' : 'ربح'); ?>, ''));
+            tr.appendChild(fullCell('', <?php echo json_encode($isEn ? 'Note' : 'ملاحظة'); ?>, 'note'));
+            tr.appendChild(fullCell(actorName, <?php echo json_encode($isEn ? 'By' : 'بواسطة'); ?>, ''));
             var act = document.createElement('td');
+            act.className = 'xfer-full';
             act.setAttribute('data-col', 'act');
             act.setAttribute('data-label', <?php echo json_encode($isEn ? 'Action' : 'إجراء'); ?>);
-            act.innerHTML = '<span class="xfer-live" aria-hidden="true"></span><span class="xfer-wait">'
-              + <?php echo json_encode($isEn ? 'Transferring' : 'جاري التحويل'); ?> + '</span>';
+            act.innerHTML = waitHtml;
             tr.appendChild(act);
             if (body.firstChild) body.insertBefore(tr, body.firstChild);
             else body.appendChild(tr);
@@ -2361,6 +2579,7 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
               return;
             }
             e.preventDefault();
+            closeXferSheet();
             if (form.getAttribute('data-busy') === '1') return;
             form.setAttribute('data-busy', '1');
             var row = insertPendingRow();
@@ -2541,6 +2760,103 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
             }
             paintQty();
           };
+          var extraOn = document.getElementById('xferExtraOn');
+          var extraBox = document.getElementById('xferExtra');
+          var extraWrap = document.getElementById('xferExtraWrap');
+          function syncExtra() {
+            var notify = document.getElementById('xferNotify');
+            var notice = !notify || notify.checked;
+            if (extraWrap) extraWrap.hidden = !notice;
+            var show = notice && extraOn && extraOn.checked;
+            if (extraBox) {
+              extraBox.hidden = !show;
+              extraBox.disabled = !show;
+            }
+          }
+          var notifyBox = document.getElementById('xferNotify');
+          if (notifyBox) notifyBox.addEventListener('change', syncExtra);
+          if (extraOn) extraOn.addEventListener('change', syncExtra);
+          syncExtra();
+          var formParent = form.parentNode;
+          var formNext = form.nextSibling;
+          var sheetLockY = 0;
+          function placeXferSheet() {
+            if (!form.classList.contains('is-sheet')) return;
+            var vv = window.visualViewport;
+            var top = vv ? vv.offsetTop : 0;
+            var left = vv ? vv.offsetLeft : 0;
+            var width = vv ? vv.width : window.innerWidth;
+            var height = vv ? vv.height : window.innerHeight;
+            form.style.top = top + 'px';
+            form.style.left = left + 'px';
+            form.style.width = width + 'px';
+            form.style.height = height + 'px';
+            form.style.right = 'auto';
+            form.style.bottom = 'auto';
+          }
+          function closeXferSheet() {
+            if (document.activeElement && document.activeElement.blur) {
+              try { document.activeElement.blur(); } catch (err) {}
+            }
+            form.classList.remove('is-sheet');
+            form.style.top = '';
+            form.style.left = '';
+            form.style.width = '';
+            form.style.height = '';
+            form.style.right = '';
+            form.style.bottom = '';
+            if (formParent && form.parentNode !== formParent) {
+              if (formNext && formNext.parentNode === formParent) formParent.insertBefore(form, formNext);
+              else formParent.appendChild(form);
+            }
+            document.body.style.position = '';
+            document.body.style.top = '';
+            document.body.style.left = '';
+            document.body.style.right = '';
+            document.body.style.width = '';
+            document.body.style.overflow = '';
+            window.scrollTo(0, sheetLockY || 0);
+          }
+          window.openCardXfer = function (profileName) {
+            var want = nameKey(profileName);
+            var i, opt;
+            if (profile && want) {
+              for (i = 0; i < profile.options.length; i++) {
+                opt = profile.options[i];
+                if (nameKey(opt.value) === want || nameKey(opt.textContent) === want) {
+                  profile.selectedIndex = i;
+                  break;
+                }
+              }
+              var picked = profile.options[profile.selectedIndex];
+              if (profileId) profileId.value = picked ? (picked.getAttribute('data-pid') || '0') : '0';
+              var title = document.getElementById('xferSheetTitle');
+              if (title && picked && picked.value) title.textContent = xferTrim(picked.textContent);
+            }
+            if (form.parentNode !== document.body) document.body.appendChild(form);
+            sheetLockY = window.pageYOffset || document.documentElement.scrollTop || 0;
+            document.body.style.top = (-sheetLockY) + 'px';
+            document.body.style.left = '0';
+            document.body.style.right = '0';
+            document.body.style.width = '100%';
+            document.body.style.position = 'fixed';
+            document.body.style.overflow = 'hidden';
+            form.classList.add('is-sheet');
+            placeXferSheet();
+            paintQty();
+          };
+          if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', placeXferSheet);
+            window.visualViewport.addEventListener('scroll', placeXferSheet);
+          }
+          var sheetX = document.getElementById('xferSheetClose');
+          if (sheetX) sheetX.addEventListener('click', closeXferSheet);
+          form.addEventListener('click', function (e) {
+            if (e.target === form) closeXferSheet();
+          });
+          document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape' && form.classList.contains('is-sheet')) closeXferSheet();
+          });
         })();
         </script>
 
@@ -2588,14 +2904,14 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
                     ?>
                     <tr data-id="<?php echo (int) $tr['id']; ?>" data-state="<?php echo e($rowState); ?>" data-from="<?php echo (int) $tr['from_agent_id']; ?>" data-qty="<?php echo (int) $tr['qty']; ?>" data-profile="<?php echo e(isset($tr['profile_name']) ? $tr['profile_name'] : ''); ?>">
                         <td class="xfer-compact">
-                            <div class="xfer-c-top"><?php echo e(isset($tr['created_at']) ? $tr['created_at'] : ''); ?></div>
-                            <div class="xfer-c-mid"><?php echo e($fromLbl); ?> ← <?php echo e(isset($tr['to_name']) ? $tr['to_name'] : ''); ?></div>
-                            <div class="xfer-c-mid"><?php echo e(isset($tr['profile_name']) ? $tr['profile_name'] : ''); ?> · <?php echo (int) $tr['qty']; ?> · <?php echo e(money_format_iqd($isReturn ? (0 - $profit) : $profit, $config['currency'])); ?></div>
-                            <?php if (!empty($tr['note'])): ?><div class="xfer-c-note"><?php echo e($tr['note']); ?></div><?php endif; ?>
+                            <div class="xfer-c-top" data-col="when"><?php echo e(isset($tr['created_at']) ? $tr['created_at'] : ''); ?></div>
+                            <div class="xfer-c-mid xfer-c-route"><?php echo e($fromLbl); ?> ← <?php echo e(isset($tr['to_name']) ? $tr['to_name'] : ''); ?></div>
+                            <div class="xfer-c-mid xfer-c-pack"><?php echo e(isset($tr['profile_name']) ? $tr['profile_name'] : ''); ?> · <?php echo (int) $tr['qty']; ?> · <?php echo e(money_format_iqd($isReturn ? (0 - $profit) : $profit, $config['currency'])); ?></div>
+                            <?php if (!empty($tr['note'])): ?><div class="xfer-c-note" data-col="note"><?php echo e($tr['note']); ?></div><?php endif; ?>
                             <div class="xfer-c-by"><?php echo e(isset($tr['created_by_name']) ? $tr['created_by_name'] : ''); ?></div>
-                            <div class="xfer-c-act"><?php echo cards_xfer_action_html($tr, $canTransfer, $homeId, $isEn, $returnedIds, $pendingReturnIds, $xferPer); ?></div>
+                            <div class="xfer-c-act" data-col="act"><?php echo cards_xfer_action_html($tr, $canTransfer, $homeId, $isEn, $returnedIds, $pendingReturnIds, $xferPer); ?></div>
                         </td>
-                        <td class="xfer-full" data-label="<?php echo e($isEn ? 'Date' : 'التاريخ'); ?>"><?php echo e(isset($tr['created_at']) ? $tr['created_at'] : ''); ?></td>
+                        <td class="xfer-full" data-col="when" data-label="<?php echo e($isEn ? 'Date' : 'التاريخ'); ?>"><?php echo e(isset($tr['created_at']) ? $tr['created_at'] : ''); ?></td>
                         <td class="xfer-full" data-label="<?php echo e($isEn ? 'From' : 'من'); ?>"><?php echo e($fromLbl); ?></td>
                         <td class="xfer-full" data-label="<?php echo e($isEn ? 'To' : 'إلى'); ?>"><?php echo e(isset($tr['to_name']) ? $tr['to_name'] : ''); ?></td>
                         <td class="xfer-full" data-label="<?php echo e($isEn ? 'Package' : 'الفئة'); ?>"><?php echo e(isset($tr['profile_name']) ? $tr['profile_name'] : ''); ?><?php if ($isReturn): ?> <span class="meta"><?php echo e($isEn ? 'return' : 'استرجاع'); ?></span><?php endif; ?></td>
@@ -2659,16 +2975,17 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
                 if (!tr) continue;
                 var prev = tr.getAttribute('data-state') || '';
                 tr.setAttribute('data-state', r.state || 'done');
-                var whenCell = tr.querySelector('[data-col="when"]');
-                if (!whenCell && tr.cells && tr.cells[0]) {
-                  whenCell = tr.cells[0];
-                  whenCell.setAttribute('data-col', 'when');
+                function paintNodes(col, value, asHtml) {
+                  var nodes = tr.querySelectorAll('[data-col="' + col + '"]');
+                  var i;
+                  for (i = 0; i < nodes.length; i++) {
+                    if (asHtml) nodes[i].innerHTML = value || '';
+                    else if (nodes[i].textContent !== (value || '')) nodes[i].textContent = value || '';
+                  }
                 }
-                if (whenCell && r.when) whenCell.textContent = r.when;
-                var note = tr.querySelector('[data-col="note"]');
-                if (note && note.textContent !== (r.note || '')) note.textContent = r.note || '';
-                var act = tr.querySelector('[data-col="act"]');
-                if (act && r.state !== 'pending') act.innerHTML = r.action || '';
+                if (r.when) paintNodes('when', r.when, false);
+                paintNodes('note', r.note || '', false);
+                if (r.state !== 'pending') paintNodes('act', r.action || '', true);
                 if (prev === 'pending' && r.state && r.state !== 'pending') {
                   if (r.state === 'done' && window.cardXferNoteDone) {
                     window.cardXferNoteDone(tr.getAttribute('data-from'), tr.getAttribute('data-profile'), tr.getAttribute('data-qty'));
@@ -2721,6 +3038,9 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
             echo e($err);
         }
     ?></p>
+    <?php if ($canTransfer): ?>
+    <p class="cards-swipe-hint"><?php echo e($isEn ? 'Swipe a package or tap Transfer, then pick the quantity and the agent.' : 'اسحب الفئة أو اضغط تحويل، ثم اختر العدد والوكيل.'); ?></p>
+    <?php endif; ?>
     <div id="cardsRoot">
     <?php if (!$sasReady && !$groups): ?>
         <p style="font-weight:700;color:#64748b" id="cardsEmpty"><?php echo e($isEn ? 'This account has no SAS or reseller, so cards are not synced.' : 'هذا الحساب ما مربوط بساس أو ريسلر، فماكو مزامنة كروت.'); ?></p>
@@ -2743,6 +3063,7 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
                 <span class="sas-box-title"><?php echo e($wName !== '' ? $wName : '—'); ?></span>
                 <span class="sas-box-sub"><?php echo e($isEn ? 'Available' : 'متوفر'); ?></span>
                 <span class="sas-box-val"><?php echo $wUnused; ?></span>
+                <?php if ($canTransfer): ?><span class="card-xfer-go"><?php echo e($isEn ? 'Transfer' : 'تحويل'); ?></span><?php endif; ?>
             </button>
             <?php endforeach; ?>
         </div>
@@ -2869,6 +3190,7 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 <script>
 (function () {
   var isEn = <?php echo $isEn ? 'true' : 'false'; ?>;
+  var canTransfer = <?php echo !empty($canTransfer) ? 'true' : 'false'; ?>;
   var ownStockOnly = <?php echo $cardsOwnStockOnly ? 'true' : 'false'; ?>;
   var sasReady = <?php echo !empty($sasReady) ? 'true' : 'false'; ?>;
   var syncEl = document.getElementById('cardsSync');
@@ -2935,7 +3257,9 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
       html += '<button type="button" class="sas-box ' + tone + '" data-wid="' + wi + '" data-total="' + (g.total || 0) + '" data-used="' + (g.used || 0) + '" data-unused="' + (g.unused || 0) + '">';
       html += '<span class="sas-box-title">' + esc(g.name || '—') + '</span>';
       html += '<span class="sas-box-sub">' + (isEn ? 'Available' : 'متوفر') + '</span>';
-      html += '<span class="sas-box-val">' + (g.unused || 0) + '</span></button>';
+      html += '<span class="sas-box-val">' + (g.unused || 0) + '</span>';
+      if (canTransfer) html += '<span class="card-xfer-go">' + (isEn ? 'Transfer' : 'تحويل') + '</span>';
+      html += '</button>';
     });
     html += '</div>';
     html += '<div class="cards-summary" id="cardsSummary">';
@@ -3157,10 +3481,68 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
     });
     bindCatBits(list);
     var wids = document.getElementById('cardsWids');
+    if (wids && canTransfer && window.openCardXfer && wids.getAttribute('data-swipe') !== '1') {
+      wids.setAttribute('data-swipe', '1');
+      var drag = null;
+      wids.addEventListener('pointerdown', function (e) {
+        var box = e.target.closest ? e.target.closest('.sas-box') : null;
+        if (!box || !wids.contains(box) || e.button > 0) return;
+        if (e.target.closest && e.target.closest('.card-xfer-go')) return;
+        drag = { el: box, x: e.clientX, y: e.clientY, id: e.pointerId, moved: false };
+      });
+      wids.addEventListener('pointermove', function (e) {
+        if (!drag || e.pointerId !== drag.id) return;
+        var dx = e.clientX - drag.x;
+        var dy = e.clientY - drag.y;
+        if (!drag.moved && Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 8) {
+          drag.el.classList.remove('is-dragging');
+          drag.el.style.transform = '';
+          drag = null;
+          return;
+        }
+        if (Math.abs(dx) < 10) return;
+        drag.moved = true;
+        drag.el.classList.add('is-dragging');
+        var shift = dx > 84 ? 84 : (dx < -84 ? -84 : dx);
+        drag.el.style.transform = 'translateX(' + shift + 'px)';
+      });
+      function endDrag(e) {
+        if (!drag || !e || e.pointerId !== drag.id) return;
+        var dx = e.clientX - drag.x;
+        var el = drag.el;
+        var title = el.querySelector('.sas-box-title');
+        el.classList.remove('is-dragging');
+        el.style.transform = '';
+        if (Math.abs(dx) > 72) {
+          el.setAttribute('data-swiped', '1');
+          window.openCardXfer(title ? title.textContent : '');
+        }
+        drag = null;
+      }
+      wids.addEventListener('pointerup', endDrag);
+      wids.addEventListener('pointercancel', function (e) {
+        if (!drag || (e && e.pointerId !== drag.id)) return;
+        drag.el.classList.remove('is-dragging');
+        drag.el.style.transform = '';
+        drag = null;
+      });
+    }
     if (wids) {
       wids.addEventListener('click', function (e) {
+        var go = e.target.closest ? e.target.closest('.card-xfer-go') : null;
         var b = e.target.closest ? e.target.closest('[data-wid]') : null;
         if (!b || !wids.contains(b)) return;
+        if (go && canTransfer && window.openCardXfer) {
+          e.preventDefault();
+          var goTitle = b.querySelector('.sas-box-title');
+          window.openCardXfer(goTitle ? goTitle.textContent : '');
+          return;
+        }
+        if (b.getAttribute('data-swiped') === '1') {
+          b.removeAttribute('data-swiped');
+          e.preventDefault();
+          return;
+        }
         var id = b.getAttribute('data-wid');
         var already = b.classList.contains('is-on');
         wids.querySelectorAll('[data-wid]').forEach(function (x) { x.classList.remove('is-on'); });

@@ -843,7 +843,7 @@ if ($mode === 'log') {
     if ($logStatus === '1') {
         $where .= ' AND m.success = 1';
     } elseif ($logStatus === '0') {
-        $where .= ' AND m.success = 0 AND m.subscriber_id IS NOT NULL AND NOT EXISTS (
+        $where .= ' AND m.success = 0 AND (m.subscriber_id IS NULL OR NOT EXISTS (
             SELECT 1 FROM message_logs mresolved
             WHERE mresolved.subscriber_id = m.subscriber_id
               AND mresolved.success = 1
@@ -852,7 +852,7 @@ if ($mode === 'log') {
                 mresolved.body = m.body
                 OR REPLACE(mresolved.message_type, \'_retry\', \'\') = REPLACE(m.message_type, \'_retry\', \'\')
               )
-        )';
+        ))';
     }
     $stCount = $pdo->prepare(
         "SELECT COUNT(*) FROM message_logs m
@@ -876,6 +876,38 @@ if ($mode === 'log') {
     );
     $st->execute($params);
     $logRows = $st->fetchAll();
+    $agentByPhone = array();
+    $needAgentName = false;
+    foreach ($logRows as $lrName) {
+        if (empty($lrName['subscriber_id'])) {
+            $needAgentName = true;
+            break;
+        }
+    }
+    if ($needAgentName) {
+        try {
+            $stAg = $pdo->query('SELECT phone, display_name, username FROM admin_users WHERE phone IS NOT NULL AND phone <> ""');
+            $agRows = $stAg ? $stAg->fetchAll(PDO::FETCH_ASSOC) : array();
+            foreach ($agRows as $ar) {
+                $pk = preg_replace('/\D+/', '', (string) $ar['phone']);
+                if (strlen($pk) >= 10) {
+                    $pk = substr($pk, -10);
+                }
+                if ($pk === '') {
+                    continue;
+                }
+                $nm = trim((string) $ar['display_name']);
+                if ($nm === '') {
+                    $nm = trim((string) $ar['username']);
+                }
+                if ($nm !== '' && !isset($agentByPhone[$pk])) {
+                    $agentByPhone[$pk] = $nm;
+                }
+            }
+        } catch (Exception $e) {
+            $agentByPhone = array();
+        }
+    }
     $logResolvedMap = message_logs_resolved_map($pdo, $logRows);
 } elseif ($mode === 'templates') {
     $sTpl = settings_load();
@@ -1561,6 +1593,8 @@ $sendFilters = array(
             <option value="reminder_debt"<?php echo $logType === 'reminder_debt' ? ' selected' : ''; ?>><?php echo e($isEnMsg ? 'Debt reminder' : 'تذكير دين'); ?></option>
             <option value="unpaid_overdue"<?php echo $logType === 'unpaid_overdue' ? ' selected' : ''; ?>><?php echo e($isEnMsg ? 'Unpaid / delay' : 'تأخير الدين'); ?></option>
             <option value="expiry_auto"<?php echo $logType === 'expiry_auto' ? ' selected' : ''; ?>><?php echo e($isEnMsg ? 'Expiry auto' : 'قرب الانتهاء'); ?></option>
+            <option value="card_transfer"<?php echo $logType === 'card_transfer' ? ' selected' : ''; ?>><?php echo e($isEnMsg ? 'Card transfer' : 'تحويل كروت'); ?></option>
+            <option value="card_pull"<?php echo $logType === 'card_pull' ? ' selected' : ''; ?>><?php echo e($isEnMsg ? 'Card pull' : 'سحب كروت'); ?></option>
         </select>
         <select name="status">
             <option value=""><?php echo e($isEnMsg ? 'All statuses' : 'كل الحالات'); ?></option>
@@ -1661,10 +1695,24 @@ $sendFilters = array(
                         ?></span>
                     </td>
                     <td class="log-name">
+                        <?php
+                        $logWho = '';
+                        if (!empty($row['subscriber_id'])) {
+                            $logWho = $row['subscriber_name'] ? (string) $row['subscriber_name'] : ('#' . (int) $row['subscriber_id']);
+                        } else {
+                            $pk = preg_replace('/\D+/', '', (string) $row['phone']);
+                            if (strlen($pk) >= 10) {
+                                $pk = substr($pk, -10);
+                            }
+                            if ($pk !== '' && isset($agentByPhone[$pk])) {
+                                $logWho = (string) $agentByPhone[$pk];
+                            }
+                        }
+                        ?>
                         <?php if (!empty($row['subscriber_id'])): ?>
-                            <a href="subscriber.php?id=<?php echo (int) $row['subscriber_id']; ?>">
-                                <?php echo e($row['subscriber_name'] ? $row['subscriber_name'] : ('#' . $row['subscriber_id'])); ?>
-                            </a>
+                            <a href="subscriber.php?id=<?php echo (int) $row['subscriber_id']; ?>"><?php echo e($logWho); ?></a>
+                        <?php elseif ($logWho !== ''): ?>
+                            <span class="log-agent"><?php echo e($logWho); ?></span>
                         <?php else: ?>
                             —
                         <?php endif; ?>
