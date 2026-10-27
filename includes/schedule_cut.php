@@ -27,6 +27,13 @@ function schedule_setting_defaults()
         'schedule_cut_send_wa' => !isset($global['schedule_cut_send_wa']) || !empty($global['schedule_cut_send_wa']),
         'expiry_auto_remind_enabled' => !empty($global['expiry_auto_remind_enabled']),
         'expiry_auto_remind_days' => $days,
+        'expiry_auto_remind_repeat' => !empty($global['expiry_auto_remind_repeat']),
+        'expiry_auto_remind_by' => 'profile',
+        'expiry_auto_remind_profiles' => array(),
+        'expiry_auto_remind_packages' => array(),
+        'expiry_auto_remind_services' => array(),
+        'expiry_auto_remind_once_enabled' => false,
+        'expiry_auto_remind_once_days' => 1,
         'unpaid_remind_enabled' => !empty($global['unpaid_remind_enabled']),
         'unpaid_remind_after_days' => $after,
         'wa_case_expiry_soon' => isset($global['wa_case_expiry_soon']) ? (string) $global['wa_case_expiry_soon'] : '',
@@ -62,6 +69,50 @@ function schedule_settings_normalize($data, $base = null)
             $days = 60;
         }
         $out['expiry_auto_remind_days'] = $days;
+    }
+    if (array_key_exists('expiry_auto_remind_repeat', $data)) {
+        $out['expiry_auto_remind_repeat'] = !empty($data['expiry_auto_remind_repeat']);
+    }
+    if (array_key_exists('expiry_auto_remind_by', $data)) {
+        $out['expiry_auto_remind_by'] = ((string) $data['expiry_auto_remind_by'] === 'service') ? 'service' : 'profile';
+    }
+    $cleanList = function ($raw) {
+        return function_exists('expiry_profile_list_clean') ? expiry_profile_list_clean($raw) : array();
+    };
+    if (!empty($data['expiry_auto_remind_lists_set'])) {
+        $out['expiry_auto_remind_packages'] = $cleanList(isset($data['expiry_auto_remind_packages']) ? $data['expiry_auto_remind_packages'] : array());
+        $out['expiry_auto_remind_services'] = $cleanList(isset($data['expiry_auto_remind_services']) ? $data['expiry_auto_remind_services'] : array());
+        $byNow = (isset($out['expiry_auto_remind_by']) && $out['expiry_auto_remind_by'] === 'service') ? 'service' : 'profile';
+        $out['expiry_auto_remind_profiles'] = ($byNow === 'service')
+            ? $out['expiry_auto_remind_services']
+            : $out['expiry_auto_remind_packages'];
+    } else {
+        if (array_key_exists('expiry_auto_remind_packages', $data)) {
+            $out['expiry_auto_remind_packages'] = $cleanList($data['expiry_auto_remind_packages']);
+        }
+        if (array_key_exists('expiry_auto_remind_services', $data)) {
+            $out['expiry_auto_remind_services'] = $cleanList($data['expiry_auto_remind_services']);
+        }
+        if (array_key_exists('expiry_auto_remind_profiles', $data) || !empty($data['expiry_auto_remind_profiles_set'])) {
+            $rawProfiles = isset($data['expiry_auto_remind_profiles']) ? $data['expiry_auto_remind_profiles'] : array();
+            $out['expiry_auto_remind_profiles'] = $cleanList($rawProfiles);
+        }
+    }
+    if (empty($data['expiry_auto_remind_lists_set'])) {
+        $out = schedule_expiry_apply_legacy($out);
+    }
+    if (array_key_exists('expiry_auto_remind_once_enabled', $data)) {
+        $out['expiry_auto_remind_once_enabled'] = !empty($data['expiry_auto_remind_once_enabled']);
+    }
+    if (array_key_exists('expiry_auto_remind_once_days', $data)) {
+        $onceDays = (int) $data['expiry_auto_remind_once_days'];
+        if ($onceDays < 0) {
+            $onceDays = 0;
+        }
+        if ($onceDays > 60) {
+            $onceDays = 60;
+        }
+        $out['expiry_auto_remind_once_days'] = $onceDays;
     }
     if (array_key_exists('unpaid_remind_enabled', $data)) {
         $out['unpaid_remind_enabled'] = !empty($data['unpaid_remind_enabled']);
@@ -130,6 +181,13 @@ function schedule_settings_for_tenant($pdo, $tenantId)
             'schedule_cut_send_wa' => true,
             'expiry_auto_remind_enabled' => false,
             'expiry_auto_remind_days' => 1,
+            'expiry_auto_remind_repeat' => false,
+            'expiry_auto_remind_by' => 'profile',
+            'expiry_auto_remind_profiles' => array(),
+            'expiry_auto_remind_packages' => array(),
+            'expiry_auto_remind_services' => array(),
+            'expiry_auto_remind_once_enabled' => false,
+            'expiry_auto_remind_once_days' => 1,
             'unpaid_remind_enabled' => false,
             'unpaid_remind_after_days' => 7,
             'wa_case_expiry_soon' => '',
@@ -155,6 +213,13 @@ function schedule_settings_save($pdo, $tenantId, $data)
             'schedule_cut_send_wa' => true,
             'expiry_auto_remind_enabled' => false,
             'expiry_auto_remind_days' => 1,
+            'expiry_auto_remind_repeat' => false,
+            'expiry_auto_remind_by' => 'profile',
+            'expiry_auto_remind_profiles' => array(),
+            'expiry_auto_remind_packages' => array(),
+            'expiry_auto_remind_services' => array(),
+            'expiry_auto_remind_once_enabled' => false,
+            'expiry_auto_remind_once_days' => 1,
             'unpaid_remind_enabled' => false,
             'unpaid_remind_after_days' => 7,
             'wa_case_expiry_soon' => '',
@@ -181,6 +246,299 @@ function schedule_settings_save($pdo, $tenantId, $data)
     }
 }
 
+function schedule_expiry_profile_choices($pdo, $tenantId)
+{
+    $tenantId = (int) $tenantId;
+    $names = array();
+    $seen = array();
+    if (!$pdo || $tenantId <= 0) {
+        return $names;
+    }
+    try {
+        $st = $pdo->prepare(
+            'SELECT DISTINCT profile_name FROM sas_users_cache
+             WHERE tenant_id = :t AND profile_name IS NOT NULL AND profile_name <> \'\'
+             ORDER BY profile_name ASC
+             LIMIT 80'
+        );
+        $st->execute(array(':t' => $tenantId));
+        $rows = $st->fetchAll();
+    } catch (Exception $e) {
+        $rows = array();
+    }
+    foreach ($rows as $row) {
+        $name = isset($row['profile_name']) ? trim((string) $row['profile_name']) : '';
+        $key = function_exists('expiry_profile_key') ? expiry_profile_key($name) : $name;
+        if ($name === '' || $key === '' || isset($seen[$key])) {
+            continue;
+        }
+        $seen[$key] = true;
+        $names[] = $name;
+    }
+    return $names;
+}
+
+function schedule_expiry_package_choices($pdo, $tenantId)
+{
+    $tenantId = (int) $tenantId;
+    $names = array();
+    $seen = array();
+    if (!$pdo || $tenantId <= 0) {
+        return $names;
+    }
+    $push = function ($name) use (&$names, &$seen) {
+        $name = trim((string) $name);
+        $key = function_exists('expiry_profile_key') ? expiry_profile_key($name) : $name;
+        if ($name === '' || $key === '' || isset($seen[$key])) {
+            return;
+        }
+        $seen[$key] = true;
+        $names[] = $name;
+    };
+    $hasSubs = 0;
+    try {
+        $st = $pdo->prepare(
+            'SELECT DISTINCT sub.service_name
+             FROM subscriptions sub
+             JOIN subscribers s ON s.id = sub.subscriber_id
+             WHERE s.tenant_id = :t AND sub.service_name IS NOT NULL AND sub.service_name <> \'\'
+             ORDER BY sub.service_name ASC
+             LIMIT 80'
+        );
+        $st->execute(array(':t' => $tenantId));
+        foreach ($st->fetchAll() as $row) {
+            $push(isset($row['service_name']) ? $row['service_name'] : '');
+            $hasSubs++;
+        }
+    } catch (Exception $e) {
+        $hasSubs = 0;
+    }
+    if ($hasSubs > 0) {
+        try {
+            $planRows = $pdo->query(
+                'SELECT name FROM service_plans WHERE is_active = 1 AND name IS NOT NULL AND name <> \'\' ORDER BY name ASC LIMIT 40'
+            )->fetchAll();
+            foreach ($planRows as $row) {
+                $push(isset($row['name']) ? $row['name'] : '');
+            }
+        } catch (Exception $e) {
+        }
+    }
+    return $names;
+}
+
+function schedule_expiry_apply_legacy($out)
+{
+    if (!is_array($out)) {
+        return array();
+    }
+    $by = (isset($out['expiry_auto_remind_by']) && $out['expiry_auto_remind_by'] === 'service') ? 'service' : 'profile';
+    $packages = (isset($out['expiry_auto_remind_packages']) && is_array($out['expiry_auto_remind_packages']))
+        ? $out['expiry_auto_remind_packages'] : array();
+    $services = (isset($out['expiry_auto_remind_services']) && is_array($out['expiry_auto_remind_services']))
+        ? $out['expiry_auto_remind_services'] : array();
+    $profiles = (isset($out['expiry_auto_remind_profiles']) && is_array($out['expiry_auto_remind_profiles']))
+        ? $out['expiry_auto_remind_profiles'] : array();
+    if ($by !== 'service' && !$packages && !$services && $profiles) {
+        $packages = $profiles;
+    }
+    $out['expiry_auto_remind_by'] = $by;
+    $out['expiry_auto_remind_packages'] = $packages;
+    $out['expiry_auto_remind_services'] = $services;
+    $out['expiry_auto_remind_profiles'] = ($by === 'service') ? $services : $packages;
+    return $out;
+}
+
+function schedule_expiry_place_saved($sched, $lists)
+{
+    if (!is_array($sched)) {
+        $sched = array();
+    }
+    $by = (isset($sched['expiry_auto_remind_by']) && $sched['expiry_auto_remind_by'] === 'service') ? 'service' : 'profile';
+    $packages = (isset($sched['expiry_auto_remind_packages']) && is_array($sched['expiry_auto_remind_packages']))
+        ? $sched['expiry_auto_remind_packages'] : array();
+    $services = (isset($sched['expiry_auto_remind_services']) && is_array($sched['expiry_auto_remind_services']))
+        ? $sched['expiry_auto_remind_services'] : array();
+    $svcKeys = array();
+    $profKeys = array();
+    if (is_array($lists)) {
+        $svcRows = (isset($lists['services']) && is_array($lists['services'])) ? $lists['services'] : array();
+        $profRows = (isset($lists['profiles']) && is_array($lists['profiles'])) ? $lists['profiles'] : array();
+        foreach ($svcRows as $name) {
+            $key = function_exists('expiry_profile_key') ? expiry_profile_key($name) : strtolower(trim((string) $name));
+            if ($key !== '') {
+                $svcKeys[$key] = $name;
+            }
+        }
+        foreach ($profRows as $name) {
+            $key = function_exists('expiry_profile_key') ? expiry_profile_key($name) : strtolower(trim((string) $name));
+            if ($key !== '' && !isset($svcKeys[$key])) {
+                $profKeys[$key] = $name;
+            }
+        }
+    }
+    if (!$svcKeys && !$profKeys) {
+        return $sched;
+    }
+    $svcOut = array();
+    $profOut = array();
+    $seenS = array();
+    $seenP = array();
+    $take = function ($name, $preferService) use (&$svcOut, &$profOut, &$seenS, &$seenP, $svcKeys, $profKeys) {
+        $name = trim((string) $name);
+        $key = function_exists('expiry_profile_key') ? expiry_profile_key($name) : strtolower($name);
+        if ($name === '' || $key === '') {
+            return;
+        }
+        if (isset($svcKeys[$key])) {
+            if (!isset($seenS[$key])) {
+                $seenS[$key] = true;
+                $svcOut[] = $svcKeys[$key];
+            }
+            return;
+        }
+        if (isset($profKeys[$key])) {
+            if (!isset($seenP[$key])) {
+                $seenP[$key] = true;
+                $profOut[] = $profKeys[$key];
+            }
+            return;
+        }
+        if ($preferService) {
+            if (!isset($seenS[$key])) {
+                $seenS[$key] = true;
+                $svcOut[] = $name;
+            }
+        } elseif (!isset($seenP[$key])) {
+            $seenP[$key] = true;
+            $profOut[] = $name;
+        }
+    };
+    foreach ($services as $name) {
+        $take($name, true);
+    }
+    foreach ($packages as $name) {
+        $take($name, false);
+    }
+    if ($by === 'service' && !$svcOut && $profOut) {
+        $by = 'profile';
+    } elseif ($by !== 'service' && $svcOut && !$profOut) {
+        $by = 'service';
+    }
+    $sched['expiry_auto_remind_by'] = $by;
+    $sched['expiry_auto_remind_packages'] = $profOut;
+    $sched['expiry_auto_remind_services'] = $svcOut;
+    $sched['expiry_auto_remind_profiles'] = ($by === 'service') ? $svcOut : $profOut;
+    return $sched;
+}
+
+function schedule_expiry_choice_lists($pdo, $config, $tenantId)
+{
+    $tenantId = (int) $tenantId;
+    $out = array('profiles' => array(), 'services' => array());
+    $file = dirname(__DIR__) . '/storage/cache/expiry_sas_lists2_t' . $tenantId . '.json';
+    if ($tenantId > 0 && is_file($file) && (time() - (int) @filemtime($file)) < 600) {
+        $raw = json_decode((string) @file_get_contents($file), true);
+        if (is_array($raw) && isset($raw['profiles']) && isset($raw['services']) && is_array($raw['profiles']) && is_array($raw['services'])) {
+            return $raw;
+        }
+    }
+    $seenP = array();
+    $seenS = array();
+    $push = function ($bucket, $name) use (&$out, &$seenP, &$seenS) {
+        $name = trim((string) $name);
+        $key = function_exists('expiry_profile_key') ? expiry_profile_key($name) : strtolower($name);
+        if ($name === '' || $key === '') {
+            return;
+        }
+        if ($bucket === 'services') {
+            if (isset($seenS[$key])) {
+                return;
+            }
+            $seenS[$key] = true;
+            $out['services'][] = $name;
+            if (isset($seenP[$key])) {
+                $next = array();
+                foreach ($out['profiles'] as $have) {
+                    $haveKey = function_exists('expiry_profile_key') ? expiry_profile_key($have) : strtolower(trim((string) $have));
+                    if ($haveKey !== $key) {
+                        $next[] = $have;
+                    }
+                }
+                $out['profiles'] = $next;
+                unset($seenP[$key]);
+            }
+            return;
+        }
+        if (isset($seenP[$key]) || isset($seenS[$key])) {
+            return;
+        }
+        $seenP[$key] = true;
+        $out['profiles'][] = $name;
+    };
+    $api = null;
+    $got = false;
+    if ($tenantId > 0 && function_exists('sas_make_connector_for_tenant')) {
+        try {
+            $api = sas_make_connector_for_tenant($pdo, $config, $tenantId);
+        } catch (Exception $e) {
+            $api = null;
+        }
+    }
+    if ($api && method_exists($api, 'getProfiles')) {
+        try {
+            $profiles = $api->getProfiles();
+        } catch (Exception $e) {
+            $profiles = array();
+        }
+        if (is_array($profiles)) {
+            $ids = array();
+            foreach ($profiles as $p) {
+                if (!is_array($p)) {
+                    continue;
+                }
+                $push('profiles', isset($p['name']) ? $p['name'] : '');
+                $id = isset($p['id']) ? (int) $p['id'] : 0;
+                if ($id > 0) {
+                    $ids[$id] = $id;
+                    $got = true;
+                }
+            }
+            if (method_exists($api, 'getAllowedExtensions')) {
+                foreach ($ids as $id) {
+                    try {
+                        $allowed = $api->getAllowedExtensions($id);
+                    } catch (Exception $e) {
+                        $allowed = array();
+                    }
+                    if (!is_array($allowed)) {
+                        continue;
+                    }
+                    foreach ($allowed as $row) {
+                        if (!is_array($row)) {
+                            continue;
+                        }
+                        $nm = (!empty($row['name']) && !is_array($row['name'])) ? $row['name'] : '';
+                        if ($nm !== '') {
+                            $push('services', $nm);
+                            $got = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (!$out['profiles'] && function_exists('schedule_expiry_profile_choices')) {
+        foreach (schedule_expiry_profile_choices($pdo, $tenantId) as $name) {
+            $push('profiles', $name);
+        }
+    }
+    if ($got) {
+        @file_put_contents($file, json_encode($out));
+    }
+    return $out;
+}
+
 function schedule_config_with_tenant($config, $sched)
 {
     if (!is_array($config)) {
@@ -189,11 +547,47 @@ function schedule_config_with_tenant($config, $sched)
     if (!is_array($sched)) {
         $sched = array();
     }
+    $sched = schedule_expiry_apply_legacy($sched);
+    $placeTid = 0;
+    if (!empty($GLOBALS['schedule_tenant_id'])) {
+        $placeTid = (int) $GLOBALS['schedule_tenant_id'];
+    } elseif (!empty($GLOBALS['portal_warm_tenant_id'])) {
+        $placeTid = (int) $GLOBALS['portal_warm_tenant_id'];
+    } elseif (function_exists('current_tenant_id')) {
+        $placeTid = (int) current_tenant_id();
+    }
+    if ($placeTid > 0 && isset($GLOBALS['pdo']) && $GLOBALS['pdo']) {
+        $placeLists = schedule_expiry_choice_lists($GLOBALS['pdo'], $config, $placeTid);
+        $sched = schedule_expiry_place_saved($sched, $placeLists);
+    }
     $config['schedule_cut_enabled'] = !empty($sched['schedule_cut_enabled']);
     $config['schedule_cut_send_wa'] = !empty($sched['schedule_cut_send_wa']);
     $config['expiry_auto_remind_enabled'] = !empty($sched['expiry_auto_remind_enabled']);
     $config['expiry_auto_remind_days'] = isset($sched['expiry_auto_remind_days'])
         ? max(0, (int) $sched['expiry_auto_remind_days'])
+        : 1;
+    $config['expiry_auto_remind_repeat'] = !empty($sched['expiry_auto_remind_repeat']);
+    $config['expiry_auto_remind_by'] = (isset($sched['expiry_auto_remind_by']) && $sched['expiry_auto_remind_by'] === 'service')
+        ? 'service'
+        : 'profile';
+    $config['expiry_auto_remind_packages'] = (isset($sched['expiry_auto_remind_packages']) && is_array($sched['expiry_auto_remind_packages']))
+        ? $sched['expiry_auto_remind_packages']
+        : array();
+    $config['expiry_auto_remind_services'] = (isset($sched['expiry_auto_remind_services']) && is_array($sched['expiry_auto_remind_services']))
+        ? $sched['expiry_auto_remind_services']
+        : array();
+    if ($config['expiry_auto_remind_by'] === 'service') {
+        $config['expiry_auto_remind_profiles'] = $config['expiry_auto_remind_services'];
+    } elseif ($config['expiry_auto_remind_packages']) {
+        $config['expiry_auto_remind_profiles'] = $config['expiry_auto_remind_packages'];
+    } else {
+        $config['expiry_auto_remind_profiles'] = (isset($sched['expiry_auto_remind_profiles']) && is_array($sched['expiry_auto_remind_profiles']))
+            ? $sched['expiry_auto_remind_profiles']
+            : array();
+    }
+    $config['expiry_auto_remind_once_enabled'] = !empty($sched['expiry_auto_remind_once_enabled']);
+    $config['expiry_auto_remind_once_days'] = isset($sched['expiry_auto_remind_once_days'])
+        ? max(0, (int) $sched['expiry_auto_remind_once_days'])
         : 1;
     $config['unpaid_remind_enabled'] = !empty($sched['unpaid_remind_enabled']);
     $config['unpaid_remind_after_days'] = isset($sched['unpaid_remind_after_days'])
@@ -240,6 +634,12 @@ function schedule_each_tenant($pdo, $config, $fn)
         $GLOBALS['schedule_tenant_id'] = $tid;
         $sched = schedule_settings_for_tenant($pdo, $tid);
         $cfg = schedule_config_with_tenant($config, $sched);
+        if (function_exists('tenant_schedule_wa_user_id') && function_exists('user_apply_wa_pack_to_config')) {
+            $packUid = tenant_schedule_wa_user_id($pdo, $tid);
+            if ($packUid > 0) {
+                user_apply_wa_pack_to_config($cfg, $pdo, $packUid);
+            }
+        }
         $out[$tid] = call_user_func($fn, $tid, $cfg, $sched);
     }
     unset($GLOBALS['schedule_tenant_id']);
@@ -255,6 +655,9 @@ function schedule_cut_message($row, $config)
     $key = 'schedule_cut';
     if (function_exists('wa_case_template_key')) {
         $key = wa_case_template_key($config, 'schedule_cut');
+    }
+    if (function_exists('wa_template_is_on') && !wa_template_is_on($config, $key)) {
+        return '';
     }
     $tpl = '';
     if (isset($config['templates'][$key]) && trim((string) $config['templates'][$key]) !== '') {

@@ -32,6 +32,13 @@ function settings_defaults()
         'wa_case_unpaid_overdue' => 'unpaid_overdue',
         'expiry_auto_remind_enabled' => false,
         'expiry_auto_remind_days' => 1,
+        'expiry_auto_remind_repeat' => false,
+        'expiry_auto_remind_by' => 'profile',
+        'expiry_auto_remind_profiles' => array(),
+        'expiry_auto_remind_packages' => array(),
+        'expiry_auto_remind_services' => array(),
+        'expiry_auto_remind_once_enabled' => false,
+        'expiry_auto_remind_once_days' => 1,
         'tpl_expiry_soon' => "السلام عليكم {name}\nتبقى لديك {days} يوم على اشتراك ({package})\nينتهي بتاريخ {to}\nيرجى التجديد لتجنب انقطاع الخدمة",
         'tpl_schedule_cut' => "السلام عليكم {name}\nتم قطع الإنترنت بسبب عدم تسديد الديون غير المسددة والبالغة {debt}\nبعد تجاوز أيام السماح ({grace} يوم).\nيرجى التسديد لإعادة الخدمة.",
         'wa_case_activation_cash' => 'activation',
@@ -549,11 +556,15 @@ function apply_settings_to_config($config, $settings)
     foreach ($catalog as $tKey => $tRow) {
         $config['templates'][$tKey] = isset($tRow['body']) ? (string) $tRow['body'] : '';
         $config['template_labels'][$tKey] = isset($tRow['label']) ? (string) $tRow['label'] : $tKey;
-        $config['wa_templates'][$tKey] = array(
+        $tplRow = array(
             'label' => $config['template_labels'][$tKey],
             'body' => $config['templates'][$tKey],
             'builtin' => !empty($tRow['builtin']),
         );
+        if (array_key_exists('on', $tRow)) {
+            $tplRow['on'] = !empty($tRow['on']) ? 1 : 0;
+        }
+        $config['wa_templates'][$tKey] = $tplRow;
     }
     // Soft fallbacks for older installs that left credit/debts empty (runtime send only).
     if (isset($config['templates']['activation_credit']) && trim((string) $config['templates']['activation_credit']) === ''
@@ -642,6 +653,23 @@ function apply_settings_to_config($config, $settings)
     $config['expiry_auto_remind_enabled'] = !empty($settings['expiry_auto_remind_enabled']);
     $config['expiry_auto_remind_days'] = isset($settings['expiry_auto_remind_days'])
         ? max(0, (int) $settings['expiry_auto_remind_days'])
+        : 1;
+    $config['expiry_auto_remind_repeat'] = !empty($settings['expiry_auto_remind_repeat']);
+    $config['expiry_auto_remind_by'] = (isset($settings['expiry_auto_remind_by']) && $settings['expiry_auto_remind_by'] === 'service')
+        ? 'service'
+        : 'profile';
+    $config['expiry_auto_remind_profiles'] = (isset($settings['expiry_auto_remind_profiles']) && is_array($settings['expiry_auto_remind_profiles']))
+        ? $settings['expiry_auto_remind_profiles']
+        : array();
+    $config['expiry_auto_remind_packages'] = (isset($settings['expiry_auto_remind_packages']) && is_array($settings['expiry_auto_remind_packages']))
+        ? $settings['expiry_auto_remind_packages']
+        : array();
+    $config['expiry_auto_remind_services'] = (isset($settings['expiry_auto_remind_services']) && is_array($settings['expiry_auto_remind_services']))
+        ? $settings['expiry_auto_remind_services']
+        : array();
+    $config['expiry_auto_remind_once_enabled'] = !empty($settings['expiry_auto_remind_once_enabled']);
+    $config['expiry_auto_remind_once_days'] = isset($settings['expiry_auto_remind_once_days'])
+        ? max(0, (int) $settings['expiry_auto_remind_once_days'])
         : 1;
     $config['schedule_cut_enabled'] = !empty($settings['schedule_cut_enabled']);
     $config['schedule_cut_send_wa'] = !isset($settings['schedule_cut_send_wa'])

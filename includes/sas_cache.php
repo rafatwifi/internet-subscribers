@@ -4325,7 +4325,10 @@ function sas_notify_activation_whatsapp($pdo, $config, $username, $sendOldDebts,
                 ));
             }
             if ($extra === '') {
-                $extra = "\n\nالديون السابقة:\n" . $notesLine;
+                $debtOn = !function_exists('wa_template_is_on') || wa_template_is_on($config, $debtKey);
+                if ($debtOn) {
+                    $extra = "\n\nالديون السابقة:\n" . $notesLine;
+                }
             } else {
                 $extra = "\n\n" . $extra;
             }

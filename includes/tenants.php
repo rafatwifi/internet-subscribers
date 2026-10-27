@@ -941,11 +941,15 @@ function tenant_apply_wa_templates_to_config(&$config, $pdo = null)
         $label = isset($tRow['label']) ? (string) $tRow['label'] : (string) $tKey;
         $config['templates'][$tKey] = $body;
         $config['template_labels'][$tKey] = $label;
-        $config['wa_templates'][$tKey] = array(
+        $tplRow = array(
             'label' => $label,
             'body' => $body,
             'builtin' => !empty($tRow['builtin']),
         );
+        if (array_key_exists('on', $tRow)) {
+            $tplRow['on'] = !empty($tRow['on']) ? 1 : 0;
+        }
+        $config['wa_templates'][$tKey] = $tplRow;
     }
 }
 
@@ -1018,12 +1022,34 @@ function user_wa_pack_save($pdo, $pack, $userId = 0)
     }
 }
 
-function user_apply_wa_pack_to_config(&$config, $pdo = null)
+function tenant_schedule_wa_user_id($pdo, $tenantId)
+{
+    $tenantId = (int) $tenantId;
+    if ($tenantId <= 0 || !$pdo) {
+        return 0;
+    }
+    user_wa_pack_ensure($pdo);
+    try {
+        $st = $pdo->prepare(
+            "SELECT id FROM admin_users
+             WHERE tenant_id = :t AND is_active = 1
+               AND wa_pack IS NOT NULL AND wa_pack <> ''
+             ORDER BY (role = 'admin') DESC, id ASC
+             LIMIT 1"
+        );
+        $st->execute(array(':t' => $tenantId));
+        return (int) $st->fetchColumn();
+    } catch (Exception $e) {
+        return 0;
+    }
+}
+
+function user_apply_wa_pack_to_config(&$config, $pdo = null, $userId = 0)
 {
     if (!$pdo && isset($GLOBALS['pdo'])) {
         $pdo = $GLOBALS['pdo'];
     }
-    $pack = user_wa_pack_get($pdo);
+    $pack = user_wa_pack_get($pdo, (int) $userId);
     if (!$pack) {
         return;
     }
@@ -1040,11 +1066,15 @@ function user_apply_wa_pack_to_config(&$config, $pdo = null)
             $label = isset($tRow['label']) ? (string) $tRow['label'] : (string) $tKey;
             $config['templates'][$tKey] = $body;
             $config['template_labels'][$tKey] = $label;
-            $config['wa_templates'][$tKey] = array(
+            $tplRow = array(
                 'label' => $label,
                 'body' => $body,
                 'builtin' => !empty($tRow['builtin']),
             );
+            if (array_key_exists('on', $tRow)) {
+                $tplRow['on'] = !empty($tRow['on']) ? 1 : 0;
+            }
+            $config['wa_templates'][$tKey] = $tplRow;
         }
     }
     $cases = (isset($pack['cases']) && is_array($pack['cases'])) ? $pack['cases'] : array();

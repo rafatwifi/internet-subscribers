@@ -646,6 +646,42 @@ class SASConnector
         return $this->parseApiResponse($this->get('user/' . $id, true));
     }
 
+    public function listActivationsPage($page, $count)
+    {
+        if (!$this->token && !$this->login()) {
+            return array();
+        }
+        $page = (int) $page;
+        if ($page < 1) {
+            $page = 1;
+        }
+        $count = (int) $count;
+        if ($count < 1) {
+            $count = 100;
+        }
+        if ($count > 200) {
+            $count = 200;
+        }
+        $payload = array(
+            'page' => $page,
+            'count' => $count,
+            'search' => '',
+            'sortBy' => 'id',
+            'direction' => 'desc',
+        );
+        $rows = $this->parseApiResponse($this->post('index/activations', $payload, true));
+        if (!is_array($rows)) {
+            return array();
+        }
+        if (isset($rows['data']) && is_array($rows['data'])) {
+            $rows = $rows['data'];
+        }
+        if (!isset($rows[0]) || !is_array($rows[0])) {
+            return array();
+        }
+        return $rows;
+    }
+
     public function getAllowedExtensions($profileId)
     {
         $profileId = (int) $profileId;

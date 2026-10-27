@@ -41,8 +41,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('messages.php?mode=schedule');
     }
     if ($section === 'expiry_run') {
-        if (empty($s['expiry_auto_remind_enabled'])) {
-            flash('error', $isEn ? 'Enable expiry reminder first' : 'فعّل تذكير انتهاء الاشتراك أولاً');
+        if (empty($s['expiry_auto_remind_enabled']) && empty($s['expiry_auto_remind_repeat'])) {
+            flash('error', $isEn ? 'Enable a reminder first' : 'فعّل أحد التذكيرين أولاً');
         } elseif (!function_exists('run_expiry_soon_reminders')) {
             flash('error', $isEn ? 'Expiry function missing' : 'دالة التذكير غير موجودة');
         } else {
@@ -96,6 +96,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'schedule_cut_send_wa' => $sendWa,
             'expiry_auto_remind_enabled' => post('expiry_auto_remind_enabled') === '1',
             'expiry_auto_remind_days' => $expDays,
+            'expiry_auto_remind_repeat' => post('expiry_auto_remind_repeat') === '1',
+            'expiry_auto_remind_by' => post('expiry_auto_remind_by') === 'service' ? 'service' : 'profile',
+            'expiry_auto_remind_lists_set' => '1',
+            'expiry_auto_remind_packages' => (isset($_POST['expiry_auto_remind_packages']) && is_array($_POST['expiry_auto_remind_packages']))
+                ? $_POST['expiry_auto_remind_packages']
+                : array(),
+            'expiry_auto_remind_services' => (isset($_POST['expiry_auto_remind_services']) && is_array($_POST['expiry_auto_remind_services']))
+                ? $_POST['expiry_auto_remind_services']
+                : array(),
+            'expiry_auto_remind_once_enabled' => post('expiry_auto_remind_enabled') === '1',
+            'expiry_auto_remind_once_days' => (int) post('expiry_auto_remind_once_days', '1'),
             'unpaid_remind_enabled' => post('unpaid_remind_enabled') === '1',
             'unpaid_remind_after_days' => $afterDays,
         );
@@ -139,6 +150,91 @@ $stats = isset($preview['stats']) && is_array($preview['stats']) ? $preview['sta
 
 $enabled = !empty($s['schedule_cut_enabled']);
 $expiryAutoOn = !empty($s['expiry_auto_remind_enabled']);
+$expiryRepeatOn = !empty($s['expiry_auto_remind_repeat']);
+$expiryBy = (isset($s['expiry_auto_remind_by']) && $s['expiry_auto_remind_by'] === 'service') ? 'service' : 'profile';
+$expiryPackagesSaved = (isset($s['expiry_auto_remind_packages']) && is_array($s['expiry_auto_remind_packages']))
+    ? $s['expiry_auto_remind_packages']
+    : array();
+$expiryServicesSaved = (isset($s['expiry_auto_remind_services']) && is_array($s['expiry_auto_remind_services']))
+    ? $s['expiry_auto_remind_services']
+    : array();
+if (!$expiryPackagesSaved && $expiryBy !== 'service') {
+    $expiryPackagesSaved = (isset($s['expiry_auto_remind_profiles']) && is_array($s['expiry_auto_remind_profiles']))
+        ? $s['expiry_auto_remind_profiles']
+        : array();
+}
+$expiryChoiceLists = function_exists('schedule_expiry_choice_lists')
+    ? schedule_expiry_choice_lists($pdo, $config, $schedTid)
+    : array('profiles' => array(), 'services' => array());
+$expiryPackageChoices = (isset($expiryChoiceLists['profiles']) && is_array($expiryChoiceLists['profiles']))
+    ? $expiryChoiceLists['profiles']
+    : array();
+$expiryServiceChoices = (isset($expiryChoiceLists['services']) && is_array($expiryChoiceLists['services']))
+    ? $expiryChoiceLists['services']
+    : array();
+if (function_exists('schedule_expiry_place_saved')) {
+    $placedRemind = schedule_expiry_place_saved(array(
+        'expiry_auto_remind_by' => $expiryBy,
+        'expiry_auto_remind_packages' => $expiryPackagesSaved,
+        'expiry_auto_remind_services' => $expiryServicesSaved,
+    ), $expiryChoiceLists);
+    $expiryBy = (isset($placedRemind['expiry_auto_remind_by']) && $placedRemind['expiry_auto_remind_by'] === 'service') ? 'service' : 'profile';
+    $expiryPackagesSaved = (isset($placedRemind['expiry_auto_remind_packages']) && is_array($placedRemind['expiry_auto_remind_packages']))
+        ? $placedRemind['expiry_auto_remind_packages'] : array();
+    $expiryServicesSaved = (isset($placedRemind['expiry_auto_remind_services']) && is_array($placedRemind['expiry_auto_remind_services']))
+        ? $placedRemind['expiry_auto_remind_services'] : array();
+}
+$expiryPackageOn = array();
+foreach ($expiryPackagesSaved as $savedName) {
+    $savedKey = function_exists('expiry_profile_key') ? expiry_profile_key($savedName) : trim((string) $savedName);
+    if ($savedKey !== '') {
+        $expiryPackageOn[$savedKey] = true;
+    }
+}
+$expiryServiceOn = array();
+foreach ($expiryServicesSaved as $savedName) {
+    $savedKey = function_exists('expiry_profile_key') ? expiry_profile_key($savedName) : trim((string) $savedName);
+    if ($savedKey !== '') {
+        $expiryServiceOn[$savedKey] = true;
+    }
+}
+$expiryProfileOn = ($expiryBy === 'service') ? $expiryServiceOn : $expiryPackageOn;
+$mergeSavedChoices = function ($choices, $saved, $onMap) {
+    foreach ($saved as $savedName) {
+        $savedName = trim((string) $savedName);
+        $savedKey = function_exists('expiry_profile_key') ? expiry_profile_key($savedName) : $savedName;
+        if ($savedKey === '' || empty($onMap[$savedKey])) {
+            continue;
+        }
+        $already = false;
+        foreach ($choices as $haveName) {
+            $haveKey = function_exists('expiry_profile_key') ? expiry_profile_key($haveName) : trim((string) $haveName);
+            if ($haveKey === $savedKey) {
+                $already = true;
+                break;
+            }
+        }
+        if (!$already) {
+            $choices[] = $savedName;
+        }
+    }
+    return $choices;
+};
+$expiryPackageChoices = $mergeSavedChoices($expiryPackageChoices, $expiryPackagesSaved, $expiryPackageOn);
+$expiryServiceChoices = $mergeSavedChoices($expiryServiceChoices, $expiryServicesSaved, $expiryServiceOn);
+$expiryOnceOn = !empty($s['expiry_auto_remind_once_enabled']);
+$expiryOnceDays = isset($s['expiry_auto_remind_once_days']) ? (int) $s['expiry_auto_remind_once_days'] : 1;
+if ($expiryOnceDays < 0) {
+    $expiryOnceDays = 0;
+}
+if ($expiryOnceDays > 60) {
+    $expiryOnceDays = 60;
+}
+$expiryRepeatDays = isset($s['expiry_auto_remind_days']) ? (int) $s['expiry_auto_remind_days'] : 1;
+$expiryNormalDays = $expiryOnceDays;
+if (!$expiryOnceOn && $expiryOnceDays === 1 && $expiryRepeatDays > 1) {
+    $expiryNormalDays = $expiryRepeatDays;
+}
 $sendWa = !isset($s['schedule_cut_send_wa']) || !empty($s['schedule_cut_send_wa']);
 $unpaidEnabled = !empty($s['unpaid_remind_enabled']);
 $unpaidAfterDays = function_exists('unpaid_remind_after_days')
@@ -195,6 +291,29 @@ $chooseTpl = $isEn ? '— Choose template —' : '— اختر قالباً —'
   background: rgba(255,255,255,.12); color: #fff;
 }
 .sched-pill.on { background: rgba(34,197,94,.22); border-color: rgba(134,239,172,.45); }
+.exp-by { display: flex; gap: 8px; margin: 0 0 10px; }
+.exp-by label {
+  flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px; margin: 0;
+  padding: 8px 10px; border-radius: 10px; border: 1px solid #d6dee8; background: #fff;
+  font-size: 13px; font-weight: 800; color: #334155; cursor: pointer;
+}
+.exp-by input { accent-color: #0f766e; }
+.exp-by label:has(input:checked) { border-color: #0f766e; background: #f0fdfa; color: #115e59; }
+.exp-prof-grid { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 12px; }
+.exp-prof {
+  position: relative; display: inline-flex; align-items: center; gap: 8px; margin: 0;
+  padding: 7px 12px; border-radius: 999px; border: 1px solid #d6dee8; background: #fff;
+  font-size: 13px; font-weight: 800; color: #334155; cursor: pointer;
+}
+.exp-prof-input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.exp-prof-ui {
+  width: 16px; height: 16px; border-radius: 5px; border: 1.5px solid #94a3b8; background: #fff;
+  display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
+}
+.exp-prof-input:checked + .exp-prof-ui { background: #0f766e; border-color: #0f766e; }
+.exp-prof-input:checked + .exp-prof-ui:after { content: ''; width: 8px; height: 4px; border: 2px solid #fff; border-top: 0; border-right: 0; transform: rotate(-45deg); margin-top: -1px; }
+.exp-prof:has(.exp-prof-input:checked) { border-color: #99f6e4; background: #f0fdfa; color: #115e59; }
+.exp-once { margin-top: 4px; padding: 10px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc; }
 .sched-pill.off { background: rgba(244,63,94,.2); border-color: rgba(253,164,175,.45); }
 .sched-stats {
   display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 0 0 12px;
@@ -312,10 +431,34 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
         ? 'Track unpaid debtors against grace days — who stays online, who will be cut, and WhatsApp notices.'
         : 'متابعة المدينين غير المسددين مقابل أيام السماح — من ضمن السماح، من راح ينقطع، وإشعار واتساب.'); ?></p>
     <div class="sched-hero-pills">
-      <span class="sched-pill <?php echo $expiryAutoOn ? 'on' : 'off'; ?>">
-        <?php echo $expiryAutoOn
-            ? e($isEn ? 'Expiry reminder ON' : 'تذكير الانتهاء يعمل')
-            : e($isEn ? 'Expiry reminder OFF' : 'تذكير الانتهاء متوقف'); ?>
+      <span class="sched-pill <?php echo ($expiryAutoOn || $expiryRepeatOn) ? 'on' : 'off'; ?>">
+        <?php
+            $pillBits = array();
+            if ($expiryRepeatOn) {
+                $pickedN = count($expiryProfileOn);
+                if ($expiryBy === 'service') {
+                    $pickedWord = $isEn ? 'services' : ($pickedN === 1 ? 'خدمة' : 'خدمات');
+                } else {
+                    $pickedWord = $isEn ? 'profiles' : ($pickedN === 1 ? 'بروفايل' : 'بروفايلات');
+                }
+                if ($pickedN > 0) {
+                    $pillBits[] = $isEn
+                        ? ('Extension repeat for ' . $pickedN . ' ' . $pickedWord)
+                        : ('تكرار التمديد لـ ' . $pickedN . ' ' . $pickedWord);
+                } else {
+                    $pillBits[] = $expiryBy === 'service'
+                        ? ($isEn ? 'Extension repeat needs a service' : 'تكرار التمديد بانتظار الخدمة')
+                        : ($isEn ? 'Extension repeat needs profiles' : 'تكرار التمديد بانتظار البروفايلات');
+                }
+            }
+            if ($expiryAutoOn) {
+                $pillBits[] = $isEn ? 'Normal expiry reminder' : 'تذكير الانتهاء العادي';
+            }
+            if (!$pillBits) {
+                $pillBits[] = $isEn ? 'Expiry reminder OFF' : 'تذكير الانتهاء متوقف';
+            }
+            echo e(implode(' · ', $pillBits));
+        ?>
       </span>
       <span class="sched-pill <?php echo $enabled ? 'on' : 'off'; ?>">
         <?php echo $enabled
@@ -471,26 +614,104 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
       <input type="hidden" name="section" value="schedule">
 
       <div class="sched-set-block" style="margin:0 0 12px;padding:12px;border:1px solid #e2e8f0;border-radius:10px">
+        <label class="toggle" style="display:flex;align-items:flex-start;gap:10px;margin:0">
+          <input type="checkbox" id="expiryRepeatToggle" name="expiry_auto_remind_repeat" value="1" <?php echo $expiryRepeatOn ? 'checked' : ''; ?>>
+          <span class="toggle-ui"></span>
+          <span><strong><?php echo e($isEn ? 'Repeat reminder for subscribers activated with an extension' : 'تكرار تذكير المشتركين المفعلين بمدة التمديد'); ?></strong></span>
+        </label>
+        <div id="expiryRepeatExtra" style="display:none;margin-top:12px">
+          <label><?php echo e($isEn ? 'Days before end' : 'قبل الانتهاء بـ (يوم)'); ?></label>
+          <input type="number" min="0" max="60" name="expiry_auto_remind_days" value="<?php echo (int) $expiryRepeatDays; ?>" style="width:100%;max-width:120px;margin-bottom:6px">
+          <p class="meta" style="margin:0 0 10px"><?php echo e($isEn
+              ? 'Ticked names get one message each day inside this window, until the subscription ends.'
+              : 'الأسماء المعلّمة توصلها رسالة كل يوم ضمن هالمدة، إلى أن يخلص الاشتراك.'); ?></p>
+          <div class="exp-by">
+            <label>
+              <input type="radio" name="expiry_auto_remind_by" value="profile" id="expiryByProfile" <?php echo $expiryBy !== 'service' ? 'checked' : ''; ?>>
+              <span><?php echo e($isEn ? 'By profile' : 'حسب البروفايل'); ?></span>
+            </label>
+            <label>
+              <input type="radio" name="expiry_auto_remind_by" value="service" id="expiryByService" <?php echo $expiryBy === 'service' ? 'checked' : ''; ?>>
+              <span><?php echo e($isEn ? 'By service' : 'حسب الخدمة'); ?></span>
+            </label>
+          </div>
+          <input type="hidden" name="expiry_auto_remind_lists_set" value="1">
+          <div id="expiryProfList" style="<?php echo $expiryBy === 'service' ? 'display:none' : ''; ?>">
+            <p class="meta" style="margin:0 0 8px"><?php echo e($isEn
+                ? 'Tick the profiles that should get the daily reminder.'
+                : 'علّم البروفايلات اللي يوصلها التذكير كل يوم.'); ?></p>
+            <?php if ($expiryPackageChoices): ?>
+            <div class="exp-prof-grid">
+              <?php foreach ($expiryPackageChoices as $choiceName): ?>
+                <?php
+                $choiceKey = function_exists('expiry_profile_key') ? expiry_profile_key($choiceName) : trim((string) $choiceName);
+                $choiceOn = $choiceKey !== '' && !empty($expiryPackageOn[$choiceKey]);
+                ?>
+                <label class="exp-prof">
+                  <input class="exp-prof-input" type="checkbox" name="expiry_auto_remind_packages[]" value="<?php echo e($choiceName); ?>" <?php echo $choiceOn ? 'checked' : ''; ?>>
+                  <span class="exp-prof-ui" aria-hidden="true"></span>
+                  <span><?php echo e($choiceName); ?></span>
+                </label>
+              <?php endforeach; ?>
+            </div>
+            <?php else: ?>
+            <p class="meta" style="margin:0 0 8px"><?php echo e($isEn
+                ? 'No profiles from SAS yet.'
+                : 'ماكو بروفايلات ظاهرة من الساس حالياً.'); ?></p>
+            <?php endif; ?>
+          </div>
+          <div id="expirySvcList" style="<?php echo $expiryBy === 'service' ? '' : 'display:none'; ?>">
+            <p class="meta" style="margin:0 0 8px"><?php echo e($isEn
+                ? 'Tick the extension service from SAS, such as an extension duration.'
+                : 'علّم خدمة التمديد الموجودة بالساس، مثل مدة التمديد.'); ?></p>
+            <?php if ($expiryServiceChoices): ?>
+            <div class="exp-prof-grid">
+              <?php foreach ($expiryServiceChoices as $choiceName): ?>
+                <?php
+                $choiceKey = function_exists('expiry_profile_key') ? expiry_profile_key($choiceName) : trim((string) $choiceName);
+                $choiceOn = $choiceKey !== '' && !empty($expiryServiceOn[$choiceKey]);
+                ?>
+                <label class="exp-prof">
+                  <input class="exp-prof-input" type="checkbox" name="expiry_auto_remind_services[]" value="<?php echo e($choiceName); ?>" <?php echo $choiceOn ? 'checked' : ''; ?>>
+                  <span class="exp-prof-ui" aria-hidden="true"></span>
+                  <span><?php echo e($choiceName); ?></span>
+                </label>
+              <?php endforeach; ?>
+            </div>
+            <?php else: ?>
+            <p class="meta" style="margin:0 0 8px"><?php echo e($isEn
+                ? 'No extension service was found in SAS.'
+                : 'ماكو خدمة تمديد ظاهرة بالساس حالياً.'); ?></p>
+            <?php endif; ?>
+          </div>
+          <p class="meta" style="margin:0"><?php echo e($isEn
+              ? 'Names left unticked do not get the daily message.'
+              : 'الاسم غير المعلّم ما توصله رسالة كل يوم.'); ?></p>
+        </div>
+      </div>
+
+      <div class="sched-set-block" style="margin:0 0 12px;padding:12px;border:1px solid #e2e8f0;border-radius:10px">
         <label class="toggle" style="display:flex;align-items:center;gap:10px;margin:0">
           <input type="checkbox" id="expiryAutoToggle" name="expiry_auto_remind_enabled" value="1"
             <?php echo !empty($s['expiry_auto_remind_enabled']) ? 'checked' : ''; ?>>
           <span class="toggle-ui"></span>
-          <span><strong><?php echo e($isEn ? 'Expiry reminder' : 'تذكير انتهاء الاشتراك'); ?></strong></span>
+          <span><strong><?php echo e($isEn ? 'Normal expiry reminder' : 'تذكير الانتهاء العادي'); ?></strong></span>
         </label>
         <div id="expiryAutoFields" style="display:none;margin-top:12px">
           <label><?php echo e($isEn ? 'Days before end' : 'قبل الانتهاء بـ (يوم)'); ?></label>
-          <input type="number" min="0" max="60" name="expiry_auto_remind_days"
-            value="<?php echo (int) (isset($s['expiry_auto_remind_days']) ? $s['expiry_auto_remind_days'] : 1); ?>"
-            style="width:100%;max-width:120px;margin-bottom:10px">
-          <label><?php echo e($isEn ? 'Template' : 'القالب'); ?></label>
-          <select name="wa_case_expiry_soon" style="width:100%">
-            <option value="__none__"<?php echo $selExpiry === '__none__' ? ' selected' : ''; ?>><?php echo e($chooseTpl); ?></option>
-            <?php foreach ($waCatalog as $tk => $trow): ?>
-              <option value="<?php echo e($tk); ?>"<?php echo $selExpiry === $tk ? ' selected' : ''; ?>><?php echo e(isset($trow['label']) ? $trow['label'] : $tk); ?></option>
-            <?php endforeach; ?>
-          </select>
-          <p class="meta" style="margin:6px 0 0">{name} {days} {package} {to}</p>
+          <input type="number" min="0" max="60" name="expiry_auto_remind_once_days" value="<?php echo (int) $expiryNormalDays; ?>" style="width:100%;max-width:120px;margin-bottom:6px">
+          <p class="meta" style="margin:0"><?php echo e($isEn
+              ? 'One reminder only. Subscribers included in the extension repeat above are left out.'
+              : 'تذكير واحد فقط. المشترك الموجود بتكرار التمديد أعلاه ما يشمله هذا التذكير.'); ?></p>
         </div>
+        <label style="display:block;margin-top:12px"><?php echo e($isEn ? 'Template' : 'القالب'); ?></label>
+        <select name="wa_case_expiry_soon" style="width:100%">
+          <option value="__none__"<?php echo $selExpiry === '__none__' ? ' selected' : ''; ?>><?php echo e($chooseTpl); ?></option>
+          <?php foreach ($waCatalog as $tk => $trow): ?>
+            <option value="<?php echo e($tk); ?>"<?php echo $selExpiry === $tk ? ' selected' : ''; ?>><?php echo e(isset($trow['label']) ? $trow['label'] : $tk); ?></option>
+          <?php endforeach; ?>
+        </select>
+        <p class="meta" style="margin:6px 0 0">{name} {days} {package} {to}</p>
       </div>
 
       <div class="sched-set-block" style="margin:0 0 12px;padding:12px;border:1px solid #e2e8f0;border-radius:10px">
@@ -563,7 +784,7 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
           <button class="btn ghost sm" type="submit"><?php echo e($isEn ? 'Test cut now' : 'تجربة القطع الآن'); ?></button>
         </form>
       <?php endif; ?>
-      <?php if ($expiryAutoOn && function_exists('run_expiry_soon_reminders')): ?>
+      <?php if (($expiryAutoOn || $expiryRepeatOn) && function_exists('run_expiry_soon_reminders')): ?>
         <form method="post" action="schedule.php" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Send expiry reminders once now?' : 'ترسل تذكير الانتهاء مرة الآن؟'); ?>);">
           <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
           <input type="hidden" name="section" value="expiry_run">
@@ -587,6 +808,15 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
     var expOn = document.getElementById('expiryAutoToggle');
     var expF = document.getElementById('expiryAutoFields');
     if (expF) expF.style.display = (expOn && expOn.checked) ? 'block' : 'none';
+    var repOn = document.getElementById('expiryRepeatToggle');
+    var repF = document.getElementById('expiryRepeatExtra');
+    if (repF) repF.style.display = (repOn && repOn.checked) ? 'block' : 'none';
+    var byProfile = document.getElementById('expiryByProfile');
+    var profList = document.getElementById('expiryProfList');
+    var svcList = document.getElementById('expirySvcList');
+    var showProfile = !byProfile || byProfile.checked;
+    if (profList) profList.style.display = showProfile ? 'block' : 'none';
+    if (svcList) svcList.style.display = showProfile ? 'none' : 'block';
     var cutOn = document.getElementById('cutToggle');
     var cutF = document.getElementById('cutFields');
     var waOn = document.getElementById('cutWaToggle');
@@ -597,7 +827,7 @@ body.rtl .sched-drawer-panel { box-shadow: 12px 0 40px rgba(15,23,42,.18); }
     var unF = document.getElementById('unpaidFields');
     if (unF) unF.style.display = (unOn && unOn.checked) ? 'block' : 'none';
   }
-  ['expiryAutoToggle', 'cutToggle', 'cutWaToggle', 'unpaidToggle'].forEach(function (id) {
+  ['expiryAutoToggle', 'expiryRepeatToggle', 'expiryByProfile', 'expiryByService', 'cutToggle', 'cutWaToggle', 'unpaidToggle'].forEach(function (id) {
     var el = document.getElementById(id);
     if (el) el.addEventListener('change', sync);
   });

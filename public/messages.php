@@ -136,26 +136,45 @@ if ($daysMax < 0) {
 
 $afterDays = unpaid_remind_after_days($config);
 
+$tplOn = function ($case, $fallbackKey) use ($config) {
+    $key = function_exists('wa_case_template_key') ? wa_case_template_key($config, $case) : $fallbackKey;
+    if ($key === '') {
+        $key = $fallbackKey;
+    }
+    if (function_exists('wa_template_is_on') && !wa_template_is_on($config, $key)) {
+        return array($key, false);
+    }
+    return array($key, true);
+};
+list($debtKey, $debtOn) = $tplOn('debt_remind', 'debt_remind');
+list($daysKey, $daysOn) = $tplOn('days_left', 'days_left');
+list($overKey, $overOn) = $tplOn('unpaid_overdue', 'unpaid_overdue');
+
 $defaultDebtTpl = '';
-if (isset($config['templates']['debt_remind'])) {
-    $defaultDebtTpl = (string) $config['templates']['debt_remind'];
-}
-if ($defaultDebtTpl === '') {
-    $defaultDebtTpl = 'السلام عليكم {name} يرجى تسديد الديون البالغة {debt} لتجنب قطع الخدمة';
+if ($debtOn) {
+    if (isset($config['templates'][$debtKey]) && trim((string) $config['templates'][$debtKey]) !== '') {
+        $defaultDebtTpl = (string) $config['templates'][$debtKey];
+    } else {
+        $defaultDebtTpl = 'السلام عليكم {name} يرجى تسديد الديون البالغة {debt} لتجنب قطع الخدمة';
+    }
 }
 
 $defaultDaysTpl = '';
-if (isset($config['templates']['days_left']) && trim((string) $config['templates']['days_left']) !== '') {
-    $defaultDaysTpl = (string) $config['templates']['days_left'];
-} else {
-    $defaultDaysTpl = 'السلام عليكم {name} تبقى لديك {days} يوم على الاشتراك ({package})';
+if ($daysOn) {
+    if (isset($config['templates'][$daysKey]) && trim((string) $config['templates'][$daysKey]) !== '') {
+        $defaultDaysTpl = (string) $config['templates'][$daysKey];
+    } else {
+        $defaultDaysTpl = 'السلام عليكم {name} تبقى لديك {days} يوم على الاشتراك ({package})';
+    }
 }
 
 $defaultOverdueTpl = '';
-if (isset($config['templates']['unpaid_overdue']) && trim((string) $config['templates']['unpaid_overdue']) !== '') {
-    $defaultOverdueTpl = (string) $config['templates']['unpaid_overdue'];
-} else {
-    $defaultOverdueTpl = "السلام عليكم {name}\nمضى على تفعيل خطك {days_passed} أيام\nيرجى تسديد الديون البالغة {debt}\nوبعكسه سيتم إيقاف الخدمة";
+if ($overOn) {
+    if (isset($config['templates'][$overKey]) && trim((string) $config['templates'][$overKey]) !== '') {
+        $defaultOverdueTpl = (string) $config['templates'][$overKey];
+    } else {
+        $defaultOverdueTpl = "السلام عليكم {name}\nمضى على تفعيل خطك {days_passed} أيام\nيرجى تسديد الديون البالغة {debt}\nوبعكسه سيتم إيقاف الخدمة";
+    }
 }
 
 $previewMsg = isset($_GET['msg']) ? (string) $_GET['msg'] : '';
@@ -210,6 +229,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $keysIn = isset($_POST['tpl_key']) && is_array($_POST['tpl_key']) ? $_POST['tpl_key'] : array();
         $labelsIn = isset($_POST['tpl_label']) && is_array($_POST['tpl_label']) ? $_POST['tpl_label'] : array();
         $bodiesIn = isset($_POST['tpl_body']) && is_array($_POST['tpl_body']) ? $_POST['tpl_body'] : array();
+        $onIn = isset($_POST['tpl_on']) && is_array($_POST['tpl_on']) ? $_POST['tpl_on'] : array();
 
         $catalog = array();
         $n = max(count($keysIn), count($labelsIn), count($bodiesIn));
@@ -218,6 +238,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $label = isset($labelsIn[$i]) ? trim((string) $labelsIn[$i]) : '';
             $body = isset($bodiesIn[$i]) ? (string) $bodiesIn[$i] : '';
             $key = function_exists('wa_sanitize_tpl_key') ? wa_sanitize_tpl_key($rawKey) : preg_replace('/[^a-z0-9_]/', '', strtolower($rawKey));
+            $postedKey = $key;
             if ($key === '' && $label !== '') {
                 $slug = function_exists('wa_sanitize_tpl_key') ? wa_sanitize_tpl_key($label) : '';
                 if ($slug === '') {
@@ -245,6 +266,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $catalog[$key] = array(
                 'label' => $label,
                 'body' => $body,
+                'on' => (!empty($onIn[$postedKey]) || !empty($onIn[$key])) ? 1 : 0,
             );
         }
 
@@ -266,6 +288,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $catalog[$nk] = array(
                 'label' => $newLabel !== '' ? $newLabel : $nk,
                 'body' => $newBody,
+                'on' => 1,
             );
         }
 
@@ -488,6 +511,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $ok = 0;
         $fail = 0;
         $skipped = 0;
+        $sendCase = array(
+            'debt' => 'debt_remind',
+            'days' => 'days_left',
+            'overdue' => 'unpaid_overdue',
+        );
+        if (isset($sendCase[$filter]) && function_exists('wa_case_template_key') && function_exists('wa_template_is_on')) {
+            $sendKey = wa_case_template_key($config, $sendCase[$filter]);
+            if ($sendKey !== '' && !wa_template_is_on($config, $sendKey)) {
+                $storedBody = isset($config['templates'][$sendKey]) ? trim((string) $config['templates'][$sendKey]) : '';
+                if (trim($msgTpl) === '' || trim($msgTpl) === $storedBody) {
+                    $msgTpl = '';
+                }
+            }
+        }
 
         if ($filter === 'debt') {
             foreach ($ids as $idRaw) {
@@ -534,6 +571,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 log_message($pdo, $id, $result);
                 if (!empty($result['success'])) {
                     $ok++;
+                } elseif (!empty($result['skipped'])) {
+                    $skipped++;
                 } else {
                     $fail++;
                 }
@@ -599,6 +638,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 log_message($pdo, $id, $result);
                 if (!empty($result['success'])) {
                     $ok++;
+                } elseif (!empty($result['skipped'])) {
+                    $skipped++;
                 } else {
                     $fail++;
                 }
@@ -607,6 +648,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $daysMax = (int) post('days', '7');
             $skipReasons = array();
+            $sasPick = isset($_POST['sas']) && is_array($_POST['sas']) ? $_POST['sas'] : array();
+            $sasTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+            foreach ($sasPick as $uRaw) {
+                $uname = trim((string) $uRaw);
+                if ($uname === '' || !function_exists('sas_cache_ensure_local')) {
+                    continue;
+                }
+                try {
+                    $stC = $pdo->prepare(
+                        'SELECT username, display_name, phone, profile_name, expire_at, local_subscriber_id, sas_user_id, parent_id, enabled, tenant_id
+                         FROM sas_users_cache
+                         WHERE username = :u AND tenant_id = :t
+                         LIMIT 1'
+                    );
+                    $stC->execute(array(':u' => $uname, ':t' => $sasTid));
+                    $crow = $stC->fetch();
+                } catch (Exception $e) {
+                    $crow = null;
+                }
+                if (!$crow) {
+                    $skipped++;
+                    continue;
+                }
+                list($sidLink, $errLink) = sas_cache_ensure_local($pdo, $config, $crow);
+                $sidLink = (int) $sidLink;
+                if ($sidLink > 0) {
+                    $ids[] = $sidLink;
+                } else {
+                    $skipped++;
+                }
+            }
             foreach ($ids as $idRaw) {
                 $id = (int) $idRaw;
                 if ($id <= 0) {
@@ -1013,43 +1085,24 @@ if ($mode === 'log') {
         $agentIdFilter = $me ? (int) $me['id'] : 0;
     }
 
+    $seenUsers = array();
     foreach ($sasCandidates as $crow) {
         $sid = isset($crow['sub_id']) ? (int) $crow['sub_id'] : 0;
         if ($sid <= 0 && !empty($crow['local_subscriber_id'])) {
             $sid = (int) $crow['local_subscriber_id'];
         }
-        $parentId = isset($crow['parent_id']) ? (int) $crow['parent_id'] : 0;
-        if (function_exists('whatsapp_may_message_subscriber') && !whatsapp_may_message_subscriber($pdo, $sid, $parentId)) {
-            continue;
-        }
-        if ($sid <= 0 && function_exists('sas_cache_ensure_local')) {
-            list($sid, $errLink) = sas_cache_ensure_local($pdo, $config, $crow);
-            $sid = (int) $sid;
-            if ($sid > 0) {
-                try {
-                    $stN = $pdo->prepare('SELECT name, phone, agent_user_id FROM subscribers WHERE id = :id LIMIT 1');
-                    $stN->execute(array(':id' => $sid));
-                    $loc = $stN->fetch();
-                    if ($loc) {
-                        $crow['sub_name'] = $loc['name'];
-                        $crow['sub_phone'] = $loc['phone'];
-                        $crow['agent_user_id'] = $loc['agent_user_id'];
-                    }
-                } catch (Exception $e) {
-                    // ignore
-                }
-            }
-        }
-        if ($sid <= 0) {
-            continue;
-        }
+        $uname = isset($crow['username']) ? trim((string) $crow['username']) : '';
         if ($agentIdFilter > 0) {
             $aid = isset($crow['agent_user_id']) ? (int) $crow['agent_user_id'] : 0;
             if ($aid !== $agentIdFilter) {
                 continue;
             }
         }
-        if (isset($seenSubIds[$sid])) {
+        if ($sid > 0) {
+            if (isset($seenSubIds[$sid])) {
+                continue;
+            }
+        } elseif ($uname === '' || isset($seenUsers[$uname])) {
             continue;
         }
         $left = isset($crow['_days']) ? (int) $crow['_days'] : 0;
@@ -1065,16 +1118,22 @@ if ($mode === 'log') {
                 isset($crow['sub_phone']) ? $crow['sub_phone'] : '',
             ));
         }
-        if ($phone === '' && function_exists('subscriber_whatsapp_phone')) {
+        if ($phone === '' && $sid > 0 && function_exists('subscriber_whatsapp_phone')) {
             $phone = subscriber_whatsapp_phone($pdo, $sid, isset($crow['sub_phone']) ? $crow['sub_phone'] : '');
         }
         if ($phone === '') {
             $phone = !empty($crow['sas_phone']) ? (string) $crow['sas_phone']
                 : (isset($crow['sub_phone']) ? (string) $crow['sub_phone'] : '');
         }
+        if ($sid > 0) {
+            $seenSubIds[$sid] = true;
+        } else {
+            $seenUsers[$uname] = true;
+        }
         $filtered[] = array(
             'id' => $sid,
             'subscriber_id' => $sid,
+            'sas_username' => $uname,
             'name' => $name,
             'phone' => $phone,
             'service_name' => isset($crow['profile_name']) ? (string) $crow['profile_name'] : '',
@@ -1083,7 +1142,6 @@ if ($mode === 'log') {
             '_days' => $left,
             '_pct' => (int) $info['pct'],
         );
-        $seenSubIds[$sid] = true;
     }
     // احتياطي: اشتراكات محلية
     try {
@@ -1103,9 +1161,6 @@ if ($mode === 'log') {
     foreach ($candidates as $row) {
         $sid = (int) $row['subscriber_id'];
         if (isset($seenSubIds[$sid])) {
-            continue;
-        }
-        if (function_exists('whatsapp_may_message_subscriber') && !whatsapp_may_message_subscriber($pdo, $sid)) {
             continue;
         }
         $info = subscription_days_info($row['start_date'], $row['end_date']);
@@ -1170,6 +1225,38 @@ $sendFilters = array(
         width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: #22c55e;
       }
       tr.msg-row-notified td { background: rgba(34, 197, 94, 0.04); }
+      .tpl-on {
+        display: inline-flex; align-items: center; gap: 6px; margin: 0;
+        font-size: 12px; font-weight: 800; color: #0f766e; cursor: pointer; direction: ltr;
+      }
+      .tpl-card.is-off .tpl-on { color: #9f1239; }
+      .tpl-card.is-off textarea { opacity: 0.55; }
+      .tpl-on-input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+      .tpl-on-ui {
+        width: 36px; height: 20px; border-radius: 999px; background: #cbd5e1;
+        position: relative; display: inline-block; flex: 0 0 auto;
+      }
+      .tpl-on-ui:after {
+        content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+        border-radius: 50%; background: #fff; transition: transform .15s ease;
+      }
+      .tpl-on-input:checked + .tpl-on-ui { background: #0f766e; }
+      .tpl-on-input:checked + .tpl-on-ui:after { transform: translateX(16px); }
+      .tpl-on-word { direction: rtl; }
+      #msgLogTable td.log-phone { white-space: normal; vertical-align: top; }
+      #msgLogTable .log-phone-stack {
+        display: flex; flex-direction: column; align-items: flex-end; gap: 2px;
+      }
+      #msgLogTable .log-phone-main,
+      #msgLogTable .log-phone-from {
+        display: block; direction: ltr; text-align: right; white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+      }
+      #msgLogTable .log-phone-from { font-size: 11px; font-weight: 700; color: #0f766e; }
+      #msgLogTable .log-from-k {
+        display: inline-block; min-width: 1.6em; margin-right: 4px;
+        color: #64748b; font-weight: 800; direction: rtl;
+      }
     </style>
     <div class="msg-hero">
         <div class="msg-hero-text">
@@ -1386,13 +1473,19 @@ $sendFilters = array(
                 }
                 $bodyVal = isset($trow['body']) ? (string) $trow['body'] : '';
                 $labVal = isset($trow['label']) ? (string) $trow['label'] : $tk;
+                $tplOnCard = !array_key_exists('on', $trow) || !empty($trow['on']);
                 $searchCard = strtolower($tk . ' ' . $labVal . ' ' . $bodyVal);
                 ?>
-                <article class="tpl-card" data-tpl-card data-search="<?php echo e($searchCard); ?>">
+                <article class="tpl-card<?php echo $tplOnCard ? '' : ' is-off'; ?>" data-tpl-card data-search="<?php echo e($searchCard); ?>">
                     <header class="tpl-card-head">
                         <input type="hidden" name="tpl_key[]" value="<?php echo e($tk); ?>">
                         <input type="text" name="tpl_label[]" class="tpl-label-input" value="<?php echo e($labVal); ?>" placeholder="<?php echo e($isEnMsg ? 'Template name' : 'اسم القالب'); ?>">
                         <span class="tpl-vars" title="<?php echo e($tk); ?>"><?php echo e($tk); ?></span>
+                        <label class="tpl-on">
+                            <input type="checkbox" class="tpl-on-input" name="tpl_on[<?php echo e($tk); ?>]" value="1" <?php echo $tplOnCard ? 'checked' : ''; ?>>
+                            <i class="tpl-on-ui" aria-hidden="true"></i>
+                            <span class="tpl-on-word"><?php echo e($tplOnCard ? ($isEnMsg ? 'On' : 'مفعّل') : ($isEnMsg ? 'Off' : 'متوقف')); ?></span>
+                        </label>
                         <button type="button" class="btn ghost sm js-tpl-del"><?php echo e($isEnMsg ? 'Delete' : 'حذف'); ?></button>
                     </header>
                     <?php if ($inUseLabels): ?>
@@ -1418,6 +1511,11 @@ $sendFilters = array(
                 <input type="hidden" name="tpl_key[]" value="">
                 <input type="text" name="tpl_label[]" class="tpl-label-input" value="" placeholder="<?php echo e($isEnMsg ? 'Template name' : 'اسم القالب'); ?>">
                 <span class="tpl-vars"></span>
+                <label class="tpl-on">
+                    <input type="checkbox" class="tpl-on-input" name="tpl_on_new" value="1" checked>
+                    <i class="tpl-on-ui" aria-hidden="true"></i>
+                    <span class="tpl-on-word"><?php echo e($isEnMsg ? 'On' : 'مفعّل'); ?></span>
+                </label>
                 <button type="button" class="btn ghost sm js-tpl-del"><?php echo e($isEnMsg ? 'Delete' : 'حذف'); ?></button>
             </header>
             <textarea name="tpl_body[]" rows="4" class="js-tpl-body" placeholder="<?php echo e($commonVars); ?>"></textarea>
@@ -1440,6 +1538,8 @@ $sendFilters = array(
           ? 'Delete this template? Reassign actions that used it.'
           : 'تحذف هذا القالب؟ عيّن قالباً آخر للحركات اللي كانت تستخدمه.'); ?>;
       var needOne = <?php echo json_encode($isEnMsg ? 'Keep at least one template.' : 'لازم يبقى قالب واحد على الأقل.'); ?>;
+      var onWord = <?php echo json_encode($isEnMsg ? 'On' : 'مفعّل'); ?>;
+      var offWord = <?php echo json_encode($isEnMsg ? 'Off' : 'متوقف'); ?>;
       var pickLabel = <?php echo json_encode($isEnMsg ? '— Choose template —' : '— اختر قالباً —'); ?>;
 
       function slugify(s) {
@@ -1493,7 +1593,17 @@ $sendFilters = array(
           sels[s].value = ok ? cur : '__none__';
         }
       }
+      function paintOn(card) {
+        var on = card.querySelector('.tpl-on-input');
+        var word = card.querySelector('.tpl-on-word');
+        if (!on) return;
+        card.classList.toggle('is-off', !on.checked);
+        if (word) word.textContent = on.checked ? onWord : offWord;
+      }
       function bindCard(card) {
+        var on = card.querySelector('.tpl-on-input');
+        if (on) on.addEventListener('change', function () { paintOn(card); });
+        paintOn(card);
         var del = card.querySelector('.js-tpl-del');
         if (del) {
           del.addEventListener('click', function () {
@@ -1529,6 +1639,11 @@ $sendFilters = array(
         var node = document.importNode(tplNode.content, true);
         var card = node.querySelector('[data-tpl-card]');
         card.querySelector('input[name="tpl_key[]"]').value = key;
+        var on = card.querySelector('.tpl-on-input');
+        if (on) {
+          on.name = 'tpl_on[' + key + ']';
+          on.checked = true;
+        }
         card.querySelector('input[name="tpl_label[]"]').value = label;
         var badge = card.querySelector('.tpl-vars');
         if (badge) badge.textContent = key;
@@ -1725,11 +1840,13 @@ $sendFilters = array(
                             —
                         <?php endif; ?>
                     </td>
-                    <td class="nowrap log-phone">
-                        <?php echo e(format_phone_display($row['phone'])); ?>
-                        <?php if (!empty($row['from_phone'])): ?>
-                            <div class="msg-from-line"><?php echo e(($isEnMsg ? 'From ' : 'من ') . format_phone_display($row['from_phone'])); ?></div>
-                        <?php endif; ?>
+                    <td class="log-phone">
+                        <div class="log-phone-stack">
+                            <div class="log-phone-main"><?php echo e(format_phone_display($row['phone'])); ?></div>
+                            <?php if (!empty($row['from_phone'])): ?>
+                                <div class="log-phone-from"><span class="log-from-k"><?php echo e($isEnMsg ? 'From' : 'من'); ?></span><span class="log-from-n"><?php echo e(format_phone_display($row['from_phone'])); ?></span></div>
+                            <?php endif; ?>
+                        </div>
                     </td>
                     <td class="log-type"><small><?php echo e(message_type_title($row['message_type'])); ?></small></td>
                     <td class="msg-status-log" data-log-live="<?php echo (!$ok && !$resolved) ? (int) $row['id'] : 0; ?>">
@@ -1901,7 +2018,10 @@ $sendFilters = array(
         #msgLogTable td.log-when { grid-area: when; color: #64748b; font-size: 11px; }
         #msgLogTable .log-when-full { display: none; }
         #msgLogTable .log-when-short { display: inline; }
-        #msgLogTable td.log-phone { grid-area: phone; justify-self: end; font-size: 11px; direction: ltr; text-align: end; }
+        #msgLogTable td.log-phone {
+          grid-area: phone; justify-self: end; font-size: 11px;
+          display: flex; flex-direction: column; align-items: flex-end;
+        }
         #msgLogTable td.log-name {
           grid-area: name;
           font-weight: 800;
@@ -1913,7 +2033,7 @@ $sendFilters = array(
         #msgLogTable td.acts-cell { grid-area: act; }
         #msgLogTable td.acts-cell:not(:has(button)) { display: none; }
         #msgLogTable .msg-fail-why { max-width: none; }
-        #msgLogTable .msg-from-line { margin-top: 0; }
+        #msgLogTable .log-phone-from { margin-top: 1px; }
       }
       .msg-st-line { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; vertical-align: middle; }
       .msg-ok-word { color: #15803d; font-weight: 800; }
@@ -2197,13 +2317,21 @@ $sendFilters = array(
                     $chkId = ($filter === 'days' && isset($row['subscriber_id']))
                         ? (int) $row['subscriber_id']
                         : (int) $row['id'];
+                    $sasPickName = ($filter === 'days' && $chkId <= 0 && !empty($row['sas_username']))
+                        ? (string) $row['sas_username']
+                        : '';
                     $alreadyNotified = ($filter === 'days' && !empty($row['_notified']));
                     ?>
                     <tr class="<?php echo $alreadyNotified ? 'msg-row-notified' : ''; ?>">
                         <td class="chk-col">
+                            <?php if ($sasPickName !== ''): ?>
+                            <input type="checkbox" class="msg-check chk-sm" name="sas[]"
+                                value="<?php echo e($sasPickName); ?>">
+                            <?php else: ?>
                             <input type="checkbox" class="msg-check chk-sm" name="ids[]"
                                 value="<?php echo $chkId; ?>"
                                 <?php echo $alreadyNotified ? '' : 'checked'; ?>>
+                            <?php endif; ?>
                         </td>
                         <td>
                             <?php echo e($row['name']); ?>

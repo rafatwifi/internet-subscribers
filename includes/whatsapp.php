@@ -234,7 +234,20 @@ function whatsapp_may_message_subscriber($pdo, $subscriberId, $parentId = 0)
         return false;
     }
     $sess = whatsapp_session_for_subscriber($pdo, (int) $subscriberId, (int) $parentId);
-    return $sess !== '' && $sess === $mine;
+    if ($sess === $mine) {
+        return true;
+    }
+    if ($sess !== '') {
+        return false;
+    }
+    // ماكو واتساب على الوكيل: مدير الشركة يرسل، الوكيل لا
+    if (function_exists('is_agent_user') && is_agent_user()) {
+        return false;
+    }
+    if (function_exists('is_group_manager_user') && is_group_manager_user()) {
+        return false;
+    }
+    return true;
 }
 
 /** مدراء الساس اللي رسائلهم تطلع من واتساب الحساب المفتوح */
@@ -626,6 +639,10 @@ function whatsapp_notify_agent_card($pdo, $config, $senderId, $agentId, $profile
         return 'no_phone';
     }
     $key = function_exists('wa_case_template_key') ? wa_case_template_key($config, $case) : '';
+    if ($key !== '' && function_exists('wa_template_is_on') && !wa_template_is_on($config, $key)) {
+        $logNotice(false, $phone, '', 'ما انرسل إشعار التحويل: القالب متوقف');
+        return 'no_template';
+    }
     $tpl = '';
     if ($key !== '' && isset($config['templates'][$key])) {
         $tpl = trim((string) $config['templates'][$key]);
@@ -794,6 +811,16 @@ function whatsapp_notifications_enabled($pdo = null, $sessionId = null)
 function whatsapp_send($config, $phone, $message, $type = 'text', $sessionId = null)
 {
     $wa = isset($config['whatsapp']) ? $config['whatsapp'] : array();
+    if (trim((string) $message) === '') {
+        return array(
+            'success' => false,
+            'skipped' => true,
+            'response' => 'القالب متوقف',
+            'phone' => (string) $phone,
+            'body' => '',
+            'type' => $type,
+        );
+    }
     $phone = normalize_phone($phone);
 
     if ($phone === '' || (function_exists('phone_is_placeholder') && phone_is_placeholder($phone))) {
@@ -2075,6 +2102,29 @@ function message_logs_resolved_map($pdo, $logRows)
  * إعادة محاولة إرسال رسالة فاشلة من السجل
  * يرجع array($ok, $message)
  */
+function whatsapp_session_for_tenant($pdo, $tenantId)
+{
+    $tenantId = (int) $tenantId;
+    if ($tenantId <= 0 || !$pdo) {
+        return '';
+    }
+    try {
+        $st = $pdo->prepare(
+            'SELECT id FROM admin_users
+             WHERE tenant_id = :t AND role = "admin" AND is_active = 1
+             ORDER BY id ASC LIMIT 1'
+        );
+        $st->execute(array(':t' => $tenantId));
+        $oid = (int) $st->fetchColumn();
+    } catch (Exception $e) {
+        return '';
+    }
+    if ($oid <= 0) {
+        return '';
+    }
+    return 'u' . $oid;
+}
+
 function wa_session_for_subscriber($pdo, $subscriberId)
 {
     $subscriberId = (int) $subscriberId;
@@ -3251,11 +3301,30 @@ function wa_case_template_key($config, $case)
     return isset($fallback[$case]) ? $fallback[$case] : $case;
 }
 
+/** القالب موقوف فقط إذا انحفظ له on=0. الغائب يبقى شغّال. */
+function wa_template_is_on($config, $key)
+{
+    $key = trim((string) $key);
+    if ($key === '' || !is_array($config)) {
+        return true;
+    }
+    if (!isset($config['wa_templates'][$key]) || !is_array($config['wa_templates'][$key])) {
+        return true;
+    }
+    if (!array_key_exists('on', $config['wa_templates'][$key])) {
+        return true;
+    }
+    return !empty($config['wa_templates'][$key]['on']);
+}
+
 function wa_render_named_template($key, $sub, $config, $extra = array())
 {
     $key = trim((string) $key);
     if ($key === '') {
         $key = 'activation';
+    }
+    if (!wa_template_is_on($config, $key)) {
+        return '';
     }
     $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
     $amountVal = isset($extra['amount']) ? $extra['amount'] : (isset($sub['monthly_price']) ? $sub['monthly_price'] : 0);
@@ -3295,6 +3364,9 @@ function activation_message($sub, $config, $extraNote = '')
     $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
     $amount = money_format_iqd($sub['monthly_price'], $currency);
     $key = function_exists('wa_case_template_key') ? wa_case_template_key($config, 'activation') : 'activation';
+    if (!wa_template_is_on($config, $key)) {
+        return '';
+    }
     $tpl = '';
     if (isset($config['templates'][$key]) && trim((string) $config['templates'][$key]) !== '') {
         $tpl = $config['templates'][$key];
@@ -3331,6 +3403,10 @@ function activation_message($sub, $config, $extraNote = '')
 /** تفعيل بالآجل: جملة التفعيل أولاً، ثم الديون السابقة في نفس الرسالة. */
 function activation_credit_customer_message($sub, $config, $amount, $debtSum = 0, $notesLine = '')
 {
+    $creditKey = function_exists('wa_case_template_key') ? wa_case_template_key($config, 'activation_credit') : 'activation_credit';
+    if (!wa_template_is_on($config, $creditKey)) {
+        return '';
+    }
     $row = is_array($sub) ? $sub : array();
     $row['monthly_price'] = $amount;
     $package = isset($row['service_name']) ? (string) $row['service_name'] : '';
@@ -3378,6 +3454,9 @@ function reminder_message($row, $config)
     $notes = isset($row['notes']) ? trim((string) $row['notes']) : '';
     $case = !empty($row['_wa_case']) ? (string) $row['_wa_case'] : 'debt_remind';
     $key = function_exists('wa_case_template_key') ? wa_case_template_key($config, $case) : 'debt_remind';
+    if (!wa_template_is_on($config, $key)) {
+        return '';
+    }
     $tpl = '';
     if (isset($config['templates'][$key]) && trim((string) $config['templates'][$key]) !== '') {
         $tpl = $config['templates'][$key];
@@ -3499,6 +3578,9 @@ function debt_created_message($row, $config)
     $notes = isset($row['notes']) ? trim((string) $row['notes']) : '';
     $debt = money_format_iqd(isset($row['debt_total']) ? $row['debt_total'] : $row['amount'], $currency);
     $key = function_exists('wa_case_template_key') ? wa_case_template_key($config, 'debt_created') : 'debt_created';
+    if (!wa_template_is_on($config, $key)) {
+        return '';
+    }
     $tpl = '';
     if (isset($config['templates'][$key]) && trim((string) $config['templates'][$key]) !== '') {
         $tpl = $config['templates'][$key];
@@ -3536,6 +3618,9 @@ function days_left_message($row, $config)
     $debtFmt = $debtTotal > 0 ? money_format_iqd($debtTotal, $currency) : '';
     $package = isset($row['package']) ? (string) $row['package'] : '';
     $key = function_exists('wa_case_template_key') ? wa_case_template_key($config, 'days_left') : 'days_left';
+    if (!wa_template_is_on($config, $key)) {
+        return '';
+    }
     $tpl = '';
     if (isset($config['templates'][$key]) && trim((string) $config['templates'][$key]) !== '') {
         $tpl = $config['templates'][$key];
@@ -3574,6 +3659,9 @@ function unpaid_overdue_message($row, $config)
     $debtFmt = money_format_iqd($debtTotal, $currency);
     $package = isset($row['package']) ? (string) $row['package'] : '';
     $key = function_exists('wa_case_template_key') ? wa_case_template_key($config, 'unpaid_overdue') : 'unpaid_overdue';
+    if (!wa_template_is_on($config, $key)) {
+        return '';
+    }
     $tpl = '';
     if (isset($config['templates'][$key]) && trim((string) $config['templates'][$key]) !== '') {
         $tpl = $config['templates'][$key];
@@ -3632,6 +3720,9 @@ function payment_message($row, $config)
     $remaining = isset($row['remaining']) ? money_format_iqd($row['remaining'], $currency) : '';
     $hasRemaining = array_key_exists('remaining', $row);
     $key = function_exists('wa_case_template_key') ? wa_case_template_key($config, 'payment_ok') : 'payment_ok';
+    if (!wa_template_is_on($config, $key)) {
+        return '';
+    }
     $tpl = '';
     if (isset($config['templates'][$key]) && trim((string) $config['templates'][$key]) !== '') {
         $tpl = $config['templates'][$key];
@@ -3674,6 +3765,9 @@ function expiry_soon_message($row, $config)
     $from = isset($row['from']) ? (string) $row['from'] : '';
     $to = isset($row['to']) ? (string) $row['to'] : '';
     $key = function_exists('wa_case_template_key') ? wa_case_template_key($config, 'expiry_soon') : 'expiry_soon';
+    if (!wa_template_is_on($config, $key)) {
+        return '';
+    }
     $tpl = '';
     if (isset($config['templates'][$key]) && trim((string) $config['templates'][$key]) !== '') {
         $tpl = $config['templates'][$key];
@@ -3709,10 +3803,17 @@ function ensure_subscription_expiry_remind_column($pdo)
     $done = true;
     try {
         $chk = $pdo->query("SHOW COLUMNS FROM subscriptions LIKE 'expiry_remind_for_end'");
-        if ($chk && $chk->fetch()) {
-            return;
+        if (!$chk || !$chk->fetch()) {
+            $pdo->exec('ALTER TABLE subscriptions ADD COLUMN expiry_remind_for_end DATE NULL DEFAULT NULL');
         }
-        $pdo->exec('ALTER TABLE subscriptions ADD COLUMN expiry_remind_for_end DATE NULL DEFAULT NULL');
+    } catch (Exception $e) {
+        // ignore
+    }
+    try {
+        $chkDay = $pdo->query("SHOW COLUMNS FROM subscriptions LIKE 'expiry_remind_last_on'");
+        if (!$chkDay || !$chkDay->fetch()) {
+            $pdo->exec('ALTER TABLE subscriptions ADD COLUMN expiry_remind_last_on DATE NULL DEFAULT NULL');
+        }
     } catch (Exception $e) {
         // ignore
     }
@@ -3734,10 +3835,17 @@ function ensure_sas_expiry_remind_column($pdo)
     }
     try {
         $chk = $pdo->query("SHOW COLUMNS FROM sas_users_cache LIKE 'expiry_remind_for_expire'");
-        if ($chk && $chk->fetch()) {
-            return;
+        if (!$chk || !$chk->fetch()) {
+            $pdo->exec('ALTER TABLE sas_users_cache ADD COLUMN expiry_remind_for_expire DATE NULL DEFAULT NULL');
         }
-        $pdo->exec('ALTER TABLE sas_users_cache ADD COLUMN expiry_remind_for_expire DATE NULL DEFAULT NULL');
+    } catch (Exception $e) {
+        // ignore
+    }
+    try {
+        $chkDay = $pdo->query("SHOW COLUMNS FROM sas_users_cache LIKE 'expiry_remind_last_on'");
+        if (!$chkDay || !$chkDay->fetch()) {
+            $pdo->exec('ALTER TABLE sas_users_cache ADD COLUMN expiry_remind_last_on DATE NULL DEFAULT NULL');
+        }
     } catch (Exception $e) {
         // ignore
     }
@@ -3797,7 +3905,7 @@ function expiry_cache_has_mark($pdo, $username, $tenantId, $endDate)
     }
 }
 
-function expiry_remind_already($pdo, $phone, $subscriberId)
+function expiry_remind_already($pdo, $phone, $subscriberId, $todayOnly = false)
 {
     $phone = trim((string) $phone);
     if ($phone !== '' && function_exists('normalize_phone')) {
@@ -3820,10 +3928,13 @@ function expiry_remind_already($pdo, $phone, $subscriberId)
     if (!$parts) {
         return false;
     }
+    $since = $todayOnly
+        ? 'created_at >= CURDATE()'
+        : 'created_at >= DATE_SUB(NOW(), INTERVAL 3 DAY)';
     $sql = 'SELECT id FROM message_logs
             WHERE success = 1
               AND message_type = \'expiry_auto\'
-              AND created_at >= DATE_SUB(NOW(), INTERVAL 3 DAY)
+              AND ' . $since . '
               AND (' . implode(' OR ', $parts) . ')
             LIMIT 1';
     try {
@@ -3956,6 +4067,224 @@ function expiry_remind_claim($pdo, $username, $tenantId, $endDate, $subRowId)
     return $claimed;
 }
 
+function expiry_remind_repeat_on($config)
+{
+    return is_array($config) && !empty($config['expiry_auto_remind_repeat']);
+}
+
+function expiry_profile_key($name)
+{
+    $name = trim((string) $name);
+    if ($name === '') {
+        return '';
+    }
+    $name = preg_replace('/\s+/u', ' ', $name);
+    if ($name === null) {
+        $name = trim((string) $name);
+    }
+    if (function_exists('mb_strtolower')) {
+        return mb_strtolower($name, 'UTF-8');
+    }
+    return strtolower($name);
+}
+
+function expiry_profile_list_clean($raw)
+{
+    $out = array();
+    $seen = array();
+    if (!is_array($raw)) {
+        return $out;
+    }
+    foreach ($raw as $name) {
+        $name = trim((string) $name);
+        if ($name === '') {
+            continue;
+        }
+        if (function_exists('mb_substr')) {
+            $name = mb_substr($name, 0, 150, 'UTF-8');
+        } elseif (strlen($name) > 150) {
+            $name = substr($name, 0, 150);
+        }
+        $key = expiry_profile_key($name);
+        if ($key === '' || isset($seen[$key])) {
+            continue;
+        }
+        $seen[$key] = true;
+        $out[] = $name;
+        if (count($out) >= 80) {
+            break;
+        }
+    }
+    return $out;
+}
+
+function expiry_daily_profile_map($config)
+{
+    $map = array();
+    if (!is_array($config) || empty($config['expiry_auto_remind_profiles']) || !is_array($config['expiry_auto_remind_profiles'])) {
+        return $map;
+    }
+    foreach ($config['expiry_auto_remind_profiles'] as $name) {
+        $key = expiry_profile_key($name);
+        if ($key !== '') {
+            $map[$key] = true;
+        }
+    }
+    return $map;
+}
+
+function expiry_name_is_extension($name)
+{
+    $key = expiry_profile_key($name);
+    if ($key === '') {
+        return false;
+    }
+    if (strpos($key, 'extend') !== false || strpos($key, 'تمديد') !== false) {
+        return true;
+    }
+    if ($key === 'test' || $key === 'تست') {
+        return true;
+    }
+    return false;
+}
+
+function expiry_remind_by($config)
+{
+    return (is_array($config) && isset($config['expiry_auto_remind_by']) && $config['expiry_auto_remind_by'] === 'service')
+        ? 'service'
+        : 'profile';
+}
+
+function expiry_extension_user_ids($pdo, $config, $tenantId, $wantMap)
+{
+    $ids = array();
+    $tenantId = (int) $tenantId;
+    if (!$pdo || $tenantId <= 0 || !is_array($wantMap) || !$wantMap) {
+        return $ids;
+    }
+    $keys = array_keys($wantMap);
+    sort($keys);
+    $file = dirname(__DIR__) . '/storage/cache/expiry_ext_users_t' . $tenantId . '_' . md5(implode('|', $keys)) . '.json';
+    if (is_file($file) && (time() - (int) @filemtime($file)) < 120) {
+        $raw = json_decode((string) @file_get_contents($file), true);
+        if (is_array($raw)) {
+            foreach ($raw as $id) {
+                $id = (int) $id;
+                if ($id > 0) {
+                    $ids[$id] = true;
+                }
+            }
+            return $ids;
+        }
+    }
+    if (!function_exists('sas_make_connector_for_tenant')) {
+        return $ids;
+    }
+    try {
+        $api = sas_make_connector_for_tenant($pdo, $config, $tenantId);
+    } catch (Exception $e) {
+        $api = null;
+    }
+    if (!$api || !method_exists($api, 'listActivationsPage')) {
+        return $ids;
+    }
+    $seen = array();
+    $cut = strtotime('-21 days');
+    for ($page = 1; $page <= 12; $page++) {
+        try {
+            $rows = $api->listActivationsPage($page, 100);
+        } catch (Exception $e) {
+            break;
+        }
+        if (!is_array($rows) || !$rows) {
+            break;
+        }
+        $old = false;
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $uid = isset($row['user_id']) ? (int) $row['user_id'] : 0;
+            if ($uid <= 0 || isset($seen[$uid])) {
+                continue;
+            }
+            $seen[$uid] = true;
+            $name = '';
+            if (isset($row['profile_details']) && is_array($row['profile_details']) && !empty($row['profile_details']['name']) && !is_array($row['profile_details']['name'])) {
+                $name = (string) $row['profile_details']['name'];
+            }
+            if (expiry_name_is_daily($wantMap, $name)) {
+                $ids[$uid] = true;
+            }
+            if (!empty($row['created_at'])) {
+                $ts = strtotime((string) $row['created_at']);
+                if ($ts && $cut && $ts < $cut) {
+                    $old = true;
+                }
+            }
+        }
+        if (count($rows) < 100 || $old) {
+            break;
+        }
+    }
+    @file_put_contents($file, json_encode(array_keys($ids)));
+    return $ids;
+}
+
+function expiry_name_is_daily($map, $name)
+{
+    $key = expiry_profile_key($name);
+    return $key !== '' && !empty($map[$key]);
+}
+
+function expiry_remind_claim_day($pdo, $username, $tenantId, $subRowId)
+{
+    $today = date('Y-m-d');
+    $username = trim((string) $username);
+    $tenantId = (int) $tenantId;
+    $subRowId = (int) $subRowId;
+    $claimed = false;
+    if ($username !== '') {
+        try {
+            $sql = 'UPDATE sas_users_cache SET expiry_remind_last_on = :d
+                    WHERE username = :u
+                      AND (expiry_remind_last_on IS NULL OR expiry_remind_last_on < :d2)';
+            $params = array(':d' => $today, ':d2' => $today, ':u' => $username);
+            if ($tenantId > 0) {
+                $sql .= ' AND tenant_id = :t';
+                $params[':t'] = $tenantId;
+            }
+            $st = $pdo->prepare($sql);
+            $st->execute($params);
+            $claimed = $st->rowCount() > 0;
+        } catch (Exception $e) {
+            $claimed = false;
+        }
+        if ($claimed && $subRowId > 0) {
+            try {
+                $pdo->prepare(
+                    'UPDATE subscriptions SET expiry_remind_last_on = :d WHERE id = :id'
+                )->execute(array(':d' => $today, ':id' => $subRowId));
+            } catch (Exception $e) {
+            }
+        }
+        return $claimed;
+    }
+    if ($subRowId > 0) {
+        try {
+            $st = $pdo->prepare(
+                'UPDATE subscriptions SET expiry_remind_last_on = :d
+                 WHERE id = :id AND (expiry_remind_last_on IS NULL OR expiry_remind_last_on < :d2)'
+            );
+            $st->execute(array(':d' => $today, ':d2' => $today, ':id' => $subRowId));
+            return $st->rowCount() > 0;
+        } catch (Exception $e) {
+            return false;
+        }
+    }
+    return false;
+}
+
 /**
  * إرسال تذكير لمن ينتهي اشتراكهم خلال N أيام
  * (اشتراكات محلية + تواريخ انتهاء كاش الساس)
@@ -3963,10 +4292,16 @@ function expiry_remind_claim($pdo, $username, $tenantId, $endDate, $subRowId)
 function run_expiry_soon_reminders($pdo, $config, $limit = 40)
 {
     $out = array('sent' => 0, 'failed' => 0, 'skipped' => 0, 'checked' => 0);
-    if (empty($config['expiry_auto_remind_enabled'])) {
+    $repeat = expiry_remind_repeat_on($config);
+    $normalOn = !empty($config['expiry_auto_remind_enabled']);
+    if (!$normalOn && !$repeat) {
         return $out;
     }
     if (empty($config['whatsapp']['enabled'])) {
+        return $out;
+    }
+    $expKey = function_exists('wa_case_template_key') ? wa_case_template_key($config, 'expiry_soon') : 'expiry_soon';
+    if ($expKey !== '' && !wa_template_is_on($config, $expKey)) {
         return $out;
     }
     $daysN = isset($config['expiry_auto_remind_days']) ? (int) $config['expiry_auto_remind_days'] : 1;
@@ -3997,10 +4332,96 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
         $remindTid = (int) current_tenant_id();
     }
 
+    $dailyMap = expiry_daily_profile_map($config);
+    $onceOn = !empty($config['expiry_auto_remind_once_enabled']);
+    $onceDays = isset($config['expiry_auto_remind_once_days']) ? (int) $config['expiry_auto_remind_once_days'] : 1;
+    if ($onceDays < 0) {
+        $onceDays = 0;
+    }
+    if ($onceDays > 60) {
+        $onceDays = 60;
+    }
+    $normalDays = $onceOn ? $onceDays : $daysN;
+    $fetchDays = 0;
+    if ($repeat && $daysN > $fetchDays) {
+        $fetchDays = $daysN;
+    }
+    if ($normalOn && $normalDays > $fetchDays) {
+        $fetchDays = $normalDays;
+    }
+    $todayMark = date('Y-m-d');
+
     // 1) تواريخ الانتهاء من كاش المشتركين
     $sasRows = array();
     if (function_exists('sas_list_expiring_rows')) {
-        $sasRows = sas_list_expiring_rows($pdo, $daysN, $limit * 3);
+        $sasRows = sas_list_expiring_rows($pdo, $fetchDays, $limit * 3);
+    }
+    $remindBy = expiry_remind_by($config);
+    $extUsers = array();
+    if ($repeat && $remindBy === 'service' && $dailyMap) {
+        $extUsers = expiry_extension_user_ids($pdo, $config, $remindTid, $dailyMap);
+    }
+    if ($repeat && $remindBy === 'service' && $extUsers && $remindTid > 0) {
+        $extIds = array();
+        foreach ($extUsers as $extUid => $extOn) {
+            $extUid = (int) $extUid;
+            if ($extUid > 0) {
+                $extIds[] = $extUid;
+            }
+        }
+        $extSeen = array();
+        foreach ($sasRows as $crow) {
+            $seenName = isset($crow['username']) ? trim((string) $crow['username']) : '';
+            if ($seenName !== '') {
+                $extSeen[$seenName] = true;
+            }
+        }
+        $extExtra = array();
+        $extChunks = array_chunk($extIds, 300);
+        foreach ($extChunks as $extChunk) {
+            if (!$extChunk) {
+                continue;
+            }
+            try {
+                $stEx = $pdo->query(
+                    'SELECT c.username, c.display_name, c.phone AS sas_phone, c.profile_name, c.expire_at,
+                            c.local_subscriber_id, c.sas_user_id, c.parent_id, c.enabled,
+                            s.id AS sub_id, s.name AS sub_name, s.phone AS sub_phone
+                     FROM sas_users_cache c
+                     LEFT JOIN subscribers s ON s.tenant_id = c.tenant_id AND s.id = c.local_subscriber_id
+                     WHERE c.tenant_id = ' . (int) $remindTid . '
+                       AND c.sas_user_id IN (' . implode(',', $extChunk) . ')
+                       AND c.expire_at IS NOT NULL
+                       AND DATE(c.expire_at) >= CURDATE()
+                       AND DATE(c.expire_at) <= DATE_ADD(CURDATE(), INTERVAL ' . (int) $daysN . ' DAY)
+                     ORDER BY c.expire_at ASC'
+                );
+                foreach ($stEx->fetchAll() as $crow) {
+                    if (isset($crow['enabled']) && (int) $crow['enabled'] !== 1) {
+                        continue;
+                    }
+                    $seenName = isset($crow['username']) ? trim((string) $crow['username']) : '';
+                    if ($seenName === '' || isset($extSeen[$seenName])) {
+                        continue;
+                    }
+                    $leftRaw = function_exists('sas_remaining_days') ? sas_remaining_days($crow['expire_at']) : '';
+                    if ($leftRaw === '') {
+                        continue;
+                    }
+                    $left = (int) $leftRaw;
+                    if ($left < 0 || $left > $daysN) {
+                        continue;
+                    }
+                    $crow['_days'] = $left;
+                    $extSeen[$seenName] = true;
+                    $extExtra[] = $crow;
+                }
+            } catch (Exception $e) {
+            }
+        }
+        if ($extExtra) {
+            $sasRows = array_merge($extExtra, $sasRows);
+        }
     }
     // صفّي من تذكّروا مسبقاً لنفس تاريخ الانتهاء
     $sasFiltered = array();
@@ -4009,8 +4430,31 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
         if ($u === '') {
             continue;
         }
+        $leftDays = isset($crow['_days']) ? (int) $crow['_days'] : 0;
+        $sasUid = isset($crow['sas_user_id']) ? (int) $crow['sas_user_id'] : 0;
+        if ($remindBy === 'service') {
+            $inRepeatSet = $repeat && $sasUid > 0 && !empty($extUsers[$sasUid]);
+        } else {
+            $matchName = isset($crow['profile_name']) ? $crow['profile_name'] : '';
+            $inRepeatSet = $repeat && expiry_name_is_daily($dailyMap, $matchName);
+        }
+        if ($inRepeatSet) {
+            if ($leftDays > $daysN) {
+                continue;
+            }
+            $rowDaily = true;
+        } elseif ($normalOn) {
+            if ($leftDays > $normalDays) {
+                continue;
+            }
+            $rowDaily = false;
+        } else {
+            continue;
+        }
+        $crow['_daily'] = $rowDaily ? 1 : 0;
         try {
-            $prevSql = 'SELECT expiry_remind_for_expire FROM sas_users_cache WHERE username = :u';
+            $markCol = $rowDaily ? 'expiry_remind_last_on' : 'expiry_remind_for_expire';
+            $prevSql = 'SELECT ' . $markCol . ' FROM sas_users_cache WHERE username = :u';
             $prevParams = array(':u' => $u);
             if ($remindTid > 0) {
                 $prevSql .= ' AND tenant_id = :t';
@@ -4021,7 +4465,8 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
             $stR->execute($prevParams);
             $prev = $stR->fetchColumn();
             $endDate = date('Y-m-d', strtotime((string) $crow['expire_at']));
-            if ($prev !== false && $prev !== null && (string) $prev === $endDate) {
+            $blockOn = $rowDaily ? $todayMark : $endDate;
+            if ($prev !== false && $prev !== null && (string) $prev === $blockOn) {
                 continue;
             }
         } catch (Exception $e) {
@@ -4043,6 +4488,7 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
         if ($username === '' || isset($doneUsers[$username])) {
             continue;
         }
+        $dailyNow = !empty($crow['_daily']);
         $out['checked']++;
         $sid = isset($crow['subscriber_id']) ? (int) $crow['subscriber_id'] : 0;
         if ($sid <= 0 && !empty($crow['local_subscriber_id'])) {
@@ -4095,12 +4541,19 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
         }
         $endDate = date('Y-m-d', strtotime((string) $crow['expire_at']));
         $waSession = whatsapp_session_for_subscriber($pdo, $sid, isset($crow['parent_id']) ? (int) $crow['parent_id'] : 0);
+        if ($waSession === '' && $remindTid > 0) {
+            $waSession = whatsapp_session_for_tenant($pdo, $remindTid);
+        }
         if ($waSession === '') {
             $out['skipped']++;
             continue;
         }
         if (isset($donePhones[$phone])) {
-            expiry_remind_mark($pdo, $username, $remindTid, $endDate, 0, $sid);
+            if ($dailyNow) {
+                expiry_remind_claim_day($pdo, $username, $remindTid, 0);
+            } else {
+                expiry_remind_mark($pdo, $username, $remindTid, $endDate, 0, $sid);
+            }
             $doneUsers[$username] = true;
             $out['skipped']++;
             continue;
@@ -4109,8 +4562,13 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
             $out['skipped']++;
             continue;
         }
-        if (expiry_remind_already($pdo, $phone, $sid) || !expiry_remind_claim($pdo, $username, $remindTid, $endDate, 0)) {
-            expiry_remind_mark($pdo, $username, $remindTid, $endDate, 0, $sid);
+        $sasHeld = $dailyNow
+            ? (expiry_remind_already($pdo, $phone, $sid, true) || !expiry_remind_claim_day($pdo, $username, $remindTid, 0))
+            : (expiry_remind_already($pdo, $phone, $sid) || !expiry_remind_claim($pdo, $username, $remindTid, $endDate, 0));
+        if ($sasHeld) {
+            if (!$dailyNow) {
+                expiry_remind_mark($pdo, $username, $remindTid, $endDate, 0, $sid);
+            }
             expiry_remind_unlock($pdo, $phone);
             $doneUsers[$username] = true;
             $donePhones[$phone] = true;
@@ -4139,7 +4597,9 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
         $doneUsers[$username] = true;
         $donePhones[$phone] = true;
         if (!empty($result['success'])) {
-            expiry_remind_mark($pdo, $username, $remindTid, $endDate, 0, $sid);
+            if (!$dailyNow) {
+                expiry_remind_mark($pdo, $username, $remindTid, $endDate, 0, $sid);
+            }
             $out['sent']++;
             usleep(700000);
         } elseif (!empty($result['skipped'])) {
@@ -4157,15 +4617,18 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
     }
     if ($remain > 0) {
         $tenantSql = ($remindTid > 0) ? (' AND s.tenant_id = ' . (int) $remindTid) : '';
+        $localDays = $repeat ? $fetchDays : $daysN;
+        $onceGate = $repeat
+            ? '((sub.expiry_remind_last_on IS NULL OR sub.expiry_remind_last_on < CURDATE()) OR (sub.expiry_remind_for_end IS NULL OR sub.expiry_remind_for_end <> sub.end_date))'
+            : '(sub.expiry_remind_for_end IS NULL OR sub.expiry_remind_for_end <> sub.end_date)';
         $sql = 'SELECT sub.id AS sub_id, sub.subscriber_id, sub.service_name, sub.start_date, sub.end_date,
                        s.name, s.phone, s.sas_username
                 FROM subscriptions sub
                 JOIN subscribers s ON s.id = sub.subscriber_id
                 WHERE sub.status = \'active\'
                   AND sub.end_date >= CURDATE()
-                  AND sub.end_date <= DATE_ADD(CURDATE(), INTERVAL ' . (int) $daysN . ' DAY)
-                  AND (sub.expiry_remind_for_end IS NULL OR sub.expiry_remind_for_end <> sub.end_date)'
-                  . $tenantSql . '
+                  AND sub.end_date <= DATE_ADD(CURDATE(), INTERVAL ' . (int) $localDays . ' DAY)
+                  AND ' . $onceGate . $tenantSql . '
                 ORDER BY sub.end_date ASC
                 LIMIT ' . (int) $remain;
         try {
@@ -4180,6 +4643,43 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
             }
             $out['checked']++;
             $info = subscription_days_info($row['start_date'], $row['end_date']);
+            $leftLocal = (int) $info['left'];
+            $profileName = '';
+            $sasUid = 0;
+            if ($u !== '' && $remindTid > 0) {
+                try {
+                    $stPn = $pdo->prepare(
+                        'SELECT profile_name, sas_user_id FROM sas_users_cache
+                         WHERE username = :u AND tenant_id = :t
+                         LIMIT 1'
+                    );
+                    $stPn->execute(array(':u' => $u, ':t' => $remindTid));
+                    $pnRow = $stPn->fetch(PDO::FETCH_ASSOC);
+                    if (is_array($pnRow)) {
+                        $profileName = isset($pnRow['profile_name']) ? (string) $pnRow['profile_name'] : '';
+                        $sasUid = isset($pnRow['sas_user_id']) ? (int) $pnRow['sas_user_id'] : 0;
+                    }
+                } catch (Exception $e) {
+                }
+            }
+            if ($remindBy === 'service') {
+                $inRepeatSet = $repeat && $sasUid > 0 && !empty($extUsers[$sasUid]);
+            } else {
+                $inRepeatSet = $repeat && expiry_name_is_daily($dailyMap, $profileName);
+            }
+            if ($inRepeatSet) {
+                if ($leftLocal > $daysN) {
+                    continue;
+                }
+                $dailyNow = true;
+            } elseif ($normalOn) {
+                if ($leftLocal > $normalDays) {
+                    continue;
+                }
+                $dailyNow = false;
+            } else {
+                continue;
+            }
             $body = expiry_soon_message(array(
                 'name' => $row['name'],
                 'days' => (int) $info['left'],
@@ -4188,6 +4688,9 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
                 'to' => $row['end_date'],
             ), $config);
             $waSession = whatsapp_session_for_subscriber($pdo, (int) $row['subscriber_id'], 0);
+            if ($waSession === '' && $remindTid > 0) {
+                $waSession = whatsapp_session_for_tenant($pdo, $remindTid);
+            }
             if ($waSession === '') {
                 $out['skipped']++;
                 continue;
@@ -4200,7 +4703,11 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
                 }
             }
             if ($localPhone !== '' && isset($donePhones[$localPhone])) {
-                expiry_remind_mark($pdo, $u, $remindTid, (string) $row['end_date'], (int) $row['sub_id'], (int) $row['subscriber_id']);
+                if ($dailyNow) {
+                    expiry_remind_claim_day($pdo, $u, $remindTid, (int) $row['sub_id']);
+                } else {
+                    expiry_remind_mark($pdo, $u, $remindTid, (string) $row['end_date'], (int) $row['sub_id'], (int) $row['subscriber_id']);
+                }
                 $out['skipped']++;
                 continue;
             }
@@ -4209,11 +4716,16 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
                 $out['skipped']++;
                 continue;
             }
-            if (expiry_cache_has_mark($pdo, $u, $remindTid, (string) $row['end_date'])
-                || expiry_remind_already($pdo, $localPhone, (int) $row['subscriber_id'])
-                || !expiry_remind_claim($pdo, $u, $remindTid, (string) $row['end_date'], (int) $row['sub_id'])
-            ) {
-                expiry_remind_mark($pdo, $u, $remindTid, (string) $row['end_date'], (int) $row['sub_id'], (int) $row['subscriber_id']);
+            $localHeld = $dailyNow
+                ? (expiry_remind_already($pdo, $localPhone, (int) $row['subscriber_id'], true)
+                    || !expiry_remind_claim_day($pdo, $u, $remindTid, (int) $row['sub_id']))
+                : (expiry_cache_has_mark($pdo, $u, $remindTid, (string) $row['end_date'])
+                    || expiry_remind_already($pdo, $localPhone, (int) $row['subscriber_id'])
+                    || !expiry_remind_claim($pdo, $u, $remindTid, (string) $row['end_date'], (int) $row['sub_id']));
+            if ($localHeld) {
+                if (!$dailyNow) {
+                    expiry_remind_mark($pdo, $u, $remindTid, (string) $row['end_date'], (int) $row['sub_id'], (int) $row['subscriber_id']);
+                }
                 expiry_remind_unlock($pdo, $lockKey);
                 if ($localPhone !== '') {
                     $donePhones[$localPhone] = true;
@@ -4237,7 +4749,9 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
                 $donePhones[$localPhone] = true;
             }
             if (!empty($result['success'])) {
-                expiry_remind_mark($pdo, $u, $remindTid, (string) $row['end_date'], (int) $row['sub_id'], (int) $row['subscriber_id']);
+                if (!$dailyNow) {
+                    expiry_remind_mark($pdo, $u, $remindTid, (string) $row['end_date'], (int) $row['sub_id'], (int) $row['subscriber_id']);
+                }
                 $out['sent']++;
                 usleep(700000);
             } elseif (!empty($result['skipped'])) {
@@ -4258,7 +4772,7 @@ function maybe_run_expiry_auto_reminders($pdo, $config)
         maybe_run_auto_schedule_jobs($pdo, $config);
         return;
     }
-    if (empty($config['expiry_auto_remind_enabled'])) {
+    if (empty($config['expiry_auto_remind_enabled']) && !expiry_remind_repeat_on($config)) {
         return;
     }
     $lock = __DIR__ . '/../config/expiry_auto_remind.lock';
@@ -4270,7 +4784,7 @@ function maybe_run_expiry_auto_reminders($pdo, $config)
         }
     }
     @file_put_contents($lock, (string) $now);
-    @run_expiry_soon_reminders($pdo, $config, 6);
+    @run_expiry_soon_reminders($pdo, $config, 20);
 }
 
 /**
@@ -4299,9 +4813,9 @@ function maybe_run_auto_schedule_jobs($pdo, $config)
     }
     @file_put_contents($lock, (string) $now);
 
-    if (!empty($config['expiry_auto_remind_enabled']) && function_exists('run_expiry_soon_reminders')) {
+    if ((!empty($config['expiry_auto_remind_enabled']) || !empty($config['expiry_auto_remind_repeat'])) && function_exists('run_expiry_soon_reminders')) {
         try {
-            @run_expiry_soon_reminders($pdo, $config, 6);
+            @run_expiry_soon_reminders($pdo, $config, 20);
         } catch (Exception $e) {
             // ignore
         }

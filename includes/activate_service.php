@@ -415,10 +415,11 @@ function activate_one_subscriber($pdo, $config, $subscriberId, $opts = array())
                             'notes' => $notesLine,
                         ))
                         : '';
-                    if ($msg === '' && function_exists('activation_message')) {
+                    $cashOn = !function_exists('wa_template_is_on') || wa_template_is_on($config, $waTemplate);
+                    if ($msg === '' && $cashOn && function_exists('activation_message')) {
                         $msg = activation_message($row, $config, '');
                     }
-                    if ($msg === '' && function_exists('activation_message_with_rental')) {
+                    if ($msg === '' && $cashOn && function_exists('activation_message_with_rental')) {
                         $rentName = $rentalDev ? $rentalDev['name'] : '';
                         $msg = activation_message_with_rental($row, $config, '', $rentalFee, $rentName);
                     }
@@ -445,12 +446,17 @@ function activate_one_subscriber($pdo, $config, $subscriberId, $opts = array())
                         ))
                         : '';
                     if ($debtTpl === '') {
-                        $debtTpl = 'تنويه: عليك ديون سابقة بمبلغ ' . money_format_iqd($oldDebtSum, $currency);
-                        if ($notesLine !== '') {
-                            $debtTpl .= "\n" . $notesLine;
+                        $debtOn = !function_exists('wa_template_is_on') || wa_template_is_on($config, $debtKey);
+                        if ($debtOn) {
+                            $debtTpl = 'تنويه: عليك ديون سابقة بمبلغ ' . money_format_iqd($oldDebtSum, $currency);
+                            if ($notesLine !== '') {
+                                $debtTpl .= "\n" . $notesLine;
+                            }
                         }
                     }
-                    $msg .= "\n\n" . $debtTpl;
+                    if ($debtTpl !== '') {
+                        $msg .= "\n\n" . $debtTpl;
+                    }
                 }
                 $result = whatsapp_send($config, $row['phone'], $msg, 'activation');
                 log_message($pdo, $subscriberId, $result);
