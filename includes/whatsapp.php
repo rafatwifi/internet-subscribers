@@ -1570,6 +1570,7 @@ function ensure_message_log_extra($pdo)
         'fail_reason' => 'VARCHAR(255) NULL DEFAULT NULL',
         'queued_at' => 'DATETIME NULL DEFAULT NULL',
         'retry_hold' => 'VARCHAR(16) NULL DEFAULT NULL',
+        'tenant_id' => 'INT UNSIGNED NULL DEFAULT NULL',
     );
     foreach ($cols as $name => $def) {
         try {
@@ -1587,6 +1588,93 @@ function ensure_message_log_extra($pdo)
         }
     } catch (Exception $e) {
     }
+    message_log_backfill_tenant($pdo);
+}
+
+function message_log_backfill_tenant($pdo)
+{
+    if (!$pdo) {
+        return;
+    }
+    $dir = dirname(__DIR__) . '/storage/cache';
+    $mark = $dir . '/msg_tenant_backfill.txt';
+    if (is_file($mark)) {
+        return;
+    }
+    try {
+        $pdo->exec(
+            'UPDATE message_logs m
+             INNER JOIN subscribers s ON s.id = m.subscriber_id
+             SET m.tenant_id = s.tenant_id
+             WHERE m.tenant_id IS NULL AND s.tenant_id IS NOT NULL AND s.tenant_id > 0'
+        );
+    } catch (Exception $e) {
+    }
+    $map = array();
+    try {
+        $rows = $pdo->query(
+            'SELECT phone, tenant_id FROM admin_users
+             WHERE phone IS NOT NULL AND phone <> "" AND tenant_id > 0'
+        )->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($rows as $ar) {
+            $pk = preg_replace('/\D+/', '', (string) $ar['phone']);
+            if (strlen($pk) >= 10) {
+                $pk = substr($pk, -10);
+            }
+            if ($pk === '') {
+                continue;
+            }
+            $t = (int) $ar['tenant_id'];
+            if (!isset($map[$pk])) {
+                $map[$pk] = $t;
+            } elseif ((int) $map[$pk] !== $t) {
+                $map[$pk] = -1;
+            }
+        }
+        if ($map) {
+            $pend = $pdo->query(
+                'SELECT id, phone FROM message_logs
+                 WHERE tenant_id IS NULL AND (subscriber_id IS NULL OR subscriber_id = 0)
+                   AND phone IS NOT NULL AND phone <> ""'
+            );
+            $upd = $pdo->prepare('UPDATE message_logs SET tenant_id = :t WHERE id = :id AND tenant_id IS NULL');
+            if ($pend) {
+                foreach ($pend->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                    $pk = preg_replace('/\D+/', '', (string) $row['phone']);
+                    if (strlen($pk) >= 10) {
+                        $pk = substr($pk, -10);
+                    }
+                    if ($pk === '' || !isset($map[$pk]) || (int) $map[$pk] <= 0) {
+                        continue;
+                    }
+                    $upd->execute(array(':t' => (int) $map[$pk], ':id' => (int) $row['id']));
+                }
+            }
+        }
+    } catch (Exception $e) {
+    }
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0775, true);
+    }
+    @file_put_contents($mark, '1');
+}
+
+function message_log_tenant_sql($mAlias, $sAlias)
+{
+    $m = preg_replace('/[^a-zA-Z0-9_]/', '', (string) $mAlias);
+    $s = preg_replace('/[^a-zA-Z0-9_]/', '', (string) $sAlias);
+    if ($m === '') {
+        $m = 'm';
+    }
+    if ($s === '') {
+        $s = 's';
+    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+    if ($tid <= 0) {
+        return ' AND 1=0';
+    }
+    return ' AND (' . $m . '.tenant_id = ' . $tid
+        . ' OR (' . $m . '.tenant_id IS NULL AND ' . $s . '.tenant_id = ' . $tid . '))';
 }
 
 function message_log_fail_text($row)
@@ -1722,14 +1810,21 @@ function log_message($pdo, $subscriberId, $result)
     }
     $nextSql = ($next === null || $next === '') ? 'NULL' : $pdo->quote($next);
     $holdSql = ($hold === '') ? 'NULL' : $pdo->quote($hold);
+    $logTid = 0;
+    if (isset($result['tenant_id']) && (int) $result['tenant_id'] > 0) {
+        $logTid = (int) $result['tenant_id'];
+    } elseif (function_exists('current_tenant_id')) {
+        $logTid = (int) current_tenant_id();
+    }
     $stmt = $pdo->prepare(
         'INSERT INTO message_logs
-            (subscriber_id, phone, message_type, body, success, response_json, from_phone, attempt, next_retry_at, fail_reason, retry_hold)
+            (subscriber_id, phone, message_type, body, success, response_json, from_phone, attempt, next_retry_at, fail_reason, retry_hold, tenant_id)
          VALUES
-            (:subscriber_id, :phone, :message_type, :body, :success, :response_json, :from_phone, :attempt, ' . $nextSql . ', :fail_reason, ' . $holdSql . ')'
+            (:subscriber_id, :phone, :message_type, :body, :success, :response_json, :from_phone, :attempt, ' . $nextSql . ', :fail_reason, ' . $holdSql . ', :tenant_id)'
     );
     $stmt->execute(array(
         ':subscriber_id' => $subscriberId,
+        ':tenant_id' => $logTid > 0 ? $logTid : null,
         ':phone' => isset($result['phone']) ? $result['phone'] : '',
         ':message_type' => isset($result['type']) ? $result['type'] : 'text',
         ':body' => isset($result['body']) ? $result['body'] : '',
@@ -1908,13 +2003,21 @@ function delete_failed_message_log($pdo, $logId)
         return array(false, 'معرّف غير صالح');
     }
     try {
-        $st = $pdo->prepare('SELECT id, subscriber_id FROM message_logs WHERE id = :id LIMIT 1');
+        $st = $pdo->prepare('SELECT id, subscriber_id, tenant_id FROM message_logs WHERE id = :id LIMIT 1');
         $st->execute(array(':id' => $logId));
         $row = $st->fetch();
         if (!$row) {
             return array(false, 'الرسالة غير موجودة');
         }
         $sid = isset($row['subscriber_id']) ? (int) $row['subscriber_id'] : 0;
+        $rowTid = isset($row['tenant_id']) ? (int) $row['tenant_id'] : 0;
+        $myTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+        if ($rowTid > 0 && $myTid > 0 && $rowTid !== $myTid) {
+            return array(false, 'ما عندك صلاحية لهذه الرسالة');
+        }
+        if ($sid <= 0 && $rowTid <= 0) {
+            return array(false, 'ما عندك صلاحية لهذه الرسالة');
+        }
         if ($sid > 0 && function_exists('user_can_access_subscriber') && !user_can_access_subscriber($pdo, $sid)) {
             return array(false, 'ما عندك صلاحية لهذه الرسالة');
         }

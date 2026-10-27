@@ -20,6 +20,8 @@ class SASConnector
     private $lastError = '';
     private $lastDebug = array();
     public $lastOnlineListOk = false;
+    public $lastOnlineComplete = false;
+    public $lastOnlineTotal = -1;
     public $lastSessionListOk = false;
 
     private $secretKey = 'abcdefghijuklmno0123456789012345';
@@ -380,7 +382,52 @@ class SASConnector
             }
         }
 
-        return $this->parseApiResponse($this->get('index/manager?page=1&limit=1000', true));
+        $fallback = $this->parseApiResponse($this->get('index/manager?page=1&limit=1000', true));
+        $rows = $this->normalizeUserList(is_array($fallback) ? $fallback : array());
+        if ($rows) {
+            return $rows;
+        }
+        foreach (array('index/managers', 'manager/index', 'index/agent', 'index/reseller') as $route) {
+            $try = $this->parseApiResponse($this->post($route, $dtParams, true));
+            $rows = $this->normalizeUserList(is_array($try) ? $try : array());
+            if ($rows) {
+                return $rows;
+            }
+        }
+        return is_array($fallback) ? $fallback : array();
+    }
+
+    private function liftOnlineUsername(&$row)
+    {
+        if (!is_array($row)) {
+            return '';
+        }
+        $keys = array('username', 'user_name', 'login');
+        foreach ($keys as $k) {
+            if (!empty($row[$k]) && !is_array($row[$k])) {
+                $v = trim((string) $row[$k]);
+                if ($v !== '') {
+                    $row['username'] = $v;
+                    return strtolower($v);
+                }
+            }
+        }
+        foreach (array('user', 'subscriber', 'customer', 'account') as $nest) {
+            if (!isset($row[$nest]) || !is_array($row[$nest])) {
+                continue;
+            }
+            foreach ($keys as $k) {
+                if (empty($row[$nest][$k]) || is_array($row[$nest][$k])) {
+                    continue;
+                }
+                $v = trim((string) $row[$nest][$k]);
+                if ($v !== '') {
+                    $row['username'] = $v;
+                    return strtolower($v);
+                }
+            }
+        }
+        return '';
     }
 
     public function getManagerById($id)
@@ -3915,10 +3962,15 @@ class SASConnector
         $all = array();
         $seen = array();
         $this->lastOnlineListOk = false;
-        foreach (array('index/online', 'index/onlineUser', 'index/session') as $route) {
+        $this->lastOnlineComplete = false;
+        $this->lastOnlineTotal = -1;
+        foreach (array('index/online', 'index/onlineUser', 'index/session', 'online/index', 'radius/online') as $route) {
             $page = 1;
             $gotAny = false;
-            while ($page <= 6) {
+            $emptyKnown = false;
+            $failed = false;
+            $knownLast = 0;
+            while ($page <= 20) {
                 $payload = array(
                     'page' => $page,
                     'count' => 800,
@@ -3927,33 +3979,72 @@ class SASConnector
                     'search' => '',
                 );
                 $full = $this->decodeApiBody($this->post($route, $payload, true), false);
-                if (isset($full['__http_error']) || isset($full['__auth_error']) || isset($full['__curl_error'])) {
+                if (!is_array($full) || isset($full['__http_error']) || isset($full['__auth_error']) || isset($full['__curl_error'])) {
+                    $failed = true;
                     break;
                 }
-                // رد ناجح من الساس (حتى لو الصفحة فاضية)
-                $this->lastOnlineListOk = true;
+                if ($page === 1) {
+                    if (isset($full['total']) && is_numeric($full['total'])) {
+                        $this->lastOnlineTotal = (int) $full['total'];
+                    } elseif (isset($full['meta']['total']) && is_numeric($full['meta']['total'])) {
+                        $this->lastOnlineTotal = (int) $full['meta']['total'];
+                    }
+                }
                 $batch = $this->normalizeUserList($full);
                 if (!is_array($batch) || !$batch) {
+                    $totalKnown = (isset($full['total']) && is_numeric($full['total']))
+                        || (isset($full['meta']['total']) && is_numeric($full['meta']['total']));
+                    if ($page === 1 && $totalKnown) {
+                        $emptyKnown = true;
+                        $this->lastOnlineListOk = true;
+                        $this->lastOnlineComplete = true;
+                    } else {
+                        $failed = true;
+                    }
                     break;
                 }
+                $this->lastOnlineListOk = true;
                 $gotAny = true;
-                foreach ($batch as $row) {
-                    $u = '';
-                    if (is_array($row) && isset($row['username'])) {
-                        $u = strtolower(trim((string) $row['username']));
+                if ($page === 1) {
+                    $pageSize = count($batch);
+                    if ($pageSize < 1) {
+                        $pageSize = 800;
                     }
+                    $reportedLast = (isset($full['last_page']) && is_numeric($full['last_page'])) ? (int) $full['last_page'] : 0;
+                    $bySize = ($this->lastOnlineTotal > 0) ? (int) ceil($this->lastOnlineTotal / $pageSize) : 0;
+                    if ($bySize > 0) {
+                        $knownLast = $bySize;
+                    } elseif ($reportedLast > 0 && $reportedLast <= 40) {
+                        $knownLast = $reportedLast;
+                    }
+                    if ($knownLast > 20) {
+                        $knownLast = 20;
+                    }
+                }
+                foreach ($batch as $row) {
+                    if (!is_array($row)) {
+                        continue;
+                    }
+                    $u = $this->liftOnlineUsername($row);
                     if ($u === '' || isset($seen[$u])) {
                         continue;
                     }
                     $seen[$u] = 1;
                     $all[] = $row;
                 }
-                if (count($batch) < 800) {
+                if (count($batch) < 800 || ($knownLast > 0 && $page >= $knownLast)) {
+                    $this->lastOnlineComplete = true;
+                    break;
+                }
+                if ($knownLast === 0 && $page >= 8) {
                     break;
                 }
                 $page++;
             }
-            if ($gotAny || $this->lastOnlineListOk) {
+            if ($failed) {
+                $this->lastOnlineComplete = false;
+            }
+            if ($gotAny || $emptyKnown) {
                 break;
             }
         }
@@ -4610,7 +4701,7 @@ class SASConnector
         if (isset($rows[0]) && is_array($rows[0])) {
             return $rows;
         }
-        foreach (array('data', 'aaData', 'rows', 'users', 'extensions', 'profiles', 'allowedExtensions', 'items', 'cards', 'pins', 'series', 'list', 'result', 'records') as $k) {
+        foreach (array('data', 'aaData', 'rows', 'users', 'online', 'online_users', 'onlineUsers', 'sessions', 'radacct', 'managers', 'agents', 'extensions', 'profiles', 'allowedExtensions', 'items', 'cards', 'pins', 'series', 'list', 'result', 'records') as $k) {
             if (isset($rows[$k]) && is_array($rows[$k])) {
                 return $this->normalizeUserList($rows[$k], $depth + 1);
             }

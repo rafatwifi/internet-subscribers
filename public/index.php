@@ -4,6 +4,34 @@ require_once __DIR__ . '/../includes/bootstrap.php';
 require_once __DIR__ . '/../includes/layout.php';
 require_login();
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && (string) post('action') === 'save_dash_layout' && function_exists('dash_layout_save')) {
+    if (!verify_csrf(post('csrf'))) {
+        flash('error', (isset($lang) && $lang === 'en') ? 'Invalid request' : 'طلب غير صالح');
+        redirect('index.php');
+    }
+    $dashMe = function_exists('current_admin') ? current_admin() : null;
+    $dashIds = isset($_POST['dash_id']) && is_array($_POST['dash_id']) ? $_POST['dash_id'] : array();
+    $dashOns = isset($_POST['dash_on']) && is_array($_POST['dash_on']) ? $_POST['dash_on'] : array();
+    $dashOnMap = array();
+    foreach ($dashOns as $dashOnId) {
+        $dashOnMap[(string) $dashOnId] = 1;
+    }
+    $dashTones = isset($_POST['dash_tone']) && is_array($_POST['dash_tone']) ? $_POST['dash_tone'] : array();
+    $dashRows = array();
+    foreach ($dashIds as $dashId) {
+        $dashId = (string) $dashId;
+        $dashRows[] = array(
+            'id' => $dashId,
+            'on' => isset($dashOnMap[$dashId]) ? 1 : 0,
+            'tone' => isset($dashTones[$dashId]) ? (string) $dashTones[$dashId] : '',
+        );
+    }
+    if ($dashMe && dash_layout_save($pdo, (int) $dashMe['id'], $dashRows)) {
+        flash('success', (isset($lang) && $lang === 'en') ? 'Widget layout saved' : 'انحفظ ترتيب الوجدز');
+    }
+    redirect('index.php');
+}
+
 $isEn = (isset($lang) && $lang === 'en');
 // مستودع كروت الساس مال الوكالة. الوكيل والدخول بوكيل بدون عضوية ما يشوفونه.
 $viewerOwnsSasWarehouse = empty($_SESSION['admin_sas_shadow'])
@@ -706,11 +734,18 @@ if ($sasReadyDash) {
 }
 
 if (!function_exists('dash_sas_box')) {
-    function dash_sas_box($href, $tone, $title, $sub, $value, $ico, $boxId = '', $extra = '')
+    function dash_sas_box($href, $tone, $title, $sub, $value, $ico, $boxId = '', $extra = '', $dashKey = '')
     {
+        if ($dashKey === '' && !empty($GLOBALS['dashLoopKey'])) {
+            $dashKey = (string) $GLOBALS['dashLoopKey'];
+        }
+        $attrs = (string) $extra;
+        if (function_exists('dash_layout_apply') && !dash_layout_apply($tone, $attrs, $dashKey)) {
+            return;
+        }
         echo '<a class="sas-box ' . e($tone) . '" href="' . e($href) . '"'
             . ($boxId !== '' ? (' id="' . e($boxId) . '"') : '')
-            . ($extra !== '' ? (' ' . $extra) : '') . '>';
+            . ($attrs !== '' ? (' ' . $attrs) : '') . '>';
         echo '<div class="sas-box-title">' . e($title) . '</div>';
         if ($sub !== '' || $boxId !== '') {
             echo '<div class="sas-box-sub"' . ($boxId !== '' ? (' id="' . e($boxId) . 'Sub"') : '') . '>' . e($sub) . '</div>';
@@ -728,7 +763,13 @@ if (!function_exists('dash_ping_box')) {
         $n = count($rows);
         $showN = $n > 4 ? 4 : $n;
         $multi = $n > 1 ? ' is-multi' : '';
-        echo '<a class="sas-box tone-navy dash-ping' . $multi . '" id="dashPing" href="settings.php?tab=sas"'
+        $pingTone = 'tone-navy';
+        $pingAttrs = '';
+        if (function_exists('dash_layout_apply') && !dash_layout_apply($pingTone, $pingAttrs, 'latency')) {
+            return;
+        }
+        echo '<a class="sas-box ' . e($pingTone) . ' dash-ping' . $multi . '" id="dashPing" href="settings.php?tab=sas"'
+            . ($pingAttrs !== '' ? (' ' . $pingAttrs) : '')
             . ' data-has="' . ($n > 0 ? '1' : '0') . '" data-count="' . (int) $n . '"'
             . ' data-empty="' . e($en ? 'Reseller' : 'الريسلر') . '"'
             . ' data-many="' . e($en ? 'Resellers' : 'الريسلرات') . '">';
@@ -1052,6 +1093,97 @@ body:has(.sas-dash) .container {
 <?php endif; ?>
 <div class="sas-dash">
 <?php
+$GLOBALS['dashLayoutMap'] = function_exists('dash_layout_map') ? dash_layout_map($pdo) : null;
+$dashFtth = function_exists('tenant_is_ftth') && tenant_is_ftth($pdo);
+if (function_exists('dash_layout_catalog')) {
+    $dashCat = dash_layout_catalog($pdo);
+    $dashEdit = array();
+    $dashSavedRows = dash_layout_saved($pdo);
+    if (is_array($dashSavedRows)) {
+        foreach ($dashSavedRows as $dashRow) {
+            if (is_array($dashRow) && !empty($dashRow['id']) && isset($dashCat[(string) $dashRow['id']])) {
+                $dashEdit[] = $dashRow;
+            }
+        }
+    }
+    foreach ($dashCat as $dashId => $dashMeta) {
+        $dashSeen = false;
+        foreach ($dashEdit as $dashRow) {
+            if ((string) $dashRow['id'] === (string) $dashId) {
+                $dashSeen = true;
+                break;
+            }
+        }
+        if (!$dashSeen) {
+            $dashEdit[] = array('id' => $dashId, 'on' => 1, 'tone' => $dashMeta['tone']);
+        }
+    }
+    $dashToneOpts = dash_layout_tones();
+    ?>
+    <details class="dash-layout">
+        <summary><?php echo e($isEn ? 'Arrange widgets' : 'ترتيب الوجدز'); ?></summary>
+        <form method="post" id="dashLayoutForm">
+            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+            <input type="hidden" name="action" value="save_dash_layout">
+            <p class="meta" style="margin:8px 0"><?php echo e($isEn ? 'Show, hide, color, and order the widgets you can see.' : 'الوجدز المتاحة لصلاحيتك: أظهرها أو أخفها، لوّنها، ورتّب مكانها.'); ?></p>
+            <div id="dashLayoutRows">
+            <?php foreach ($dashEdit as $dashRow):
+                $dashId = (string) $dashRow['id'];
+                if (!isset($dashCat[$dashId])) {
+                    continue;
+                }
+                $dashOn = !isset($dashRow['on']) || !empty($dashRow['on']);
+                $dashTone = isset($dashRow['tone']) ? (string) $dashRow['tone'] : $dashCat[$dashId]['tone'];
+                ?>
+                <div class="dash-layout-row" data-row>
+                    <button type="button" class="dash-move" data-move="up">↑</button>
+                    <button type="button" class="dash-move" data-move="down">↓</button>
+                    <label class="dash-layout-name">
+                        <input type="checkbox" name="dash_on[]" value="<?php echo e($dashId); ?>"<?php echo $dashOn ? ' checked' : ''; ?>>
+                        <?php echo e($dashCat[$dashId]['label']); ?>
+                    </label>
+                    <input type="hidden" name="dash_id[]" value="<?php echo e($dashId); ?>">
+                    <select name="dash_tone[<?php echo e($dashId); ?>]">
+                        <?php foreach ($dashToneOpts as $toneId => $toneName): ?>
+                        <option value="<?php echo e($toneId); ?>"<?php echo $dashTone === $toneId ? ' selected' : ''; ?>><?php echo e($toneName); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+            <?php endforeach; ?>
+            </div>
+            <button class="btn" type="submit" style="margin-top:10px"><?php echo e($isEn ? 'Save' : 'حفظ'); ?></button>
+        </form>
+    </details>
+    <style>
+    .dash-layout { margin: 0 0 12px; background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 10px 12px; }
+    .dash-layout summary { cursor: pointer; font-weight: 800; }
+    .dash-layout-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #f1f5f9; }
+    .dash-move { width: 32px; height: 32px; border: 0; border-radius: 8px; background: #f1f5f9; font-weight: 800; cursor: pointer; }
+    .dash-layout-name { flex: 1; display: flex; align-items: center; gap: 8px; margin: 0; font-weight: 700; }
+    .dash-layout select { min-width: 110px; height: 36px; }
+    </style>
+    <script>
+    (function () {
+      var box = document.getElementById('dashLayoutRows');
+      if (!box) return;
+      box.addEventListener('click', function (e) {
+        var btn = e.target.closest ? e.target.closest('[data-move]') : null;
+        if (!btn) return;
+        var row = btn.closest('[data-row]');
+        if (!row) return;
+        if (btn.getAttribute('data-move') === 'up' && row.previousElementSibling) {
+          box.insertBefore(row, row.previousElementSibling);
+        }
+        if (btn.getAttribute('data-move') === 'down' && row.nextElementSibling) {
+          box.insertBefore(row.nextElementSibling, row);
+        }
+      });
+    })();
+    </script>
+    <?php
+}
+?>
+<?php
 $accWidList = null;
 if (function_exists('is_accountant_user') && is_accountant_user() && function_exists('accountant_widgets_saved')) {
     $accWidList = accountant_widgets_saved($pdo);
@@ -1161,6 +1293,7 @@ if ($isAccDash) {
     $usersHome = 'sas.php';
     echo '<div class="sas-boxes">';
     foreach ($order as $wid) {
+        $GLOBALS['dashLoopKey'] = (string) $wid;
         $wid = (string) $wid;
         if (strpos($wid, 'pkg:') === 0) {
             $pnm = rawurldecode(substr($wid, 4));
@@ -1215,6 +1348,7 @@ if ($isAccDash) {
             dash_ping_box($dashPingRows, $en, $dashPingSeed);
         }
     }
+    $GLOBALS['dashLoopKey'] = '';
     echo '</div>';
 } else {
 ?>
@@ -1223,42 +1357,57 @@ if ($isAccDash) {
 $usersHome = 'sas.php';
 if (!$accLocked || $showWid('subscribers')) {
     if ($accLocked) {
-        dash_sas_box($usersHome, 'tone-blue', $en ? 'Subscribers' : 'المشتركين', '', (string) (int) $sasCounts['total'], '👤');
+        dash_sas_box($usersHome, 'tone-blue', $en ? 'Subscribers' : 'المشتركين', '', (string) (int) $sasCounts['total'], '👤', '', '', 'subscribers');
     } else {
-        dash_sas_box($usersHome, 'tone-blue', $en ? 'Total users' : 'كل المشتركين', $en ? 'Registered users' : 'مسجّلين', (string) (int) $sasCounts['total'], '👤', 'dashUsers');
-        dash_sas_box('sas.php?sub=active', 'tone-green', $en ? 'Active users' : 'فعال', $en ? 'Running line' : 'خط شغال', (string) (int) $sasCounts['active'], '☺', 'dashActive');
-        dash_sas_box('sas.php?sub=online', 'tone-aqua', $en ? 'Online users' : 'متصل حاليا', $en ? 'Connected' : 'على الخط', (string) (int) $sasCounts['online'], '💡', 'dashOnline');
-        dash_sas_box('sas.php?sub=expired', 'tone-red', $en ? 'Expired users' : 'منتهي', $en ? 'Ended' : 'انتهى الخط', (string) (int) $sasCounts['expired'], '☹', 'dashExpired');
-        dash_sas_box('sas.php?sub=soon', 'tone-yellow', $en ? 'About to expire' : 'على وشك الانتهاء', $en ? 'In 3 days' : 'خلال 3 أيام', (string) (int) $sasCounts['soon'], '📅', 'dashSoon');
-        dash_sas_box('sas.php?sub=today', 'tone-teal', $en ? 'Expiring today' : 'ينتهي اليوم', $en ? 'Today' : 'اليوم', (string) (int) $sasCounts['today'], '📅', 'dashToday');
+        dash_sas_box($usersHome, 'tone-blue', $en ? 'Total users' : 'كل المشتركين', $en ? 'Registered users' : 'مسجّلين', (string) (int) $sasCounts['total'], '👤', 'dashUsers', '', 'subscribers');
+        dash_sas_box('sas.php?sub=active', 'tone-green', $en ? 'Active users' : 'فعال', $en ? 'Running line' : 'خط شغال', (string) (int) $sasCounts['active'], '☺', 'dashActive', '', 'active');
+        dash_sas_box('sas.php?sub=online', 'tone-aqua', $en ? 'Online users' : 'متصل حاليا', $en ? 'Connected' : 'على الخط', (string) (int) $sasCounts['online'], '💡', 'dashOnline', '', 'online');
+        dash_sas_box('sas.php?sub=expired', 'tone-red', $en ? 'Expired users' : 'منتهي', $en ? 'Ended' : 'انتهى الخط', (string) (int) $sasCounts['expired'], '☹', 'dashExpired', '', 'expired');
+        dash_sas_box('sas.php?sub=soon', 'tone-yellow', $en ? 'About to expire' : 'على وشك الانتهاء', $en ? 'In 3 days' : 'خلال 3 أيام', (string) (int) $sasCounts['soon'], '📅', 'dashSoon', '', 'soon');
+        dash_sas_box('sas.php?sub=today', 'tone-teal', $en ? 'Expiring today' : 'ينتهي اليوم', $en ? 'Today' : 'اليوم', (string) (int) $sasCounts['today'], '📅', 'dashToday', '', 'today');
     }
 }
 if ($isAccDash && $showWid('agents') && $accLocked) {
     $agentN = function_exists('accountant_tree_ids') ? count(accountant_tree_ids($pdo)) : 0;
-    dash_sas_box('agents.php', 'tone-purple', $en ? 'Agents' : 'الوكلاء', '', (string) (int) $agentN, '👥');
+    dash_sas_box('agents.php', 'tone-purple', $en ? 'Agents' : 'الوكلاء', '', (string) (int) $agentN, '👥', '', '', 'agents');
 }
 if ($sasReadyDash && !$accLocked) {
-    dash_sas_box('sas.php', 'tone-lime', $en ? 'Reward points' : 'نقاط تشجيعية', $en ? 'Balance' : 'الرصيد', (string) $sasPointsDisp, '🎁', 'dashPoints');
+    dash_sas_box('sas.php', 'tone-lime', $en ? 'Reward points' : 'نقاط تشجيعية', $en ? 'Balance' : 'الرصيد', (string) $sasPointsDisp, '🎁', 'dashPoints', '', 'points');
 }
 if (!$accLocked) {
     dash_ping_box($dashPingRows, $en, $dashPingSeed);
 }
 if ($showWid('collected')) {
-    dash_sas_box('reports.php', 'tone-yellow', $en ? 'Collected' : 'المقبوض', $en ? 'This month' : 'هذا الشهر', money_format_iqd($receivedMonth, $config['currency']), '💵', 'dashCollected');
+    dash_sas_box('reports.php', 'tone-yellow', $en ? 'Collected' : 'المقبوض', $en ? 'This month' : 'هذا الشهر', money_format_iqd($receivedMonth, $config['currency']), '💵', 'dashCollected', '', 'collected');
 }
 if ($showWid('debts')) {
-    dash_sas_box('debts.php?status=unpaid', 'tone-red', $en ? 'Debts' : 'الديون', $en ? 'Unpaid' : 'غير مدفوع', money_format_iqd($totalDebt, $config['currency']), '📄', 'dashDebts');
+    dash_sas_box('debts.php?status=unpaid', 'tone-red', $en ? 'Debts' : 'الديون', $en ? 'Unpaid' : 'غير مدفوع', money_format_iqd($totalDebt, $config['currency']), '📄', 'dashDebts', '', 'debts');
 }
 if ($showWid('profit')) {
-    dash_sas_box('reports.php', 'tone-green', $en ? 'Profit' : 'الربح', $en ? 'This month' : 'هذا الشهر', money_format_iqd($profitMonth, $config['currency']), '📈', 'dashProfit');
-    dash_sas_box('reports.php', 'tone-teal', $en ? 'Capital' : 'رأس المال', $en ? 'Profit + debts' : 'الربح + الديون', money_format_iqd($capitalMonth, $config['currency']), '🏦', 'dashCapital');
+    dash_sas_box('reports.php', 'tone-green', $en ? 'Profit' : 'الربح', $en ? 'This month' : 'هذا الشهر', money_format_iqd($profitMonth, $config['currency']), '📈', 'dashProfit', '', 'profit');
+    dash_sas_box('reports.php', 'tone-teal', $en ? 'Capital' : 'رأس المال', $en ? 'Profit + debts' : 'الربح + الديون', money_format_iqd($capitalMonth, $config['currency']), '🏦', 'dashCapital', '', 'capital');
 }
 if ($showWid('activations')) {
-    dash_sas_box('subscriptions.php', 'tone-purple', $en ? 'Sales' : 'المبيعات', $en ? 'This month' : 'هذا الشهر', money_format_iqd($salesMonth, $config['currency']), '🧾', 'dashSales');
-    dash_sas_box('subscriptions.php', 'tone-aqua', $en ? 'Activations' : 'تفعيلات الشهر', $en ? 'This month' : 'هذا الشهر', (string) (int) $activatedMonth, '⚡', 'dashActs');
+    dash_sas_box('subscriptions.php', 'tone-purple', $en ? 'Sales' : 'المبيعات', $en ? 'This month' : 'هذا الشهر', money_format_iqd($salesMonth, $config['currency']), '🧾', 'dashSales', '', 'sales');
+    dash_sas_box('subscriptions.php', 'tone-aqua', $en ? 'Activations' : 'تفعيلات الشهر', $en ? 'This month' : 'هذا الشهر', (string) (int) $activatedMonth, '⚡', 'dashActs', '', 'activations');
 }
 if ($showWid('rentals')) {
-    dash_sas_box('rentals.php', 'tone-navy', $en ? 'Rental towers' : 'أبراج الإيجار', $en ? 'Active of total' : 'فعال من أصل الكل', ((int) $rentalActiveCount) . '\\' . (int) $rentalTotalCount, '📡');
+    dash_sas_box('rentals.php', 'tone-navy', $en ? 'Rental towers' : 'أبراج الإيجار', $en ? 'Active of total' : 'فعال من أصل الكل', ((int) $rentalActiveCount) . '\\' . (int) $rentalTotalCount, '📡', '', '', 'rentals');
+}
+if (!empty($dashFtth)) {
+    $cabN = 0;
+    try {
+        if (function_exists('ensure_cabinets_schema')) {
+            ensure_cabinets_schema($pdo);
+        }
+        $cabTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+        if ($cabTid > 0) {
+            $cabN = (int) $pdo->query('SELECT COUNT(*) FROM cabinets WHERE tenant_id = ' . $cabTid)->fetchColumn();
+        }
+    } catch (Exception $e) {
+        $cabN = 0;
+    }
+    dash_sas_box('cabinets.php', 'tone-teal', $en ? 'Cabinets' : 'الكابينات', $en ? 'Sites' : 'مواقع', (string) $cabN, '📡', 'dashCabs', '', 'cabinets');
 }
 if ($sasReadyDash && $showWid('cards')) {
     $cardTotal = 0;
@@ -1275,7 +1424,7 @@ if ($sasReadyDash && $showWid('cards')) {
         }
     }
     $cardSub = $cardParts ? implode(' · ', $cardParts) : ($en ? 'No free cards' : 'ماكو كروت شاغرة');
-    dash_sas_box('cards.php', 'tone-navy', $en ? 'Cards' : 'الكروت', $cardSub, (string) (int) $cardTotal, '🃏', 'dashCards');
+    dash_sas_box('cards.php', 'tone-navy', $en ? 'Cards' : 'الكروت', $cardSub, (string) (int) $cardTotal, '🃏', 'dashCards', '', 'cards');
 }
 if (!$accLocked) {
     dash_sas_box('settings.php', 'tone-purple', $en ? 'System version' : 'إصدار النظام', $en ? 'Portal' : 'البوابة', 'v' . $dashVersion, '📦');

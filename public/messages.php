@@ -52,6 +52,9 @@ if (isset($_GET['ajax']) && (string) $_GET['ajax'] === 'log_ring') {
         if ($scopeRing !== '') {
             $whereRing .= ' AND m.subscriber_id IS NOT NULL' . $scopeRing;
         }
+        if (function_exists('message_log_tenant_sql')) {
+            $whereRing .= message_log_tenant_sql('m', 's');
+        }
     }
     if (function_exists('app_session_close')) {
         app_session_close();
@@ -817,10 +820,13 @@ if ($mode === 'log') {
         $where .= ' AND m.subscriber_id IS NOT NULL' . $waLogScope;
     } elseif (function_exists('subscriber_agent_scope_sql')) {
         $scopeLog = subscriber_agent_scope_sql('s');
+        $logTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
         if (is_agent_user()) {
             $where .= ' AND m.subscriber_id IS NOT NULL' . $scopeLog;
-        } elseif ($scopeLog !== '') {
-            $where .= ' AND (m.subscriber_id IS NULL OR (1=1' . $scopeLog . '))';
+        } elseif ($scopeLog !== '' && $logTid > 0) {
+            $where .= ' AND ((m.subscriber_id IS NOT NULL' . $scopeLog . ') OR (m.subscriber_id IS NULL AND m.tenant_id = ' . $logTid . '))';
+        } elseif ($logTid > 0) {
+            $where .= ' AND (m.tenant_id = ' . $logTid . ' OR (m.tenant_id IS NULL AND s.tenant_id = ' . $logTid . '))';
         }
     }
     if ($logQ !== '') {
@@ -886,7 +892,9 @@ if ($mode === 'log') {
     }
     if ($needAgentName) {
         try {
-            $stAg = $pdo->query('SELECT phone, display_name, username FROM admin_users WHERE phone IS NOT NULL AND phone <> ""');
+            $nameTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+            $stAg = $pdo->prepare('SELECT phone, display_name, username FROM admin_users WHERE tenant_id = :t AND phone IS NOT NULL AND phone <> ""');
+            $stAg->execute(array(':t' => $nameTid));
             $agRows = $stAg ? $stAg->fetchAll(PDO::FETCH_ASSOC) : array();
             foreach ($agRows as $ar) {
                 $pk = preg_replace('/\D+/', '', (string) $ar['phone']);

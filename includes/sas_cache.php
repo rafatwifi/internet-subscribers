@@ -277,13 +277,27 @@ function sas_cache_username($row)
     if (!is_array($row)) {
         return '';
     }
-    foreach (array('username', 'user_name', 'login', 'user') as $k) {
+    foreach (array('username', 'user_name', 'login') as $k) {
         if (!isset($row[$k]) || is_array($row[$k])) {
             continue;
         }
         $v = trim((string) $row[$k]);
         if ($v !== '') {
             return $v;
+        }
+    }
+    foreach (array('user', 'subscriber', 'customer', 'account') as $nest) {
+        if (!isset($row[$nest]) || !is_array($row[$nest])) {
+            continue;
+        }
+        foreach (array('username', 'user_name', 'login') as $k) {
+            if (empty($row[$nest][$k]) || is_array($row[$nest][$k])) {
+                continue;
+            }
+            $v = trim((string) $row[$nest][$k]);
+            if ($v !== '') {
+                return $v;
+            }
         }
     }
     return '';
@@ -334,6 +348,11 @@ function sas_cache_parent_id($row)
     }
     if (isset($row['parent']) && is_array($row['parent']) && isset($row['parent']['id']) && is_numeric($row['parent']['id'])) {
         return (int) $row['parent']['id'];
+    }
+    foreach (array('manager_id', 'reseller_id', 'agent_id') as $k) {
+        if (isset($row[$k]) && is_numeric($row[$k]) && (int) $row[$k] > 0) {
+            return (int) $row[$k];
+        }
     }
     return 0;
 }
@@ -1696,6 +1715,19 @@ function sas_online_flags_throttle_file()
 function sas_refresh_online_flags($pdo, $config)
 {
     $throttleFile = sas_online_flags_throttle_file();
+    $tidHeavy = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tidHeavy <= 0) {
+        $tidHeavy = 1;
+    }
+    $heavyFile = dirname($throttleFile) . DIRECTORY_SEPARATOR . 'isp_sas_online_heavy_t' . $tidHeavy . '.txt';
+    $heavyRaw = is_file($heavyFile) ? (string) @file_get_contents($heavyFile) : '';
+    $heavyAge = is_file($heavyFile) ? (time() - (int) @filemtime($heavyFile)) : 99999;
+    if (strncmp($heavyRaw, 'full', 4) === 0 && $heavyAge < 30) {
+        return 0;
+    }
+    if (strncmp($heavyRaw, 'part', 4) === 0 && $heavyAge < 12) {
+        return 0;
+    }
     $throttleAge = is_file($throttleFile) ? (time() - (int) @filemtime($throttleFile)) : 99999;
     if ($throttleAge < 2) {
         return 0;
@@ -1719,8 +1751,11 @@ function sas_refresh_online_flags($pdo, $config)
         @session_write_close();
     }
     try {
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(70);
+        }
         if (method_exists($api, 'setTimeout')) {
-            $api->setTimeout(8);
+            $api->setTimeout(25);
         }
         $rows = $api->listOnlineUsers();
     } catch (Exception $e) {
@@ -1731,6 +1766,10 @@ function sas_refresh_online_flags($pdo, $config)
     }
     // إذا فشل الاتصال بالساس — لا تمسح الأونلاين القديم
     if (isset($api->lastOnlineListOk) && !$api->lastOnlineListOk) {
+        return 0;
+    }
+    if (isset($api->lastOnlineComplete) && !$api->lastOnlineComplete) {
+        @file_put_contents($heavyFile, 'part ' . time());
         return 0;
     }
         $names = array();
@@ -1856,6 +1895,9 @@ function sas_refresh_online_flags($pdo, $config)
         } catch (Exception $e2) {
         }
         @file_put_contents($throttleFile, (string) time());
+        if (isset($api->lastOnlineTotal) && (int) $api->lastOnlineTotal > 900) {
+            @file_put_contents($heavyFile, 'full ' . time());
+        }
         if ($lockFh) {
             @flock($lockFh, LOCK_UN);
             @fclose($lockFh);
@@ -2511,6 +2553,12 @@ function sas_managers_for_ui($api)
     if (isset($rows['data']) && is_array($rows['data'])) {
         $rows = $rows['data'];
     }
+    foreach (array('managers', 'agents', 'rows', 'items') as $wrapKey) {
+        if (isset($rows[$wrapKey]) && is_array($rows[$wrapKey])) {
+            $rows = $rows[$wrapKey];
+            break;
+        }
+    }
     foreach ($rows as $m) {
         if (!is_array($m)) {
             continue;
@@ -2521,7 +2569,13 @@ function sas_managers_for_ui($api)
         } elseif (function_exists('sas_extract_user_id')) {
             $id = sas_extract_user_id($m);
         }
-        $name = !empty($m['username']) ? (string) $m['username'] : (function_exists('sas_row_name') ? sas_row_name($m) : '');
+        $name = !empty($m['username']) ? (string) $m['username'] : '';
+        if ($name === '' && isset($m['user']) && is_array($m['user']) && !empty($m['user']['username'])) {
+            $name = (string) $m['user']['username'];
+        }
+        if ($name === '' && function_exists('sas_row_name')) {
+            $name = sas_row_name($m);
+        }
         if ($id <= 0) {
             continue;
         }
@@ -5358,7 +5412,7 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
         ':enabled' => sas_cache_enabled($row),
         ':expire_at' => sas_cache_expire_at($row),
         ':parent_id' => ($parId = sas_cache_parent_id($row)) > 0 ? $parId : null,
-        ':parent_name' => (($parN = sas_cache_parent_name($row)) !== '' ? sas_clip($parN, 80) : null),
+        ':parent_name' => (($parN = sas_cache_parent_name($row)) !== '' ? sas_clip($parN, 190) : null),
         ':city' => (($city = sas_cache_str_field($row, array('city'))) !== '' ? sas_clip($city, 120) : null),
         ':email' => (($em = sas_cache_str_field($row, array('email'))) !== '' ? sas_clip($em, 150) : null),
         ':company' => (($co = sas_cache_str_field($row, array('company'))) !== '' ? sas_clip($co, 150) : null),

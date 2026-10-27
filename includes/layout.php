@@ -302,10 +302,15 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <?php if ($can('agents') || (function_exists('is_agent_user') && is_agent_user()) || (function_exists('is_group_manager_user') && is_group_manager_user())): ?>
             <a class="<?php echo $active === 'accountants' ? 'active' : ''; ?>" href="agents.php?view=accountant"><?php echo e($isEn ? 'Accountant' : 'المحاسب'); ?></a>
             <?php endif; ?>
-            <?php if ($can('rentals')): ?>
+            <?php
+            $navFtth = isset($pdo) && function_exists('tenant_is_ftth') && tenant_is_ftth($pdo);
+            if ($navFtth && ($can('subscribers') || $can('dashboard'))): ?>
+            <a class="<?php echo $active === 'cabinets' ? 'active' : ''; ?>" href="cabinets.php"><?php echo e($isEn ? 'Cabinets' : 'الكابينات'); ?></a>
+            <?php endif; ?>
+            <?php if ($can('rentals') && !$navFtth): ?>
             <a class="<?php echo $active === 'rentals' ? 'active' : ''; ?>" href="rentals.php"><?php echo e($isEn ? 'Rentals' : 'الإيجار'); ?></a>
             <?php endif; ?>
-            <?php if ($can('debts')): ?>
+            <?php if ($can('debts') && !$navFtth): ?>
             <a class="<?php echo $active === 'debts' ? 'active' : ''; ?>" href="debts.php"><?php echo e(t('debts')); ?></a>
             <?php endif; ?>
             <?php if ($can('subscribers')): ?>

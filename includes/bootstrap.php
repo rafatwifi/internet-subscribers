@@ -269,6 +269,8 @@ if (!empty($_SESSION['admin_logged_in']) && function_exists('app_session_refresh
 require_once __DIR__ . '/invoices.php';
 require_once __DIR__ . '/activity.php';
 require_once __DIR__ . '/rental.php';
+require_once __DIR__ . '/cabinets.php';
+require_once __DIR__ . '/dash_layout.php';
 $sasServiceFile = __DIR__ . '/sas_service.php';
 if (is_file($sasServiceFile)) {
     require_once $sasServiceFile;
