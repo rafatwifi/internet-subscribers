@@ -680,6 +680,23 @@ function cards_execute_pending_transfer($pdo, $config, $pendingId, $homeId, $lan
                 $unitNote = (float) $ratesNote['cost'];
             }
         }
+        $noticeQty = (int) $qty;
+        if (!empty($move['ranges']) && is_array($move['ranges'])) {
+            $span = 0;
+            foreach ($move['ranges'] as $rg) {
+                if (!is_array($rg)) {
+                    continue;
+                }
+                $a = isset($rg['from_id']) ? (int) $rg['from_id'] : 0;
+                $b = isset($rg['to_id']) ? (int) $rg['to_id'] : 0;
+                if ($a > 0 && $b >= $a) {
+                    $span += ($b - $a + 1);
+                }
+            }
+            if ($span > $noticeQty) {
+                $noticeQty = $span;
+            }
+        }
         if ($noticeAgent > 0 && $unitNote > 0 && function_exists('whatsapp_notify_agent_card')) {
             $waCode = whatsapp_notify_agent_card(
                 $pdo,
@@ -687,7 +704,7 @@ function cards_execute_pending_transfer($pdo, $config, $pendingId, $homeId, $lan
                 (int) $homeId,
                 $noticeAgent,
                 $profileName,
-                (int) $qty,
+                $noticeQty,
                 $unitNote,
                 $noticeKind,
                 $extraNote
@@ -1791,19 +1808,25 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 }
 .cards-page .xfer-compact {
   display: grid; width: 100%; box-sizing: border-box; text-align: start;
-  grid-template-columns: 148px minmax(0, 1.4fr) minmax(0, 1fr) auto;
-  grid-template-areas: "when route pack act" "when note by act";
-  align-items: center; column-gap: 14px; row-gap: 2px;
+  grid-template-columns: 148px minmax(0, 1.35fr) minmax(180px, 1fr) 72px;
+  grid-template-areas: "when route pack act" "when by note act";
+  align-items: center; column-gap: 16px; row-gap: 2px;
 }
-.cards-page .xfer-c-top { grid-area: when; direction: ltr; font-size: 12px; color: #64748b; }
+.cards-page .xfer-c-top { grid-area: when; direction: ltr; font-size: 12px; color: #64748b; white-space: nowrap; }
 .cards-page .xfer-c-route,
 .cards-page .xfer-c-pack { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.cards-page .xfer-c-route { grid-area: route; font-size: 14px; font-weight: 800; }
-.cards-page .xfer-c-pack { grid-area: pack; font-size: 13px; font-weight: 700; color: #334155; }
+.cards-page .xfer-c-route {
+  grid-area: route; font-size: 14px; font-weight: 800;
+  direction: ltr; text-align: left; unicode-bidi: isolate;
+}
+.cards-page .xfer-c-pack {
+  grid-area: pack; font-size: 13px; font-weight: 700; color: #334155;
+  font-variant-numeric: tabular-nums;
+}
 .cards-page .xfer-c-note { grid-area: note; font-size: 12px; color: #64748b; }
 .cards-page .xfer-c-note:empty { display: none; }
-.cards-page .xfer-c-by { grid-area: by; font-size: 11px; color: #94a3b8; }
-.cards-page .xfer-c-act { grid-area: act; justify-self: end; margin: 0; }
+.cards-page .xfer-c-by { grid-area: by; font-size: 11px; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cards-page .xfer-c-act { grid-area: act; justify-self: end; margin: 0; width: 72px; text-align: center; }
 .cards-page .cards-swipe-hint {
   margin: 0 0 10px; color: #475569; font-size: 13px; font-weight: 700;
 }
@@ -2524,7 +2547,8 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
             top.setAttribute('data-col', 'when');
             var route = document.createElement('div');
             route.className = 'xfer-c-mid xfer-c-route';
-            route.textContent = fromName + ' ← ' + toName;
+            route.setAttribute('dir', 'ltr');
+            route.textContent = fromName + ' → ' + toName;
             var pack = document.createElement('div');
             pack.className = 'xfer-c-mid xfer-c-pack';
             pack.textContent = profName + ' · ' + qtyVal;
@@ -2905,7 +2929,7 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
                     <tr data-id="<?php echo (int) $tr['id']; ?>" data-state="<?php echo e($rowState); ?>" data-from="<?php echo (int) $tr['from_agent_id']; ?>" data-qty="<?php echo (int) $tr['qty']; ?>" data-profile="<?php echo e(isset($tr['profile_name']) ? $tr['profile_name'] : ''); ?>">
                         <td class="xfer-compact">
                             <div class="xfer-c-top" data-col="when"><?php echo e(isset($tr['created_at']) ? $tr['created_at'] : ''); ?></div>
-                            <div class="xfer-c-mid xfer-c-route"><?php echo e($fromLbl); ?> ← <?php echo e(isset($tr['to_name']) ? $tr['to_name'] : ''); ?></div>
+                            <div class="xfer-c-mid xfer-c-route" dir="ltr"><?php echo e($fromLbl); ?> → <?php echo e(isset($tr['to_name']) ? $tr['to_name'] : ''); ?></div>
                             <div class="xfer-c-mid xfer-c-pack"><?php echo e(isset($tr['profile_name']) ? $tr['profile_name'] : ''); ?> · <?php echo (int) $tr['qty']; ?> · <?php echo e(money_format_iqd($isReturn ? (0 - $profit) : $profit, $config['currency'])); ?></div>
                             <?php if (!empty($tr['note'])): ?><div class="xfer-c-note" data-col="note"><?php echo e($tr['note']); ?></div><?php endif; ?>
                             <div class="xfer-c-by"><?php echo e(isset($tr['created_by_name']) ? $tr['created_by_name'] : ''); ?></div>

@@ -507,10 +507,49 @@ function month_short_label($ym, $shortOnly = false)
     return $label . ' ' . $y;
 }
 
+function tpl_money_number($text)
+{
+    $text = str_replace(',', '', (string) $text);
+    if (!preg_match('/-?\d+(?:\.\d+)?/', $text, $m)) {
+        return null;
+    }
+    return (float) $m[0];
+}
+
 function tpl_fill($template, $vars)
 {
     $out = (string) $template;
+    if (preg_match_all('/\{[A-Za-z0-9_]+\}(?:\s*\+\s*\{[A-Za-z0-9_]+\})+/', $out, $found)) {
+        foreach ($found[0] as $expr) {
+            preg_match_all('/\{([A-Za-z0-9_]+)\}/', $expr, $keys);
+            $sum = 0.0;
+            $ok = true;
+            $cur = 'د.ع';
+            foreach ($keys[1] as $key) {
+                if (!isset($vars[$key])) {
+                    $ok = false;
+                    break;
+                }
+                $raw = (string) $vars[$key];
+                $num = tpl_money_number($raw);
+                if ($num === null) {
+                    $ok = false;
+                    break;
+                }
+                $sum += $num;
+                if (preg_match('/د\.ع|IQD|USD/u', $raw, $c)) {
+                    $cur = $c[0];
+                }
+            }
+            if ($ok) {
+                $out = str_replace($expr, money_format_iqd($sum, $cur), $out);
+            }
+        }
+    }
     foreach ($vars as $k => $v) {
+        if (strpos((string) $k, '__') === 0) {
+            continue;
+        }
         $out = str_replace(array('{' . $k . '}', '$' . $k), (string) $v, $out);
     }
     return $out;

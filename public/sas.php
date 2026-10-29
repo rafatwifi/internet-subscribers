@@ -2924,6 +2924,9 @@ body:has(#sasActModal:not(.hidden)) .main-top {
   white-space: nowrap;
   line-height: 1.35;
 }
+.sas-radius-page #subsTable .sas-fn-rest { display: none; }
+html.sas-ln-off .sas-radius-page #subsTable .sas-fn-rest,
+.sas-radius-page #subsTable.ln-off .sas-fn-rest { display: inline; }
 .sas-radius-page #subsTable .sas-rent-mini {
   position: static;
   flex: 0 0 auto;
@@ -3240,7 +3243,12 @@ body:has(#sasActModal:not(.hidden)) .main-top {
     margin-bottom: calc(96px + env(safe-area-inset-bottom));
   }
   body:has(.sas-radius-page) .footer { display: none; }
-  .sas-radius-page #subsTable { min-width: 0; width: max-content; table-layout: auto; }
+  .sas-radius-page #subsTable { min-width: 100%; width: 100%; table-layout: auto; }
+  .sas-radius-page #subsTable .col-fn { width: 100%; }
+  .sas-radius-page #subsTable th.col-fn,
+  .sas-radius-page #subsTable td.col-fn,
+  .sas-radius-page #subsTable .sas-fn-link,
+  .sas-radius-page #subsTable .sas-fn-rest { white-space: normal; }
   .sas-radius-page #subsTable th,
   .sas-radius-page #subsTable td {
     padding: 4px 4px;
@@ -3326,10 +3334,13 @@ body:has(#sasActModal:not(.hidden)) .main-top {
         parts.push('#subsTable .col-' + k + '{display:none!important}');
       }
     }
-    if (!parts.length) return;
+    if (o.ln === false) {
+      document.documentElement.classList.add('sas-ln-off');
+    }
+    if (!parts.length && o.ln !== false) return;
     var s = document.createElement('style');
     s.id = 'sasColsBoot';
-    s.appendChild(document.createTextNode(parts.join('')));
+    s.appendChild(document.createTextNode(parts.join('') + (o.ln === false ? '#subsTable.ln-off .sas-fn-rest{display:inline}' : '')));
     document.head.appendChild(s);
   } catch (e) {}
 })();
@@ -5789,6 +5800,8 @@ body:has(#sasActModal:not(.hidden)) .main-top {
       }
     });
     style.textContent = css.join('');
+    var subs = document.getElementById('subsTable');
+    if (subs) subs.classList.toggle('ln-off', savedCols.ln === false);
     if (!skipOrder) applyOrder();
   }
   function persistCols() {

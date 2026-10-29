@@ -1230,7 +1230,19 @@ $sendFilters = array(
         font-size: 12px; font-weight: 800; color: #0f766e; cursor: pointer; direction: ltr;
       }
       .tpl-card.is-off .tpl-on { color: #9f1239; }
-      .tpl-card.is-off textarea { opacity: 0.55; }
+      .tpl-card.is-off .tpl-model,
+      .tpl-card.is-off textarea,
+      .tpl-card.is-off .tpl-face-lab { opacity: 0.4; }
+      .tpl-face-lab {
+        display: block; margin: 2px 0 4px; font-size: 12px; font-weight: 800; color: #334155;
+      }
+      .tpl-model {
+        margin: 0 0 8px; padding: 10px 12px; min-height: 52px;
+        border-radius: 10px; background: #fff; border: 1px dashed #cbd5e1;
+        color: #0f172a; font-size: 14px; font-weight: 600; line-height: 1.55;
+        white-space: pre-wrap; word-break: break-word;
+      }
+      .tpl-card textarea { margin-top: 0; }
       .tpl-on-input { position: absolute; opacity: 0; width: 1px; height: 1px; }
       .tpl-on-ui {
         width: 36px; height: 20px; border-radius: 999px; background: #cbd5e1;
@@ -1491,6 +1503,9 @@ $sendFilters = array(
                     <?php if ($inUseLabels): ?>
                         <p class="tpl-used"><?php echo e($isEnMsg ? 'Used by: ' : 'مستخدم في: '); ?><?php echo e(implode(' · ', $inUseLabels)); ?></p>
                     <?php endif; ?>
+                    <label class="tpl-face-lab"><?php echo e($isEnMsg ? 'Sample' : 'النموذج'); ?></label>
+                    <div class="tpl-model" dir="auto"></div>
+                    <label class="tpl-face-lab"><?php echo e($isEnMsg ? 'Template' : 'القالب'); ?></label>
                     <textarea name="tpl_body[]" rows="4" class="js-tpl-body" placeholder="<?php echo e($commonVars); ?>"><?php echo e($bodyVal); ?></textarea>
                     <div class="tpl-card-foot">
                         <span class="tpl-len"><?php echo function_exists('mb_strlen') ? mb_strlen($bodyVal, 'UTF-8') : strlen($bodyVal); ?> <?php echo e($isEnMsg ? 'chars' : 'حرف'); ?></span>
@@ -1518,6 +1533,9 @@ $sendFilters = array(
                 </label>
                 <button type="button" class="btn ghost sm js-tpl-del"><?php echo e($isEnMsg ? 'Delete' : 'حذف'); ?></button>
             </header>
+            <label class="tpl-face-lab"><?php echo e($isEnMsg ? 'Sample' : 'النموذج'); ?></label>
+            <div class="tpl-model" dir="auto"></div>
+            <label class="tpl-face-lab"><?php echo e($isEnMsg ? 'Template' : 'القالب'); ?></label>
             <textarea name="tpl_body[]" rows="4" class="js-tpl-body" placeholder="<?php echo e($commonVars); ?>"></textarea>
             <div class="tpl-card-foot"><span class="tpl-len">0 <?php echo e($isEnMsg ? 'chars' : 'حرف'); ?></span></div>
         </article>
@@ -1559,11 +1577,56 @@ $sendFilters = array(
         while (keys[k + '_' + n]) n++;
         return k + '_' + n;
       }
+      var sampleVars = {
+        name: 'أحمد', package: 'الباقة', qty: '4', price: '85,000 د.ع',
+        total: '340,000 د.ع', debt: '85,000 د.ع', from: '2026-10-01', to: '2026-11-01',
+        amount: '85,000 د.ع', month: 'تشرين', notes: 'ملاحظة', days: '3',
+        days_passed: '10', remaining: '0', grace: '3'
+      };
+      function moneyJoin(n) {
+        var x = Math.round(n);
+        var s = String(Math.abs(x));
+        var out = '';
+        while (s.length > 3) {
+          out = ',' + s.slice(-3) + out;
+          s = s.slice(0, -3);
+        }
+        return (x < 0 ? '-' : '') + s + out + ' د.ع';
+      }
+      function fillSample(text) {
+        var out = String(text || '');
+        out = out.replace(/\{[A-Za-z0-9_]+\}(?:\s*\+\s*\{[A-Za-z0-9_]+\})+/g, function (expr) {
+          var keys = expr.match(/\{([A-Za-z0-9_]+)\}/g) || [];
+          var sum = 0;
+          var i;
+          for (i = 0; i < keys.length; i++) {
+            var k = keys[i].slice(1, -1);
+            var raw = sampleVars[k] || '';
+            var num = String(raw).replace(/,/g, '').match(/-?\d+(?:\.\d+)?/);
+            if (!num) return expr;
+            sum += parseFloat(num[0]);
+          }
+          return moneyJoin(sum);
+        });
+        var key;
+        for (key in sampleVars) {
+          if (!Object.prototype.hasOwnProperty.call(sampleVars, key)) continue;
+          out = out.split('{' + key + '}').join(sampleVars[key]);
+        }
+        return out.trim() === '' ? '—' : out;
+      }
+      function paintModel(card) {
+        var ta = card.querySelector('.js-tpl-body');
+        var box = card.querySelector('.tpl-model');
+        if (!ta || !box) return;
+        box.textContent = fillSample(ta.value);
+      }
       function updateLen(card) {
         var ta = card.querySelector('.js-tpl-body');
         var el = card.querySelector('.tpl-len');
         if (!ta || !el) return;
         el.textContent = String(ta.value.length) + ' ' + charsWord;
+        paintModel(card);
       }
       function refreshCount() {
         if (!lib || !countHint) return;

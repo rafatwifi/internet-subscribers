@@ -6498,9 +6498,19 @@ function sas_render_table_row($row, $n, $config, $lang)
         $rentBadge = rental_badge_html($rentSub);
     }
     // الشعار يسار الاسم (في RTL: الاسم أولاً ثم الشعار)
-    $fnText = ($fn !== '') ? $fn : '-';
+    $fnText = ($fn !== '') ? $fn : '';
+    $lnExtra = '';
+    if ($ln !== '' && ($fnText === '' || (function_exists('mb_strpos') ? mb_strpos($fnText, $ln, 0, 'UTF-8') === false : strpos($fnText, $ln) === false))) {
+        $lnExtra = $ln;
+    }
+    if ($fnText === '' && $lnExtra === '') {
+        $fnText = '-';
+    }
+    $fullName = trim($fnText . ' ' . $lnExtra);
     $html .= '<td class="col-fn"><span class="sas-fn-wrap' . ($rentBadge !== '' ? ' has-rent' : '') . '">'
-        . '<a class="sas-link sas-fn-link" href="' . e($detailUrl) . '" title="' . e($fnText) . '">' . e($fnText) . '</a>'
+        . '<a class="sas-link sas-fn-link" href="' . e($detailUrl) . '" title="' . e($fullName) . '">' . e($fnText !== '' ? $fnText : $fullName)
+        . ($lnExtra !== '' ? '<span class="sas-fn-rest"> ' . e($lnExtra) . '</span>' : '')
+        . '</a>'
         . ($rentBadge !== '' ? '<span class="sas-rent-mini" title="' . e($rentDevName) . '">' . $rentBadge . '</span>' : '')
         . '</span></td>';
     $html .= '<td class="col-ln"><span class="cell-edit" tabindex="0" data-edit="lastname" data-allow-empty="1" data-id="' . e($username) . '" data-value="' . e($ln) . '" title="' . e($editTip) . '">' . e($ln !== '' ? $ln : '-') . '</span></td>';
