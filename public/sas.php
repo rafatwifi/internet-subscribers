@@ -6089,6 +6089,19 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
       if (off) document.body.classList.add('sub-ping-off');
       else document.body.classList.remove('sub-ping-off');
     } catch (ePing) {}
+    // عند تشغيل البنك: أظهر عمود PING حتى لو كان مطفي بخيارات الأعمدة
+    if (!off) {
+      if (!savedCols || typeof savedCols !== 'object') savedCols = {};
+      savedCols.ping = true;
+      var pingInp = colsDrop ? colsDrop.querySelector('input[data-col="ping"]') : null;
+      if (pingInp) pingInp.checked = true;
+    }
+    if (typeof applyCols === 'function') {
+      try { applyCols(true); } catch (eCol) {}
+    }
+    if (!off) {
+      try { persistCols(); } catch (ePersist) {}
+    }
   }
   setPingColumnByMode(<?php echo json_encode($pingModeNow); ?>);
   var pingModeBox = document.getElementById('subPingMode');
@@ -6097,8 +6110,15 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
       var btn = e.target && e.target.closest ? e.target.closest('[data-ping-mode]') : null;
       if (!btn || !pingModeBox.contains(btn)) return;
       var mode = btn.getAttribute('data-ping-mode') || 'off';
+      e.preventDefault();
+      e.stopPropagation();
       closeMenus();
-      if (pingModeBox.getAttribute('data-mode') === mode) return;
+      if (pingModeBox.getAttribute('data-mode') === mode) {
+        // حتى لو نفس الخيار: أعد الإظهار لأن لايف/الأعمدة قد تخفيه
+        setPingColumnByMode(mode);
+        return;
+      }
+      var prevMode = pingModeBox.getAttribute('data-mode') || 'off';
       var all = pingModeBox.querySelectorAll('[data-ping-mode]');
       for (var i = 0; i < all.length; i++) all[i].classList.remove('is-on');
       btn.classList.add('is-on');
@@ -6115,13 +6135,33 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
       body.append('action', 'sas_ping_mode');
       body.append('sub_ping_mode', mode);
       fetch('sas.php', { method: 'POST', credentials: 'same-origin', body: body })
-        .then(function () {
+        .then(function (r) { return r.json().catch(function () { return { ok: true }; }); })
+        .then(function (d) {
+          if (d && d.ok === false) {
+            pingModeBox.setAttribute('data-mode', prevMode);
+            setPingColumnByMode(prevMode);
+            var prevBtn = pingModeBox.querySelector('[data-ping-mode="' + prevMode + '"]');
+            var allB = pingModeBox.querySelectorAll('[data-ping-mode]');
+            for (var j = 0; j < allB.length; j++) allB[j].classList.remove('is-on');
+            if (prevBtn) prevBtn.classList.add('is-on');
+            if (window.showCornerToast) {
+              window.showCornerToast((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Could not save ping mode' : 'ما انحفظ وضع البنك'); ?>, 'error');
+            }
+            if (window.appBusyDone) window.appBusyDone();
+            return;
+          }
+          setPingColumnByMode(mode);
+          // لايف: عبّئ البنك فوراً بدون انتظار رفرش الجدول
+          try { if (typeof paintLiveOnline === 'function') paintLiveOnline(); } catch (e1) {}
+          try { if (typeof pingVisibleNow === 'function') pingVisibleNow(); } catch (e2) {}
           function go(left) {
             if (liveBusy && left > 0) {
               setTimeout(function () { go(left - 1); }, 250);
               return;
             }
             refreshTableLive().then(function () {
+              setPingColumnByMode(mode);
+              try { if (typeof pingVisibleNow === 'function') pingVisibleNow(); } catch (e3) {}
               if (window.appBusyDone) window.appBusyDone();
             });
           }
@@ -6264,7 +6304,8 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
       .catch(function () { liveBusy = false; return null; });
   }
   function applyAutoRefresh(sec, skipSave) {
-    refreshSec = parseInt(sec, 10) || 0;
+    refreshSec = parseInt(sec, 10);
+    if (isNaN(refreshSec) || refreshSec < 0) refreshSec = 0;
     var isLive = refreshSec === 2;
     if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
     var autoBtn = document.getElementById('autoRefreshBtn');
@@ -6278,10 +6319,28 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
         b.classList.toggle('is-on', String(b.getAttribute('data-refresh')) === String(refreshSec));
       });
     }
-    if (refreshSec > 2) {
+    // لايف (2ث): حدّث الجدول كل ثانيتين + البنك للأونلاين
+    if (refreshSec === 2) {
+      refreshTimer = setInterval(function () {
+        refreshTableLive();
+        try { if (typeof paintLiveOnline === 'function') paintLiveOnline(); } catch (eL) {}
+        try { if (typeof pingVisibleNow === 'function') pingVisibleNow(); } catch (eP) {}
+      }, 2000);
+    } else if (refreshSec > 2) {
       refreshTimer = setInterval(refreshTableLive, refreshSec * 1000);
     }
-    if (!skipSave) persistCols();
+    if (!skipSave) {
+      persistCols();
+      // احفظ على السيرفر حتى يثبت لايف بعد الرفرش
+      try {
+        var body = new FormData();
+        body.append('csrf', csrf);
+        body.append('action', 'sas_save_cols');
+        body.append('cols', JSON.stringify(savedCols || {}));
+        body.append('refresh_sec', String(refreshSec));
+        fetch('sas.php', { method: 'POST', credentials: 'same-origin', body: body }).catch(function () {});
+      } catch (eSave) {}
+    }
   }
   syncMenuToOrder();
   applyCols();

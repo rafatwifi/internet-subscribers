@@ -47,7 +47,10 @@ if ($tab === 'templates') {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'sas') {
     $tab = 'sas';
 }
-if (!in_array($tab, array('general', 'whatsapp', 'rental', 'users', 'plans', 'sas', 'saas', 'schedule', 'sensitive', 'update', 'maintenance', 'widgets'), true)) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'ui_theme') {
+    $tab = 'theme';
+}
+if (!in_array($tab, array('general', 'whatsapp', 'rental', 'users', 'plans', 'sas', 'saas', 'schedule', 'sensitive', 'update', 'maintenance', 'widgets', 'theme'), true)) {
     $tab = 'general';
 }
 
@@ -75,8 +78,8 @@ if ($tab === 'users') {
         flash('error', $lang === 'en' ? 'Super admin only' : 'للمدير العام فقط');
         redirect('settings.php');
     }
-} elseif ($tab === 'widgets' || $isAgentWaOnly || $isAgencySasOnly) {
-    // ترتيب الوجدز لكل حساب، وواتساب للوكيل، وربط ساس للوكالة
+} elseif ($tab === 'widgets' || $tab === 'theme' || $isAgentWaOnly || $isAgencySasOnly) {
+    // وجدز وثيم لكل حساب، وواتساب للوكيل، وربط ساس للوكالة
 } else {
     // وكالة بدون صلاحية settings: وجّه مباشرة لربط الساس
     if ($agencyTid > 1 && !user_can('settings') && $tab === 'general') {
@@ -218,11 +221,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $msg = $lang === 'en' ? 'Unsupported background image type.' : 'نوع صورة الخلفية غير مدعوم.';
                     }
                     flash('error', $msg);
-                    $backTabFail = isset($_POST['return_tab']) ? preg_replace('/[^a-z0-9_]/', '', (string) $_POST['return_tab']) : $tab;
-                    if ($backTabFail === '') {
-                        $backTabFail = 'widgets';
-                    }
-                    redirect('settings.php?tab=' . $backTabFail);
+                    redirect('settings.php?tab=theme');
                 }
                 if (function_exists('admin_ui_prefs_save')) {
                     admin_ui_prefs_save($pdo, 'glass_bg', $savedBg);
@@ -230,11 +229,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
         flash('success', $lang === 'en' ? 'Theme saved for your account' : 'انحفظ الثيم لحسابك');
-        $backTab = isset($_POST['return_tab']) ? preg_replace('/[^a-z0-9_]/', '', (string) $_POST['return_tab']) : $tab;
-        if ($backTab === '') {
-            $backTab = 'widgets';
-        }
-        redirect('settings.php?tab=' . $backTab);
+        redirect('settings.php?tab=theme');
     }
     $data = array();
     $skipSettingsSave = false;
@@ -1189,7 +1184,7 @@ render_settings_tabs($tab);
 
 $uiThemeNow = function_exists('ui_theme_current') ? ui_theme_current($pdo) : 'classic';
 $uiThemeNow = ($uiThemeNow === 'glass') ? 'glass' : 'classic';
-$showThemePanel = in_array($tab, array('widgets', 'general', 'sas', 'whatsapp'), true);
+$showThemePanel = ($tab === 'theme');
 $glassBgNow = function_exists('ui_glass_bg_url') ? ui_glass_bg_url($pdo, isset($settings) ? $settings : null) : '';
 $glassBgPersonal = '';
 if (function_exists('admin_ui_prefs_load') && function_exists('ui_glass_bg_filename')) {
@@ -1205,10 +1200,10 @@ if (function_exists('admin_ui_prefs_load') && function_exists('ui_glass_bg_filen
             ? 'Saved for your login only. Classic is the previous look, Glass is the transparent dashboard.'
             : 'ينحفظ لحسابك فقط. الكلاسيك هو الشكل السابق، والزجاجي هو الداشبورد الشفاف.'); ?>
     </p>
-    <form method="post" class="theme-pick-form" id="themePickForm" enctype="multipart/form-data">
+    <form method="post" class="theme-pick-form" id="themePickForm" enctype="multipart/form-data" action="settings.php?tab=theme">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="section" value="ui_theme">
-        <input type="hidden" name="return_tab" value="<?php echo e($tab); ?>">
+        <input type="hidden" name="return_tab" value="theme">
         <div class="theme-pick-grid" role="radiogroup" aria-label="<?php echo e($lang === 'en' ? 'Theme' : 'الثيم'); ?>">
             <label class="theme-card<?php echo $uiThemeNow === 'classic' ? ' is-on' : ''; ?>">
                 <input type="radio" name="ui_theme" value="classic" <?php echo $uiThemeNow === 'classic' ? 'checked' : ''; ?>>

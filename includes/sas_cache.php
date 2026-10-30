@@ -921,10 +921,7 @@ function sas_ping_mode_normalize($mode)
 
 function sas_ping_mode($pdo)
 {
-    static $cached = null;
-    if ($cached !== null) {
-        return $cached;
-    }
+    // اقرأ من الجلسة/القاعدة كل مرة — الكاش الثابت كان يخلي الاختيار القديم يضل بعد التشغيل
     $mode = 'off';
     if ($pdo && function_exists('admin_ui_prefs_load')) {
         $prefs = admin_ui_prefs_load($pdo);
@@ -932,8 +929,7 @@ function sas_ping_mode($pdo)
             $mode = sas_ping_mode_normalize($prefs['sub_ping_mode']);
         }
     }
-    $cached = $mode;
-    return $cached;
+    return $mode;
 }
 
 function sas_ping_mode_style()

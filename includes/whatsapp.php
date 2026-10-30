@@ -952,12 +952,26 @@ function whatsapp_gateway_status_for_account($wa, $sessionId)
         'session' => '',
         'session_ok' => false,
         'status' => 'need_link',
+        'registered' => false,
+        'unreachable' => false,
     );
+    if ($sessionId === '') {
+        return $blank;
+    }
     $data = whatsapp_gateway_fetch_status($wa, $sessionId);
-    if (!is_array($data) || !isset($data['session']) || (string) $data['session'] !== $sessionId || $sessionId === '') {
+    if (!is_array($data)) {
+        $blank['status'] = 'gateway_down';
+        $blank['unreachable'] = true;
+        return $blank;
+    }
+    if (!isset($data['session']) || (string) $data['session'] !== $sessionId) {
         return $blank;
     }
     $data['session_ok'] = true;
+    $data['unreachable'] = false;
+    if (!isset($data['registered'])) {
+        $data['registered'] = false;
+    }
     if (empty($data['ready'])) {
         $data['phone'] = '';
     }
@@ -986,7 +1000,37 @@ function whatsapp_send_local($wa, $phone, $message, $type, $sessionId = '')
     }
     $gate = whatsapp_gateway_status_for_account($wa, $sessionId);
     $fromPhone = isset($gate['phone']) ? trim((string) $gate['phone']) : '';
-    if (empty($gate['ready']) || !isset($gate['session']) || (string) $gate['session'] !== $sessionId) {
+    $gateSessionOk = isset($gate['session']) && (string) $gate['session'] === $sessionId;
+    if (empty($gate['ready']) || !$gateSessionOk) {
+        // بوابة ما ردت — مو «غير مربوط»
+        if (!empty($gate['unreachable'])) {
+            return array(
+                'success' => false,
+                'skipped' => true,
+                'response' => 'ما وصل لبوابة واتساب — حاول بعد لحظات',
+                'phone' => $phone,
+                'from_phone' => $fromPhone,
+                'body' => $message,
+                'type' => $type,
+                'http_code' => 0,
+            );
+        }
+        // جلسة محفوظة وتعيد الاتصال — لا تعلّقها «ينتظر الربط»
+        if ($gateSessionOk && (
+            !empty($gate['registered'])
+            || (isset($gate['status']) && (string) $gate['status'] === 'reconnecting')
+        )) {
+            return array(
+                'success' => false,
+                'skipped' => true,
+                'response' => 'واتساب يعيد الاتصال — انتظر قليلاً',
+                'phone' => $phone,
+                'from_phone' => $fromPhone,
+                'body' => $message,
+                'type' => $type,
+                'http_code' => 0,
+            );
+        }
         return array(
             'success' => false,
             'skipped' => true,
@@ -1733,15 +1777,17 @@ function message_log_hold_kind($result)
     if (strpos($resp, 'متوقفة') !== false || strpos($low, 'disabled') !== false) {
         return 'wait_on';
     }
-    if (!empty($result['skipped'])
-        || strpos($resp, 'ربط') !== false
+    // فقط حالات الربط الحقيقية — مو كل skipped (قالب متوقف / جمهور / إلخ)
+    if (strpos($resp, 'يرجى ربط') !== false
+        || strpos($resp, 'لا توجد جلسة واتساب') !== false
         || strpos($low, 'not ready') !== false
-        || strpos($low, 'scan qr') !== false
-        || strpos($resp, 'جلسة') !== false) {
+        || strpos($low, 'scan qr') !== false) {
         return 'wait_link';
     }
     $http = isset($result['http_code']) ? (int) $result['http_code'] : -1;
     if ($http === 0
+        || strpos($resp, 'يعيد الاتصال') !== false
+        || strpos($low, 'reconnecting') !== false
         || strpos($low, 'timed out') !== false
         || strpos($low, 'timeout') !== false
         || strpos($low, 'failed to connect') !== false
@@ -1780,15 +1826,18 @@ function message_log_hold_from_stored($reason, $response)
     if (strpos($blob, 'رقم هاتف') !== false || strpos($blob, 'غير صالح أو فارغ') !== false || strpos($low, 'invalid phone') !== false) {
         return 'no_phone';
     }
-    if (strpos($blob, 'يرجى ربط') !== false || strpos($low, 'not ready') !== false || strpos($low, 'scan qr') !== false || strpos($blob, 'تأكد أن واتساب متصل') !== false) {
+    if (strpos($blob, 'يرجى ربط') !== false || strpos($blob, 'لا توجد جلسة واتساب') !== false
+        || strpos($low, 'not ready') !== false || strpos($low, 'scan qr') !== false) {
         return 'wait_link';
     }
     if (strpos($blob, 'متوقفة') !== false || strpos($blob, 'غير مفعّل') !== false || strpos($blob, 'غير مفعل') !== false || strpos($low, 'disabled in config') !== false) {
         return 'wait_on';
     }
-    if (strpos($low, 'timed out') !== false || strpos($low, 'timeout') !== false || strpos($low, 'failed to connect') !== false
+    if (strpos($blob, 'يعيد الاتصال') !== false || strpos($low, 'reconnecting') !== false
+        || strpos($low, 'timed out') !== false || strpos($low, 'timeout') !== false || strpos($low, 'failed to connect') !== false
         || strpos($blob, 'ما وصل لبوابة') !== false || strpos($blob, 'انقطع اتصال') !== false
-        || strpos($low, 'connection closed') !== false || strpos($low, 'connection terminated') !== false) {
+        || strpos($low, 'connection closed') !== false || strpos($low, 'connection terminated') !== false
+        || strpos($blob, 'تأكد أن واتساب متصل') !== false) {
         return 'wait_net';
     }
     return '';
@@ -2217,7 +2266,10 @@ function retry_failed_message($pdo, $config, $logId, $subscriberId = 0, $manual 
         $type .= '_retry';
     }
     $retrySession = trim((string) $sessionOverride);
-    if (function_exists('whatsapp_may_message_subscriber') && !whatsapp_may_message_subscriber($pdo, (int) $log['sid'])) {
+    $logSid = isset($log['sid']) ? (int) $log['sid'] : (int) (isset($log['subscriber_id']) ? $log['subscriber_id'] : 0);
+    $logTypeBase = preg_replace('/_retry$/', '', (string) $log['message_type']);
+    $agentNotice = ($logSid <= 0 && ($logTypeBase === 'card_transfer' || $logTypeBase === 'card_pull'));
+    if (!$agentNotice && function_exists('whatsapp_may_message_subscriber') && !whatsapp_may_message_subscriber($pdo, $logSid)) {
         $own = wa_session_for_subscriber($pdo, (int) $log['sid']);
         if ($own !== '') {
             $retrySession = $own;
@@ -2298,11 +2350,14 @@ function message_log_live_pack($row, $lang = 'ar')
     if ($hold === 'no_phone') {
         return array('kind' => 'nophone', 'label' => $en ? 'No number' : 'بدون رقم');
     }
-    if ($hold === 'wait_link' || $hold === 'wait_on') {
-        return array('kind' => 'link', 'label' => $en ? 'Waiting for link' : 'ينتظر الربط');
+    if ($hold === 'wait_link') {
+        return array('kind' => 'link', 'label' => $en ? 'Waiting for WhatsApp link' : 'ينتظر ربط واتساب');
+    }
+    if ($hold === 'wait_on') {
+        return array('kind' => 'link', 'label' => $en ? 'WhatsApp alerts are off' : 'إشعارات واتساب متوقفة');
     }
     if ($hold === 'wait_net') {
-        return array('kind' => 'net', 'label' => $en ? 'Waiting for net' : 'ينتظر النت');
+        return array('kind' => 'net', 'label' => $en ? 'Reconnecting…' : 'يعيد الاتصال…');
     }
     if (is_array($row) && !empty($row['queued_at'])) {
         $queuedTs = strtotime((string) $row['queued_at']);
@@ -2467,21 +2522,64 @@ function wa_retry_release($pdo, $config)
                 }
                 $keptRemind[$sid] = 1;
             }
-            $sess = ($sid > 0 && function_exists('wa_session_for_subscriber')) ? wa_session_for_subscriber($pdo, $sid) : '';
-            if ($sess === '') {
+            // جلسات مرشّحة: سلسلة الساس، حساب الشركة، والحساب المفتوح إن كان يملك الإرسال
+            $candidates = array();
+            if ($sid > 0 && function_exists('whatsapp_session_for_subscriber')) {
+                $sTree = trim((string) whatsapp_session_for_subscriber($pdo, $sid));
+                if ($sTree !== '' && $sTree !== 'default') {
+                    $candidates[] = $sTree;
+                }
+            }
+            if ($sid > 0 && function_exists('wa_session_for_subscriber')) {
+                $sAdmin = trim((string) wa_session_for_subscriber($pdo, $sid));
+                if ($sAdmin !== '' && $sAdmin !== 'default' && !in_array($sAdmin, $candidates, true)) {
+                    $candidates[] = $sAdmin;
+                }
+            }
+            $isAgentNotice = ($sid <= 0 && ($mtype === 'card_transfer' || $mtype === 'card_pull'));
+            if (function_exists('whatsapp_session_id')) {
+                $mine = trim((string) whatsapp_session_id());
+                if ($mine !== '' && $mine !== 'default' && !in_array($mine, $candidates, true)) {
+                    $may = $isAgentNotice;
+                    if (!$may && $sid > 0 && function_exists('whatsapp_may_message_subscriber')) {
+                        $may = whatsapp_may_message_subscriber($pdo, $sid);
+                    }
+                    if ($may) {
+                        $candidates[] = $mine;
+                    }
+                }
+            }
+            if (!$candidates) {
                 continue;
             }
-            if (!isset($readyCache[$sess])) {
-                $on = function_exists('whatsapp_notifications_enabled') ? whatsapp_notifications_enabled($pdo, $sess) : true;
-                $linked = false;
-                if ($on && function_exists('whatsapp_gateway_status_for_account')) {
-                    $wa = (is_array($config) && isset($config['whatsapp'])) ? $config['whatsapp'] : array();
-                    $gst = whatsapp_gateway_status_for_account($wa, $sess);
-                    $linked = is_array($gst) && !empty($gst['ready']);
+            $linkedAny = false;
+            $onAny = false;
+            $waCfg = (is_array($config) && isset($config['whatsapp'])) ? $config['whatsapp'] : array();
+            foreach ($candidates as $sess) {
+                if (!isset($readyCache[$sess])) {
+                    $on = function_exists('whatsapp_notifications_enabled')
+                        ? whatsapp_notifications_enabled($pdo, $sess)
+                        : true;
+                    $linked = false;
+                    if ($on && function_exists('whatsapp_gateway_status_for_account')) {
+                        $gst = whatsapp_gateway_status_for_account($waCfg, $sess);
+                        $linked = is_array($gst) && !empty($gst['ready']);
+                    }
+                    $readyCache[$sess] = array('on' => $on ? 1 : 0, 'linked' => $linked ? 1 : 0);
                 }
-                $readyCache[$sess] = array('on' => $on ? 1 : 0, 'linked' => $linked ? 1 : 0);
+                if (!empty($readyCache[$sess]['on'])) {
+                    $onAny = true;
+                }
+                if (!empty($readyCache[$sess]['linked'])) {
+                    $linkedAny = true;
+                    break;
+                }
             }
-            if (empty($readyCache[$sess]['on']) || empty($readyCache[$sess]['linked'])) {
+            if ($hold === 'wait_on') {
+                if (!$onAny) {
+                    continue;
+                }
+            } elseif (!$linkedAny) {
                 continue;
             }
             $mark->execute(array(':id' => (int) $row['id']));
@@ -2547,14 +2645,27 @@ function wa_retry_due_batch($pdo, $config, $limit = 2)
     }
     $sql = 'SELECT m.id FROM message_logs m';
     if ($tid > 0) {
-        $sql .= ' INNER JOIN subscribers s ON s.id = m.subscriber_id AND s.tenant_id = ' . $tid;
+        $sql .= ' LEFT JOIN subscribers s ON s.id = m.subscriber_id';
     }
-    $sql .= ' WHERE m.success = 0 AND m.subscriber_id IS NOT NULL
+    $sql .= ' WHERE m.success = 0
               AND m.queued_at IS NULL
               AND (m.retry_hold IS NULL OR m.retry_hold = \'\')
               AND m.next_retry_at IS NOT NULL AND m.next_retry_at <= NOW() AND m.attempt < 3
-              ORDER BY m.next_retry_at ASC
-              LIMIT ' . $limit;
+              AND (
+                    m.subscriber_id IS NOT NULL
+                    OR m.message_type IN (\'card_transfer\', \'card_pull\')
+                  )';
+    if ($tid > 0) {
+        $sql .= ' AND (
+                    (m.subscriber_id IS NOT NULL AND s.tenant_id = ' . $tid . ')
+                    OR (
+                        (m.subscriber_id IS NULL OR m.subscriber_id = 0)
+                        AND m.message_type IN (\'card_transfer\', \'card_pull\')
+                        AND (m.tenant_id = ' . $tid . ' OR m.tenant_id IS NULL)
+                    )
+                  )';
+    }
+    $sql .= ' ORDER BY m.next_retry_at ASC LIMIT ' . $limit;
     try {
         $ids = $pdo->query($sql)->fetchAll(PDO::FETCH_COLUMN);
     } catch (Exception $e) {

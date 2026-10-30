@@ -16,6 +16,7 @@ function render_settings_tabs($current = 'general')
     ?>
 <div class="tabs">
     <a class="<?php echo $current === 'widgets' ? 'on' : ''; ?>" href="settings.php?tab=widgets"><?php echo e($isEn ? 'Widgets' : 'الوجدز'); ?></a>
+    <a class="<?php echo $current === 'theme' ? 'on' : ''; ?>" href="settings.php?tab=theme"><?php echo e($isEn ? 'Theme' : 'الثيم'); ?></a>
     <?php if ($platformTabs && $can('settings')): ?>
     <a class="<?php echo $current === 'general' ? 'on' : ''; ?>" href="settings.php?tab=general"><?php echo e(t('settings_general')); ?></a>
     <?php endif; ?>

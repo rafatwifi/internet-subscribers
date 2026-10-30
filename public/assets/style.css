@@ -4106,9 +4106,13 @@ input.chk-sm[type="checkbox"],
   cursor: pointer;
 }
 .log-table td {
-  vertical-align: top;
+  vertical-align: middle;
   font-size: 12px;
   padding: 6px 8px !important;
+}
+.log-table td.log-phone,
+.log-table th.log-phone-h {
+  text-align: center;
 }
 .log-details {
   max-width: 280px;

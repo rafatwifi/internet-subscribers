@@ -66,6 +66,20 @@ if (isset($_GET['ajax']) && (string) $_GET['ajax'] === 'log_ring') {
         if (function_exists('ensure_message_log_extra')) {
             ensure_message_log_extra($pdo);
         }
+        // فك التعليق وأعد المحاولة لما واتساب متصل فعلياً — حتى ما يضل السبنر يفرفر
+        global $config;
+        if (function_exists('wa_retry_release') && isset($config)) {
+            try {
+                wa_retry_release($pdo, $config);
+            } catch (Exception $e) {
+            }
+        }
+        if (function_exists('wa_retry_due_batch') && isset($config)) {
+            try {
+                wa_retry_due_batch($pdo, $config, 2);
+            } catch (Exception $e) {
+            }
+        }
         try {
             $q = $pdo->query(
                 'SELECT m.id, m.success, m.subscriber_id, m.queued_at, m.next_retry_at, m.retry_hold
@@ -1255,19 +1269,21 @@ $sendFilters = array(
       .tpl-on-input:checked + .tpl-on-ui { background: #0f766e; }
       .tpl-on-input:checked + .tpl-on-ui:after { transform: translateX(16px); }
       .tpl-on-word { direction: rtl; }
-      #msgLogTable td.log-phone { white-space: normal; vertical-align: top; }
-      #msgLogTable .log-phone-stack {
-        display: flex; flex-direction: column; align-items: flex-end; gap: 2px;
+      /* الهاتف: وسط العمود مع العنوان — بدون flex حتى ما يطفو */
+      #msgLogTable th.log-phone-h,
+      #msgLogTable td.log-phone {
+        white-space: nowrap;
+        vertical-align: middle;
+        text-align: center !important;
       }
-      #msgLogTable .log-phone-main,
-      #msgLogTable .log-phone-from {
-        display: block; direction: ltr; text-align: right; white-space: nowrap;
+      #msgLogTable .log-phone-main {
+        display: inline;
+        direction: ltr;
+        unicode-bidi: isolate;
+        white-space: nowrap;
         font-variant-numeric: tabular-nums;
-      }
-      #msgLogTable .log-phone-from { font-size: 11px; font-weight: 700; color: #0f766e; }
-      #msgLogTable .log-from-k {
-        display: inline-block; min-width: 1.6em; margin-right: 4px;
-        color: #64748b; font-weight: 800; direction: rtl;
+        font-weight: 700;
+        letter-spacing: 0.02em;
       }
     </style>
     <div class="msg-hero">
@@ -1833,12 +1849,22 @@ $sendFilters = array(
         </div>
     <div class="table-wrap msg-table-wrap">
         <table class="table-compact log-table" id="msgLogTable">
+            <colgroup>
+                <col class="log-col-check">
+                <col class="log-col-when">
+                <col class="log-col-name">
+                <col class="log-col-phone">
+                <col class="log-col-type">
+                <col class="log-col-status">
+                <col class="log-col-body">
+                <col class="log-col-act">
+            </colgroup>
             <thead>
             <tr>
                 <th class="sub-check-cell"><input type="checkbox" id="logCheckAll" title="<?php echo e($isEnMsg ? 'Select page' : 'تحديد الصفحة'); ?>"></th>
                 <th><?php echo e($isEnMsg ? 'When' : 'الوقت'); ?></th>
                 <th><?php echo e(t('name')); ?></th>
-                <th><?php echo e(t('phone')); ?></th>
+                <th class="log-phone-h"><?php echo e(t('phone')); ?></th>
                 <th><?php echo e($isEnMsg ? 'Type' : 'النوع'); ?></th>
                 <th><?php echo e($isEnMsg ? 'Status' : 'الحالة'); ?></th>
                 <th><?php echo e($isEnMsg ? 'Message' : 'نص الرسالة'); ?></th>
@@ -1903,16 +1929,14 @@ $sendFilters = array(
                             —
                         <?php endif; ?>
                     </td>
-                    <td class="log-phone">
-                        <div class="log-phone-stack">
-                            <div class="log-phone-main"><?php echo e(format_phone_display($row['phone'])); ?></div>
-                            <?php if (!empty($row['from_phone'])): ?>
-                                <div class="log-phone-from"><span class="log-from-k"><?php echo e($isEnMsg ? 'From' : 'من'); ?></span><span class="log-from-n"><?php echo e(format_phone_display($row['from_phone'])); ?></span></div>
-                            <?php endif; ?>
-                        </div>
+                    <td class="log-phone"<?php echo !empty($row['from_phone']) ? (' title="' . e(($isEnMsg ? 'From ' : 'من ') . format_phone_display($row['from_phone'])) . '"') : ''; ?>>
+                        <span class="log-phone-main"><?php echo e(format_phone_display($row['phone'])); ?></span>
                     </td>
                     <td class="log-type"><small><?php echo e(message_type_title($row['message_type'])); ?></small></td>
-                    <td class="msg-status-log" data-log-live="<?php echo (!$ok && !$resolved) ? (int) $row['id'] : 0; ?>">
+                    <?php
+                    $failText = (!$ok && function_exists('message_log_fail_text')) ? message_log_fail_text($row) : '';
+                    ?>
+                    <td class="msg-status-log" data-log-live="<?php echo (!$ok && !$resolved) ? (int) $row['id'] : 0; ?>"<?php echo ($failText !== '' && !$ok) ? (' title="' . e($failText) . '"') : ''; ?>>
                         <?php
                         $tryN = isset($row['attempt']) ? (int) $row['attempt'] : 0;
                         if ($tryN < 1) {
@@ -1924,7 +1948,6 @@ $sendFilters = array(
                         $tryWaiting = !$ok && !empty($row['next_retry_at']);
                         $inQueue = !$ok && !empty($row['queued_at']);
                         $showTry = !$ok && ($tryWaiting || $tryN > 1);
-                        $failText = (!$ok && function_exists('message_log_fail_text')) ? message_log_fail_text($row) : '';
                         ?>
                         <?php if ($ok): ?>
                             <span class="msg-st-line"><span class="dot-msg ok" title="<?php echo e($isEnMsg ? 'Sent' : 'تم'); ?>"></span><span class="msg-ok-word"><?php echo e($isEnMsg ? 'OK' : 'تم'); ?></span></span>
@@ -1940,21 +1963,12 @@ $sendFilters = array(
                             <span class="msg-st-line"><span class="dot-msg fail"></span><span><?php echo e($isEnMsg ? 'Fail' : 'فشل'); ?></span><?php if ($showTry): ?><span class="msg-try"><?php echo (int) $tryN; ?>/3</span><?php endif; ?></span>
                             <?php endif; ?>
                         <?php endif; ?>
-                        <?php if ($failText !== '' && !$ok && !$resolved): ?>
-                            <div class="msg-fail-why" title="<?php echo e($failText); ?>"><?php echo e($failText); ?></div>
-                        <?php endif; ?>
                     </td>
                     <td class="log-details msg-log-body" title="<?php echo e($bodyFull); ?>">
                         <div class="msg-log-clip"><?php echo e($bodyShort); ?></div>
-                        <?php if ($bodyShort !== str_replace(array("\r\n", "\n", "\r"), ' ', $bodyFull)): ?>
-                            <details class="msg-log-more">
-                                <summary><?php echo e($isEnMsg ? 'Full' : 'كامل'); ?></summary>
-                                <pre class="msg-log-pre"><?php echo e($bodyFull); ?></pre>
-                            </details>
-                        <?php endif; ?>
                     </td>
                     <td class="acts-cell">
-                        <?php if (!empty($row['subscriber_id'])): ?>
+                        <?php if (!$ok && !$resolved): ?>
                             <button class="link-act" type="submit" value="<?php echo (int) $row['id']; ?>" onclick="document.getElementById('logBulkAction').value='retry_log'; document.getElementById('logRetryId').value=this.value; var bf=document.getElementById('msgLogBulkForm'); if(bf) bf.setAttribute('data-no-wait','1');" title="<?php echo e($isEnMsg ? 'Resend' : 'إعادة إرسال'); ?>">↻</button>
                         <?php elseif ($resolved): ?>
                             <span class="msg-resolved-arrow acts-resolved" title="<?php echo e($failText !== '' ? $failText : ($isEnMsg ? 'Failure reason is not stored' : 'ماكو سبب محفوظ')); ?>">→</span>
@@ -2009,6 +2023,51 @@ $sendFilters = array(
         padding: 8px 10px; border-radius: 8px; cursor: pointer; color: #b91c1c; font-weight: 600;
       }
       .msg-log-ctx button:hover { background: #fef2f2; }
+      #msgLogTable { width: 100%; }
+      @media (min-width: 641px) {
+        #msgLogTable { table-layout: fixed; }
+        #msgLogTable .log-col-check { width: 42px; }
+        #msgLogTable .log-col-when { width: 168px; }
+        #msgLogTable .log-col-name { width: 132px; }
+        #msgLogTable .log-col-phone { width: 132px; }
+        #msgLogTable .log-col-type { width: 108px; }
+        #msgLogTable .log-col-status { width: 156px; }
+        #msgLogTable .log-col-act { width: 44px; }
+        #msgLogTable th,
+        #msgLogTable td {
+          vertical-align: middle;
+          height: 46px;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        #msgLogTable .msg-log-clip {
+          display: block;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          line-height: 46px;
+          max-height: 46px;
+          -webkit-line-clamp: unset;
+        }
+        #msgLogTable th.log-phone-h,
+        #msgLogTable td.log-phone {
+          text-align: center !important;
+        }
+        #msgLogTable .msg-live {
+          max-width: 100%;
+          height: 28px;
+          padding: 0 8px;
+          border-radius: 999px;
+          background: rgba(37, 99, 235, 0.08);
+        }
+        #msgLogTable .msg-live b {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          font-weight: 800;
+        }
+        #msgLogTable .msg-st-line { height: 28px; }
+      }
       #msgLogTable tr.row-msg-fail { cursor: context-menu; }
       .msg-bulk-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 10px; }
       #msgLogTable .sub-check-cell { width: 36px; text-align: center; }
@@ -2032,12 +2091,12 @@ $sendFilters = array(
       @keyframes msgRingSpin { to { transform: rotate(360deg); } }
       .log-when-short { display: none; }
       #msgLogTable .msg-log-clip {
-        display: -webkit-box;
-        -webkit-line-clamp: 2;
-        -webkit-box-orient: vertical;
+        display: block;
+        white-space: nowrap;
         overflow: hidden;
-        line-height: 1.45;
-        max-height: 2.9em;
+        text-overflow: ellipsis;
+        line-height: 1.4;
+        max-height: none;
       }
       @media (max-width: 640px) {
         .msg-live { font-size: 11px; gap: 4px; }
@@ -2082,8 +2141,10 @@ $sendFilters = array(
         #msgLogTable .log-when-full { display: none; }
         #msgLogTable .log-when-short { display: inline; }
         #msgLogTable td.log-phone {
-          grid-area: phone; justify-self: end; font-size: 11px;
-          display: flex; flex-direction: column; align-items: flex-end;
+          grid-area: phone;
+          justify-self: end;
+          font-size: 11px;
+          text-align: center !important;
         }
         #msgLogTable td.log-name {
           grid-area: name;
@@ -2096,7 +2157,6 @@ $sendFilters = array(
         #msgLogTable td.acts-cell { grid-area: act; }
         #msgLogTable td.acts-cell:not(:has(button)) { display: none; }
         #msgLogTable .msg-fail-why { max-width: none; }
-        #msgLogTable .log-phone-from { margin-top: 1px; }
       }
       .msg-st-line { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; vertical-align: middle; }
       .msg-ok-word { color: #15803d; font-weight: 800; }
