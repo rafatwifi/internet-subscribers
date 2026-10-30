@@ -840,55 +840,9 @@ foreach ($myPrices as $mp) {
     }
 }
 
-$planProfiles = array();
-try {
-    $planRows = $pdo->query(
-        'SELECT name, cost_price, sas_profile_id, sort_order, is_active
-         FROM service_plans ORDER BY sort_order ASC, id ASC'
-    )->fetchAll();
-    foreach ($planRows as $pl) {
-        if (isset($pl['is_active']) && (int) $pl['is_active'] !== 1) {
-            continue;
-        }
-        $pnm = trim((string) $pl['name']);
-        if ($pnm === '') {
-            continue;
-        }
-        $planProfiles[] = array(
-            'id' => isset($pl['sas_profile_id']) ? (int) $pl['sas_profile_id'] : 0,
-            'name' => $pnm,
-            'price' => isset($pl['cost_price']) ? (float) $pl['cost_price'] : 0,
-            'from_plan' => 1,
-        );
-    }
-} catch (Exception $e) {
-}
-$profiles = $planProfiles;
-if (!$profiles) {
-    if (function_exists('sas_make_connector') && function_exists('sas_profiles_for_ui') && function_exists('sas_is_ready') && sas_is_ready($config)) {
-        $apiP = sas_make_connector($config);
-        if ($apiP) {
-            $profiles = sas_profiles_for_ui($apiP);
-        }
-    }
-}
-if (!$profiles) {
-    try {
-        $stP = $pdo->prepare(
-            'SELECT profile_id, profile_name, MAX(wholesale_price) AS wholesale_price
-             FROM agent_card_prices WHERE tenant_id = :t GROUP BY profile_id, profile_name'
-        );
-        $stP->execute(array(':t' => $tid));
-        foreach ($stP->fetchAll() as $pr) {
-            $profiles[] = array(
-                'id' => (int) $pr['profile_id'],
-                'name' => $pr['profile_name'],
-                'price' => (float) $pr['wholesale_price'],
-            );
-        }
-    } catch (Exception $e) {
-    }
-}
+$profiles = function_exists('sas_tenant_profile_rows')
+    ? sas_tenant_profile_rows($pdo, $config)
+    : array();
 $pkgFloor = $myFloor;
 foreach ($profiles as $pf) {
     $pk = strtolower(trim(isset($pf['name']) ? (string) $pf['name'] : ''));
@@ -1406,8 +1360,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 if (!$wantSheet) {
 render_header($isEn ? 'Package prices' : 'تسعير الباقات', 'agent_prices');
-require_once __DIR__ . '/../includes/settings_tabs.php';
-render_settings_tabs('prices');
 ?>
 <div class="price-layout">
 <div class="panel agent-pick-panel" id="agentPickPanel">

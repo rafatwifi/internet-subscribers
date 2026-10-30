@@ -1,15 +1,14 @@
 ---
-description: Always package changed upload files into one Desktop replace folder
+description: Deploy changed files directly to the live server via SSH/SFTP
 alwaysApply: true
 ---
 
-# Deploy: Desktop replace folder
+# Deploy: رفع مباشر على السيرفر
 
-After every code change that should reach the live server, do not upload the files yourself. Put them in Desktop folder `123` and tell the user to upload that folder.
+بعد كل تعديل كود يجب أن يصل للموقع الحي: **ارفع الملفات مباشرة على السيرفر** (SFTP/SSH). لا تعتمد على مجلد سطح المكتب `123` ولا تطلب من المستخدم رفع يدوي إلا إذا فشل الرفع أو طلب صراحةً نسخة محلية.
 
-1. After finishing code changes, create **one folder on the Desktop named exactly `123`** (`C:\Users\rafat\Desktop\123`) containing **only the files that must be replaced**, keeping the same path hierarchy (`includes/…`, `public/…`, `cron/…`, etc.).
-2. **Always** use folder name `123` (wipe/recreate it each pack so it does not mix old unrelated files). Do not invent other pack folder names unless the user asks.
-3. Include a `README.txt` listing the files and a one-line upload note.
-4. **Never** put live secrets in the pack: do not overwrite/include `config/config.php` unless the user explicitly asks.
-5. Tell the user the Desktop folder is `123` and which paths to upload.
-6. Live site is PHP 7.0 on Apache; deploy only changed files with matching hierarchy (existing project convention: via Desktop `123` the user uploads manually).
+1. ارفع **فقط الملفات المتغيّرة** بنفس التسلسل الهرمي على السيرفر (`includes/…`, `public/…`, `cron/…`, إلخ).
+2. المضيف الحي: `admin.isp-wifi.com` — مسار المشروع على السيرفر: `/var/www/html/internet-subscribers` (PHP 7.0 / Apache). استخدم سكربت الرفع الموجود (مثل `isp_ui_put*.py` / اعتماديات `isp_stock_live.py`) عبر paramiko عند الحاجة.
+3. **لا ترفع أبداً** أسراراً أو `config/config.php` إلا إذا طلب المستخدم ذلك صراحة.
+4. بعد الرفع شغّل فحص صياغة PHP للملفات المرفوعة (`php7.0 -l`) عند الإمكان، واذكر للمستخدم ما رُفع باختصار.
+5. مجلد `123` اختياري فقط عند طلب المستخدم أو كاحتياط إذا تعذّر الاتصال بالسيرفر — ليس المسار الافتراضي.

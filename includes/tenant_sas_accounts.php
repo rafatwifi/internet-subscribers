@@ -487,6 +487,13 @@ function tenant_sas_account_save($pdo, $tenantId, $fields, $accountId = 0)
         } else {
             tenant_sas_accounts_mirror_default($pdo, $tenantId);
         }
+        if (function_exists('sas_profiles_cache_clear')) {
+            sas_profiles_cache_clear();
+        }
+        $ftthFile = dirname(__DIR__) . '/storage/cache/ftth_profiles_t' . (int) $tenantId . '.json';
+        if (is_file($ftthFile)) {
+            @unlink($ftthFile);
+        }
         return array(true, 'تم الحفظ', $id);
     } catch (Exception $e) {
         return array(false, 'فشل الحفظ: ' . $e->getMessage(), 0);

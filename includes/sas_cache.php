@@ -729,6 +729,12 @@ function sas_cache_is_online_row($row)
     if (!is_array($row)) {
         return 0;
     }
+    if (isset($row['online_status']) && !is_array($row['online_status'])) {
+        $os = $row['online_status'];
+        if ($os === true || $os === 1 || $os === '1' || $os === 'online' || $os === 'ONLINE') {
+            return 1;
+        }
+    }
     foreach (array('acctsessionid', 'acct_session_id', 'acctSessionId') as $k) {
         if (!isset($row[$k]) || is_array($row[$k])) {
             continue;
@@ -1821,8 +1827,45 @@ function sas_refresh_online_flags($pdo, $config)
         if ($tidOnline <= 0) {
             $tidOnline = 1;
         }
-        $pdo->exec('UPDATE sas_users_cache SET is_online = 0 WHERE tenant_id = ' . $tidOnline . ' AND is_online = 1');
+        // إذا قائمة الأونلاين من حساب ما تطابق كاش الشركة (مثل FTTH) — لا تمسح الأونلاين
+        $skipOnlineWipe = false;
         if ($names) {
+            $cacheOnline = 0;
+            $overlap = 0;
+            try {
+                $cacheOnline = (int) $pdo->query(
+                    'SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = ' . (int) $tidOnline . ' AND is_online = 1'
+                )->fetchColumn();
+                $probe = array_slice(array_keys($names), 0, 40);
+                if ($probe && $cacheOnline > 0) {
+                    $ph = array();
+                    $bind = array();
+                    foreach ($probe as $i => $k) {
+                        $ph[] = ':p' . $i;
+                        $bind[':p' . $i] = $k;
+                    }
+                    $stOv = $pdo->prepare(
+                        'SELECT COUNT(*) FROM sas_users_cache
+                         WHERE tenant_id = ' . (int) $tidOnline . '
+                           AND LOWER(username) IN (' . implode(',', $ph) . ')'
+                    );
+                    $stOv->execute($bind);
+                    $overlap = (int) $stOv->fetchColumn();
+                }
+            } catch (Exception $eOv) {
+                $overlap = 0;
+            }
+            if ($cacheOnline >= 50 && $overlap <= 0) {
+                $skipOnlineWipe = true;
+            }
+        } elseif (!$names) {
+            // قائمة فارغة مؤكدة: اترك المسح أدناه يصفّر الأونلاين
+            $skipOnlineWipe = false;
+        }
+        if (!$skipOnlineWipe) {
+            $pdo->exec('UPDATE sas_users_cache SET is_online = 0 WHERE tenant_id = ' . $tidOnline . ' AND is_online = 1');
+        }
+        if ($names && !$skipOnlineWipe) {
             $onlineKeys = array_keys($names);
             $chunks = array_chunk($onlineKeys, 40);
             foreach ($chunks as $chunk) {
@@ -1894,6 +1937,12 @@ function sas_refresh_online_flags($pdo, $config)
             sas_sessions_note_online($pdo, $rowByUser);
         } catch (Exception $e2) {
         }
+        // FTTH وغيرها: عبّئ الاستهلاك اليومي من قائمة المشتركين (مو من صف الجلسة)
+        try {
+            $onlineHeavy = isset($api->lastOnlineTotal) && (int) $api->lastOnlineTotal > 900;
+            sas_backfill_daily_traffic($pdo, $config, $onlineHeavy ? 10 : 4, false);
+        } catch (Exception $eBf) {
+        }
         @file_put_contents($throttleFile, (string) time());
         if (isset($api->lastOnlineTotal) && (int) $api->lastOnlineTotal > 900) {
             @file_put_contents($heavyFile, 'full ' . time());
@@ -1936,25 +1985,305 @@ function sas_refresh_online_flags_throttled($pdo, $config, $minInterval = 4, $fo
     return sas_refresh_online_flags($pdo, $config);
 }
 
+/**
+ * حدّث الاستهلاك اليومي لمشتركين ظاهرين من تفاصيل الساس (daily_traffic_details).
+ */
+function sas_refresh_daily_traffic_users($pdo, $config, $usernames)
+{
+    if (!$pdo || !is_array($usernames) || !$usernames) {
+        return 0;
+    }
+    $api = function_exists('sas_page_connector') ? sas_page_connector($config) : null;
+    if (!$api || !method_exists($api, 'listUsersPage')) {
+        return 0;
+    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tid <= 0) {
+        $tid = 1;
+    }
+    // فضّل الفاضيين أولاً حتى يظهر الاستهلاك للمتصلين الظاهرين
+    $ordered = array();
+    $seen = array();
+    try {
+        $want = array();
+        foreach ($usernames as $rawU) {
+            $u = trim((string) $rawU);
+            if ($u === '' || isset($seen[strtolower($u)])) {
+                continue;
+            }
+            $seen[strtolower($u)] = 1;
+            $want[] = $u;
+            if (count($want) >= 60) {
+                break;
+            }
+        }
+        if ($want) {
+            $ph = array();
+            $bind = array(':t' => $tid);
+            foreach ($want as $i => $u) {
+                $ph[] = ':u' . $i;
+                $bind[':u' . $i] = $u;
+            }
+            $stMiss = $pdo->prepare(
+                'SELECT username, daily_traffic FROM sas_users_cache
+                 WHERE tenant_id = :t AND username IN (' . implode(',', $ph) . ')'
+            );
+            $stMiss->execute($bind);
+            $miss = array();
+            $have = array();
+            foreach ($stMiss as $r) {
+                $un = isset($r['username']) ? (string) $r['username'] : '';
+                if ($un === '') {
+                    continue;
+                }
+                $tr = isset($r['daily_traffic']) ? trim((string) $r['daily_traffic']) : '';
+                if ($tr === '' || $tr === '-') {
+                    $miss[] = $un;
+                } else {
+                    $have[] = $un;
+                }
+            }
+            foreach ($want as $u) {
+                $found = false;
+                foreach ($miss as $m) {
+                    if (strcasecmp($m, $u) === 0) {
+                        $ordered[] = $m;
+                        $found = true;
+                        break;
+                    }
+                }
+                if (!$found) {
+                    foreach ($have as $h) {
+                        if (strcasecmp($h, $u) === 0) {
+                            $ordered[] = $h;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    } catch (Exception $eOrd) {
+        $ordered = array();
+    }
+    if (!$ordered) {
+        foreach ($usernames as $rawU) {
+            $u = trim((string) $rawU);
+            if ($u !== '') {
+                $ordered[] = $u;
+            }
+        }
+    }
+    $n = 0;
+    $seen = array();
+    foreach ($ordered as $rawU) {
+        $u = trim((string) $rawU);
+        if ($u === '' || isset($seen[strtolower($u)])) {
+            continue;
+        }
+        $seen[strtolower($u)] = 1;
+        if (count($seen) > 40) {
+            break;
+        }
+        try {
+            $page = $api->listUsersPage(0, 8, $u);
+        } catch (Exception $e) {
+            continue;
+        }
+        if (empty($page['ok']) || empty($page['rows']) || !is_array($page['rows'])) {
+            continue;
+        }
+        foreach ($page['rows'] as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $ru = function_exists('sas_cache_username') ? sas_cache_username($row) : '';
+            if ($ru === '' || strcasecmp($ru, $u) !== 0) {
+                continue;
+            }
+            $tr = sas_cache_daily_traffic($row);
+            if ($tr === '') {
+                break;
+            }
+            try {
+                $st = $pdo->prepare(
+                    'UPDATE sas_users_cache SET daily_traffic = :tr
+                     WHERE tenant_id = :t AND username = :u LIMIT 1'
+                );
+                $st->execute(array(
+                    ':tr' => function_exists('sas_clip') ? sas_clip($tr, 60) : substr($tr, 0, 60),
+                    ':t' => $tid,
+                    ':u' => $ru,
+                ));
+                $n++;
+            } catch (Exception $e2) {
+            }
+            break;
+        }
+    }
+    return $n;
+}
+
+/**
+ * عبّئ الاستهلاك اليومي من قائمة المشتركين (with_traffic) على دفعات —
+ * قائمة الأونلاين بـ FTTH غالباً ما ترجّع daily_traffic_details.
+ * $force=true يتجاوز فاصل الثروتل (للتعبئة اليدوية/الاختبار).
+ */
+function sas_backfill_daily_traffic($pdo, $config, $maxPages = 6, $force = false)
+{
+    if (!$pdo) {
+        return 0;
+    }
+    $maxPages = (int) $maxPages;
+    if ($maxPages < 1) {
+        $maxPages = 1;
+    }
+    if ($maxPages > 40) {
+        $maxPages = 40;
+    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tid <= 0) {
+        $tid = 1;
+    }
+    $dir = dirname(__DIR__) . '/storage/cache';
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0775, true);
+    }
+    $stateFile = $dir . '/sas_traf_bf_t' . $tid . '.json';
+    $pageNum = 1;
+    $lastAt = 0;
+    $rawState = is_file($stateFile) ? @file_get_contents($stateFile) : false;
+    if ($rawState !== false && $rawState !== '') {
+        $st = json_decode($rawState, true);
+        if (is_array($st)) {
+            if (isset($st['page']) && (int) $st['page'] > 0) {
+                $pageNum = (int) $st['page'];
+            }
+            if (isset($st['at'])) {
+                $lastAt = (int) $st['at'];
+            }
+        }
+    }
+    // لا تضرب الساس بكل أجاكس — دفعة كل ~12 ثانية تكفي لملء الآلاف خلال دقائق
+    if (!$force && $lastAt > 0 && (time() - $lastAt) < 12) {
+        return 0;
+    }
+    $api = function_exists('sas_page_connector') ? sas_page_connector($config) : null;
+    if (!$api || !method_exists($api, 'listUsersPage')) {
+        return 0;
+    }
+    $updated = 0;
+    $pageSize = 100;
+    for ($i = 0; $i < $maxPages; $i++) {
+        $start = ($pageNum - 1) * $pageSize;
+        try {
+            if (method_exists($api, 'setTimeout')) {
+                $api->setTimeout(20);
+            }
+            $page = $api->listUsersPage($start, $pageSize, '');
+        } catch (Exception $e) {
+            break;
+        }
+        if (empty($page['ok']) || empty($page['rows']) || !is_array($page['rows'])) {
+            $pageNum = 1;
+            break;
+        }
+        $batch = array();
+        foreach ($page['rows'] as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $u = function_exists('sas_cache_username') ? sas_cache_username($row) : '';
+            if ($u === '') {
+                continue;
+            }
+            $tr = sas_cache_daily_traffic($row);
+            if ($tr === '') {
+                continue;
+            }
+            $batch[$u] = function_exists('sas_clip') ? sas_clip($tr, 60) : substr($tr, 0, 60);
+        }
+        if ($batch) {
+            $chunks = array_chunk($batch, 40, true);
+            foreach ($chunks as $chunk) {
+                $case = 'CASE username';
+                $in = array();
+                $bind = array(':t' => $tid);
+                $j = 0;
+                foreach ($chunk as $u => $tr) {
+                    $case .= ' WHEN :u' . $j . ' THEN :tr' . $j;
+                    $in[] = ':in' . $j;
+                    $bind[':u' . $j] = $u;
+                    $bind[':tr' . $j] = $tr;
+                    $bind[':in' . $j] = $u;
+                    $j++;
+                }
+                $case .= ' ELSE daily_traffic END';
+                try {
+                    $sql = 'UPDATE sas_users_cache SET daily_traffic = ' . $case
+                        . ' WHERE tenant_id = :t AND username IN (' . implode(',', $in) . ')';
+                    $pdo->prepare($sql)->execute($bind);
+                    $updated += count($chunk);
+                } catch (Exception $e2) {
+                }
+            }
+        }
+        $complete = !empty($page['complete']) || count($page['rows']) < $pageSize;
+        if ($complete) {
+            $pageNum = 1;
+            break;
+        }
+        $pageNum++;
+        if ($pageNum > 400) {
+            $pageNum = 1;
+            break;
+        }
+    }
+    @file_put_contents($stateFile, json_encode(array('page' => $pageNum, 'at' => time())));
+    return $updated;
+}
+
 function sas_cache_daily_traffic($row)
 {
     if (!is_array($row)) {
         return '';
     }
     $nests = array($row);
-    foreach (array('quota', 'traffic', 'stats', 'statistics', 'usage', 'acct', 'radius', 'counters') as $nk) {
-        if (isset($row[$nk]) && is_array($row[$nk]) && !isset($row[$nk][0])) {
-            $nests[] = $row[$nk];
+    foreach (array(
+        'quota', 'traffic', 'stats', 'statistics', 'usage', 'acct', 'radius', 'counters',
+        'daily_traffic_details', 'dailyTrafficDetails', 'traffic_details', 'trafficDetails',
+    ) as $nk) {
+        if (!isset($row[$nk])) {
+            continue;
+        }
+        $nv = $row[$nk];
+        if (is_string($nv) && $nv !== '') {
+            $c0 = substr(ltrim($nv), 0, 1);
+            if ($c0 === '{' || $c0 === '[') {
+                $dec = json_decode($nv, true);
+                if (is_array($dec)) {
+                    $nv = $dec;
+                }
+            }
+        }
+        if (is_array($nv) && !isset($nv[0])) {
+            $nests[] = $nv;
         }
     }
+    // صف الأونلاين فيه عدّادات الجلسة — مو استهلاك يومي
+    $isOnlineSessionRow = isset($row['radacctid']) || isset($row['acctsessiontime'])
+        || isset($row['acctinputoctets']) || isset($row['acctoutputoctets']);
     $textKeys = array(
         'daily_traffic', 'dailyTraffic', 'daily_total', 'dailyTotal', 'daily_usage', 'dailyUsage',
         'today_traffic', 'traffic_today', 'todayTraffic', 'used_today', 'daily_data',
-        'daily', 'traf', 'totaltraffic', 'total_traffic',
+        'daily', 'traf', 'totaltraffic', 'total_traffic', 'traffic',
     );
     foreach ($nests as $src) {
         foreach ($textKeys as $k) {
             if (!isset($src[$k]) || is_array($src[$k]) || $src[$k] === '' || $src[$k] === null) {
+                continue;
+            }
+            // مفتاح traffic العام على صف الجلسة غالباً boolean ضمن status — تجاهله هناك
+            if ($isOnlineSessionRow && $src === $row && ($k === 'traffic' || $k === 'traf' || $k === 'daily')) {
                 continue;
             }
             $v = $src[$k];
@@ -1968,16 +2297,19 @@ function sas_cache_daily_traffic($row)
     }
     $down = 0.0;
     $up = 0.0;
+    // لا نستخدم acct*octets — بـ FTTH غالباً صفر أو عدّاد جلسة طويل مو يومي
     $downKeys = array(
         'daily_download', 'daily_down', 'dailyDownload', 'today_download',
-        'acctoutputoctets', 'acct_output_octets', 'output_octets', 'bytes_out',
         'totalDownload', 'total_download',
     );
     $upKeys = array(
         'daily_upload', 'daily_up', 'dailyUpload', 'today_upload',
-        'acctinputoctets', 'acct_input_octets', 'input_octets', 'bytes_in',
         'totalUpload', 'total_upload',
     );
+    if (!$isOnlineSessionRow) {
+        $downKeys = array_merge($downKeys, array('output_octets', 'bytes_out'));
+        $upKeys = array_merge($upKeys, array('input_octets', 'bytes_in'));
+    }
     foreach ($nests as $src) {
         foreach ($downKeys as $k) {
             if (isset($src[$k]) && is_numeric($src[$k]) && (float) $src[$k] > $down) {
@@ -1995,6 +2327,9 @@ function sas_cache_daily_traffic($row)
         return sas_format_bytes($sum);
     }
     foreach ($nests as $src) {
+        if ($isOnlineSessionRow && $src === $row) {
+            continue;
+        }
         foreach ($textKeys as $k) {
             if (isset($src[$k]) && is_numeric($src[$k])) {
                 return '0 MB';
@@ -2002,6 +2337,28 @@ function sas_cache_daily_traffic($row)
         }
     }
     return '';
+}
+
+/**
+ * تعبير SQL لترتيب الاستهلاك اليومي رقمياً من نص مثل «12.5 GB».
+ */
+function sas_daily_traffic_order_sql($alias = 'c')
+{
+    $alias = preg_replace('/[^a-zA-Z0-9_]/', '', (string) $alias);
+    if ($alias === '') {
+        $alias = 'c';
+    }
+    $col = $alias . '.daily_traffic';
+    $raw = 'REPLACE(REPLACE(IFNULL(' . $col . ', \'\'), \',\', \'\'), \' \', \'\')';
+    return '(CASE
+        WHEN ' . $col . ' IS NULL OR TRIM(' . $col . ') = \'\' OR ' . $col . ' IN (\'-\', \'0\') THEN 0
+        WHEN UPPER(' . $raw . ') LIKE \'%TB%\' THEN CAST(NULLIF(REPLACE(UPPER(' . $raw . '), \'TB\', \'\'), \'\') AS DECIMAL(24,6)) * 1099511627776
+        WHEN UPPER(' . $raw . ') LIKE \'%GB%\' THEN CAST(NULLIF(REPLACE(UPPER(' . $raw . '), \'GB\', \'\'), \'\') AS DECIMAL(24,6)) * 1073741824
+        WHEN UPPER(' . $raw . ') LIKE \'%MB%\' THEN CAST(NULLIF(REPLACE(UPPER(' . $raw . '), \'MB\', \'\'), \'\') AS DECIMAL(24,6)) * 1048576
+        WHEN UPPER(' . $raw . ') LIKE \'%KB%\' THEN CAST(NULLIF(REPLACE(UPPER(' . $raw . '), \'KB\', \'\'), \'\') AS DECIMAL(24,6)) * 1024
+        WHEN ' . $raw . ' REGEXP \'^[0-9]+(\\.[0-9]+)?$\' THEN CAST(' . $raw . ' AS DECIMAL(24,6))
+        ELSE 0
+    END)';
 }
 
 function sas_format_bytes($n)
@@ -2484,11 +2841,44 @@ function sas_page_connector($config)
     return $api;
 }
 
+function sas_profiles_session_key($config = null)
+{
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+    $user = '';
+    $host = '';
+    if (function_exists('sas_config')) {
+        $s = sas_config($config);
+        if (is_array($s)) {
+            $user = isset($s['username']) ? strtolower(trim((string) $s['username'])) : '';
+            $host = isset($s['host']) ? strtolower(trim((string) $s['host'])) : '';
+        }
+    }
+    return $tid . '|' . $host . '|' . $user;
+}
+
+function sas_profiles_cache_clear()
+{
+    unset(
+        $_SESSION['sas_profiles_ui'],
+        $_SESSION['sas_profiles_ui_at'],
+        $_SESSION['sas_profiles_ui_key'],
+        $_SESSION['sas_unused_ui_v6'],
+        $_SESSION['sas_unused_ui_v6_at'],
+        $_SESSION['sas_unused_ui_v6_key']
+    );
+    if (function_exists('sas_cards_inventory_forget')) {
+        sas_cards_inventory_forget();
+    }
+}
+
 function sas_profiles_for_ui($api)
 {
+    $key = sas_profiles_session_key();
     if (isset($_SESSION['sas_profiles_ui']) && is_array($_SESSION['sas_profiles_ui'])
         && isset($_SESSION['sas_profiles_ui_at']) && (time() - (int) $_SESSION['sas_profiles_ui_at']) < 600
-        && $_SESSION['sas_profiles_ui']) {
+        && !empty($_SESSION['sas_profiles_ui'])
+        && isset($_SESSION['sas_profiles_ui_key'])
+        && (string) $_SESSION['sas_profiles_ui_key'] === $key) {
         return $_SESSION['sas_profiles_ui'];
     }
     $out = array();
@@ -2527,8 +2917,85 @@ function sas_profiles_for_ui($api)
     if ($out) {
         $_SESSION['sas_profiles_ui'] = $out;
         $_SESSION['sas_profiles_ui_at'] = time();
+        $_SESSION['sas_profiles_ui_key'] = $key;
         if (session_status() !== PHP_SESSION_ACTIVE && function_exists('app_session_touch')) {
             app_session_touch();
+        }
+    }
+    return $out;
+}
+
+/** باقات الواجهة حسب نوع الوكالة: FTTH من ساسها فقط، بدون جدول الباقات العام لوكالات ثانية. */
+function sas_tenant_profile_rows($pdo, $config)
+{
+    $out = array();
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+    $isFtth = function_exists('tenant_is_ftth') && tenant_is_ftth($pdo, $config);
+    if ($isFtth) {
+        if (function_exists('sas_is_ready') && sas_is_ready($config)
+            && function_exists('sas_make_connector') && function_exists('sas_profiles_for_ui')) {
+            $api = sas_make_connector($config);
+            if ($api) {
+                $out = sas_profiles_for_ui($api);
+            }
+        }
+        if (!$out && $tid > 0 && function_exists('cabinet_ftth_profiles')) {
+            foreach (cabinet_ftth_profiles($config, $tid) as $name) {
+                $name = trim((string) $name);
+                if ($name === '') {
+                    continue;
+                }
+                $out[] = array('id' => 0, 'name' => $name, 'price' => 0.0);
+            }
+        }
+        return $out;
+    }
+    try {
+        if ($pdo) {
+            $planRows = $pdo->query(
+                'SELECT name, cost_price, sas_profile_id, sort_order, is_active
+                 FROM service_plans ORDER BY sort_order ASC, id ASC'
+            )->fetchAll();
+            foreach ($planRows as $pl) {
+                if (isset($pl['is_active']) && (int) $pl['is_active'] !== 1) {
+                    continue;
+                }
+                $pnm = trim((string) $pl['name']);
+                if ($pnm === '') {
+                    continue;
+                }
+                $out[] = array(
+                    'id' => isset($pl['sas_profile_id']) ? (int) $pl['sas_profile_id'] : 0,
+                    'name' => $pnm,
+                    'price' => isset($pl['cost_price']) ? (float) $pl['cost_price'] : 0,
+                    'from_plan' => 1,
+                );
+            }
+        }
+    } catch (Exception $e) {
+    }
+    if (!$out && function_exists('sas_is_ready') && sas_is_ready($config)
+        && function_exists('sas_make_connector') && function_exists('sas_profiles_for_ui')) {
+        $api = sas_make_connector($config);
+        if ($api) {
+            $out = sas_profiles_for_ui($api);
+        }
+    }
+    if (!$out && $pdo && $tid > 0) {
+        try {
+            $stP = $pdo->prepare(
+                'SELECT profile_id, profile_name, MAX(wholesale_price) AS wholesale_price
+                 FROM agent_card_prices WHERE tenant_id = :t GROUP BY profile_id, profile_name'
+            );
+            $stP->execute(array(':t' => $tid));
+            foreach ($stP->fetchAll() as $pr) {
+                $out[] = array(
+                    'id' => (int) $pr['profile_id'],
+                    'name' => $pr['profile_name'],
+                    'price' => (float) $pr['wholesale_price'],
+                );
+            }
+        } catch (Exception $e) {
         }
     }
     return $out;
@@ -3420,7 +3887,12 @@ function sas_unused_cards_cached($api, $force = false)
 {
     $ttl = 120;
     $at = isset($_SESSION['sas_unused_ui_v6_at']) ? (int) $_SESSION['sas_unused_ui_v6_at'] : 0;
-    if (!$force && $at > 0 && isset($_SESSION['sas_unused_ui_v6']) && is_array($_SESSION['sas_unused_ui_v6'])) {
+    $wantKey = function_exists('sas_profiles_session_key')
+        ? sas_profiles_session_key()
+        : sas_cards_tenant_suffix();
+    $haveKey = isset($_SESSION['sas_unused_ui_v6_key']) ? (string) $_SESSION['sas_unused_ui_v6_key'] : '';
+    if (!$force && $at > 0 && isset($_SESSION['sas_unused_ui_v6']) && is_array($_SESSION['sas_unused_ui_v6'])
+        && $haveKey !== '' && $haveKey === $wantKey) {
         $age = time() - $at;
         $empty = !$_SESSION['sas_unused_ui_v6'];
         $needsPins = false;
@@ -3521,6 +3993,9 @@ function sas_unused_cards_cached($api, $force = false)
     }
     $_SESSION['sas_unused_ui_v6'] = $out;
     $_SESSION['sas_unused_ui_v6_at'] = time();
+    $_SESSION['sas_unused_ui_v6_key'] = function_exists('sas_profiles_session_key')
+        ? sas_profiles_session_key()
+        : sas_cards_tenant_suffix();
     unset(
         $_SESSION['sas_unused_ui'],
         $_SESSION['sas_unused_ui_at'],

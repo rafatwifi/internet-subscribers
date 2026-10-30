@@ -5,6 +5,175 @@ function e($value)
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 }
 
+/** ثيم الواجهة لكل مستخدم: classic | glass */
+function ui_theme_normalize($theme)
+{
+    $theme = strtolower(trim((string) $theme));
+    return ($theme === 'glass') ? 'glass' : 'classic';
+}
+
+function ui_theme_current($pdo = null)
+{
+    if ($pdo && function_exists('admin_ui_prefs_load')) {
+        $prefs = admin_ui_prefs_load($pdo);
+        if (is_array($prefs) && isset($prefs['ui_theme'])) {
+            return ui_theme_normalize($prefs['ui_theme']);
+        }
+    }
+    if (!empty($_SESSION['ui_prefs']) && is_array($_SESSION['ui_prefs']) && isset($_SESSION['ui_prefs']['ui_theme'])) {
+        return ui_theme_normalize($_SESSION['ui_prefs']['ui_theme']);
+    }
+    return 'classic';
+}
+
+/** اسم ملف خلفية الزجاج الخاصة بالمستخدم */
+function ui_glass_bg_filename($prefs)
+{
+    if (!is_array($prefs) || empty($prefs['glass_bg'])) {
+        return '';
+    }
+    $file = basename(str_replace('\\', '/', (string) $prefs['glass_bg']));
+    if ($file === '' || $file === '.' || $file === '..') {
+        return '';
+    }
+    if (!preg_match('/^glass-bg-\d+\.(jpe?g|png|gif|webp)$/i', $file)) {
+        return '';
+    }
+    return $file;
+}
+
+/** رابط خلفية الزجاج: شخصي ثم صورة النظام ثم فارغ */
+function ui_glass_bg_url($pdo = null, $settings = null)
+{
+    $prefs = array();
+    if ($pdo && function_exists('admin_ui_prefs_load')) {
+        $prefs = admin_ui_prefs_load($pdo);
+    } elseif (!empty($_SESSION['ui_prefs']) && is_array($_SESSION['ui_prefs'])) {
+        $prefs = $_SESSION['ui_prefs'];
+    }
+    $file = ui_glass_bg_filename($prefs);
+    if ($file !== '') {
+        $dir = function_exists('login_uploads_dir')
+            ? login_uploads_dir()
+            : (dirname(__DIR__) . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'uploads');
+        $path = $dir . DIRECTORY_SEPARATOR . $file;
+        if (is_file($path)) {
+            $v = @filemtime($path);
+            return 'uploads/' . rawurlencode($file) . ($v ? ('?v=' . (int) $v) : '');
+        }
+    }
+    if (is_array($settings) && function_exists('login_bg_url')) {
+        $sys = login_bg_url($settings);
+        if ($sys !== '') {
+            return $sys;
+        }
+    }
+    return '';
+}
+
+function ui_glass_bg_delete_files($userId)
+{
+    $userId = (int) $userId;
+    if ($userId <= 0) {
+        return;
+    }
+    $dir = function_exists('login_uploads_dir')
+        ? login_uploads_dir()
+        : (dirname(__DIR__) . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'uploads');
+    if (!is_dir($dir)) {
+        return;
+    }
+    $list = glob($dir . DIRECTORY_SEPARATOR . 'glass-bg-' . $userId . '.*');
+    if (!is_array($list)) {
+        return;
+    }
+    foreach ($list as $old) {
+        if (is_file($old)) {
+            @unlink($old);
+        }
+    }
+}
+
+function ui_glass_bg_store_upload($fileInfo, $userId, &$failReason = null)
+{
+    $failReason = '';
+    $userId = (int) $userId;
+    if ($userId <= 0) {
+        $failReason = 'user';
+        return false;
+    }
+    if (!is_array($fileInfo) || empty($fileInfo['tmp_name'])) {
+        $failReason = 'no_file';
+        return false;
+    }
+    if (!is_uploaded_file($fileInfo['tmp_name'])) {
+        $failReason = 'upload';
+        return false;
+    }
+    if (!empty($fileInfo['error']) && (int) $fileInfo['error'] !== 0) {
+        $failReason = 'php_' . (int) $fileInfo['error'];
+        return false;
+    }
+    if ((int) $fileInfo['size'] > 8 * 1024 * 1024) {
+        $failReason = 'size';
+        return false;
+    }
+    $info = @getimagesize($fileInfo['tmp_name']);
+    $map = array(
+        IMAGETYPE_JPEG => 'jpg',
+        IMAGETYPE_PNG => 'png',
+        IMAGETYPE_GIF => 'gif',
+    );
+    if (defined('IMAGETYPE_WEBP')) {
+        $map[IMAGETYPE_WEBP] = 'webp';
+    }
+    $ext = '';
+    if (is_array($info) && !empty($info[2]) && isset($map[(int) $info[2]])) {
+        $ext = $map[(int) $info[2]];
+    } else {
+        $orig = isset($fileInfo['name']) ? strtolower((string) $fileInfo['name']) : '';
+        if (preg_match('/\.(jpe?g)$/', $orig)) {
+            $ext = 'jpg';
+        } elseif (preg_match('/\.png$/', $orig)) {
+            $ext = 'png';
+        } elseif (preg_match('/\.gif$/', $orig)) {
+            $ext = 'gif';
+        } elseif (preg_match('/\.webp$/', $orig)) {
+            $ext = 'webp';
+        }
+    }
+    if ($ext === '') {
+        $failReason = 'type';
+        return false;
+    }
+    $dir = function_exists('login_uploads_dir')
+        ? login_uploads_dir()
+        : (dirname(__DIR__) . DIRECTORY_SEPARATOR . 'public' . DIRECTORY_SEPARATOR . 'uploads');
+    if (!is_dir($dir) && !@mkdir($dir, 0755, true)) {
+        $failReason = 'mkdir';
+        return false;
+    }
+    if (!is_writable($dir)) {
+        @chmod($dir, 0755);
+    }
+    if (!is_writable($dir)) {
+        $failReason = 'writable';
+        return false;
+    }
+    ui_glass_bg_delete_files($userId);
+    $name = 'glass-bg-' . $userId . '.' . $ext;
+    $dest = $dir . DIRECTORY_SEPARATOR . $name;
+    if (!@move_uploaded_file($fileInfo['tmp_name'], $dest)) {
+        if (!@copy($fileInfo['tmp_name'], $dest)) {
+            $failReason = 'move';
+            return false;
+        }
+        @unlink($fileInfo['tmp_name']);
+    }
+    @chmod($dest, 0644);
+    return $name;
+}
+
 function app_public_url($path)
 {
     $path = (string) $path;
@@ -590,6 +759,80 @@ function export_csv($filename, $headers, $rows)
     }
     fclose($out);
     exit;
+}
+
+/** ملف يفتحه إكسل (HTML table + .xls) بدون مكتبات. */
+function export_excel_html($filename, $headers, $rows)
+{
+    $filename = preg_replace('/[^A-Za-z0-9._\-\x{0600}-\x{06FF}]+/u', '_', (string) $filename);
+    if ($filename === '') {
+        $filename = 'export.xls';
+    }
+    if (!preg_match('/\.xls$/i', $filename)) {
+        $filename .= '.xls';
+    }
+    header('Content-Type: application/vnd.ms-excel; charset=utf-8');
+    header('Content-Disposition: attachment; filename="' . $filename . '"');
+    header('Pragma: no-cache');
+    header('Expires: 0');
+    echo "\xEF\xBB\xBF";
+    echo '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel">';
+    echo '<head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"></head><body>';
+    echo '<table border="1" cellspacing="0" cellpadding="4">';
+    echo '<tr>';
+    foreach ($headers as $h) {
+        echo '<th style="background:#eef2f6;font-weight:700">' . htmlspecialchars((string) $h, ENT_QUOTES, 'UTF-8') . '</th>';
+    }
+    echo '</tr>';
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        echo '<tr>';
+        foreach ($row as $cell) {
+            $t = (string) $cell;
+            $style = '';
+            if ($t !== '' && preg_match('/^[=+\-@]/', $t)) {
+                $t = "'" . $t;
+            }
+            if ($t !== '' && preg_match('/^[0-9+\-].*$/', $t)) {
+                $style = ' style="mso-number-format:\'\\@\'"';
+            }
+            echo '<td' . $style . '>' . htmlspecialchars($t, ENT_QUOTES, 'UTF-8') . '</td>';
+        }
+        echo '</tr>';
+    }
+    echo '</table></body></html>';
+    exit;
+}
+
+/** تصدير مشتركين الساس: بدون أب، أو عنده وكلاء تحته. */
+function sas_may_export_excel($pdo)
+{
+    if (!function_exists('current_admin')) {
+        return false;
+    }
+    $me = current_admin();
+    $uid = $me ? (int) $me['id'] : 0;
+    if ($uid <= 0 || !$pdo) {
+        return false;
+    }
+    $boss = 0;
+    if (function_exists('account_user_boss_id')) {
+        $boss = (int) account_user_boss_id($pdo, $uid);
+    } elseif (function_exists('account_viewer_parent_id')) {
+        $boss = (int) account_viewer_parent_id($pdo);
+    }
+    if ($boss <= 0) {
+        return true;
+    }
+    if (function_exists('account_viewer_has_downline') && account_viewer_has_downline($pdo, $uid)) {
+        return true;
+    }
+    if (function_exists('account_has_card_downline') && account_has_card_downline($pdo, $uid)) {
+        return true;
+    }
+    return false;
 }
 
 function message_type_base($type)

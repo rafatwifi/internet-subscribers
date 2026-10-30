@@ -133,7 +133,10 @@ if (isset($_GET['ajax']) && ($_GET['ajax'] === 'profiles' || $_GET['ajax'] === '
         && isset($_SESSION['sas_profiles_ui']) && is_array($_SESSION['sas_profiles_ui'])
         && !empty($_SESSION['sas_profiles_ui_at'])
         && (time() - (int) $_SESSION['sas_profiles_ui_at']) < 600
-        && $_SESSION['sas_profiles_ui']) {
+        && $_SESSION['sas_profiles_ui']
+        && function_exists('sas_profiles_session_key')
+        && isset($_SESSION['sas_profiles_ui_key'])
+        && (string) $_SESSION['sas_profiles_ui_key'] === sas_profiles_session_key($config)) {
         sas_json_out(true, '', array('profiles' => $_SESSION['sas_profiles_ui']));
     }
     if ($ajaxKind === 'managers' && !$forceCards
@@ -1246,6 +1249,9 @@ $sortMap = array(
     'rent' => 's.rental_device_id',
     'ip' => 'c.framed_ip',
     'msg' => 'last_msg_at',
+    'traf' => function_exists('sas_daily_traffic_order_sql')
+        ? sas_daily_traffic_order_sql('c')
+        : 'c.daily_traffic',
 );
 if (!isset($sortMap[$sortKey])) {
     $sortKey = 'name';
@@ -1254,10 +1260,93 @@ $orderSql = $sortMap[$sortKey] . ' ' . strtoupper($sortDir);
 if ($sortKey === 'name') {
     $orderSql = 'c.display_name ' . strtoupper($sortDir) . ', c.username ASC';
 }
+if ($sortKey === 'traf') {
+    $orderSql = $sortMap['traf'] . ' ' . strtoupper($sortDir) . ', c.username ASC';
+}
 
 $fromSql = function_exists('sas_cache_list_from_sql')
     ? sas_cache_list_from_sql()
     : ' FROM sas_users_cache c LEFT JOIN subscribers s ON s.id = c.local_subscriber_id';
+
+$canExportExcel = function_exists('sas_may_export_excel') && sas_may_export_excel($pdo);
+if (isset($_GET['export']) && (string) $_GET['export'] === 'excel') {
+    if (!$canExportExcel) {
+        flash('error', $lang === 'en' ? 'Excel export is not available for this account' : 'تصدير الإكسل غير متاح لهذا الحساب');
+        redirect('sas.php');
+    }
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
+    if (function_exists('set_time_limit')) {
+        @set_time_limit(120);
+    }
+    $exportRows = array();
+    try {
+        $exSql = sas_cache_list_select_sql(true) . $fromSql . '
+         WHERE ' . $where . '
+         ORDER BY ' . $orderSql . '
+         LIMIT 20000';
+        $exSt = $pdo->prepare($exSql);
+        $exSt->execute($params);
+        $exportRows = $exSt->fetchAll();
+    } catch (Exception $e) {
+        flash('error', $lang === 'en' ? 'Export failed' : 'فشل التصدير');
+        redirect('sas.php');
+    }
+    $enEx = ($lang === 'en');
+    $headers = array(
+        $enEx ? '#' : '#',
+        $enEx ? 'Username' : 'اسم الدخول',
+        'IP',
+        'MAC',
+        $enEx ? 'First name' : 'الاسم الأول',
+        $enEx ? 'Last name' : 'الاسم الأخير',
+        $enEx ? 'Phone' : 'الهاتف',
+        $enEx ? 'Expiration' : 'تاريخ الانتهاء',
+        $enEx ? 'Parent' : 'تابع الى',
+        $enEx ? 'Profile' : 'الباقة',
+        $enEx ? 'Rental' : 'الإيجار',
+        $enEx ? 'Debts' : 'الديون',
+        $enEx ? 'Online' : 'متصل',
+        $enEx ? 'Enabled' : 'مفعّل',
+    );
+    $out = array();
+    $nEx = 1;
+    foreach ($exportRows as $er) {
+        if (!is_array($er)) {
+            continue;
+        }
+        $rentOn = !empty($er['rental_enabled']) && trim((string) (isset($er['rental_device_id']) ? $er['rental_device_id'] : '')) !== '';
+        $out[] = array(
+            $nEx++,
+            isset($er['username']) ? (string) $er['username'] : '',
+            isset($er['framed_ip']) ? (string) $er['framed_ip'] : '',
+            isset($er['mac_address']) ? (string) $er['mac_address'] : '',
+            isset($er['firstname']) ? (string) $er['firstname'] : '',
+            isset($er['lastname']) ? (string) $er['lastname'] : '',
+            isset($er['phone']) ? (string) $er['phone'] : (isset($er['local_phone']) ? (string) $er['local_phone'] : ''),
+            isset($er['expire_at']) ? (string) $er['expire_at'] : '',
+            isset($er['parent_name']) ? (string) $er['parent_name'] : '',
+            isset($er['profile_name']) ? (string) $er['profile_name'] : '',
+            $rentOn ? (isset($er['rental_device_id']) ? (string) $er['rental_device_id'] : ($enEx ? 'Yes' : 'نعم')) : '',
+            isset($er['debt']) ? (string) $er['debt'] : '0',
+            !empty($er['is_online']) ? ($enEx ? 'Yes' : 'نعم') : ($enEx ? 'No' : 'لا'),
+            (isset($er['enabled']) && (string) $er['enabled'] !== '0' && (string) $er['enabled'] !== '')
+                ? ($enEx ? 'Yes' : 'نعم')
+                : ($enEx ? 'No' : 'لا'),
+        );
+    }
+    $stamp = date('Y-m-d_H-i');
+    $fname = ($enEx ? 'subscribers-' : 'مشتركين-') . $stamp . '.xls';
+    if (function_exists('export_excel_html')) {
+        export_excel_html($fname, $headers, $out);
+    }
+    if (function_exists('export_csv')) {
+        export_csv(str_replace('.xls', '.csv', $fname), $headers, $out);
+    }
+    flash('error', $enEx ? 'Export failed' : 'فشل التصدير');
+    redirect('sas.php');
+}
 
 try {
     $countSql = 'SELECT COUNT(DISTINCT c.username)' . $fromSql . ' WHERE ' . $where;
@@ -1423,6 +1512,16 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'live_online') {
             if ($tidLive <= 0) {
                 $tidLive = 1;
             }
+            if (function_exists('sas_refresh_daily_traffic_users')) {
+                sas_refresh_daily_traffic_users($pdo, $config, array_keys($wantUsers));
+            }
+            // دفعة خفيفة مقيّدة بوقت — تكمل ملء استهلاك المتصلين والفاصلين
+            if (function_exists('sas_backfill_daily_traffic')) {
+                try {
+                    sas_backfill_daily_traffic($pdo, $config, 4, false);
+                } catch (Exception $eBf) {
+                }
+            }
             $ph = array();
             $bind = array(':t' => $tidLive);
             $i = 0;
@@ -1514,7 +1613,7 @@ function sas_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw, 
 {
     if ($currentKey === $key) {
         $nextDir = ($currentDir === 'asc') ? 'desc' : 'asc';
-    } elseif ($key === 'debt' || $key === 'days' || $key === 'id' || $key === 'rent') {
+    } elseif ($key === 'debt' || $key === 'days' || $key === 'id' || $key === 'rent' || $key === 'traf') {
         $nextDir = 'desc';
     } else {
         $nextDir = 'asc';
@@ -1928,6 +2027,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   appearance: none; border: 0; background: transparent; color: #9aa8b6;
   width: 32px; height: 32px; cursor: pointer; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
+  text-decoration: none; box-sizing: border-box;
   border-radius: 6px;
 }
 .sas-table-tools .tool-ico:hover { color: #3c8dbc; background: #f3f7fa; }
@@ -2770,14 +2870,14 @@ body:has(#sasActModal:not(.hidden)) .main-top {
 }
 .sas-radius-page #subsTable th,
 .sas-radius-page #subsTable td {
-  text-align: center !important;
+  text-align: center;
   vertical-align: middle;
   overflow: visible;
   white-space: nowrap;
+  font-family: var(--font, "Tajawal", "Segoe UI", Tahoma, Arial, sans-serif);
 }
 .sas-radius-page #subsTable th {
-  background: #f4f4f4; color: #222;
-  font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+  background: #f4f4f4; color: #475569;
   font-size: 13px; font-weight: 600;
   padding: 5px 6px; border-bottom: 1px solid #e5e5e5;
   line-height: 1.3;
@@ -2785,11 +2885,13 @@ body:has(#sasActModal:not(.hidden)) .main-top {
 .sas-radius-page #subsTable th .th-sort {
   display: inline;
   white-space: nowrap;
+  font-family: inherit;
+  font-weight: inherit;
 }
 .sas-radius-page #subsTable td {
   padding: 4px 6px;
-  font-family: "Segoe UI", Tahoma, Arial, sans-serif;
-  font-size: 13px; font-weight: 400;
+  font-size: 13px; font-weight: 500;
+  color: #334155;
   border-bottom: 1px solid #ececec;
 }
 .sas-radius-page #subsTable td a,
@@ -2797,8 +2899,49 @@ body:has(#sasActModal:not(.hidden)) .main-top {
 .sas-radius-page #subsTable td .sub-ping,
 .sas-radius-page #subsTable td .sub-ago,
 .sas-radius-page #subsTable td strong {
-  font-weight: 400;
+  font-family: inherit;
+  font-weight: 500;
   font-size: 13px;
+}
+/* يسار: بيانات لاتينية/أرقام */
+.sas-radius-page #subsTable th.col-user,
+.sas-radius-page #subsTable td.col-user,
+.sas-radius-page #subsTable th.col-ip,
+.sas-radius-page #subsTable td.col-ip,
+.sas-radius-page #subsTable th.col-mac,
+.sas-radius-page #subsTable td.col-mac,
+.sas-radius-page #subsTable th.col-phone,
+.sas-radius-page #subsTable td.col-phone,
+.sas-radius-page #subsTable th.col-exp,
+.sas-radius-page #subsTable td.col-exp,
+.sas-radius-page #subsTable th.col-traf,
+.sas-radius-page #subsTable td.col-traf,
+.sas-radius-page #subsTable th.col-grace,
+.sas-radius-page #subsTable td.col-grace,
+.sas-radius-page #subsTable th.col-days,
+.sas-radius-page #subsTable td.col-days,
+.sas-radius-page #subsTable th.col-num,
+.sas-radius-page #subsTable td.col-num {
+  text-align: left !important;
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+/* يمين: أسماء ونصوص عربية */
+.sas-radius-page #subsTable th.col-fn,
+.sas-radius-page #subsTable td.col-fn,
+.sas-radius-page #subsTable th.col-ln,
+.sas-radius-page #subsTable td.col-ln,
+.sas-radius-page #subsTable th.col-parent,
+.sas-radius-page #subsTable td.col-parent,
+.sas-radius-page #subsTable th.col-pkg,
+.sas-radius-page #subsTable td.col-pkg,
+.sas-radius-page #subsTable th.col-rent,
+.sas-radius-page #subsTable td.col-rent,
+.sas-radius-page #subsTable th.col-debt,
+.sas-radius-page #subsTable td.col-debt {
+  text-align: right !important;
+  direction: rtl;
+  unicode-bidi: isolate;
 }
 .sas-radius-page #subsTable td.col-user,
 .sas-radius-page #subsTable th.col-user,
@@ -2816,12 +2959,6 @@ body:has(#sasActModal:not(.hidden)) .main-top {
   padding-left: 6px;
   padding-right: 6px;
 }
-.sas-radius-page #subsTable td.col-user,
-.sas-radius-page #subsTable th.col-user {
-  text-align: left !important;
-  direction: ltr;
-  unicode-bidi: isolate;
-}
 .sas-radius-page #subsTable .col-fn,
 .sas-radius-page #subsTable .col-pkg,
 .sas-radius-page #subsTable .col-parent {
@@ -2832,32 +2969,31 @@ body:has(#sasActModal:not(.hidden)) .main-top {
 .sas-radius-page #subsTable .sas-link,
 .sas-radius-page #subsTable .debt-amt,
 .sas-radius-page #subsTable .rent-cell-edit {
-  text-align: center !important;
+  text-align: inherit !important;
+  font-family: inherit;
 }
 .sas-radius-page #subsTable .cell-edit {
   display: inline-block;
   max-width: 100%;
 }
-.sas-radius-page #subsTable th.col-fn,
-.sas-radius-page #subsTable td.col-fn,
 .sas-radius-page #subsTable th.col-fn .th-sort,
-.sas-radius-page #subsTable td.col-fn .sas-fn-link {
+.sas-radius-page #subsTable td.col-fn .sas-fn-link,
+.sas-radius-page #subsTable th.col-ln .th-sort {
   direction: rtl;
   text-align: right !important;
   unicode-bidi: isolate;
+  font-family: inherit;
 }
-.sas-radius-page #subsTable .col-ip {
-  direction: ltr;
-  unicode-bidi: isolate;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
+.sas-radius-page #subsTable td.col-ip .sas-ip-wrap {
+  display: inline-flex;
+  justify-content: flex-start;
+  width: auto;
+  max-width: 100%;
 }
 .sas-radius-page #subsTable th.col-mac,
 .sas-radius-page #subsTable td.col-mac {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
-  font-size: 12px;
-  direction: ltr;
 }
 .sas-radius-page #subsTable th.col-ping,
 .sas-radius-page #subsTable td.col-ping {
@@ -3002,6 +3138,10 @@ html.sas-ln-off .sas-radius-page #subsTable .sas-fn-rest,
 .sas-radius-page #subsTable td.col-rent.col-off { display: none !important; }
 .sas-radius-page #subsTable th.col-off,
 .sas-radius-page #subsTable td.col-off { display: none !important; }
+/* البنك طافي — اخفِ عمود PING من الجدول وقائمة الأعمدة */
+body.sub-ping-off #subsTable th.col-ping,
+body.sub-ping-off #subsTable td.col-ping { display: none !important; }
+body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important; }
 .sas-filter-label {
   font-size: 11px; font-weight: 800; color: #64748b;
   padding: 8px 10px 4px; letter-spacing: .02em;
@@ -3345,6 +3485,10 @@ html.sas-ln-off .sas-radius-page #subsTable .sas-fn-rest,
   } catch (e) {}
 })();
 </script>
+<?php $pingModeNow = function_exists('sas_ping_mode') ? sas_ping_mode($pdo) : 'off'; ?>
+<?php if ($pingModeNow === 'off'): ?>
+<script>try{document.body.classList.add('sub-ping-off');}catch(e){}</script>
+<?php endif; ?>
 <div class="sas-radius-page">
     <?php if ($sasOfflineSnap): ?>
         <div class="sas-offline-banner" id="sasOfflineBanner" role="status">
@@ -3377,7 +3521,6 @@ html.sas-ln-off .sas-radius-page #subsTable .sas-fn-rest,
     <?php endif; ?>
 
     <div class="sas-legend">
-        <?php $pingModeNow = function_exists('sas_ping_mode') ? sas_ping_mode($pdo) : 'off'; ?>
         <div class="sas-legend-states">
         <span><i class="status-sq status-online"></i> <?php echo e($lang === 'en' ? 'Active + connected' : 'فعال ومتصل'); ?></span>
         <span><i class="status-sq status-active"></i> <?php echo e($lang === 'en' ? 'Active' : 'فعال غير متصل'); ?></span>
@@ -3423,6 +3566,29 @@ html.sas-ln-off .sas-radius-page #subsTable .sas-fn-rest,
                 <?php endif; ?>
             </form>
             <div class="sas-table-tools">
+                <?php if (!empty($canExportExcel)):
+                    $exQs = array('export' => 'excel');
+                    if ($q !== '') {
+                        $exQs['q'] = $q;
+                    }
+                    if ($subFilter !== '') {
+                        $exQs['sub'] = $subFilter;
+                    }
+                    if ($parentFilter !== '') {
+                        $exQs['parent'] = $parentFilter;
+                    }
+                    if ($sortKey !== '' && $sortKey !== 'name') {
+                        $exQs['sort'] = $sortKey;
+                    }
+                    if ($sortDir === 'desc') {
+                        $exQs['dir'] = 'desc';
+                    }
+                    $exportExcelHref = 'sas.php?' . http_build_query($exQs);
+                    ?>
+                <a class="tool-ico" id="exportExcelBtn" href="<?php echo e($exportExcelHref); ?>" title="<?php echo e($lang === 'en' ? 'Export Excel' : 'تصدير إكسل'); ?>">
+                    <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M5 3h9l5 5v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zm8 1.5V9h4.5L13 4.5zM8 12h2.2l.9 2.4L12.1 12H14l-1.7 4L14 20h-2.1l-1-2.5-.9 2.5H8l1.7-4L8 12z"/></svg>
+                </a>
+                <?php endif; ?>
                 <button type="button" class="tool-ico" id="colsToggleBtn" title="<?php echo e($lang === 'en' ? 'Columns' : 'الأعمدة'); ?>">
                     <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M4 5h4v14H4zm6 0h4v14h-4zm6 0h4v14h-4z"/></svg>
                 </button>
@@ -3454,17 +3620,17 @@ html.sas-ln-off .sas-radius-page #subsTable .sas-fn-rest,
                 <th class="col-ip"><?php echo sas_sort_link('ip', 'IP Address', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
                 <th class="col-mac" title="<?php echo e($lang === 'en' ? 'MAC while online, last MAC while offline' : 'الماك للمتصل، وآخر ماك للفاصل'); ?>">MAC</th>
                 <th class="col-fn"><?php echo sas_sort_link('firstname', $lang === 'en' ? 'First Name' : 'الاسم الأول', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
-                <th class="col-ln"><?php echo sas_sort_link('lastname', $lang === 'en' ? 'Last Name' : 'الاسم الثاني', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
+                <th class="col-ln"><?php echo sas_sort_link('lastname', $lang === 'en' ? 'Last Name' : 'الاسم الأخير', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
                 <th class="col-phone"><?php echo e($lang === 'en' ? 'Phone' : 'الهاتف'); ?></th>
                 <th class="col-exp"><?php echo sas_sort_link('expire', $lang === 'en' ? 'Expiration' : 'تاريخ الانتهاء', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
                 <th class="col-parent"><?php echo sas_sort_link('parent', $lang === 'en' ? 'Parent' : 'تابع الى', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
                 <th class="col-pkg"><?php echo sas_sort_link('package', $lang === 'en' ? 'Profile' : 'الباقة', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
                 <th class="col-rent"><?php echo sas_sort_link('rent', $lang === 'en' ? 'Rental' : 'الإيجار', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
                 <th class="col-debt"><?php echo sas_sort_link('debt', $lang === 'en' ? 'Debts' : 'الديون', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
-                <th class="col-traf" title="<?php echo e($lang === 'en' ? 'Daily traffic' : 'الاستهلاك اليومي'); ?>"><?php echo e($lang === 'en' ? 'Daily' : 'الاستهلاك'); ?></th>
+                <th class="col-traf" title="<?php echo e($lang === 'en' ? 'Daily traffic' : 'الاستهلاك اليومي'); ?>"><?php echo sas_sort_link('traf', $lang === 'en' ? 'Daily' : 'الاستهلاك', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
                 <th class="col-grace" title="<?php echo e($lang === 'en' ? 'Grace days' : 'أيام السماح'); ?>"><?php echo e($lang === 'en' ? 'Grace' : 'السماح'); ?></th>
                 <th class="col-days" title="<?php echo e($lang === 'en' ? 'Remaining days' : 'الأيام المتبقية'); ?>"><?php echo sas_sort_link('days', $lang === 'en' ? 'Days left' : 'المتبقي', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
-                <th class="col-msg" title="<?php echo e($lang === 'en' ? 'Last message' : 'آخر رسالة'); ?>"><?php echo e($lang === 'en' ? 'Msg' : 'الرسالة'); ?></th>
+                <th class="col-msg" title="<?php echo e($lang === 'en' ? 'Last notice' : 'آخر إشعار'); ?>"><?php echo e($lang === 'en' ? 'Notice' : 'الاشعار'); ?></th>
             </tr>
             </thead>
             <tbody id="subsTableBody">
@@ -3589,7 +3755,6 @@ html.sas-ln-off .sas-radius-page #subsTable .sas-fn-rest,
     <button type="button" class="ops-item" data-ops="pay" id="opsItemPay" hidden><?php echo e(t('pay_debts')); ?></button>
     <button type="button" class="ops-item" data-ops="activate" id="opsItemActivate" hidden><?php echo e(t('activate')); ?></button>
     <button type="button" class="ops-item" data-ops="give_test" id="opsItemGiveTest" hidden><?php echo e(t('give_test')); ?></button>
-    <button type="button" class="ops-item" data-ops="change_profile" id="opsItemProfile" hidden><?php echo e($lang === 'en' ? 'Change package' : 'تغيير نوع الاشتراك'); ?></button>
     <button type="button" class="ops-item" data-ops="disable" id="opsItemDisable" hidden><?php echo e($lang === 'en' ? 'Disable' : 'تعطيل'); ?></button>
     <button type="button" class="ops-item" data-ops="enable" id="opsItemEnable" hidden><?php echo e($lang === 'en' ? 'Enable' : 'تشغيل'); ?></button>
     <button type="button" class="ops-item" data-ops="disconnect" id="opsItemDisconnect" hidden><?php echo e($lang === 'en' ? 'Disconnect' : 'قطع الاتصال'); ?></button>
@@ -3706,7 +3871,7 @@ html.sas-ln-off .sas-radius-page #subsTable .sas-fn-rest,
     </div>
     <div class="cols-check ops-item" data-col-row="msg">
         <span class="cols-handle" draggable="true" title="<?php echo e($lang === 'en' ? 'Drag to reorder' : 'اسحب للترتيب'); ?>">⋮⋮</span>
-        <label><input type="checkbox" data-col="msg" checked> <?php echo e($lang === 'en' ? 'Message' : 'الرسالة'); ?></label>
+        <label><input type="checkbox" data-col="msg" checked> <?php echo e($lang === 'en' ? 'Notice' : 'الاشعار'); ?></label>
         <button type="button" class="cols-shift" data-dir="-1" aria-label="up">▲</button>
         <button type="button" class="cols-shift" data-dir="1" aria-label="down">▼</button>
     </div>
@@ -4150,7 +4315,10 @@ html.sas-ln-off .sas-radius-page #subsTable .sas-fn-rest,
       'per_page' => $perPageRaw,
   )); ?>;
   var csrf = <?php echo json_encode(csrf_token()); ?>;
-  var rentalDevices = <?php echo json_encode(function_exists('rental_devices_list') ? rental_devices_list() : array()); ?>;
+  var rentalDevices = <?php
+    $rentUiOn = !function_exists('rental_system_is_on') || rental_system_is_on();
+    echo json_encode(($rentUiOn && function_exists('rental_devices_list')) ? rental_devices_list() : array());
+  ?>;
   var rentNoneLabel = <?php echo json_encode($lang === 'en' ? 'No rental' : 'بدون إيجار'); ?>;
   var rentFeeTxt = <?php echo json_encode(function_exists('rental_fee_amount') && function_exists('money_format_iqd')
     ? money_format_iqd(rental_fee_amount(), isset($config['currency']) ? $config['currency'] : 'د.ع')
@@ -4527,7 +4695,6 @@ html.sas-ln-off .sas-radius-page #subsTable .sas-fn-rest,
     showEl(document.getElementById('opsItemOpen'), !!one);
     showEl(document.getElementById('opsItemPay'), anyDebt);
     showEl(document.getElementById('opsItemActivate'), !!one && !maintBlockActivate);
-    showEl(document.getElementById('opsItemProfile'), !!one);
     showEl(document.getElementById('opsItemEnable'), !!(one && !one.enabled));
     showEl(document.getElementById('opsItemDisable'), !!(one && one.enabled));
     showEl(document.getElementById('opsItemDisconnect'), !!(one && one.online));
@@ -4623,10 +4790,6 @@ html.sas-ln-off .sas-radius-page #subsTable .sas-fn-rest,
     }
     if (action === 'activate' && one) {
       openActModal(one);
-      return;
-    }
-    if (action === 'change_profile' && one) {
-      openProfModal(one);
       return;
     }
     if ((action === 'enable' || action === 'disable') && one) {
@@ -5920,6 +6083,14 @@ html.sas-ln-off .sas-radius-page #subsTable .sas-fn-rest,
     if (window.scrollTo) window.scrollTo(0, y);
     repaintActMarks();
   }
+  function setPingColumnByMode(mode) {
+    var off = mode === 'off';
+    try {
+      if (off) document.body.classList.add('sub-ping-off');
+      else document.body.classList.remove('sub-ping-off');
+    } catch (ePing) {}
+  }
+  setPingColumnByMode(<?php echo json_encode($pingModeNow); ?>);
   var pingModeBox = document.getElementById('subPingMode');
   if (pingModeBox) {
     pingModeBox.addEventListener('click', function (e) {
@@ -5932,6 +6103,7 @@ html.sas-ln-off .sas-radius-page #subsTable .sas-fn-rest,
       for (var i = 0; i < all.length; i++) all[i].classList.remove('is-on');
       btn.classList.add('is-on');
       pingModeBox.setAttribute('data-mode', mode);
+      setPingColumnByMode(mode);
       var pingIco = document.getElementById('pingModeBtn');
       if (pingIco) {
         if (mode === 'off') pingIco.classList.remove('is-on');

@@ -47,7 +47,7 @@ if ($tab === 'templates') {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'sas') {
     $tab = 'sas';
 }
-if (!in_array($tab, array('general', 'whatsapp', 'rental', 'users', 'plans', 'sas', 'saas', 'schedule', 'sensitive', 'update', 'maintenance'), true)) {
+if (!in_array($tab, array('general', 'whatsapp', 'rental', 'users', 'plans', 'sas', 'saas', 'schedule', 'sensitive', 'update', 'maintenance', 'widgets'), true)) {
     $tab = 'general';
 }
 
@@ -75,8 +75,8 @@ if ($tab === 'users') {
         flash('error', $lang === 'en' ? 'Super admin only' : 'للمدير العام فقط');
         redirect('settings.php');
     }
-} elseif ($isAgentWaOnly || $isAgencySasOnly) {
-    // واتساب للوكيل / ربط ساس للوكالة — بدون صلاحية settings كاملة
+} elseif ($tab === 'widgets' || $isAgentWaOnly || $isAgencySasOnly) {
+    // ترتيب الوجدز لكل حساب، وواتساب للوكيل، وربط ساس للوكالة
 } else {
     // وكالة بدون صلاحية settings: وجّه مباشرة لربط الساس
     if ($agencyTid > 1 && !user_can('settings') && $tab === 'general') {
@@ -145,6 +145,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('settings.php?tab=' . $tab);
     }
 
+    if ((string) post('action') === 'save_dash_layout' && function_exists('dash_layout_save')) {
+        $dashMe = function_exists('current_admin') ? current_admin() : null;
+        $dashIds = isset($_POST['dash_id']) && is_array($_POST['dash_id']) ? $_POST['dash_id'] : array();
+        $dashOns = isset($_POST['dash_on']) && is_array($_POST['dash_on']) ? $_POST['dash_on'] : array();
+        $dashOnMap = array();
+        foreach ($dashOns as $dashOnId) {
+            $dashOnMap[(string) $dashOnId] = 1;
+        }
+        $dashTones = isset($_POST['dash_tone']) && is_array($_POST['dash_tone']) ? $_POST['dash_tone'] : array();
+        $dashRows = array();
+        foreach ($dashIds as $dashId) {
+            $dashId = (string) $dashId;
+            $dashRows[] = array(
+                'id' => $dashId,
+                'on' => isset($dashOnMap[$dashId]) ? 1 : 0,
+                'tone' => isset($dashTones[$dashId]) ? (string) $dashTones[$dashId] : '',
+            );
+        }
+        if ($dashMe && dash_layout_save($pdo, (int) $dashMe['id'], $dashRows)) {
+            flash('success', $lang === 'en' ? 'Widget layout saved' : 'انحفظ ترتيب الوجدز');
+        } else {
+            flash('error', $lang === 'en' ? 'Could not save the widget layout' : 'ما انحفظ ترتيب الوجدز');
+        }
+        redirect('settings.php?tab=widgets');
+    }
+
     $section = post('section', 'general');
     if (!$isPlatformAdmin && in_array($section, array('general', 'login_bg', 'whatsapp', 'add_user', 'save_user', 'delete_user'), true)) {
         flash('error', $lang === 'en' ? 'Platform admin only' : 'للمدير العام فقط');
@@ -159,6 +185,56 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         flash('success', $lang === 'en' ? 'Saved' : 'تم الحفظ');
         redirect('settings.php?tab=sas');
+    }
+    if ($section === 'ui_theme') {
+        $themePick = function_exists('ui_theme_normalize')
+            ? ui_theme_normalize(post('ui_theme', 'classic'))
+            : ((post('ui_theme', 'classic') === 'glass') ? 'glass' : 'classic');
+        if (function_exists('admin_ui_prefs_save')) {
+            admin_ui_prefs_save($pdo, 'ui_theme', $themePick);
+        }
+        $meTheme = function_exists('current_admin') ? current_admin() : null;
+        $meThemeId = $meTheme ? (int) $meTheme['id'] : 0;
+        if ($meThemeId > 0 && function_exists('ui_glass_bg_store_upload')) {
+            if (post('glass_bg_remove') === '1') {
+                ui_glass_bg_delete_files($meThemeId);
+                if (function_exists('admin_ui_prefs_save')) {
+                    admin_ui_prefs_save($pdo, 'glass_bg', '');
+                }
+            } elseif (!empty($_FILES['glass_bg_file']['tmp_name'])) {
+                $bgFail = '';
+                $savedBg = ui_glass_bg_store_upload($_FILES['glass_bg_file'], $meThemeId, $bgFail);
+                if ($savedBg === false) {
+                    $msg = $lang === 'en'
+                        ? 'Background upload failed. Use JPG/PNG/GIF/WEBP up to 8MB.'
+                        : 'فشل رفع الخلفية. استخدم JPG/PNG/GIF/WEBP بحد 8MB.';
+                    if ($bgFail === 'writable' || $bgFail === 'mkdir') {
+                        $msg = $lang === 'en'
+                            ? 'Uploads folder is not writable (public/uploads).'
+                            : 'مجلد الرفع غير قابل للكتابة (public/uploads).';
+                    } elseif ($bgFail === 'size') {
+                        $msg = $lang === 'en' ? 'Background image is too large (max 8MB).' : 'صورة الخلفية كبيرة (الحد 8MB).';
+                    } elseif ($bgFail === 'type') {
+                        $msg = $lang === 'en' ? 'Unsupported background image type.' : 'نوع صورة الخلفية غير مدعوم.';
+                    }
+                    flash('error', $msg);
+                    $backTabFail = isset($_POST['return_tab']) ? preg_replace('/[^a-z0-9_]/', '', (string) $_POST['return_tab']) : $tab;
+                    if ($backTabFail === '') {
+                        $backTabFail = 'widgets';
+                    }
+                    redirect('settings.php?tab=' . $backTabFail);
+                }
+                if (function_exists('admin_ui_prefs_save')) {
+                    admin_ui_prefs_save($pdo, 'glass_bg', $savedBg);
+                }
+            }
+        }
+        flash('success', $lang === 'en' ? 'Theme saved for your account' : 'انحفظ الثيم لحسابك');
+        $backTab = isset($_POST['return_tab']) ? preg_replace('/[^a-z0-9_]/', '', (string) $_POST['return_tab']) : $tab;
+        if ($backTab === '') {
+            $backTab = 'widgets';
+        }
+        redirect('settings.php?tab=' . $backTab);
     }
     $data = array();
     $skipSettingsSave = false;
@@ -538,47 +614,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             $data['brand_icon'] = $savedIco;
         }
-    } elseif ($section === 'rental') {
+    } elseif ($section === 'rental_system') {
+        $data = array(
+            'rental_system_enabled' => post('rental_system_enabled') === '1',
+        );
+        $tab = 'rental';
+    } elseif ($section === 'rental_fee') {
         $fee = (float) post('rental_fee', '5000');
         if ($fee < 0) {
             $fee = 0;
         }
-        $names = isset($_POST['device_name']) && is_array($_POST['device_name']) ? $_POST['device_name'] : array();
-        $icons = isset($_POST['device_icon']) && is_array($_POST['device_icon']) ? $_POST['device_icon'] : array();
-        $colors = isset($_POST['device_color']) && is_array($_POST['device_color']) ? $_POST['device_color'] : array();
-        $ids = isset($_POST['device_id']) && is_array($_POST['device_id']) ? $_POST['device_id'] : array();
-        $devices = array();
-        $n = max(count($names), count($ids));
-        for ($i = 0; $i < $n; $i++) {
-            $name = isset($names[$i]) ? trim((string) $names[$i]) : '';
-            if ($name === '') {
-                continue;
-            }
-            $id = isset($ids[$i]) ? trim((string) $ids[$i]) : '';
+        $data = array('rental_fee' => $fee);
+        $tab = 'rental';
+    } elseif ($section === 'rental_device_save') {
+        $cur = settings_load();
+        $oldId = trim((string) post('device_old_id', ''));
+        $name = trim((string) post('device_name', ''));
+        $id = trim((string) post('device_id', ''));
+        if ($id === '' && $name !== '') {
+            $id = preg_replace('/\s+/', '-', strtolower($name));
             if ($id === '') {
-                $id = preg_replace('/\s+/', '-', strtolower($name));
-                if ($id === '') {
-                    $id = 'dev' . ($i + 1);
-                }
+                $id = 'dev' . time();
             }
-            $icon = isset($icons[$i]) ? trim((string) $icons[$i]) : '';
-            if ($icon === '') {
-                $icon = strtoupper(substr($id, 0, 2));
-            }
-            $color = isset($colors[$i]) ? trim((string) $colors[$i]) : '#5e5ce6';
-            $devices[] = array(
-                'id' => $id,
-                'name' => $name,
-                'icon' => $icon,
-                'color' => $color,
-            );
         }
-        if (!$devices) {
-            $devices = rental_default_devices();
+        $icon = trim((string) post('device_icon', ''));
+        $color = trim((string) post('device_color', '#5e5ce6'));
+        list($okDev, $devices) = rental_devices_replace_one($cur, $oldId, array(
+            'id' => $id,
+            'name' => $name,
+            'icon' => $icon,
+            'color' => $color,
+        ));
+        if (!$okDev) {
+            flash('error', $lang === 'en' ? 'Name and code are required' : 'الاسم والمعرّف مطلوبان');
+            redirect('settings.php?tab=rental&device=' . rawurlencode($oldId !== '' ? $oldId : 'new'));
         }
+        $data = array('rental_devices' => $devices);
+        $tab = 'rental';
+        $_POST['_rental_device_redirect'] = $id;
+    } elseif ($section === 'rental_device_delete') {
+        $cur = settings_load();
+        $delId = trim((string) post('device_id', ''));
         $data = array(
-            'rental_fee' => $fee,
-            'rental_devices' => $devices,
+            'rental_devices' => rental_devices_remove_one($cur, $delId),
         );
         $tab = 'rental';
     } elseif ($section === 'whatsapp') {
@@ -1017,6 +1095,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             flash('error', 'Cannot write settings.json');
         }
+        if ($section === 'rental_device_save' && !empty($_POST['_rental_device_redirect'])) {
+            redirect('settings.php?tab=rental&device=' . rawurlencode((string) $_POST['_rental_device_redirect']));
+        }
+        if ($section === 'rental_device_delete') {
+            redirect('settings.php?tab=rental');
+        }
         redirect('settings.php?tab=' . $tab);
     }
 }
@@ -1082,6 +1166,16 @@ if ($tab === 'sas') {
 }
 $rentalDevices = rental_devices_list($s);
 $rentalFee = rental_fee_amount($s);
+$rentalSystemOn = function_exists('rental_system_is_on') ? rental_system_is_on($s) : true;
+$rentalDeviceEdit = isset($_GET['device']) ? trim((string) $_GET['device']) : '';
+$rentalEditRow = null;
+$rentalIsNew = ($rentalDeviceEdit === 'new');
+if ($rentalDeviceEdit !== '' && !$rentalIsNew) {
+    $rentalEditRow = rental_device_by_id($rentalDeviceEdit, $s);
+    if (!$rentalEditRow) {
+        $rentalDeviceEdit = '';
+    }
+}
 $hostHint = parse_url(isset($s['whatsapp_local_url']) ? $s['whatsapp_local_url'] : '', PHP_URL_HOST);
 if (!$hostHint) {
     $hostHint = '172.16.16.13';
@@ -1092,7 +1186,364 @@ $me = current_admin();
 
 render_header(t('settings'), $activeNav);
 render_settings_tabs($tab);
+
+$uiThemeNow = function_exists('ui_theme_current') ? ui_theme_current($pdo) : 'classic';
+$uiThemeNow = ($uiThemeNow === 'glass') ? 'glass' : 'classic';
+$showThemePanel = in_array($tab, array('widgets', 'general', 'sas', 'whatsapp'), true);
+$glassBgNow = function_exists('ui_glass_bg_url') ? ui_glass_bg_url($pdo, isset($settings) ? $settings : null) : '';
+$glassBgPersonal = '';
+if (function_exists('admin_ui_prefs_load') && function_exists('ui_glass_bg_filename')) {
+    $glassBgPersonal = ui_glass_bg_filename(admin_ui_prefs_load($pdo));
+}
 ?>
+
+<?php if ($showThemePanel): ?>
+<div class="panel theme-pick-panel" id="themePickPanel">
+    <h2><?php echo e($lang === 'en' ? 'Interface theme' : 'ثيم الواجهة'); ?></h2>
+    <p class="meta" style="margin-top:-6px">
+        <?php echo e($lang === 'en'
+            ? 'Saved for your login only. Classic is the previous look, Glass is the transparent dashboard.'
+            : 'ينحفظ لحسابك فقط. الكلاسيك هو الشكل السابق، والزجاجي هو الداشبورد الشفاف.'); ?>
+    </p>
+    <form method="post" class="theme-pick-form" id="themePickForm" enctype="multipart/form-data">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="section" value="ui_theme">
+        <input type="hidden" name="return_tab" value="<?php echo e($tab); ?>">
+        <div class="theme-pick-grid" role="radiogroup" aria-label="<?php echo e($lang === 'en' ? 'Theme' : 'الثيم'); ?>">
+            <label class="theme-card<?php echo $uiThemeNow === 'classic' ? ' is-on' : ''; ?>">
+                <input type="radio" name="ui_theme" value="classic" <?php echo $uiThemeNow === 'classic' ? 'checked' : ''; ?>>
+                <span class="theme-card-preview theme-prev-classic" aria-hidden="true">
+                    <span class="tp-side"></span>
+                    <span class="tp-main">
+                        <span class="tp-bar"></span>
+                        <span class="tp-boxes"><i></i><i></i><i></i></span>
+                    </span>
+                </span>
+                <span class="theme-card-name"><?php echo e($lang === 'en' ? 'Classic' : 'كلاسيك'); ?></span>
+                <span class="theme-card-sub"><?php echo e($lang === 'en' ? 'Previous solid look' : 'الشكل السابق الصلب'); ?></span>
+            </label>
+            <label class="theme-card<?php echo $uiThemeNow === 'glass' ? ' is-on' : ''; ?>">
+                <input type="radio" name="ui_theme" value="glass" <?php echo $uiThemeNow === 'glass' ? 'checked' : ''; ?>>
+                <span class="theme-card-preview theme-prev-glass" aria-hidden="true"<?php
+                    echo $glassBgNow !== '' ? (' style="background-image:url(' . e($glassBgNow) . ')"') : '';
+                ?>>
+                    <span class="tp-side"></span>
+                    <span class="tp-main">
+                        <span class="tp-bar"></span>
+                        <span class="tp-boxes"><i></i><i></i><i></i></span>
+                    </span>
+                </span>
+                <span class="theme-card-name"><?php echo e($lang === 'en' ? 'Glass' : 'زجاجي شفاف'); ?></span>
+                <span class="theme-card-sub"><?php echo e($lang === 'en' ? 'Frosted glass dashboard' : 'داشبورد زجاجي شفاف'); ?></span>
+            </label>
+        </div>
+        <div class="theme-glass-bg" style="margin-top:14px">
+            <label><?php echo e($lang === 'en' ? 'Glass background image (optional)' : 'صورة خلفية الزجاج (اختياري)'); ?></label>
+            <input type="file" name="glass_bg_file" accept="image/jpeg,image/png,image/gif,image/webp">
+            <small class="meta" style="display:block;margin-top:4px">
+                <?php echo e($lang === 'en'
+                    ? 'For your account only. JPG/PNG/GIF/WEBP up to 8MB. Makes transparency look better.'
+                    : 'لحسابك فقط. JPG/PNG/GIF/WEBP حتى 8MB. تخلي الشفافية أوضح.'); ?>
+            </small>
+            <?php if ($glassBgNow !== ''): ?>
+                <div class="login-bg-preview" style="margin-top:10px;height:88px;border-radius:12px;background-image:url(<?php echo e($glassBgNow); ?>);background-size:cover;background-position:center"></div>
+            <?php endif; ?>
+        </div>
+        <div class="actions" style="margin-top:12px">
+            <button class="btn" type="submit"><?php echo e($lang === 'en' ? 'Save theme' : 'حفظ الثيم'); ?></button>
+            <?php if ($glassBgPersonal !== ''): ?>
+                <button class="btn ghost" type="submit" name="glass_bg_remove" value="1"><?php echo e($lang === 'en' ? 'Remove background image' : 'إزالة صورة الخلفية'); ?></button>
+            <?php endif; ?>
+        </div>
+    </form>
+</div>
+<style>
+.theme-pick-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+@media (max-width: 640px) { .theme-pick-grid { grid-template-columns: 1fr; } }
+.theme-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(15,23,42,.12);
+  background: rgba(255,255,255,.55);
+  cursor: pointer;
+  transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+.theme-card input { position: absolute; opacity: 0; pointer-events: none; }
+.theme-card.is-on {
+  border-color: #0ea5e9;
+  box-shadow: 0 0 0 2px rgba(14,165,233,.25);
+}
+.theme-card:hover { transform: translateY(-2px); }
+.theme-card-name { font-weight: 800; font-size: 14px; }
+.theme-card-sub { font-size: 12px; font-weight: 600; opacity: .7; }
+.theme-card-preview {
+  display: flex;
+  height: 76px;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(15,23,42,.08);
+}
+.theme-card-preview .tp-side { width: 22%; }
+.theme-card-preview .tp-main { flex: 1; padding: 8px; display: flex; flex-direction: column; gap: 7px; }
+.theme-card-preview .tp-bar { height: 10px; border-radius: 999px; }
+.theme-card-preview .tp-boxes { display: flex; gap: 6px; flex: 1; }
+.theme-card-preview .tp-boxes i { flex: 1; border-radius: 8px; display: block; }
+.theme-prev-classic .tp-side { background: #12181f; }
+.theme-prev-classic .tp-main { background: #e8edf3; }
+.theme-prev-classic .tp-bar { background: #fff; }
+.theme-prev-classic .tp-boxes i:nth-child(1) { background: linear-gradient(145deg,#38bdf8,#0369a1); }
+.theme-prev-classic .tp-boxes i:nth-child(2) { background: linear-gradient(145deg,#4ade80,#15803d); }
+.theme-prev-classic .tp-boxes i:nth-child(3) { background: linear-gradient(145deg,#fb7185,#be123c); }
+.theme-prev-glass {
+  background: url('assets/glass-bg.jpg?v=1') center/cover;
+}
+.theme-prev-glass .tp-side { background: rgba(255,255,255,.12); backdrop-filter: blur(6px); }
+.theme-prev-glass .tp-main { background: transparent; }
+.theme-prev-glass .tp-bar,
+.theme-prev-glass .tp-boxes i {
+  background: rgba(255,255,255,.16);
+  border: 1px solid rgba(255,255,255,.28);
+  backdrop-filter: blur(6px);
+}
+</style>
+<script>
+(function () {
+  var form = document.getElementById('themePickForm');
+  if (!form) return;
+  form.querySelectorAll('input[name="ui_theme"]').forEach(function (r) {
+    r.addEventListener('change', function () {
+      form.querySelectorAll('.theme-card').forEach(function (c) { c.classList.remove('is-on'); });
+      var lab = r.closest('.theme-card');
+      if (lab) lab.classList.add('is-on');
+    });
+  });
+})();
+</script>
+<?php endif; ?>
+
+<?php if ($tab === 'widgets' && function_exists('dash_layout_edit_rows')):
+    list($dashCat, $dashEdit) = dash_layout_edit_rows($pdo);
+    $dashToneOpts = function_exists('dash_layout_tones') ? dash_layout_tones() : array();
+    $isEnSet = ($lang === 'en');
+?>
+<div class="panel panel-compact wid-panel">
+    <h2><?php echo e($isEnSet ? 'Arrange widgets' : 'ترتيب الوجدز'); ?></h2>
+    <p class="meta"><?php echo e($isEnSet
+        ? 'Drag the tiles like the dashboard. Tap the eye to hide, and the dots to change color.'
+        : 'اسحب البطاقات مثل لوحة الوجدز. العين تخفي، والنقاط تغيّر اللون.'); ?></p>
+    <?php if (!$dashEdit): ?>
+        <p class="meta"><?php echo e($isEnSet ? 'No widgets are available for this account.' : 'ماكو وجدز متاحة لهذا الحساب.'); ?></p>
+    <?php else: ?>
+    <form method="post" action="settings.php?tab=widgets" id="dashLayoutForm">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="action" value="save_dash_layout">
+        <div class="wid-sort" id="widSort">
+            <?php foreach ($dashEdit as $dashRow):
+                $dashId = (string) $dashRow['id'];
+                if (!isset($dashCat[$dashId])) {
+                    continue;
+                }
+                $dashOn = !isset($dashRow['on']) || !empty($dashRow['on']);
+                $dashTone = isset($dashRow['tone']) ? (string) $dashRow['tone'] : $dashCat[$dashId]['tone'];
+                if (!isset($dashToneOpts[$dashTone])) {
+                    $dashTone = $dashCat[$dashId]['tone'];
+                }
+                ?>
+            <div class="wid-tile sas-box <?php echo e($dashTone); ?><?php echo $dashOn ? '' : ' is-off'; ?>" data-row data-tone="<?php echo e($dashTone); ?>">
+                <input type="hidden" name="dash_id[]" value="<?php echo e($dashId); ?>">
+                <input type="hidden" class="wid-tone-val" name="dash_tone[<?php echo e($dashId); ?>]" value="<?php echo e($dashTone); ?>">
+                <label class="wid-eye" title="<?php echo e($isEnSet ? 'Show / hide' : 'إظهار / إخفاء'); ?>">
+                    <input type="checkbox" name="dash_on[]" value="<?php echo e($dashId); ?>"<?php echo $dashOn ? ' checked' : ''; ?>>
+                    <span aria-hidden="true">👁</span>
+                </label>
+                <div class="sas-box-title"><?php echo e($dashCat[$dashId]['label']); ?></div>
+                <div class="sas-box-sub"><?php echo e($isEnSet ? 'Preview' : 'معاينة'); ?></div>
+                <div class="sas-box-val">—</div>
+                <div class="wid-tones" data-no-drag>
+                    <?php foreach ($dashToneOpts as $toneId => $toneName): ?>
+                    <button type="button" class="wid-dot <?php echo e($toneId); ?><?php echo $dashTone === $toneId ? ' on' : ''; ?>" data-tone="<?php echo e($toneId); ?>" title="<?php echo e($toneName); ?>" aria-label="<?php echo e($toneName); ?>"></button>
+                    <?php endforeach; ?>
+                </div>
+            </div>
+            <?php endforeach; ?>
+        </div>
+        <div class="wid-save">
+            <button class="btn" type="submit"><?php echo e($isEnSet ? 'Save' : 'حفظ'); ?></button>
+        </div>
+    </form>
+    <?php endif; ?>
+</div>
+<style>
+.wid-panel { max-width: none; }
+.wid-panel h2 { margin: 0 0 6px; }
+.wid-sort {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 14px;
+  width: 100%;
+}
+@media (max-width: 1100px) { .wid-sort { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 760px) { .wid-sort { grid-template-columns: 1fr; gap: 11px; } }
+.wid-tile.sas-box {
+  --c1: #0f766e; --c2: #115e59; --ink: #ffffff;
+  position: relative; overflow: hidden;
+  display: flex; flex-direction: column; justify-content: flex-start;
+  color: var(--ink) !important; text-decoration: none !important;
+  border-radius: 2px 20px 2px 16px; min-height: 118px;
+  padding: 14px 16px 42px 18px;
+  background: linear-gradient(145deg, var(--c1) 0%, var(--c2) 100%);
+  border: 0; box-shadow: 6px 7px 0 rgba(15, 23, 42, 0.12);
+  cursor: grab; touch-action: none; user-select: none;
+  transition: transform .16s ease, box-shadow .16s ease, opacity .16s ease, filter .16s ease;
+}
+.wid-tile.sas-box::before {
+  content: ''; position: absolute; inset-block: 12px 12px; inset-inline-start: 0;
+  width: 4px; border-radius: 0 6px 6px 0; background: rgba(255,255,255,0.55);
+}
+.wid-tile.sas-box::after {
+  content: ''; position: absolute; width: 110px; height: 110px; border-radius: 50%;
+  inset-inline-end: -34px; inset-block-end: -42px; background: rgba(255,255,255,0.12); pointer-events: none;
+}
+.wid-tile .sas-box-title { font-size: 13px; font-weight: 800; opacity: .95; z-index: 1; line-height: 1.25; padding-inline-end: 36px; }
+.wid-tile .sas-box-sub { font-size: 11px; font-weight: 600; opacity: .8; margin-top: 2px; z-index: 1; }
+.wid-tile .sas-box-val { font-size: 26px; font-weight: 800; margin-top: 6px; z-index: 1; letter-spacing: -0.02em; }
+.wid-tile.is-drag { opacity: .78; transform: scale(1.03); box-shadow: 10px 12px 0 rgba(15, 23, 42, 0.18); z-index: 3; }
+.wid-tile.is-off { filter: grayscale(.85) brightness(.88); opacity: .55; }
+.wid-eye {
+  position: absolute; inset-inline-end: 10px; inset-block-start: 10px; z-index: 2;
+  width: 34px; height: 34px; margin: 0; border-radius: 10px;
+  background: rgba(15, 23, 42, .22); display: grid; place-items: center; cursor: pointer;
+}
+.wid-eye input { position: absolute; opacity: 0; pointer-events: none; }
+.wid-eye span { font-size: 15px; line-height: 1; }
+.wid-tile.is-off .wid-eye { background: rgba(15, 23, 42, .45); }
+.wid-tones {
+  position: absolute; inset-inline-start: 12px; inset-block-end: 10px; z-index: 2;
+  display: flex; flex-wrap: wrap; gap: 5px; max-width: calc(100% - 24px);
+}
+.wid-dot {
+  width: 16px; height: 16px; border-radius: 50%; border: 2px solid rgba(255,255,255,.55);
+  padding: 0; cursor: pointer; box-shadow: inset 0 0 0 1px rgba(15,23,42,.12);
+  background: linear-gradient(145deg, var(--c1), var(--c2));
+}
+.wid-dot.on { border-color: #fff; box-shadow: 0 0 0 2px rgba(15,23,42,.28); }
+.wid-dot.tone-blue { --c1: #38bdf8; --c2: #0369a1; }
+.wid-dot.tone-green { --c1: #4ade80; --c2: #15803d; }
+.wid-dot.tone-aqua { --c1: #22d3ee; --c2: #0e7490; }
+.wid-dot.tone-red { --c1: #fb7185; --c2: #be123c; }
+.wid-dot.tone-yellow { --c1: #fbbf24; --c2: #b45309; }
+.wid-dot.tone-teal { --c1: #2dd4bf; --c2: #0f766e; }
+.wid-dot.tone-purple { --c1: #fb923c; --c2: #c2410c; }
+.wid-dot.tone-lime { --c1: #a3e635; --c2: #4d7c0f; }
+.wid-dot.tone-navy { --c1: #64748b; --c2: #1e293b; }
+.wid-tile.tone-blue { --c1: #38bdf8; --c2: #0369a1; }
+.wid-tile.tone-green { --c1: #4ade80; --c2: #15803d; }
+.wid-tile.tone-aqua { --c1: #22d3ee; --c2: #0e7490; }
+.wid-tile.tone-red { --c1: #fb7185; --c2: #be123c; }
+.wid-tile.tone-yellow { --c1: #fbbf24; --c2: #b45309; }
+.wid-tile.tone-teal { --c1: #2dd4bf; --c2: #0f766e; }
+.wid-tile.tone-purple { --c1: #fb923c; --c2: #c2410c; }
+.wid-tile.tone-lime { --c1: #a3e635; --c2: #4d7c0f; }
+.wid-tile.tone-navy { --c1: #64748b; --c2: #1e293b; }
+.wid-save {
+  position: sticky; bottom: 12px; margin-top: 16px; z-index: 5;
+  display: flex; justify-content: flex-start;
+}
+.wid-save .btn { min-width: 160px; height: 46px; box-shadow: 0 8px 20px rgba(15,23,42,.18); }
+@media (max-width: 640px) { .wid-save .btn { width: 100%; } }
+</style>
+<script>
+(function () {
+  var list = document.getElementById('widSort');
+  if (!list) return;
+  var drag = null;
+  var tones = ['tone-blue','tone-green','tone-red','tone-yellow','tone-teal','tone-navy','tone-lime','tone-purple','tone-aqua'];
+  function rowOf(el) {
+    return el && el.closest ? el.closest('[data-row]') : null;
+  }
+  function place(x, y) {
+    var cards = list.querySelectorAll('[data-row]');
+    var best = null, bestD = 1e15, i, r, cx, cy, d;
+    for (i = 0; i < cards.length; i++) {
+      if (cards[i] === drag) continue;
+      r = cards[i].getBoundingClientRect();
+      cx = r.left + r.width / 2;
+      cy = r.top + r.height / 2;
+      d = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+      if (d < bestD) { bestD = d; best = cards[i]; }
+    }
+    if (!best) { list.appendChild(drag); return; }
+    r = best.getBoundingClientRect();
+    var before;
+    if (Math.abs(y - (r.top + r.height / 2)) > r.height * 0.35) {
+      before = y < r.top + r.height / 2;
+    } else {
+      var rtl = (getComputedStyle(list).direction === 'rtl');
+      before = rtl ? (x > r.left + r.width / 2) : (x < r.left + r.width / 2);
+    }
+    if (before) list.insertBefore(drag, best);
+    else if (best.nextSibling) list.insertBefore(drag, best.nextSibling);
+    else list.appendChild(drag);
+  }
+  list.addEventListener('pointerdown', function (e) {
+    if (e.target.closest && (e.target.closest('[data-no-drag]') || e.target.closest('.wid-eye'))) return;
+    var row = rowOf(e.target);
+    if (!row) return;
+    e.preventDefault();
+    drag = row;
+    row.classList.add('is-drag');
+    try { row.setPointerCapture(e.pointerId); } catch (err) {}
+  });
+  list.addEventListener('pointermove', function (e) {
+    if (!drag) return;
+    e.preventDefault();
+    if (e.clientY < 72) window.scrollBy(0, -16);
+    else if (e.clientY > window.innerHeight - 88) window.scrollBy(0, 16);
+    place(e.clientX, e.clientY);
+  });
+  function stop() {
+    if (!drag) return;
+    drag.classList.remove('is-drag');
+    drag = null;
+  }
+  list.addEventListener('pointerup', stop);
+  list.addEventListener('pointercancel', stop);
+  list.addEventListener('change', function (e) {
+    var eye = e.target.closest ? e.target.closest('.wid-eye input') : null;
+    if (!eye) return;
+    var row = rowOf(eye);
+    if (row) row.classList.toggle('is-off', !eye.checked);
+  });
+  list.addEventListener('click', function (e) {
+    var dot = e.target.closest ? e.target.closest('.wid-dot') : null;
+    if (!dot) return;
+    e.preventDefault();
+    var row = rowOf(dot);
+    if (!row) return;
+    var tone = dot.getAttribute('data-tone') || '';
+    var i;
+    for (i = 0; i < tones.length; i++) row.classList.remove(tones[i]);
+    if (tone) row.classList.add(tone);
+    row.setAttribute('data-tone', tone);
+    var hid = row.querySelector('.wid-tone-val');
+    if (hid) hid.value = tone;
+    var dots = row.querySelectorAll('.wid-dot');
+    for (i = 0; i < dots.length; i++) dots[i].classList.toggle('on', dots[i] === dot);
+  });
+})();
+</script>
+<?php endif; ?>
+
 
 <?php if ($tab === 'maintenance' && function_exists('is_super_admin_user') && is_super_admin_user()): ?>
 <div class="panel panel-compact">
@@ -1713,51 +2164,151 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
 <?php endif; ?>
 
 <?php if ($tab === 'rental'): ?>
+<style>
+.rent-toggle-card {
+  display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap;
+  padding:16px 18px; border-radius:16px; border:1px solid #e2e8f0; background:#fff;
+  box-shadow:0 10px 24px rgba(15,23,42,.04); margin-bottom:14px;
+}
+.rent-toggle-card h2 { margin:0; font-size:1.1rem; }
+.rent-toggle-card p { margin:4px 0 0; color:#64748b; font-weight:650; font-size:13px; }
+.rent-dev-list { display:flex; flex-direction:column; gap:10px; margin-top:12px; }
+.rent-dev-row {
+  display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;
+  padding:12px 14px; border:1px solid #e2e8f0; border-radius:14px; background:#fafbfc;
+}
+.rent-dev-meta { display:flex; align-items:center; gap:10px; min-width:0; }
+.rent-dev-badge {
+  width:36px; height:36px; border-radius:10px; display:inline-flex; align-items:center; justify-content:center;
+  color:#fff; font-weight:800; font-size:12px; flex:0 0 auto;
+}
+.rent-dev-name { font-weight:800; color:#0f172a; }
+.rent-dev-id { color:#64748b; font-size:12px; font-weight:700; direction:ltr; unicode-bidi:isolate; }
+.rent-dev-actions { display:flex; gap:8px; flex-wrap:wrap; }
+</style>
+<?php if ($rentalIsNew || $rentalEditRow):
+    $ed = $rentalEditRow ? $rentalEditRow : array('id' => '', 'name' => '', 'icon' => 'DV', 'color' => '#5e5ce6');
+?>
 <div class="panel glass-panel">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+        <h2 style="margin:0"><?php echo e($rentalIsNew
+            ? ($lang === 'en' ? 'New device type' : 'نوع جهاز جديد')
+            : (($lang === 'en' ? 'Edit device type' : 'تعديل نوع الجهاز') . ' — ' . $ed['name'])); ?></h2>
+        <a class="btn secondary sm" href="settings.php?tab=rental"><?php echo e($lang === 'en' ? 'Back' : 'رجوع'); ?></a>
+    </div>
+    <p style="color:var(--muted);margin-top:0;font-weight:600">
+        <?php echo e($lang === 'en'
+            ? 'Saving or deleting this type does not change the other types.'
+            : 'حفظ أو مسح هذا النوع ما يغيّر بقية الأنواع.'); ?>
+    </p>
+    <form method="post">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="section" value="rental_device_save">
+        <input type="hidden" name="device_old_id" value="<?php echo e($rentalIsNew ? '' : $ed['id']); ?>">
+        <div class="form-grid cols-2">
+            <div>
+                <label><?php echo e($lang === 'en' ? 'Name' : 'الاسم'); ?></label>
+                <input name="device_name" value="<?php echo e($ed['name']); ?>" required>
+            </div>
+            <div>
+                <label><?php echo e($lang === 'en' ? 'Code / ID' : 'المعرّف'); ?></label>
+                <input class="ltr" name="device_id" value="<?php echo e($ed['id']); ?>" required>
+            </div>
+            <div>
+                <label><?php echo e($lang === 'en' ? 'Badge' : 'الرمز'); ?></label>
+                <input name="device_icon" value="<?php echo e($ed['icon']); ?>" maxlength="4">
+            </div>
+            <div>
+                <label><?php echo e($lang === 'en' ? 'Color' : 'اللون'); ?></label>
+                <input type="color" name="device_color" value="<?php echo e($ed['color']); ?>">
+            </div>
+        </div>
+        <div class="actions">
+            <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
+        </div>
+    </form>
+    <?php if (!$rentalIsNew): ?>
+    <form method="post" style="margin-top:14px" onsubmit="return confirm(<?php echo json_encode($lang === 'en' ? 'Delete this device type only?' : 'مسح نوع الجهاز هذا فقط؟'); ?>);">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="section" value="rental_device_delete">
+        <input type="hidden" name="device_id" value="<?php echo e($ed['id']); ?>">
+        <button class="btn secondary" type="submit"><?php echo e($lang === 'en' ? 'Delete this type' : 'مسح هذا النوع'); ?></button>
+    </form>
+    <?php endif; ?>
+</div>
+<?php else: ?>
+<div class="panel glass-panel">
+    <form method="post" class="rent-toggle-card" id="rentalSystemForm">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="section" value="rental_system">
+        <div>
+            <h2><?php echo e($lang === 'en' ? 'Rental system' : 'نظام الإيجار'); ?></h2>
+            <p><?php echo e($lang === 'en'
+                ? ($rentalSystemOn ? 'On — rentals menu and subscriber rental tools are available.' : 'Off — rental features are hidden.')
+                : ($rentalSystemOn ? 'تشغيل — قائمة الإيجار وأدوات إيجار المشترك متاحة.' : 'إيقاف — ميزات الإيجار مخفية.')); ?></p>
+        </div>
+        <label class="toggle" style="display:flex;align-items:center;gap:10px;margin:0">
+            <input type="checkbox" name="rental_system_enabled" value="1" <?php echo $rentalSystemOn ? 'checked' : ''; ?> onchange="this.form.submit()">
+            <span class="toggle-ui"></span>
+            <span style="font-weight:800"><?php echo e($rentalSystemOn
+                ? ($lang === 'en' ? 'Enabled' : 'تشغيل')
+                : ($lang === 'en' ? 'Disabled' : 'إيقاف')); ?></span>
+        </label>
+    </form>
+
+    <?php if ($rentalSystemOn): ?>
     <h2><?php echo e($lang === 'en' ? 'Rental devices' : 'أجهزة الإيجار'); ?></h2>
     <p style="color:var(--muted);margin-top:-6px;font-weight:600">
         <?php echo e($lang === 'en'
             ? 'Monthly rent is added to subscription when activating a subscriber with a rental device.'
             : 'مبلغ الإيجار الشهري يُضاف للاشتراك عند تفعيل مشترك عليه جهاز إيجار.'); ?>
     </p>
-    <form method="post" id="rentalSettingsForm">
+    <form method="post" style="margin-bottom:18px">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
-        <input type="hidden" name="section" value="rental">
+        <input type="hidden" name="section" value="rental_fee">
         <div class="form-grid cols-2">
             <div>
                 <label><?php echo e($lang === 'en' ? 'Monthly rental fee' : 'مبلغ الإيجار الشهري'); ?></label>
                 <input type="number" name="rental_fee" min="0" step="1" value="<?php echo e((float) $rentalFee); ?>" required>
             </div>
         </div>
-        <h3 style="margin:18px 0 10px;font-size:15px"><?php echo e($lang === 'en' ? 'Device types' : 'أنواع الأجهزة'); ?></h3>
-        <div id="rentalDeviceRows">
-            <?php foreach ($rentalDevices as $d): ?>
-            <div class="form-grid rental-device-row" style="margin-bottom:10px">
-                <div>
-                    <label><?php echo e($lang === 'en' ? 'Name' : 'الاسم'); ?></label>
-                    <input name="device_name[]" value="<?php echo e($d['name']); ?>" required>
-                </div>
-                <div>
-                    <label><?php echo e($lang === 'en' ? 'Code / ID' : 'المعرّف'); ?></label>
-                    <input class="ltr" name="device_id[]" value="<?php echo e($d['id']); ?>">
-                </div>
-                <div>
-                    <label><?php echo e($lang === 'en' ? 'Badge' : 'الرمز'); ?></label>
-                    <input name="device_icon[]" value="<?php echo e($d['icon']); ?>" maxlength="4">
-                </div>
-                <div>
-                    <label><?php echo e($lang === 'en' ? 'Color' : 'اللون'); ?></label>
-                    <input type="color" name="device_color[]" value="<?php echo e($d['color']); ?>">
-                </div>
-            </div>
-            <?php endforeach; ?>
-        </div>
         <div class="actions">
-            <button type="button" class="btn ghost" id="addRentalDeviceBtn">+ <?php echo e($lang === 'en' ? 'Device type' : 'نوع جهاز'); ?></button>
-            <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
+            <button class="btn" type="submit"><?php echo e($lang === 'en' ? 'Save fee' : 'حفظ المبلغ'); ?></button>
         </div>
     </form>
+
+    <h3 style="margin:8px 0 0;font-size:15px"><?php echo e($lang === 'en' ? 'Device types' : 'أنواع الأجهزة'); ?></h3>
+    <p style="color:var(--muted);margin:6px 0 0;font-weight:600;font-size:13px">
+        <?php echo e($lang === 'en'
+            ? 'Each type opens on its own page. Edit or delete one without touching the others.'
+            : 'كل نوع بصفحته. تعديل أو مسح واحد ما يمس الباقي.'); ?>
+    </p>
+    <div class="rent-dev-list">
+        <?php foreach ($rentalDevices as $d): ?>
+        <div class="rent-dev-row">
+            <div class="rent-dev-meta">
+                <span class="rent-dev-badge" style="background:<?php echo e($d['color']); ?>"><?php echo e($d['icon']); ?></span>
+                <div>
+                    <div class="rent-dev-name"><?php echo e($d['name']); ?></div>
+                    <div class="rent-dev-id"><?php echo e($d['id']); ?></div>
+                </div>
+            </div>
+            <div class="rent-dev-actions">
+                <a class="btn secondary sm" href="settings.php?tab=rental&device=<?php echo e(rawurlencode($d['id'])); ?>"><?php echo e($lang === 'en' ? 'Edit' : 'تعديل'); ?></a>
+            </div>
+        </div>
+        <?php endforeach; ?>
+        <?php if (!$rentalDevices): ?>
+        <p style="color:#64748b;font-weight:700"><?php echo e($lang === 'en' ? 'No device types yet.' : 'ماكو أنواع أجهزة بعد.'); ?></p>
+        <?php endif; ?>
+    </div>
+    <div class="actions" style="margin-top:12px">
+        <a class="btn" href="settings.php?tab=rental&device=new">+ <?php echo e($lang === 'en' ? 'Device type' : 'نوع جهاز'); ?></a>
+    </div>
+    <?php endif; ?>
 </div>
+<?php endif; ?>
+
 <div class="panel glass-panel" style="margin-top:16px">
     <h2><?php echo e($lang === 'en' ? 'Subscriber device login (IP click)' : 'دخول جهاز المشترك (ضغط IP)'); ?></h2>
     <p style="color:var(--muted);margin-top:-6px;font-weight:600">
@@ -1794,24 +2345,6 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
         </div>
     </form>
 </div>
-<script>
-(function () {
-  var btn = document.getElementById('addRentalDeviceBtn');
-  var box = document.getElementById('rentalDeviceRows');
-  if (!btn || !box) return;
-  btn.addEventListener('click', function () {
-    var row = document.createElement('div');
-    row.className = 'form-grid rental-device-row';
-    row.style.marginBottom = '10px';
-    row.innerHTML = ''
-      + '<div><label>الاسم</label><input name="device_name[]" required></div>'
-      + '<div><label>المعرّف</label><input class="ltr" name="device_id[]"></div>'
-      + '<div><label>الرمز</label><input name="device_icon[]" maxlength="4" value="DV"></div>'
-      + '<div><label>اللون</label><input type="color" name="device_color[]" value="#5e5ce6"></div>';
-    box.appendChild(row);
-  });
-})();
-</script>
 <?php endif; ?>
 
 <?php if ($tab === 'whatsapp'): ?>
@@ -2293,7 +2826,7 @@ $defPassVal = isset($sasCfgUi['default_password']) && (string) $sasCfgUi['defaul
     ? (string) $sasCfgUi['default_password']
     : '1234';
 $sasTitle = ($sasTenantIdUi > 1)
-    ? ($isEn ? 'SAS accounts' : 'حسابات الساس')
+    ? ($isEn ? 'Reseller link' : 'ربط رسلر')
     : t('settings_sas');
 $stOk = $sasConnStatus && !empty($sasConnStatus['ok']);
 $stReady = $sasConnStatus && !empty($sasConnStatus['ready']);

@@ -1,5 +1,38 @@
 <?php
 
+/** أيقونة SVG حديثة لروابط القائمة الجانبية */
+function nav_side_ico($key)
+{
+    $key = strtolower(trim((string) $key));
+    $paths = array(
+        'dashboard' => '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
+        'subscribers' => '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+        'cards' => '<rect x="2" y="5" width="20" height="14" rx="2.5"/><line x1="2" y1="10" x2="22" y2="10"/><line x1="6" y1="15" x2="10" y2="15"/>',
+        'plans' => '<path d="M12 2l9 4.5v6.5c0 4.5-3.6 8.4-9 9.5-5.4-1.1-9-5-9-9.5V6.5L12 2z"/><path d="M9 12l2 2 4-4"/>',
+        'agents' => '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/><path d="M16 11l2 2 4-4"/>',
+        'accountants' => '<rect x="4" y="2" width="16" height="20" rx="2"/><line x1="8" y1="6" x2="16" y2="6"/><line x1="8" y1="10" x2="16" y2="10"/><line x1="8" y1="14" x2="12" y2="14"/><circle cx="16" cy="17" r="1.2"/>',
+        'cabinets' => '<rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><circle cx="7" cy="6" r="1"/><circle cx="7" cy="12" r="1"/><circle cx="7" cy="18" r="1"/>',
+        'rentals' => '<path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1.2"/>',
+        'debts' => '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/>',
+        'import_export' => '<path d="M12 3v12"/><polyline points="8 7 12 3 16 7"/><path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/>',
+        'movements' => '<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>',
+        'messages' => '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+        'reports' => '<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>',
+        'profit' => '<polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/>',
+        'logs' => '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/>',
+        'activity' => '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>',
+        'settings' => '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+        'company' => '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
+        'billing' => '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/><circle cx="16" cy="15" r="1.5"/>',
+        'companies' => '<path d="M3 21h18"/><path d="M5 21V7l7-4 7 4v14"/><path d="M9 21v-6h6v6"/><path d="M9 9h.01"/><path d="M15 9h.01"/><path d="M9 13h.01"/><path d="M15 13h.01"/>',
+        'logout' => '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>',
+    );
+    $inner = isset($paths[$key]) ? $paths[$key] : $paths['dashboard'];
+    return '<span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">'
+        . $inner
+        . '</svg></span>';
+}
+
 function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $topToolsHtml = '')
 {
     global $siteName, $lang, $settings, $pdo, $config;
@@ -30,6 +63,8 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     $brandIcon = (function_exists('brand_icon_url') && is_array($settings))
         ? brand_icon_url($settings)
         : '';
+    $uiTheme = function_exists('ui_theme_current') ? ui_theme_current(isset($pdo) ? $pdo : null) : 'classic';
+    $uiTheme = ($uiTheme === 'glass') ? 'glass' : 'classic';
     ?>
 <!DOCTYPE html>
 <html lang="<?php echo e($lang); ?>" dir="<?php echo $isEn ? 'ltr' : 'rtl'; ?>">
@@ -44,57 +79,683 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     <link rel="icon" href="assets/favicon.png?v=2" type="image/png" sizes="32x32">
     <?php endif; ?>
     <link rel="apple-touch-icon" href="<?php echo e($brandIcon !== '' ? $brandIcon : 'assets/apple-touch-icon.png?v=2'); ?>">
-    <link rel="stylesheet" href="assets/style.css?v=ui19">
+    <link rel="stylesheet" href="assets/style.css?v=ui23">
+    <?php
+    // خلفية صورة حتى يشتغل blur — شخصي ثم نظام ثم الافتراضي
+    $glassBgSrc = 'assets/glass-bg.jpg?v=1';
+    $glassCustom = function_exists('ui_glass_bg_url')
+        ? ui_glass_bg_url(isset($pdo) ? $pdo : null, is_array($settings) ? $settings : null)
+        : '';
+    if ($glassCustom !== '') {
+        $glassBgSrc = $glassCustom;
+    } elseif ($bgUrl !== '') {
+        $glassBgSrc = $bgUrl;
+    }
+    ?>
     <style>
-        <?php if ($bgMode === 'image' && $bgUrl !== ''): ?>
-        body.app-bg-image {
-            background-color: <?php echo e($bgColor); ?> !important;
-            background-image: url("<?php echo e($bgUrl); ?>") !important;
+        /*
+         * سبب التهنيك السابق: backdrop-filter + transform animation + background-attachment:fixed
+         * على ويندوز يطلع مستطيلات بيض/سود (GPU compositing).
+         * الحل: أنيميشن opacity فقط للثيم الزجاجي، وblur أقل طبقات، وخلفية scroll.
+         */
+        @keyframes uiEnterFade {
+          from { opacity: 0; transform: translateY(14px); }
+          to { opacity: 1; transform: none; }
+        }
+        @keyframes uiSideIn {
+          from { opacity: 0; transform: translateX(var(--ui-side, -22px)); }
+          to { opacity: 1; transform: none; }
+        }
+        @keyframes uiSoftPop {
+          from { opacity: 0; transform: translateY(10px) scale(.98); }
+          to { opacity: 1; transform: none; }
+        }
+        @keyframes uiGlassFade {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+        html[dir="rtl"] { --ui-side: 22px; }
+        html[dir="ltr"] { --ui-side: -22px; }
+
+        /* كلاسيك: حركة للمحتوى فقط — لا تلمس السايدبار (تكسر إخفاء الموبايل) */
+        body.theme-classic .main { animation: uiEnterFade .58s .06s cubic-bezier(.22,.9,.28,1) both; }
+        body.theme-classic .main-top { animation: uiSoftPop .5s .04s cubic-bezier(.22,.9,.28,1) both; }
+        body.theme-classic .sas-boxes .sas-box,
+        body.theme-classic .panel { animation: uiSoftPop .48s cubic-bezier(.22,.9,.28,1) both; }
+        body.theme-classic .sas-boxes .sas-box:nth-child(1) { animation-delay: .05s; }
+        body.theme-classic .sas-boxes .sas-box:nth-child(2) { animation-delay: .09s; }
+        body.theme-classic .sas-boxes .sas-box:nth-child(3) { animation-delay: .13s; }
+        body.theme-classic .sas-boxes .sas-box:nth-child(4) { animation-delay: .17s; }
+        body.theme-classic .sas-boxes .sas-box:nth-child(5) { animation-delay: .21s; }
+        body.theme-classic .sas-boxes .sas-box:nth-child(6) { animation-delay: .25s; }
+        body.theme-classic .sas-boxes .sas-box:nth-child(7) { animation-delay: .29s; }
+        body.theme-classic .sas-boxes .sas-box:nth-child(8) { animation-delay: .33s; }
+        body.theme-classic .sas-boxes .sas-box:nth-child(n+9) { animation-delay: .37s; }
+
+        /* زجاجي: opacity فقط — بدون أنيميشن على السايدبار */
+        body.theme-glass .main,
+        body.theme-glass .main-top,
+        body.theme-glass .panel,
+        body.theme-glass .sas-table-card,
+        body.theme-glass .sas-boxes .sas-box {
+          animation: uiGlassFade .45s ease both;
+        }
+        body.theme-glass .main { animation-delay: .05s; }
+        body.theme-glass .sas-boxes .sas-box:nth-child(1) { animation-delay: .06s; }
+        body.theme-glass .sas-boxes .sas-box:nth-child(2) { animation-delay: .1s; }
+        body.theme-glass .sas-boxes .sas-box:nth-child(3) { animation-delay: .14s; }
+        body.theme-glass .sas-boxes .sas-box:nth-child(4) { animation-delay: .18s; }
+        body.theme-glass .sas-boxes .sas-box:nth-child(n+5) { animation-delay: .22s; }
+
+        /* هاتف: القائمة مخفية حتى sidebar-open — لا تدع الأنيميشن يثبت transform */
+        @media (max-width: 900px) {
+          body.theme-classic .sidebar,
+          body.theme-glass .sidebar {
+            animation: none !important;
+          }
+          body.rtl .sidebar,
+          body:not(.ltr) .sidebar {
+            transform: translateX(110%) !important;
+          }
+          body.ltr .sidebar {
+            transform: translateX(-110%) !important;
+          }
+          .app.sidebar-open .sidebar,
+          body.ltr .app.sidebar-open .sidebar,
+          body.rtl .app.sidebar-open .sidebar,
+          body:not(.ltr) .app.sidebar-open .sidebar {
+            transform: translateX(0) !important;
+          }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+          body.theme-classic .main,
+          body.theme-classic .main-top,
+          body.theme-classic .sas-boxes .sas-box,
+          body.theme-classic .panel,
+          body.theme-glass .main,
+          body.theme-glass .main-top,
+          body.theme-glass .panel,
+          body.theme-glass .sas-table-card,
+          body.theme-glass .sas-boxes .sas-box { animation: none !important; }
+        }
+
+        .glass-card {
+            background: rgba(248, 250, 252, 0.48);
+            border: 1px solid rgba(255, 255, 255, 0.28);
+            border-radius: 16px;
+            box-shadow: 0 8px 28px rgba(15, 23, 42, 0.12);
+            color: #0f172a;
+        }
+        /* زجاج أشفّ — أقل بياض، نص غامق مقروء */
+        body.theme-glass {
+            --glass-bg: rgba(248, 250, 252, 0.52);
+            --glass-bg-soft: rgba(248, 250, 252, 0.4);
+            --glass-line: rgba(255, 255, 255, 0.28);
+            --glass-ink: #0f172a;
+            --glass-text: #0f172a;
+            --glass-muted: #334155;
+            --glass-side: rgba(12, 18, 28, 0.78);
+            background-color: #1a1f2a !important;
+            background-image: url("<?php echo e($glassBgSrc); ?>") !important;
             background-size: cover !important;
             background-position: center center !important;
             background-repeat: no-repeat !important;
-            background-attachment: fixed !important;
+            background-attachment: scroll !important;
+            color: var(--glass-ink);
         }
-        body.app-bg-image .bg-bubbles { display: none; }
-        body.app-bg-image .app { background: transparent; }
-        body.app-bg-image .main { background: transparent; }
-        body.app-bg-image .panel,
-        body.app-bg-image .sas-table-card,
-        body.app-bg-image .glass-panel,
-        body.app-bg-image .sched-table-wrap,
-        body.app-bg-image .sched-toolbar,
-        body.app-bg-image .sched-stat,
-        body.app-bg-image .msg-table-wrap,
-        body.app-bg-image .msg-toolbar,
-        body.app-bg-image .msg-compose,
-        body.app-bg-image .debts-table-wrap,
-        body.app-bg-image .debts-toolbar,
-        body.app-bg-image .debts-add,
-        body.app-bg-image .chart-panel,
-        body.app-bg-image .cat-block,
-        body.app-bg-image .modal-card,
-        body.app-bg-image .ops-modal-card {
-            background: rgba(255,255,255,0.78) !important;
-            backdrop-filter: blur(12px) saturate(1.15);
-            -webkit-backdrop-filter: blur(12px) saturate(1.15);
-            border-color: rgba(255,255,255,0.45) !important;
+        body.theme-glass .bg-bubbles { display: none !important; }
+        body.theme-glass .app,
+        body.theme-glass .main,
+        body.theme-glass .container,
+        body.theme-glass .table-wrap { background: transparent !important; color: inherit; }
+
+        body.theme-glass .main-top,
+        body.theme-glass .panel,
+        body.theme-glass .card,
+        body.theme-glass .sas-table-card,
+        body.theme-glass .glass-panel,
+        body.theme-glass .sched-table-wrap,
+        body.theme-glass .msg-table-wrap,
+        body.theme-glass .debts-table-wrap,
+        body.theme-glass .chart-panel,
+        body.theme-glass .cat-block,
+        body.theme-glass .cards-page .cat-block,
+        body.theme-glass .modal-card,
+        body.theme-glass .ops-modal-card {
+            background: var(--glass-bg) !important;
+            backdrop-filter: blur(16px) saturate(1.2) !important;
+            -webkit-backdrop-filter: blur(16px) saturate(1.2) !important;
+            border: 1px solid var(--glass-line) !important;
+            border-radius: 16px !important;
+            box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+            color: var(--glass-ink) !important;
         }
-        body.app-bg-image .sas-table-headbar,
-        body.app-bg-image .main-top {
-            background: rgba(255,255,255,0.72) !important;
-            backdrop-filter: blur(10px);
-            -webkit-backdrop-filter: blur(10px);
+        /* نافذة الدخول بصفة: دائماً وسط الشاشة */
+        .login-as-modal {
+            position: fixed !important;
+            inset: 0 !important;
+            z-index: 200000 !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            padding: 16px !important;
+            margin: 0 !important;
+            background: rgba(15, 23, 42, 0.5) !important;
+            box-sizing: border-box !important;
         }
-        <?php elseif ($bgMode === 'color'): ?>
-        body.app-bg-color {
-            background: <?php echo e($bgColor); ?> !important;
+        .login-as-modal[hidden] {
+            display: none !important;
         }
-        body.app-bg-color .bg-bubbles { opacity: .25; }
-        <?php endif; ?>
-        /* Sidebar modern — text only, centered */
-        .sidebar {
+        .login-as-card {
+            position: relative !important;
+            margin: auto !important;
+            width: min(420px, 100%) !important;
+            max-height: min(88vh, 640px) !important;
+            overflow: auto !important;
+            flex: 0 0 auto !important;
+            align-self: center !important;
+        }
+        body.theme-glass .login-as-card {
+            background: rgba(255, 255, 255, 0.94) !important;
+            backdrop-filter: blur(18px) saturate(1.2) !important;
+            -webkit-backdrop-filter: blur(18px) saturate(1.2) !important;
+            border: 1px solid rgba(15, 23, 42, 0.12) !important;
+            border-radius: 16px !important;
+            box-shadow: 0 20px 50px rgba(15, 23, 42, 0.28) !important;
+            color: #0f172a !important;
+        }
+        /* سايدبار غامق للقائمة فقط */
+        body.theme-glass .sidebar {
+            background: var(--glass-side) !important;
+            backdrop-filter: blur(16px) saturate(1.15) !important;
+            -webkit-backdrop-filter: blur(16px) saturate(1.15) !important;
+            border: 0 !important;
+            border-inline-end: 1px solid rgba(255,255,255,0.12) !important;
+            border-radius: 0 !important;
+            color: #f8fafc !important;
+            box-shadow: none;
+        }
+        /* قوائم السياق فاتحة وواضحة */
+        body.theme-glass .ops-dropdown,
+        body.theme-glass .cols-dropdown,
+        body.theme-glass .filter-dropdown,
+        body.theme-glass .top-admin-dropdown,
+        body.theme-glass .ops-panel {
+            background: rgba(255, 255, 255, 0.88) !important;
+            backdrop-filter: blur(18px) saturate(1.2) !important;
+            -webkit-backdrop-filter: blur(18px) saturate(1.2) !important;
+            border: 1px solid rgba(15, 23, 42, 0.12) !important;
+            border-radius: 14px !important;
+            box-shadow: 0 14px 36px rgba(15, 23, 42, 0.18) !important;
+            color: #0f172a !important;
+        }
+        body.theme-glass .ops-dropdown .ops-item,
+        body.theme-glass .ops-dropdown a.ops-item,
+        body.theme-glass .ops-dropdown button.ops-item,
+        body.theme-glass .ops-panel .ops-item,
+        body.theme-glass .top-admin-dropdown a,
+        body.theme-glass .top-admin-dropdown button,
+        body.theme-glass .cols-dropdown,
+        body.theme-glass .cols-dropdown label,
+        body.theme-glass .filter-dropdown,
+        body.theme-glass .filter-dropdown label {
+            color: #0f172a !important;
+            background: transparent !important;
+        }
+        body.theme-glass .ops-dropdown .ops-item:hover,
+        body.theme-glass .ops-dropdown button.ops-item:hover,
+        body.theme-glass .ops-dropdown a.ops-item:hover,
+        body.theme-glass .top-admin-dropdown a:hover,
+        body.theme-glass .top-admin-dropdown button:hover {
+            background: #f1f5f9 !important;
+            color: #0f172a !important;
+        }
+        body.theme-glass .ops-item.ops-warn { color: #b45309 !important; }
+        body.theme-glass .ops-item.ops-danger { color: #dc2626 !important; }
+        body.theme-glass #opsItemHint { color: #64748b !important; }
+
+        body.theme-glass .panel,
+        body.theme-glass .cat-block,
+        body.theme-glass .cards-page .cat-block,
+        body.theme-glass .sas-table-card,
+        body.theme-glass .modal-card {
+            overflow: hidden !important;
+            border-radius: 16px !important;
+        }
+        body.theme-glass .cards-page .cat-head {
+            background: rgba(15, 23, 42, 0.04) !important;
+            color: var(--glass-ink) !important;
+            border: 0 !important;
+        }
+        body.theme-glass .cards-page .cat-head h3,
+        body.theme-glass .cards-page .cat-chevron { color: var(--glass-ink) !important; }
+        body.theme-glass .cards-page .cat-body {
+            border-top-color: rgba(15, 23, 42, 0.08) !important;
+            background: transparent !important;
+        }
+        body.theme-glass .cards-page .chip,
+        body.theme-glass .cards-page .chip.free {
+            background: rgba(248, 250, 252, 0.42) !important;
+            border-color: rgba(15, 23, 42, 0.1) !important;
+            color: var(--glass-ink) !important;
+            border-radius: 12px !important;
+        }
+        body.theme-glass .cards-page .pin,
+        body.theme-glass .cards-page .by-line { color: #334155 !important; }
+        body.theme-glass .cards-page .pill {
+            background: #e2e8f0 !important;
+            color: #334155 !important;
+            border: 0;
+        }
+        body.theme-glass .cards-page .pill.ok {
+            background: #dcfce7 !important;
+            color: #166534 !important;
+        }
+        body.theme-glass .cards-page .pill.bad {
+            background: #fee2e2 !important;
+            color: #991b1b !important;
+        }
+        body.theme-glass .sched-toolbar,
+        body.theme-glass .sched-stat,
+        body.theme-glass .msg-toolbar,
+        body.theme-glass .msg-compose,
+        body.theme-glass .debts-toolbar,
+        body.theme-glass .debts-add,
+        body.theme-glass .ping-mode,
+        body.theme-glass .theme-card,
+        body.theme-glass .login-bg-preview {
+            background: var(--glass-bg-soft) !important;
+            border-color: rgba(15, 23, 42, 0.1) !important;
+            color: var(--glass-ink) !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+            border-radius: 16px !important;
+        }
+        body.theme-glass .msg-compose {
+            overflow: hidden !important;
+            padding: 14px !important;
+        }
+        body.theme-glass .msg-compose textarea,
+        body.theme-glass .msg-compose input,
+        body.theme-glass .msg-compose select {
+            border-radius: 12px !important;
+            background: rgba(248, 250, 252, 0.55) !important;
+        }
+        body.theme-glass .tabs a {
+            background: var(--glass-bg-soft) !important;
+            border-color: rgba(15, 23, 42, 0.1) !important;
+            color: var(--glass-ink) !important;
+            border-radius: 999px !important;
+        }
+        body.theme-glass .tabs {
+            background: transparent !important;
+            border: 0 !important;
+            box-shadow: none !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+            gap: 8px;
+            padding: 0;
+        }
+        body.theme-glass .sas-table-card,
+        body.theme-glass .msg-table-wrap,
+        body.theme-glass .debts-table-wrap,
+        body.theme-glass .sched-table-wrap {
+            overflow: hidden !important;
+            border-radius: 16px !important;
+            padding: 0 !important;
+        }
+        body.theme-glass .sas-table-headbar {
+            background: rgba(15, 23, 42, 0.05) !important;
+            border: 0 !important;
+            border-bottom: 1px solid rgba(15, 23, 42, 0.08) !important;
+            border-radius: 0 !important;
+            color: var(--glass-ink) !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+        }
+        body.theme-glass .sas-headbar-name,
+        body.theme-glass .sas-headbar-title,
+        body.theme-glass .sas-table-headbar .sas-found,
+        body.theme-glass .sas-table-headbar,
+        body.theme-glass .sas-table-headbar * {
+            color: var(--glass-ink) !important;
+        }
+        body.theme-glass .sas-table-headbar .sas-found { opacity: 0.72 !important; }
+        body.theme-glass .sas-table-card > .table-wrap,
+        body.theme-glass .msg-table-wrap > .table-wrap,
+        body.theme-glass .debts-table-wrap > .table-wrap {
+            margin: 0 !important;
+            border: 0 !important;
+            border-radius: 0 !important;
+            background: transparent !important;
+            box-shadow: none !important;
+        }
+        body.theme-glass .sas-table-card table,
+        body.theme-glass .sas-table-card #subsTable { border-radius: 0 !important; }
+        body.theme-glass .sas-table-tools .tool-ico {
+            color: #334155 !important;
+            background: transparent !important;
+        }
+        body.theme-glass .sas-table-tools .tool-ico:hover,
+        body.theme-glass .sas-table-tools .tool-ico.is-on {
+            color: #0369a1 !important;
+            background: rgba(14, 165, 233, 0.12) !important;
+        }
+        body.theme-glass .panel h2,
+        body.theme-glass .card h2,
+        body.theme-glass .meta,
+        body.theme-glass label,
+        body.theme-glass .sas-dash h2,
+        body.theme-glass .sas-dash h2.sas-sec,
+        body.theme-glass .theme-card-name,
+        body.theme-glass .theme-card-sub,
+        body.theme-glass small {
+            color: var(--glass-muted) !important;
+        }
+        body.theme-glass .panel h2,
+        body.theme-glass .theme-card-name { color: var(--glass-ink) !important; }
+
+        body.theme-glass .main-top {
+            margin: 12px 14px 0;
+            border-radius: 18px !important;
+            overflow: visible !important;
+            color: var(--glass-ink);
+        }
+        body.theme-glass .main-top .page-title,
+        body.theme-glass .main-top h1,
+        body.theme-glass .main-top .title,
+        body.theme-glass .menu-btn,
+        body.theme-glass .side-menu-btn { color: var(--glass-ink) !important; }
+
+        body.theme-glass .main-top-end,
+        body.theme-glass .top-admin-menu {
+            position: relative;
+            z-index: 50;
+            overflow: visible !important;
+        }
+        body.theme-glass .main-top-end .top-user-cluster,
+        body.theme-glass .top-user-cluster {
+            background: rgba(248, 250, 252, 0.55) !important;
+            border: 1px solid rgba(255, 255, 255, 0.28) !important;
+            border-radius: 999px !important;
+            box-shadow: 0 4px 14px rgba(15, 23, 42, 0.08);
+            overflow: visible !important;
+            pointer-events: auto !important;
+        }
+        body.theme-glass .top-lang-btn,
+        body.theme-glass .top-profile-btn {
+            background: transparent !important;
+            color: var(--glass-ink) !important;
+            border: 0 !important;
+            border-radius: 0 !important;
+            box-shadow: none !important;
+            pointer-events: auto !important;
+            cursor: pointer !important;
+            position: relative;
+            z-index: 2;
+        }
+        body.theme-glass .top-admin-dropdown {
+            z-index: 100050 !important;
+            overflow: visible !important;
+            pointer-events: auto !important;
+        }
+        /* بدون مربع خلف حرف اللغة */
+        body.theme-glass .top-lang-btn {
+            border-inline-start: 1px solid rgba(15, 23, 42, 0.1) !important;
+            background: transparent !important;
+        }
+        body.theme-glass .top-lang-btn:hover,
+        body.theme-glass .top-profile-btn:hover {
+            background: rgba(15, 23, 42, 0.05) !important;
+        }
+        body.theme-glass .top-profile-btn { font-weight: 800; }
+        body.theme-glass .top-profile-name { color: var(--glass-ink) !important; }
+        body.theme-glass .top-as-agent {
+            background: rgba(14, 165, 233, 0.18) !important;
+            color: #0369a1 !important;
+            border: 0;
+        }
+        body.theme-glass .top-profile-avatar {
+            background: rgba(15, 23, 42, 0.08) !important;
+            color: #334155 !important;
+            border: 1px solid rgba(15, 23, 42, 0.08);
+        }
+
+        /* وجدز: شفافة + ألوان زاهية من نقاط التلوين بالإعدادات */
+        body.theme-glass .sas-box {
+            --g1: rgba(45, 212, 191, 0.62);
+            --g2: rgba(13, 148, 136, 0.38);
+            --gline: rgba(20, 184, 166, 0.85);
+            --ink: #0f172a;
+            background:
+                linear-gradient(145deg, var(--g1) 0%, var(--g2) 72%, rgba(255,255,255,0.12) 100%) !important;
+            border: 1px solid var(--gline) !important;
+            border-radius: 16px !important;
+            box-shadow: 0 8px 26px rgba(15, 23, 42, 0.12) !important;
+            color: var(--ink) !important;
+            padding: 1.25rem 1.35rem !important;
+            backdrop-filter: blur(14px) saturate(1.45) !important;
+            -webkit-backdrop-filter: blur(14px) saturate(1.45) !important;
+            transition: filter .18s ease, box-shadow .18s ease, border-color .18s ease;
+        }
+        body.theme-glass .sas-box.tone-blue {
+            --g1: rgba(56, 189, 248, 0.72); --g2: rgba(2, 132, 199, 0.42); --gline: rgba(14, 165, 233, 0.9);
+        }
+        body.theme-glass .sas-box.tone-green {
+            --g1: rgba(74, 222, 128, 0.7); --g2: rgba(22, 163, 74, 0.4); --gline: rgba(34, 197, 94, 0.9);
+        }
+        body.theme-glass .sas-box.tone-red {
+            --g1: rgba(251, 113, 133, 0.7); --g2: rgba(225, 29, 72, 0.4); --gline: rgba(244, 63, 94, 0.9);
+        }
+        body.theme-glass .sas-box.tone-yellow {
+            --g1: rgba(250, 204, 21, 0.72); --g2: rgba(217, 119, 6, 0.4); --gline: rgba(245, 158, 11, 0.92);
+        }
+        body.theme-glass .sas-box.tone-teal {
+            --g1: rgba(45, 212, 191, 0.7); --g2: rgba(13, 148, 136, 0.4); --gline: rgba(20, 184, 166, 0.9);
+        }
+        body.theme-glass .sas-box.tone-navy {
+            --g1: rgba(148, 163, 184, 0.62); --g2: rgba(51, 65, 85, 0.42); --gline: rgba(100, 116, 139, 0.85);
+        }
+        body.theme-glass .sas-box.tone-lime {
+            --g1: rgba(190, 242, 100, 0.72); --g2: rgba(101, 163, 13, 0.4); --gline: rgba(132, 204, 22, 0.92);
+        }
+        body.theme-glass .sas-box.tone-purple {
+            --g1: rgba(251, 146, 60, 0.72); --g2: rgba(234, 88, 12, 0.4); --gline: rgba(249, 115, 22, 0.9);
+        }
+        body.theme-glass .sas-box.tone-aqua {
+            --g1: rgba(34, 211, 238, 0.72); --g2: rgba(8, 145, 178, 0.4); --gline: rgba(6, 182, 212, 0.92);
+        }
+        body.theme-glass .sas-box.tone-maroon {
+            --g1: rgba(251, 113, 133, 0.7); --g2: rgba(190, 18, 60, 0.42); --gline: rgba(225, 29, 72, 0.9);
+        }
+        body.theme-glass .sas-box:hover {
+            transform: none !important;
+            filter: saturate(1.12) brightness(1.04);
+            border-color: var(--gline) !important;
+            box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16) !important;
+            background:
+                linear-gradient(145deg, var(--g1) 0%, var(--g2) 72%, rgba(255,255,255,0.16) 100%) !important;
+        }
+        body.theme-glass .sas-box::before {
+            background: var(--gline) !important;
+            box-shadow: 0 0 10px var(--gline);
+            width: 4px;
+            opacity: 1;
+        }
+        body.theme-glass .sas-box::after { display: none !important; }
+        body.theme-glass .sas-box-title,
+        body.theme-glass .sas-box-sub {
+            color: rgba(15, 23, 42, 0.88) !important;
+            font-weight: 800;
+            text-shadow: 0 1px 0 rgba(255,255,255,0.35);
+        }
+        body.theme-glass .sas-box-val {
+            color: #0f172a !important;
+            font-weight: 900;
+            text-shadow: 0 1px 0 rgba(255,255,255,0.35);
+        }
+        body.theme-glass .sas-box-ico {
+            opacity: 1 !important;
+            color: #0f172a !important;
+            background: rgba(15, 23, 42, 0.1) !important;
+            width: 36px;
+            height: 36px;
+            border-radius: 12px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+        body.theme-glass .sas-box-ico .sas-ico-svg { width: 22px; height: 22px; }
+
+        /* كل الجداول: شفافة + نص غامق — بدون صفوف بيضاء صلبة */
+        body.theme-glass table,
+        body.theme-glass .data-table,
+        body.theme-glass table.data-table,
+        body.theme-glass table.table-compact,
+        body.theme-glass .log-table,
+        body.theme-glass #subsTable {
+            background: transparent !important;
+            color: var(--glass-ink) !important;
+        }
+        body.theme-glass table th,
+        body.theme-glass table td,
+        body.theme-glass .data-table th,
+        body.theme-glass .data-table td,
+        body.theme-glass table.table-compact th,
+        body.theme-glass table.table-compact td,
+        body.theme-glass .log-table th,
+        body.theme-glass .log-table td,
+        body.theme-glass #subsTable th,
+        body.theme-glass #subsTable td,
+        body.theme-glass .sas-radius-page #subsTable tbody tr:nth-child(even) td,
+        body.theme-glass .sas-radius-page #subsTable tbody tr:hover td {
+            border-color: rgba(15, 23, 42, 0.1) !important;
+            color: var(--glass-ink) !important;
+            background: transparent !important;
+        }
+        body.theme-glass table th,
+        body.theme-glass .data-table th,
+        body.theme-glass table.table-compact th,
+        body.theme-glass .log-table th,
+        body.theme-glass #subsTable th {
+            background: rgba(15, 23, 42, 0.06) !important;
+            color: #1e293b !important;
+        }
+        body.theme-glass table tbody tr:hover td,
+        body.theme-glass .data-table tbody tr:hover td,
+        body.theme-glass #subsTable tbody tr:hover td,
+        body.theme-glass .sas-radius-page #subsTable tbody tr:hover td {
+            background: rgba(14, 165, 233, 0.1) !important;
+            color: var(--glass-ink) !important;
+        }
+        /* تحديد مشترك: تمييز خفيف بدون طمس البيانات */
+        body.theme-glass #subsTable tbody tr.sas-row-ctx {
+            outline: 2px solid rgba(37, 99, 235, 0.7) !important;
+            outline-offset: -2px;
+        }
+        body.theme-glass #subsTable tbody tr.sas-row-ctx td,
+        body.theme-glass .sas-radius-page #subsTable tbody tr.sas-row-ctx td,
+        body.theme-glass .sas-radius-page #subsTable tbody tr.row-status-expired.sas-row-ctx td,
+        body.theme-glass .sas-radius-page #subsTable tbody tr.row-status-left.sas-row-ctx td,
+        body.theme-glass .sas-radius-page #subsTable tbody tr.row-status-active.sas-row-ctx td,
+        body.theme-glass .sas-radius-page #subsTable tbody tr.row-status-expired.sas-row-ctx:hover td,
+        body.theme-glass .sas-radius-page #subsTable tbody tr.row-status-left.sas-row-ctx:hover td {
+            background: rgba(59, 130, 246, 0.18) !important;
+            color: #0f172a !important;
+        }
+        body.theme-glass #subsTable tbody tr.sas-row-ctx td *,
+        body.theme-glass #subsTable tbody tr.sas-row-ctx a {
+            color: inherit !important;
+        }
+        body.theme-glass .sas-radius-page #subsTable tbody tr.row-status-expired td {
+            background: rgba(250, 204, 21, 0.14) !important;
+        }
+        body.theme-glass .sas-radius-page #subsTable tbody tr.row-status-left td {
+            background: rgba(248, 113, 113, 0.14) !important;
+        }
+        body.theme-glass .btn,
+        body.theme-glass .ops-top-btn,
+        body.theme-glass .tool-ico,
+        body.theme-glass .ping-mode-btn,
+        body.theme-glass .cards-page .btn,
+        body.theme-glass .cards-page .chip-copy {
+            background: rgba(248, 250, 252, 0.45) !important;
+            border: 1px solid rgba(15, 23, 42, 0.12) !important;
+            color: var(--glass-ink) !important;
+            box-shadow: none !important;
+            border-radius: 12px !important;
+        }
+        body.theme-glass .btn:hover,
+        body.theme-glass .ops-top-btn:hover,
+        body.theme-glass .tool-ico:hover {
+            background: rgba(248, 250, 252, 0.65) !important;
+        }
+        body.theme-glass .btn.ghost,
+        body.theme-glass .btn.outline {
+            background: transparent !important;
+            border-color: rgba(15, 23, 42, 0.18) !important;
+            color: var(--glass-ink) !important;
+        }
+        body.theme-glass .tabs a.on,
+        body.theme-glass .ping-mode-btn.is-on {
+            background: rgba(14, 165, 233, 0.2) !important;
+            border-color: rgba(14, 165, 233, 0.45) !important;
+            color: #0c4a6e !important;
+        }
+        body.theme-glass input,
+        body.theme-glass select,
+        body.theme-glass textarea {
+            background: rgba(248, 250, 252, 0.5) !important;
+            border-color: rgba(15, 23, 42, 0.14) !important;
+            color: var(--glass-ink) !important;
+        }
+        body.theme-glass input::placeholder,
+        body.theme-glass textarea::placeholder { color: #64748b; }
+        body.theme-glass .alert {
+            background: rgba(248, 250, 252, 0.55) !important;
+            border: 1px solid rgba(15, 23, 42, 0.12) !important;
+            color: var(--glass-ink) !important;
+        }
+        body.theme-glass a.sas-link,
+        body.theme-glass .sas-user-copywrap a { color: #0369a1 !important; }
+        body.theme-glass .footer {
+            background: transparent;
+            color: rgba(248, 250, 252, 0.75);
+            border: 0;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.35);
+        }
+
+        /* ثيم كلاسيك */
+        body.theme-classic .sidebar {
           background: #12181f !important;
+          backdrop-filter: none;
+          -webkit-backdrop-filter: none;
           border-inline-end: 1px solid rgba(255,255,255,0.06);
+        }
+        body.theme-classic.app-bg-image {
+          background-color: <?php echo e($bgColor); ?> !important;
+          background-image: url("<?php echo e($bgUrl !== '' ? $bgUrl : $glassBgSrc); ?>") !important;
+          background-size: cover !important;
+          background-position: center center !important;
+          background-repeat: no-repeat !important;
+          background-attachment: scroll !important;
+        }
+        body.theme-classic.app-bg-image .bg-bubbles { display: none; }
+        body.theme-classic.app-bg-image .app,
+        body.theme-classic.app-bg-image .main { background: transparent; }
+        body.theme-classic.app-bg-image .panel,
+        body.theme-classic.app-bg-image .sas-table-card,
+        body.theme-classic.app-bg-image .glass-panel,
+        body.theme-classic.app-bg-image .main-top {
+          background: rgba(255,255,255,0.78) !important;
+          backdrop-filter: blur(12px) saturate(1.15);
+          -webkit-backdrop-filter: blur(12px) saturate(1.15);
+          border-color: rgba(255,255,255,0.45) !important;
+          color: #1c2430;
+        }
+        body.theme-classic.app-bg-color {
+          background: <?php echo e($bgColor); ?> !important;
         }
         .sidebar-head {
           padding: 18px 14px 12px;
@@ -116,27 +777,53 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
         .side-links a {
           display: flex;
           align-items: center;
-          justify-content: center;
-          text-align: center;
+          justify-content: flex-start;
+          gap: 10px;
+          text-align: start;
           min-height: 42px;
-          padding: 10px 12px;
+          padding: 10px 14px;
           border-radius: 10px;
           font-size: 13.5px;
           font-weight: 700;
           color: rgba(248,250,252,0.72);
           border: 1px solid transparent;
         }
-        .side-links a .nav-ico { display: none !important; }
+        /* عربي: من اليمين | إنكليزي: من اليسار */
+        body.rtl .side-links a,
+        body:not(.ltr) .side-links a {
+          justify-content: flex-start;
+          text-align: right;
+        }
+        body.ltr .side-links a {
+          justify-content: flex-start;
+          text-align: left;
+        }
+        .side-links a .nav-ico {
+          display: inline-flex !important;
+          align-items: center;
+          justify-content: center;
+          flex: 0 0 auto;
+          width: 22px;
+          height: 22px;
+          color: rgba(148, 163, 184, 0.95);
+        }
+        .side-links a .nav-ico svg {
+          display: block;
+          width: 18px;
+          height: 18px;
+        }
         .side-links a:hover {
           background: rgba(255,255,255,0.06);
           color: #fff;
         }
+        .side-links a:hover .nav-ico { color: #e2e8f0; }
         .side-links a.active {
           background: rgba(56, 189, 248, 0.14);
           color: #e0f2fe;
           border-color: rgba(56, 189, 248, 0.22);
           box-shadow: none;
         }
+        .side-links a.active .nav-ico { color: #7dd3fc; }
         .side-links .nav-user { display: none !important; }
         .sidebar .lang-mini { display: none !important; }
         .main-top-end .top-user-cluster {
@@ -228,9 +915,21 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
           text-decoration: none;
           font-size: 14px;
         }
+        .top-admin-dropdown a:hover,
+        .top-admin-dropdown button:hover {
+          background: #f1f5f9;
+        }
+        body.theme-glass .top-admin-dropdown a,
+        body.theme-glass .top-admin-dropdown button {
+          color: #f8fafc;
+        }
+        body.theme-glass .top-admin-dropdown a:hover,
+        body.theme-glass .top-admin-dropdown button:hover {
+          background: rgba(255,255,255,0.12);
+        }
     </style>
 </head>
-<body class="<?php echo $isEn ? 'ltr' : 'rtl'; ?> ios-glass<?php
+<body class="<?php echo $isEn ? 'ltr' : 'rtl'; ?> theme-<?php echo e($uiTheme); ?><?php
     if ($bgMode === 'image' && $bgUrl !== '') {
         echo ' app-bg-image';
     } elseif ($bgMode === 'color') {
@@ -253,38 +952,36 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             ?>
             <?php if ($isPlatformAdmin): ?>
             <?php /* —— قائمة أدمن المنصة فقط —— */ ?>
-            <a class="<?php echo $active === 'dashboard' ? 'active' : ''; ?>" href="index.php"><?php echo e(t('dashboard')); ?></a>
-            <a class="<?php echo $active === 'companies' ? 'active' : ''; ?>" href="companies.php"><?php echo e($isEn ? 'Companies' : 'الشركات'); ?></a>
-            <a class="<?php echo $active === 'saas_agents' ? 'active' : ''; ?>" href="saas_agents.php"><?php echo e($isEn ? 'Agents' : 'وكلاء'); ?></a>
+            <a class="<?php echo $active === 'dashboard' ? 'active' : ''; ?>" href="index.php"><?php echo nav_side_ico('dashboard'); ?><?php echo e(t('dashboard')); ?></a>
+            <a class="<?php echo $active === 'companies' ? 'active' : ''; ?>" href="companies.php"><?php echo nav_side_ico('companies'); ?><?php echo e($isEn ? 'Companies' : 'الشركات'); ?></a>
+            <a class="<?php echo $active === 'saas_agents' ? 'active' : ''; ?>" href="saas_agents.php"><?php echo nav_side_ico('agents'); ?><?php echo e($isEn ? 'Agents' : 'وكلاء'); ?></a>
             <?php if ($can('subscribers')): ?>
-            <a class="<?php echo $active === 'import_export' ? 'active' : ''; ?>" href="import_export.php"><?php echo e($isEn ? 'Import & Export' : 'استيراد وتصدير'); ?></a>
-            <?php endif; ?>
-            <?php if ($can('subscriptions')): ?>
-            <a class="<?php echo $active === 'system_activity' ? 'active' : ''; ?>" href="logs.php?scope=system"><?php echo e($isEn ? 'System activity' : 'حركات النظام'); ?></a>
+            <a class="<?php echo $active === 'import_export' ? 'active' : ''; ?>" href="import_export.php"><?php echo nav_side_ico('import_export'); ?><?php echo e($isEn ? 'Import & Export' : 'استيراد وتصدير'); ?></a>
             <?php endif; ?>
             <?php if ($can('logs')): ?>
-            <a class="<?php echo $active === 'logs' ? 'active' : ''; ?>" href="logs.php"><?php echo e($isEn ? 'Log' : 'اللوك'); ?></a>
+            <a class="<?php echo $active === 'system_activity' ? 'active' : ''; ?>" href="logs.php?scope=system" data-nav="system_activity"><?php echo nav_side_ico('activity'); ?><?php echo e($isEn ? 'System activity' : 'حركات النظام'); ?></a>
+            <a class="<?php echo $active === 'logs' ? 'active' : ''; ?>" href="logs.php?scope=audit" data-nav="logs"><?php echo nav_side_ico('logs'); ?><?php echo e($isEn ? 'Log' : 'اللوك'); ?></a>
             <?php endif; ?>
             <?php if ($can('settings') || $can('users') || $can('plans') || $can('backup')): ?>
-            <a class="<?php echo $settingsActive && $active !== 'schedule' ? 'active' : ''; ?>" href="settings.php"><?php echo e(t('settings')); ?></a>
+            <a class="<?php echo $settingsActive && $active !== 'schedule' ? 'active' : ''; ?>" href="settings.php"><?php echo nav_side_ico('settings'); ?><?php echo e(t('settings')); ?></a>
             <?php endif; ?>
-            <a class="<?php echo $active === 'company' ? 'active' : ''; ?>" href="company.php"><?php echo e($isEn ? 'About company' : 'عن الشركة'); ?></a>
-            <a href="logout.php"><?php echo e(t('logout')); ?></a>
+            <a class="<?php echo $active === 'company' ? 'active' : ''; ?>" href="company.php"><?php echo nav_side_ico('company'); ?><?php echo e($isEn ? 'About company' : 'عن الشركة'); ?></a>
+            <a href="logout.php"><?php echo nav_side_ico('logout'); ?><?php echo e(t('logout')); ?></a>
             <?php else: ?>
             <?php /* —— قائمة الوكالة / الوكيل (كل خصائص المشتركين تبقى هنا) —— */ ?>
             <?php if ($can('dashboard')): ?>
-            <a class="<?php echo $active === 'dashboard' ? 'active' : ''; ?>" href="index.php"><?php echo e(t('dashboard')); ?></a>
+            <a class="<?php echo $active === 'dashboard' ? 'active' : ''; ?>" href="index.php"><?php echo nav_side_ico('dashboard'); ?><?php echo e(t('dashboard')); ?></a>
             <?php endif; ?>
             <?php if ($can('subscribers')): ?>
-            <a class="<?php echo $active === 'sas' ? 'active' : ''; ?>" href="sas.php"><?php echo e(t('sas')); ?></a>
+            <a class="<?php echo $active === 'sas' ? 'active' : ''; ?>" href="sas.php"><?php echo nav_side_ico('subscribers'); ?><?php echo e(t('sas')); ?></a>
             <?php endif; ?>
             <?php
             $hideLeafCards = isset($pdo) && function_exists('account_viewer_is_leaf_child') && account_viewer_is_leaf_child($pdo);
             if ($can('cards') && !$hideLeafCards): ?>
-            <a class="<?php echo $active === 'cards' ? 'active' : ''; ?>" href="cards.php"><?php echo e($isEn ? 'Cards' : 'الكارتات'); ?></a>
+            <a class="<?php echo $active === 'cards' ? 'active' : ''; ?>" href="cards.php"><?php echo nav_side_ico('cards'); ?><?php echo e($isEn ? 'Cards' : 'الكارتات'); ?></a>
             <?php endif; ?>
             <?php if ($can('plans')): ?>
-            <a class="<?php echo $active === 'plans' ? 'active' : ''; ?>" href="plans.php"><?php echo e(t('plans')); ?></a>
+            <a class="<?php echo $active === 'plans' ? 'active' : ''; ?>" href="plans.php"><?php echo nav_side_ico('plans'); ?><?php echo e(t('plans')); ?></a>
             <?php endif; ?>
             <?php
             $navChildAgents = 0;
@@ -297,53 +994,55 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             $accSeesAgents = function_exists('is_accountant_user') && is_accountant_user()
                 && function_exists('user_boss_has_downline') && user_boss_has_downline(isset($pdo) ? $pdo : null);
             if (($can('agents') && $navChildAgents > 0) || $accSeesAgents): ?>
-            <a class="<?php echo $active === 'agents' ? 'active' : ''; ?>" href="agents.php"><?php echo e($isEn ? 'Agents' : 'الوكلاء'); ?></a>
+            <a class="<?php echo $active === 'agents' ? 'active' : ''; ?>" href="agents.php"><?php echo nav_side_ico('agents'); ?><?php echo e($isEn ? 'Agents' : 'الوكلاء'); ?></a>
             <?php endif; ?>
             <?php if ($can('agents') || (function_exists('is_agent_user') && is_agent_user()) || (function_exists('is_group_manager_user') && is_group_manager_user())): ?>
-            <a class="<?php echo $active === 'accountants' ? 'active' : ''; ?>" href="agents.php?view=accountant"><?php echo e($isEn ? 'Accountant' : 'المحاسب'); ?></a>
+            <a class="<?php echo $active === 'accountants' ? 'active' : ''; ?>" href="agents.php?view=accountant"><?php echo nav_side_ico('accountants'); ?><?php echo e($isEn ? 'Accountant' : 'المحاسب'); ?></a>
             <?php endif; ?>
             <?php
             $navFtth = isset($pdo) && function_exists('tenant_is_ftth') && tenant_is_ftth($pdo);
             if ($navFtth && ($can('subscribers') || $can('dashboard'))): ?>
-            <a class="<?php echo $active === 'cabinets' ? 'active' : ''; ?>" href="cabinets.php"><?php echo e($isEn ? 'Cabinets' : 'الكابينات'); ?></a>
+            <a class="<?php echo $active === 'cabinets' ? 'active' : ''; ?>" href="cabinets.php"><?php echo nav_side_ico('cabinets'); ?><?php echo e($isEn ? 'Cabinets' : 'الكابينات'); ?></a>
             <?php endif; ?>
-            <?php if ($can('rentals') && !$navFtth): ?>
-            <a class="<?php echo $active === 'rentals' ? 'active' : ''; ?>" href="rentals.php"><?php echo e($isEn ? 'Rentals' : 'الإيجار'); ?></a>
+            <?php
+            $navRentOn = !function_exists('rental_system_is_on') || rental_system_is_on();
+            if ($can('rentals') && !$navFtth && $navRentOn): ?>
+            <a class="<?php echo $active === 'rentals' ? 'active' : ''; ?>" href="rentals.php"><?php echo nav_side_ico('rentals'); ?><?php echo e($isEn ? 'Rentals' : 'الإيجار'); ?></a>
             <?php endif; ?>
             <?php if ($can('debts') && !$navFtth): ?>
-            <a class="<?php echo $active === 'debts' ? 'active' : ''; ?>" href="debts.php"><?php echo e(t('debts')); ?></a>
+            <a class="<?php echo $active === 'debts' ? 'active' : ''; ?>" href="debts.php"><?php echo nav_side_ico('debts'); ?><?php echo e(t('debts')); ?></a>
             <?php endif; ?>
             <?php if ($can('subscribers')): ?>
-            <a class="<?php echo $active === 'import_export' ? 'active' : ''; ?>" href="import_export.php"><?php echo e($isEn ? 'Import & Export' : 'استيراد وتصدير'); ?></a>
+            <a class="<?php echo $active === 'import_export' ? 'active' : ''; ?>" href="import_export.php"><?php echo nav_side_ico('import_export'); ?><?php echo e($isEn ? 'Import & Export' : 'استيراد وتصدير'); ?></a>
             <?php endif; ?>
             <?php if ($can('subscriptions')): ?>
-            <a class="<?php echo $active === 'subscriptions' ? 'active' : ''; ?>" href="subscriptions.php"><?php echo e(t('movements')); ?></a>
+            <a class="<?php echo $active === 'subscriptions' ? 'active' : ''; ?>" href="subscriptions.php"><?php echo nav_side_ico('movements'); ?><?php echo e(t('movements')); ?></a>
             <?php endif; ?>
             <?php if ($can('messages')): ?>
-            <a class="<?php echo $active === 'messages' ? 'active' : ''; ?>" href="messages.php"><?php echo e(t('messages')); ?></a>
+            <a class="<?php echo $active === 'messages' ? 'active' : ''; ?>" href="messages.php"><?php echo nav_side_ico('messages'); ?><?php echo e(t('messages')); ?></a>
             <?php endif; ?>
             <?php if ($can('reports')): ?>
-            <a class="<?php echo $active === 'reports' ? 'active' : ''; ?>" href="reports.php"><?php echo e(t('reports')); ?></a>
-            <a class="<?php echo $active === 'profit' ? 'active' : ''; ?>" href="profit_report.php"><?php echo e($isEn ? 'Profits' : 'الأرباح'); ?></a>
+            <a class="<?php echo $active === 'reports' ? 'active' : ''; ?>" href="reports.php"><?php echo nav_side_ico('reports'); ?><?php echo e(t('reports')); ?></a>
+            <a class="<?php echo $active === 'profit' ? 'active' : ''; ?>" href="profit_report.php"><?php echo nav_side_ico('profit'); ?><?php echo e($isEn ? 'Profits' : 'الأرباح'); ?></a>
             <?php endif; ?>
             <?php if ($can('logs')): ?>
-            <a class="<?php echo $active === 'logs' ? 'active' : ''; ?>" href="logs.php"><?php echo e($isEn ? 'Log' : 'اللوك'); ?></a>
+            <a class="<?php echo $active === 'logs' ? 'active' : ''; ?>" href="logs.php"><?php echo nav_side_ico('logs'); ?><?php echo e($isEn ? 'Log' : 'اللوك'); ?></a>
             <?php endif; ?>
             <?php if ($can('settings') || $can('users') || $can('plans') || $can('backup')): ?>
-            <a class="<?php echo $settingsActive && $active !== 'schedule' ? 'active' : ''; ?>" href="settings.php?tab=sas"><?php echo e(t('settings')); ?></a>
+            <a class="<?php echo $settingsActive && $active !== 'schedule' ? 'active' : ''; ?>" href="settings.php?tab=sas"><?php echo nav_side_ico('settings'); ?><?php echo e(t('settings')); ?></a>
             <?php endif; ?>
-            <a class="<?php echo $active === 'company' ? 'active' : ''; ?>" href="company.php"><?php echo e($isEn ? 'Company' : 'عن الشركة'); ?></a>
+            <a class="<?php echo $active === 'company' ? 'active' : ''; ?>" href="company.php"><?php echo nav_side_ico('company'); ?><?php echo e($isEn ? 'Company' : 'عن الشركة'); ?></a>
             <?php
             $navTid = $navTidEarly;
             if ($navTid > 1):
             ?>
-            <a class="<?php echo $active === 'billing' ? 'active' : ''; ?>" href="billing.php"><?php echo e($isEn ? 'Billing' : 'الاشتراك'); ?></a>
+            <a class="<?php echo $active === 'billing' ? 'active' : ''; ?>" href="billing.php"><?php echo nav_side_ico('billing'); ?><?php echo e($isEn ? 'Billing' : 'الاشتراك'); ?></a>
             <?php endif; ?>
             <?php
             $hideSideLogout = (function_exists('is_agent_user') && is_agent_user()) || $navTid > 1;
             if (!$hideSideLogout):
             ?>
-            <a href="logout.php"><?php echo e(t('logout')); ?></a>
+            <a href="logout.php"><?php echo nav_side_ico('logout'); ?><?php echo e(t('logout')); ?></a>
             <?php endif; ?>
             <?php endif; ?>
         </nav>
@@ -517,19 +1216,34 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <style>
             #appVeil[hidden], #appRing[hidden] { display: none !important; }
             #appVeil {
-                position: fixed; inset: 0; z-index: 99999;
+                position: fixed !important;
+                inset: 0 !important;
+                z-index: 199998 !important;
                 background: rgba(255,255,255,.22);
                 backdrop-filter: blur(2.5px);
                 -webkit-backdrop-filter: blur(2.5px);
                 pointer-events: none;
+                margin: 0 !important;
             }
+            /* وسط الشاشة فعلياً (RTL/LTR) — inset+margin بدون left% اللي ينكسر بالعربي */
             #appRing {
-                position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-                z-index: 100000; width: 72px; height: 72px; border-radius: 50%;
+                position: fixed !important;
+                top: 0 !important;
+                right: 0 !important;
+                bottom: 0 !important;
+                left: 0 !important;
+                inset: 0 !important;
+                width: 72px !important;
+                height: 72px !important;
+                margin: auto !important;
+                transform: none !important;
+                z-index: 199999 !important;
+                border-radius: 50%;
                 background: #fff; box-shadow: 0 10px 28px rgba(15, 23, 42, .16);
-                display: flex; align-items: center; justify-content: center;
+                display: flex !important; align-items: center; justify-content: center;
                 pointer-events: none;
             }
+            #appRing[hidden] { display: none !important; }
             #appRing svg { width: 46px; height: 46px; transform: rotate(-90deg); }
             #appRing .ring-track { fill: none; stroke: #e8eef5; stroke-width: 3.5; }
             #appRing .ring-fill {
@@ -1021,6 +1735,9 @@ window.showCornerToast = function (msg, kind) {
 
   function showModal(on) {
     if (!modal) return;
+    if (on && modal.parentNode !== document.body) {
+      document.body.appendChild(modal);
+    }
     modal.hidden = !on;
     if (on && qInput) {
       qInput.value = '';
@@ -1113,13 +1830,27 @@ window.showCornerToast = function (msg, kind) {
   var veil = document.getElementById('appVeil');
   var arm = null;
 
+  function pinToViewport(el) {
+    if (el && el.parentNode !== document.body) {
+      document.body.appendChild(el);
+    }
+  }
   function showWait(on) {
-    if (veil) veil.hidden = !on;
+    if (!veil) return;
+    if (on) pinToViewport(veil);
+    veil.hidden = !on;
   }
   function showRing() {
     if (!ring) return;
+    pinToViewport(veil);
+    pinToViewport(ring);
     ring.style.top = '';
     ring.style.left = '';
+    ring.style.right = '';
+    ring.style.bottom = '';
+    ring.style.inset = '';
+    ring.style.margin = '';
+    ring.style.transform = '';
     showWait(true);
     ring.hidden = false;
     ring.classList.remove('is-done');

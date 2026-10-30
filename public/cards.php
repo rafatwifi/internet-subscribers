@@ -1291,9 +1291,11 @@ function cards_transfer_available_qty($pdo, $config, $homeId, $fromAgentId, $pro
 
 function cards_page_with_all_categories($pdo, $groups)
 {
+    // أضف كل أنواع باقات هالوكالة (FTTH من ساسها، غيرها من باقاتها) حتى الفارغة
     if (!is_array($groups)) {
         $groups = array();
     }
+    global $config;
     $byName = array();
     $byPid = array();
     foreach ($groups as $i => $g) {
@@ -1310,18 +1312,9 @@ function cards_page_with_all_categories($pdo, $groups)
         }
     }
     $catalog = array();
-    if (function_exists('sas_cards_inventory_load_persisted')) {
-        $inv = sas_cards_inventory_load_persisted(0);
-        if ($inv && !empty($inv['groups']) && is_array($inv['groups'])) {
-            foreach ($inv['groups'] as $g) {
-                if (is_array($g)) {
-                    $catalog[] = $g;
-                }
-            }
-        }
-    }
-    if (!empty($_SESSION['sas_profiles_ui']) && is_array($_SESSION['sas_profiles_ui'])) {
-        foreach ($_SESSION['sas_profiles_ui'] as $pr) {
+    if (function_exists('sas_tenant_profile_rows')) {
+        $cfg = (isset($config) && is_array($config)) ? $config : array();
+        foreach (sas_tenant_profile_rows($pdo, $cfg) as $pr) {
             if (!is_array($pr)) {
                 continue;
             }
@@ -1330,21 +1323,6 @@ function cards_page_with_all_categories($pdo, $groups)
                 'profile_id' => isset($pr['id']) ? (int) $pr['id'] : 0,
                 'unused' => 0,
             );
-        }
-    }
-    if ($pdo) {
-        try {
-            $st = $pdo->query('SELECT name, sas_profile_id FROM service_plans ORDER BY sort_order ASC, id ASC');
-            if ($st) {
-                foreach ($st->fetchAll() as $p) {
-                    $catalog[] = array(
-                        'name' => isset($p['name']) ? (string) $p['name'] : '',
-                        'profile_id' => isset($p['sas_profile_id']) ? (int) $p['sas_profile_id'] : 0,
-                        'unused' => 0,
-                    );
-                }
-            }
-        } catch (Exception $e) {
         }
     }
     foreach ($catalog as $g) {
@@ -1357,13 +1335,12 @@ function cards_page_with_all_categories($pdo, $groups)
         if (($key !== '' && isset($byName[$key])) || ($pid > 0 && isset($byPid[$pid]))) {
             continue;
         }
-        $unused = isset($g['unused']) ? (int) $g['unused'] : 0;
         $row = array(
             'name' => $name !== '' ? $name : ('#' . $pid),
             'profile_id' => $pid,
-            'total' => isset($g['total']) ? (int) $g['total'] : $unused,
-            'used' => isset($g['used']) ? (int) $g['used'] : 0,
-            'unused' => $unused,
+            'total' => 0,
+            'used' => 0,
+            'unused' => 0,
             'cards' => array(),
         );
         $groups[] = $row;
@@ -1787,9 +1764,10 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 .cards-page .xfer-panel h2 { margin: 0 0 6px; font-size: 18px; }
 .cards-page .xfer-head {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  margin: 0 0 12px;
+  margin: 0 0 8px; min-height: 36px;
 }
-.cards-page .xfer-head h3 { margin: 0; font-size: 18px; }
+.cards-page .xfer-head h3 { margin: 0; font-size: 16px; line-height: 1.2; }
+.cards-page .xfer-head .btn.sm { height: 32px; padding: 0 12px; line-height: 1; display: inline-flex; align-items: center; }
 .cards-page .xfer-scroll {
   border: 0; border-radius: 0;
   max-width: 100%;
@@ -1803,30 +1781,53 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 .cards-page .xfer-table tbody,
 .cards-page .xfer-table tr { display: block; width: 100%; }
 .cards-page .xfer-table tr {
-  border: 1px solid #e8edf3; border-radius: 14px; margin: 0 0 8px; padding: 12px 14px;
-  background: #fff; box-shadow: 0 6px 16px rgba(15, 23, 42, 0.04);
+  border: 1px solid #e2e8f0; border-radius: 10px; margin: 0 0 5px; padding: 0;
+  background: #fff; box-shadow: none;
+}
+.cards-page tr[data-state="done"] {
+  background: #f0fdf4; border-color: #dcfce7;
 }
 .cards-page .xfer-compact {
-  display: grid; width: 100%; box-sizing: border-box; text-align: start;
-  grid-template-columns: 148px minmax(0, 1.35fr) minmax(180px, 1fr) 72px;
-  grid-template-areas: "when route pack act" "when by note act";
-  align-items: center; column-gap: 16px; row-gap: 2px;
+  display: flex; align-items: center; gap: 12px;
+  width: 100%; box-sizing: border-box; min-width: 0;
+  padding: 7px 12px; text-align: start; line-height: 1.2;
 }
-.cards-page .xfer-c-top { grid-area: when; direction: ltr; font-size: 12px; color: #64748b; white-space: nowrap; }
+.cards-page .xfer-c-meta {
+  flex: 0 0 178px; min-width: 0;
+  display: flex; align-items: center; gap: 6px;
+}
+.cards-page .xfer-c-top {
+  direction: ltr; unicode-bidi: isolate;
+  font-size: 12px; color: #64748b; white-space: nowrap;
+  font-variant-numeric: tabular-nums; line-height: 1.2;
+}
+.cards-page .xfer-c-by {
+  font-size: 11px; color: #94a3b8; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; max-width: 78px; line-height: 1.2;
+}
+.cards-page .xfer-c-by:not(:empty)::before {
+  content: "·"; margin-inline-end: 6px; color: #cbd5e1;
+}
 .cards-page .xfer-c-route,
-.cards-page .xfer-c-pack { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cards-page .xfer-c-pack,
+.cards-page .xfer-c-note {
+  min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.2;
+}
 .cards-page .xfer-c-route {
-  grid-area: route; font-size: 14px; font-weight: 800;
+  flex: 1 1 160px; font-size: 13px; font-weight: 800;
   direction: ltr; text-align: left; unicode-bidi: isolate;
 }
 .cards-page .xfer-c-pack {
-  grid-area: pack; font-size: 13px; font-weight: 700; color: #334155;
+  flex: 0 1 210px; font-size: 12px; font-weight: 700; color: #334155;
   font-variant-numeric: tabular-nums;
 }
-.cards-page .xfer-c-note { grid-area: note; font-size: 12px; color: #64748b; }
+.cards-page .xfer-c-note { flex: 0 1 110px; font-size: 11px; color: #64748b; }
 .cards-page .xfer-c-note:empty { display: none; }
-.cards-page .xfer-c-by { grid-area: by; font-size: 11px; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.cards-page .xfer-c-act { grid-area: act; justify-self: end; margin: 0; width: 72px; text-align: center; }
+.cards-page .xfer-c-act {
+  flex: 0 0 auto; margin: 0; min-width: 44px;
+  display: inline-flex; align-items: center; justify-content: center;
+  text-align: center; line-height: 1;
+}
 .cards-page .cards-swipe-hint {
   margin: 0 0 10px; color: #475569; font-size: 13px; font-weight: 700;
 }
@@ -1954,7 +1955,7 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 }
 .cards-page td[data-col="act"] { vertical-align: middle; text-align: center; white-space: normal; }
 .cards-page td[data-col="act"] form,
-.cards-page .xfer-c-act form { display: block; margin: 2px 0 0; }
+.cards-page .xfer-c-act form { display: inline-flex; align-items: center; margin: 0; }
 .cards-page .xfer-live {
   display: inline-block; width: 16px; height: 16px; box-sizing: border-box;
   border-radius: 50%; border: 2px solid #dbe4ee; border-top-color: #0f766e;
@@ -1965,8 +1966,7 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 }
 @keyframes xferSpin { to { transform: rotate(360deg); } }
 .cards-page tr[data-state="pending"] td { color: #64748b; }
-.cards-page tr[data-state="done"] { background: #f0fdf4; }
-.cards-page .xfer-ok { color: #166534; font-weight: 700; margin-inline-end: 6px; }
+.cards-page .xfer-ok { color: #166534; font-weight: 800; margin: 0; line-height: 1; }
 .cards-page .xfer-grid {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px;
   min-width: 0;
@@ -2025,41 +2025,26 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
   .cards-page .xfer-table tbody,
   .cards-page .xfer-table tr { display: block; width: 100%; }
   .cards-page .xfer-compact {
-    display: grid; width: 100%; box-sizing: border-box;
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-areas:
-      "when act"
-      "route route"
-      "pack pack"
-      "note note"
-      "by by";
-    column-gap: 8px; row-gap: 2px; text-align: start;
+    flex-wrap: wrap; gap: 4px 10px; padding: 8px 10px; align-items: center;
   }
   .cards-page .xfer-table tr {
-    border: 1px solid #e8edf3; border-radius: 12px; margin: 0 0 8px; padding: 10px 12px;
-    background: #fff; text-align: start; max-width: none;
+    border-radius: 10px; margin: 0 0 5px; text-align: start; max-width: none;
   }
   .cards-page .xfer-table tr:not(:has(.xfer-compact)) td {
     display: block; width: 100%; border: 0; padding: 2px 0; text-align: start;
     word-break: normal; overflow-wrap: break-word;
   }
   .cards-page .xfer-table tr:not(:has(.xfer-compact)) td:empty { display: none; }
-  .cards-page .xfer-c-top { grid-area: when; font-size: 12px; color: #64748b; direction: ltr; text-align: end; }
-  .cards-page .xfer-c-act { grid-area: act; margin-top: 0; justify-self: end; }
-  .cards-page .xfer-c-route { grid-area: route; }
-  .cards-page .xfer-c-pack { grid-area: pack; }
-  .cards-page .xfer-c-note { grid-area: note; }
-  .cards-page .xfer-c-by { grid-area: by; }
-  .cards-page .xfer-c-mid {
-    font-size: 13px; font-weight: 700; line-height: 1.45;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
+  .cards-page .xfer-c-meta { flex: 1 1 auto; max-width: calc(100% - 56px); }
+  .cards-page .xfer-c-by { max-width: 96px; }
+  .cards-page .xfer-c-act { margin-inline-start: auto; }
+  .cards-page .xfer-c-route { flex: 1 1 100%; font-size: 13px; }
+  .cards-page .xfer-c-pack { flex: 1 1 auto; }
   .cards-page .xfer-c-note {
-    font-size: 12px; color: #64748b; line-height: 1.35; margin-top: 2px;
-    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    flex: 1 1 100%; white-space: normal;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
   }
   .cards-page .xfer-c-note:empty { display: none; }
-  .cards-page .xfer-c-by { font-size: 11px; color: #94a3b8; }
 }
 .cards-page .xfer-native {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
@@ -2542,9 +2527,16 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
             tr.setAttribute('data-qty', qtyVal);
             var compact = document.createElement('td');
             compact.className = 'xfer-compact';
+            var meta = document.createElement('div');
+            meta.className = 'xfer-c-meta';
             var top = document.createElement('div');
             top.className = 'xfer-c-top';
             top.setAttribute('data-col', 'when');
+            var by = document.createElement('div');
+            by.className = 'xfer-c-by';
+            by.textContent = actorName;
+            meta.appendChild(top);
+            meta.appendChild(by);
             var route = document.createElement('div');
             route.className = 'xfer-c-mid xfer-c-route';
             route.setAttribute('dir', 'ltr');
@@ -2555,18 +2547,14 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
             var noteC = document.createElement('div');
             noteC.className = 'xfer-c-note';
             noteC.setAttribute('data-col', 'note');
-            var by = document.createElement('div');
-            by.className = 'xfer-c-by';
-            by.textContent = actorName;
             var actC = document.createElement('div');
             actC.className = 'xfer-c-act';
             actC.setAttribute('data-col', 'act');
             actC.innerHTML = waitHtml;
-            compact.appendChild(top);
+            compact.appendChild(meta);
             compact.appendChild(route);
             compact.appendChild(pack);
             compact.appendChild(noteC);
-            compact.appendChild(by);
             compact.appendChild(actC);
             tr.appendChild(compact);
             function fullCell(text, label, col) {
@@ -2928,11 +2916,13 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
                     ?>
                     <tr data-id="<?php echo (int) $tr['id']; ?>" data-state="<?php echo e($rowState); ?>" data-from="<?php echo (int) $tr['from_agent_id']; ?>" data-qty="<?php echo (int) $tr['qty']; ?>" data-profile="<?php echo e(isset($tr['profile_name']) ? $tr['profile_name'] : ''); ?>">
                         <td class="xfer-compact">
-                            <div class="xfer-c-top" data-col="when"><?php echo e(isset($tr['created_at']) ? $tr['created_at'] : ''); ?></div>
+                            <div class="xfer-c-meta">
+                                <div class="xfer-c-top" data-col="when"><?php echo e(isset($tr['created_at']) ? $tr['created_at'] : ''); ?></div>
+                                <div class="xfer-c-by"><?php echo e(isset($tr['created_by_name']) ? $tr['created_by_name'] : ''); ?></div>
+                            </div>
                             <div class="xfer-c-mid xfer-c-route" dir="ltr"><?php echo e($fromLbl); ?> → <?php echo e(isset($tr['to_name']) ? $tr['to_name'] : ''); ?></div>
                             <div class="xfer-c-mid xfer-c-pack"><?php echo e(isset($tr['profile_name']) ? $tr['profile_name'] : ''); ?> · <?php echo (int) $tr['qty']; ?> · <?php echo e(money_format_iqd($isReturn ? (0 - $profit) : $profit, $config['currency'])); ?></div>
                             <?php if (!empty($tr['note'])): ?><div class="xfer-c-note" data-col="note"><?php echo e($tr['note']); ?></div><?php endif; ?>
-                            <div class="xfer-c-by"><?php echo e(isset($tr['created_by_name']) ? $tr['created_by_name'] : ''); ?></div>
                             <div class="xfer-c-act" data-col="act"><?php echo cards_xfer_action_html($tr, $canTransfer, $homeId, $isEn, $returnedIds, $pendingReturnIds, $xferPer); ?></div>
                         </td>
                         <td class="xfer-full" data-col="when" data-label="<?php echo e($isEn ? 'Date' : 'التاريخ'); ?>"><?php echo e(isset($tr['created_at']) ? $tr['created_at'] : ''); ?></td>

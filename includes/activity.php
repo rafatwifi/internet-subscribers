@@ -40,12 +40,97 @@ function ensure_activity_logs_table($pdo)
         }
     } catch (Exception $e) {
     }
+    try {
+        $col = $pdo->query("SHOW COLUMNS FROM activity_logs LIKE 'actor_ip'")->fetch();
+        if (!$col) {
+            $pdo->exec('ALTER TABLE activity_logs ADD COLUMN actor_ip VARCHAR(45) DEFAULT NULL AFTER actor_name');
+        }
+    } catch (Exception $e) {
+    }
+    try {
+        $col = $pdo->query("SHOW COLUMNS FROM activity_logs LIKE 'actor_ip_kind'")->fetch();
+        if (!$col) {
+            $pdo->exec('ALTER TABLE activity_logs ADD COLUMN actor_ip_kind VARCHAR(20) DEFAULT NULL AFTER actor_ip');
+        }
+    } catch (Exception $e) {
+    }
 
     $ready = true;
 }
 
 /**
- * تسجيل حركة في السجل (مع اسم المستخدم الحالي إن وُجد)
+ * عنوان الطلب الحالي (مع احترام X-Forwarded-For عند البروكسي)
+ */
+function activity_request_ip()
+{
+    $candidates = array();
+    if (!empty($_SERVER['HTTP_CF_CONNECTING_IP'])) {
+        $candidates[] = (string) $_SERVER['HTTP_CF_CONNECTING_IP'];
+    }
+    if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+        foreach (explode(',', (string) $_SERVER['HTTP_X_FORWARDED_FOR']) as $part) {
+            $candidates[] = trim($part);
+        }
+    }
+    if (!empty($_SERVER['HTTP_X_REAL_IP'])) {
+        $candidates[] = (string) $_SERVER['HTTP_X_REAL_IP'];
+    }
+    if (!empty($_SERVER['REMOTE_ADDR'])) {
+        $candidates[] = (string) $_SERVER['REMOTE_ADDR'];
+    }
+    foreach ($candidates as $ip) {
+        $ip = trim((string) $ip);
+        if ($ip === '') {
+            continue;
+        }
+        if (strpos($ip, ':') !== false && strpos($ip, '.') !== false) {
+            // ممكن IPv4:port
+            $bits = explode(':', $ip);
+            if (count($bits) === 2 && filter_var($bits[0], FILTER_VALIDATE_IP)) {
+                $ip = $bits[0];
+            }
+        }
+        if (filter_var($ip, FILTER_VALIDATE_IP)) {
+            return $ip;
+        }
+    }
+    return '';
+}
+
+/**
+ * داخلي (شبكة خاصة/محلية) أو خارجي (إنترنت عام)
+ * يرجع array(ip, kind) حيث kind = internal|external|unknown
+ */
+function activity_ip_meta($ip = null)
+{
+    if ($ip === null) {
+        $ip = activity_request_ip();
+    }
+    $ip = trim((string) $ip);
+    if ($ip === '' || !filter_var($ip, FILTER_VALIDATE_IP)) {
+        return array('ip' => '', 'kind' => 'unknown');
+    }
+    $public = filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE);
+    if ($public) {
+        return array('ip' => $ip, 'kind' => 'external');
+    }
+    return array('ip' => $ip, 'kind' => 'internal');
+}
+
+function activity_ip_kind_label($kind, $en = false)
+{
+    $kind = (string) $kind;
+    if ($kind === 'external') {
+        return $en ? 'external' : 'خارجي';
+    }
+    if ($kind === 'internal') {
+        return $en ? 'internal' : 'داخلي';
+    }
+    return $en ? 'unknown' : 'غير معروف';
+}
+
+/**
+ * تسجيل حركة في السجل (مع اسم المستخدم وعنوان الـ IP إن وُجد)
  */
 function activity_log($pdo, $subscriberId, $entityType, $entityId, $action, $summary, $details = '')
 {
@@ -60,12 +145,15 @@ function activity_log($pdo, $subscriberId, $entityType, $entityId, $action, $sum
                 $actorName = current_admin_label();
             }
         }
+        $ipMeta = activity_ip_meta();
+        $actorIp = $ipMeta['ip'] !== '' ? $ipMeta['ip'] : null;
+        $actorIpKind = $ipMeta['kind'] !== 'unknown' ? $ipMeta['kind'] : ($actorIp ? $ipMeta['kind'] : null);
 
         try {
             $stmt = $pdo->prepare(
                 'INSERT INTO activity_logs
-                 (subscriber_id, entity_type, entity_id, action, summary, details, actor_user_id, actor_name)
-                 VALUES (:sid, :etype, :eid, :action, :summary, :details, :aid, :aname)'
+                 (subscriber_id, entity_type, entity_id, action, summary, details, actor_user_id, actor_name, actor_ip, actor_ip_kind)
+                 VALUES (:sid, :etype, :eid, :action, :summary, :details, :aid, :aname, :aip, :akind)'
             );
             $stmt->execute(array(
                 ':sid' => $subscriberId ? (int) $subscriberId : null,
@@ -76,21 +164,41 @@ function activity_log($pdo, $subscriberId, $entityType, $entityId, $action, $sum
                 ':details' => ($details !== '' && $details !== null) ? (string) $details : null,
                 ':aid' => $actorId,
                 ':aname' => $actorName,
+                ':aip' => $actorIp,
+                ':akind' => $actorIpKind,
             ));
         } catch (Exception $e2) {
-            $stmt = $pdo->prepare(
-                'INSERT INTO activity_logs
-                 (subscriber_id, entity_type, entity_id, action, summary, details)
-                 VALUES (:sid, :etype, :eid, :action, :summary, :details)'
-            );
-            $stmt->execute(array(
-                ':sid' => $subscriberId ? (int) $subscriberId : null,
-                ':etype' => (string) $entityType,
-                ':eid' => $entityId ? (int) $entityId : null,
-                ':action' => (string) $action,
-                ':summary' => (string) $summary,
-                ':details' => ($details !== '' && $details !== null) ? (string) $details : null,
-            ));
+            try {
+                $stmt = $pdo->prepare(
+                    'INSERT INTO activity_logs
+                     (subscriber_id, entity_type, entity_id, action, summary, details, actor_user_id, actor_name)
+                     VALUES (:sid, :etype, :eid, :action, :summary, :details, :aid, :aname)'
+                );
+                $stmt->execute(array(
+                    ':sid' => $subscriberId ? (int) $subscriberId : null,
+                    ':etype' => (string) $entityType,
+                    ':eid' => $entityId ? (int) $entityId : null,
+                    ':action' => (string) $action,
+                    ':summary' => (string) $summary,
+                    ':details' => ($details !== '' && $details !== null) ? (string) $details : null,
+                    ':aid' => $actorId,
+                    ':aname' => $actorName,
+                ));
+            } catch (Exception $e3) {
+                $stmt = $pdo->prepare(
+                    'INSERT INTO activity_logs
+                     (subscriber_id, entity_type, entity_id, action, summary, details)
+                     VALUES (:sid, :etype, :eid, :action, :summary, :details)'
+                );
+                $stmt->execute(array(
+                    ':sid' => $subscriberId ? (int) $subscriberId : null,
+                    ':etype' => (string) $entityType,
+                    ':eid' => $entityId ? (int) $entityId : null,
+                    ':action' => (string) $action,
+                    ':summary' => (string) $summary,
+                    ':details' => ($details !== '' && $details !== null) ? (string) $details : null,
+                ));
+            }
         }
     } catch (Exception $e) {
         // لا تكسر الصفحة بسبب فشل اللوك
@@ -247,8 +355,23 @@ function fetch_activity_filtered($pdo, $limit, $q, $scope)
     if ($scope === 'system') {
         $where .= " AND (a.subscriber_id IS NULL OR a.entity_type IN ('system','tenant','user','saas','backup','auth'))";
     }
-    $logPlatform = function_exists('is_super_admin_user') && is_super_admin_user();
-    if (!$logPlatform && function_exists('current_tenant_id')) {
+    $logPlatform = function_exists('is_super_admin_user') && is_super_admin_user()
+        && !(function_exists('is_impersonating') && is_impersonating());
+    if ($logPlatform && $scope !== 'system') {
+        // لوك البوابة: حركات طاقم المنصة فقط — مو تفعيل/قبض/تسديد وكلاء الشركات
+        $where .= ' AND ('
+            . 'a.actor_user_id IN (SELECT id FROM admin_users WHERE COALESCE(tenant_id, 1) <= 1)'
+            . " OR ("
+            . ' (a.actor_user_id IS NULL OR a.actor_user_id = 0)'
+            . " AND (a.subscriber_id IS NULL OR a.subscriber_id = 0)"
+            . " AND a.entity_type IN ('system','tenant','user','saas','backup','auth','company','platform','membership')"
+            . ')'
+            . ')';
+        $where .= " AND NOT ("
+            . " a.entity_type = 'subscriber'"
+            . ' AND a.actor_user_id IN (SELECT id FROM admin_users WHERE COALESCE(tenant_id, 1) > 1)'
+            . ')';
+    } elseif (!$logPlatform && function_exists('current_tenant_id')) {
         $logTid = (int) current_tenant_id();
         $where .= ' AND ('
             . '(a.subscriber_id IS NOT NULL AND a.subscriber_id > 0 AND s.tenant_id = ' . $logTid . ')'

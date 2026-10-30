@@ -3,6 +3,10 @@
 require_once __DIR__ . '/../includes/bootstrap.php';
 require_once __DIR__ . '/../includes/layout.php';
 require_login();
+if (function_exists('rental_system_is_on') && !rental_system_is_on()) {
+    flash('error', (isset($lang) && $lang === 'en') ? 'Rental system is off' : 'نظام الإيجار متوقف');
+    redirect('index.php');
+}
 
 $pdo->exec("UPDATE subscriptions SET status = 'expired' WHERE status = 'active' AND end_date < CURDATE()");
 

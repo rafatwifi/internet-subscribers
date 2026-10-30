@@ -15,6 +15,7 @@ function render_settings_tabs($current = 'general')
     $platformTabs = function_exists('is_super_admin_user') && is_super_admin_user();
     ?>
 <div class="tabs">
+    <a class="<?php echo $current === 'widgets' ? 'on' : ''; ?>" href="settings.php?tab=widgets"><?php echo e($isEn ? 'Widgets' : 'الوجدز'); ?></a>
     <?php if ($platformTabs && $can('settings')): ?>
     <a class="<?php echo $current === 'general' ? 'on' : ''; ?>" href="settings.php?tab=general"><?php echo e(t('settings_general')); ?></a>
     <?php endif; ?>
@@ -28,13 +29,13 @@ function render_settings_tabs($current = 'general')
     <a class="<?php echo $current === 'prices' ? 'on' : ''; ?>" href="agent_prices.php"><?php echo e($isEn ? 'Package prices' : 'تسعير الباقات'); ?></a>
     <?php endif; ?>
     <?php if ($can('settings')): ?>
-    <a class="<?php echo $current === 'rental' ? 'on' : ''; ?>" href="settings.php?tab=rental"><?php echo e($isEn ? 'Rental devices' : 'أجهزة الإيجار'); ?></a>
+    <a class="<?php echo $current === 'rental' ? 'on' : ''; ?>" href="settings.php?tab=rental"><?php echo e($isEn ? 'Rental system' : 'نظام الإيجار'); ?></a>
     <a class="<?php echo $current === 'whatsapp' ? 'on' : ''; ?>" href="settings.php?tab=whatsapp"><?php echo e(t('settings_whatsapp')); ?></a>
     <?php if (function_exists('is_super_admin_user') && is_super_admin_user()): ?>
     <a class="<?php echo $current === 'maintenance' ? 'on' : ''; ?>" href="settings.php?tab=maintenance"><?php echo e($isEn ? 'Maintenance' : 'صيانة النظام'); ?></a>
     <?php endif; ?>
     <a class="<?php echo $current === 'sas' ? 'on' : ''; ?>" href="settings.php?tab=sas"><?php
-        echo e($agencySas ? ($isEn ? 'SAS accounts' : 'حسابات الساس') : t('settings_sas'));
+        echo e($agencySas ? ($isEn ? 'Reseller link' : 'ربط رسلر') : t('settings_sas'));
     ?></a>
     <?php if (function_exists('is_super_admin_user') && is_super_admin_user()): ?>
     <a class="<?php echo $current === 'saas' ? 'on' : ''; ?>" href="settings.php?tab=saas"><?php echo e($isEn ? 'SaaS / ZainCash' : 'الاستضافة / زين كاش'); ?></a>
@@ -46,7 +47,7 @@ function render_settings_tabs($current = 'general')
     <?php endif; ?>
     <?php endif; ?>
     <?php elseif ($agencySas): ?>
-    <a class="<?php echo $current === 'sas' ? 'on' : ''; ?>" href="settings.php?tab=sas"><?php echo e($isEn ? 'SAS accounts' : 'حسابات الساس'); ?></a>
+    <a class="<?php echo $current === 'sas' ? 'on' : ''; ?>" href="settings.php?tab=sas"><?php echo e($isEn ? 'Reseller link' : 'ربط رسلر'); ?></a>
     <?php if (function_exists('is_agent_user') && is_agent_user()): ?>
     <a class="<?php echo $current === 'whatsapp' ? 'on' : ''; ?>" href="settings.php?tab=whatsapp"><?php echo e(t('settings_whatsapp')); ?></a>
     <?php endif; ?>

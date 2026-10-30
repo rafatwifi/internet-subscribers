@@ -32,13 +32,27 @@ function rental_default_devices()
     );
 }
 
+function rental_system_is_on($settings = null)
+{
+    if ($settings === null) {
+        $settings = function_exists('settings_load') ? settings_load() : array();
+    }
+    if (!is_array($settings)) {
+        return true;
+    }
+    if (!array_key_exists('rental_system_enabled', $settings)) {
+        return true;
+    }
+    return !empty($settings['rental_system_enabled']);
+}
+
 function rental_devices_list($settings = null)
 {
     if ($settings === null) {
         $settings = settings_load();
     }
     $list = array();
-    if (!empty($settings['rental_devices']) && is_array($settings['rental_devices'])) {
+    if (isset($settings['rental_devices']) && is_array($settings['rental_devices'])) {
         foreach ($settings['rental_devices'] as $d) {
             if (!is_array($d)) {
                 continue;
@@ -55,11 +69,65 @@ function rental_devices_list($settings = null)
                 'color' => isset($d['color']) && $d['color'] !== '' ? (string) $d['color'] : '#5e5ce6',
             );
         }
+        return $list;
     }
-    if (!$list) {
-        $list = rental_default_devices();
+    return rental_default_devices();
+}
+
+function rental_devices_replace_one($settings, $oldId, $device)
+{
+    $list = rental_devices_list($settings);
+    $oldId = trim((string) $oldId);
+    $device = is_array($device) ? $device : array();
+    $newId = isset($device['id']) ? trim((string) $device['id']) : '';
+    $newName = isset($device['name']) ? trim((string) $device['name']) : '';
+    if ($newId === '' || $newName === '') {
+        return array(false, $list);
     }
-    return $list;
+    $row = array(
+        'id' => $newId,
+        'name' => $newName,
+        'icon' => isset($device['icon']) && trim((string) $device['icon']) !== ''
+            ? trim((string) $device['icon'])
+            : strtoupper(substr($newId, 0, 2)),
+        'color' => isset($device['color']) && trim((string) $device['color']) !== ''
+            ? trim((string) $device['color'])
+            : '#5e5ce6',
+    );
+    $out = array();
+    $replaced = false;
+    foreach ($list as $d) {
+        if ($oldId !== '' && $d['id'] === $oldId) {
+            $out[] = $row;
+            $replaced = true;
+            continue;
+        }
+        if ($d['id'] === $newId && $oldId !== $newId) {
+            continue;
+        }
+        $out[] = $d;
+    }
+    if (!$replaced) {
+        $out[] = $row;
+    }
+    return array(true, $out);
+}
+
+function rental_devices_remove_one($settings, $deviceId)
+{
+    $deviceId = trim((string) $deviceId);
+    $list = rental_devices_list($settings);
+    if ($deviceId === '') {
+        return $list;
+    }
+    $out = array();
+    foreach ($list as $d) {
+        if ($d['id'] === $deviceId) {
+            continue;
+        }
+        $out[] = $d;
+    }
+    return $out;
 }
 
 function rental_fee_amount($settings = null)
@@ -130,6 +198,9 @@ function sas_save_user_rental($pdo, $config, $username, $enabled, $deviceId, $op
     $username = trim((string) $username);
     if ($username === '') {
         return array(false, 'مشترك غير محدد', array());
+    }
+    if (function_exists('rental_system_is_on') && !rental_system_is_on()) {
+        return array(false, 'نظام الإيجار متوقف من الإعدادات', array());
     }
     if (!function_exists('sas_cache_get') || !function_exists('sas_cache_ensure_local')) {
         return array(false, 'ملف SAS غير مكتمل', array());

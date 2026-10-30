@@ -171,12 +171,21 @@ a { color: inherit; text-decoration: none; }
   border-bottom: 1px solid rgba(255,255,255,0.05);
 }
 .side-links a .nav-ico {
-  width: 1.25em;
-  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
   color: #b8c2cc;
   flex: 0 0 auto;
 }
+.side-links a .nav-ico svg {
+  display: block;
+  width: 18px;
+  height: 18px;
+}
 .side-links a:hover { background: rgba(255,255,255,0.06); color: #fff; }
+.side-links a:hover .nav-ico { color: #e2e8f0; }
 .side-links a.active {
   background: #dd4b39;
   color: #fff;
@@ -2767,6 +2776,236 @@ body.ltr .chart-year-total { text-align: right; }
   font-size: 13px;
   font-weight: 700;
   margin-top: 2px;
+}
+
+/* Twin loom: profit + activations on one pulse */
+.twin-panel {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  background:
+    radial-gradient(120% 80% at 100% 0%, rgba(245, 158, 11, 0.10), transparent 55%),
+    radial-gradient(90% 70% at 0% 100%, rgba(13, 148, 136, 0.10), transparent 50%),
+    rgba(255, 255, 255, 0.72);
+}
+.twin-panel::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(15, 23, 42, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(15, 23, 42, 0.03) 1px, transparent 1px);
+  background-size: 28px 28px;
+  mask-image: linear-gradient(180deg, rgba(0,0,0,.55), transparent 88%);
+  opacity: .55;
+  z-index: 0;
+}
+.twin-head,
+.twin-legend,
+.twin-stage,
+.twin-months { position: relative; z-index: 1; }
+.twin-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.twin-title h2 { margin: 0 0 4px; }
+.twin-totals {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.twin-tot {
+  min-width: 148px;
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: rgba(255,255,255,.72);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.06);
+}
+.twin-tot-lab {
+  display: block;
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+.twin-tot strong {
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+.twin-tot.is-profit strong { color: #b45309; }
+.twin-tot.is-acts strong { color: #0f766e; }
+.twin-legend {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin: 0 0 8px;
+}
+.twin-leg {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 800;
+  color: #334155;
+}
+.twin-leg i {
+  width: 18px;
+  height: 8px;
+  border-radius: 999px;
+  display: inline-block;
+}
+.twin-leg.is-profit i {
+  background: linear-gradient(90deg, #f59e0b, #d97706);
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.18);
+}
+.twin-leg.is-acts i {
+  background: linear-gradient(90deg, #0d9488, #38bdf8);
+  box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.16);
+}
+.twin-stage {
+  position: relative;
+  height: min(320px, 52vw);
+  min-height: 220px;
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.35), rgba(255,255,255,.08));
+  border: 1px solid rgba(15, 23, 42, 0.06);
+  overflow: hidden;
+}
+.twin-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.twin-grid {
+  stroke: rgba(15, 23, 42, 0.07);
+  stroke-width: 1;
+  stroke-dasharray: 4 6;
+}
+.twin-now {
+  fill: rgba(245, 158, 11, 0.10);
+  stroke: rgba(245, 158, 11, 0.18);
+  stroke-width: 1;
+  rx: 16;
+}
+.twin-line-p {
+  fill: none;
+  stroke: #d97706;
+  stroke-width: 3.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 6px 10px rgba(217, 119, 6, 0.22));
+}
+.twin-line-a {
+  fill: none;
+  stroke-width: 3.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 8px 12px rgba(13, 148, 136, 0.22));
+}
+.twin-draw {
+  stroke-dasharray: 1400;
+  stroke-dashoffset: 1400;
+  animation: twinDraw 1.15s ease forwards;
+}
+@keyframes twinDraw {
+  to { stroke-dashoffset: 0; }
+}
+.twin-dot-p {
+  fill: #fff;
+  stroke: #d97706;
+  stroke-width: 2.5;
+}
+.twin-dot-p.is-cur {
+  fill: #f59e0b;
+  stroke: #fff;
+  stroke-width: 2;
+}
+.twin-bead-a {
+  fill: rgba(13, 148, 136, 0.16);
+  stroke: rgba(13, 148, 136, 0.55);
+  stroke-width: 1.5;
+}
+.twin-bead-a.is-cur {
+  fill: rgba(56, 189, 248, 0.22);
+  stroke: #0d9488;
+}
+.twin-bead-core {
+  fill: #0f766e;
+}
+.twin-hit { cursor: crosshair; }
+.twin-tip {
+  position: absolute;
+  transform: translateX(-50%);
+  min-width: 168px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.92);
+  color: #fff;
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.28);
+  pointer-events: none;
+  z-index: 3;
+}
+.twin-tip[hidden] { display: none !important; }
+.twin-tip b {
+  display: block;
+  font-size: 12px;
+  margin-bottom: 6px;
+  opacity: .85;
+}
+.twin-tip-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 3px 0;
+}
+.twin-tip-row.is-profit strong { color: #fbbf24; }
+.twin-tip-row.is-acts strong { color: #5eead4; }
+.twin-months {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 12px;
+}
+.twin-m {
+  appearance: none;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: rgba(255,255,255,.65);
+  border-radius: 999px;
+  padding: 7px 4px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  color: #64748b;
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease, border-color .15s ease, transform .15s ease;
+}
+.twin-m.is-cur,
+.twin-m.is-on {
+  color: #9a3412;
+  background: rgba(245, 158, 11, 0.16);
+  border-color: rgba(245, 158, 11, 0.35);
+}
+.twin-m:hover { transform: translateY(-1px); }
+@media (max-width: 900px) {
+  .twin-stage { min-height: 200px; height: 240px; }
+  .twin-tot { min-width: 132px; }
+  .twin-tot strong { font-size: 16px; }
+  .twin-months { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+}
+@media (max-width: 520px) {
+  .twin-months { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .twin-m { font-size: 10px; padding: 8px 2px; }
 }
 
 .month-grid {

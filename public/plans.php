@@ -2,16 +2,22 @@
 
 require_once __DIR__ . '/../includes/bootstrap.php';
 require_once __DIR__ . '/../includes/layout.php';
-require_once __DIR__ . '/../includes/settings_tabs.php';
 require_login();
 require_perm('plans');
+$plansFtth = function_exists('tenant_is_ftth') && tenant_is_ftth($pdo, isset($config) ? $config : null);
 $plansLeaf = function_exists('account_viewer_is_leaf_child') && account_viewer_is_leaf_child($pdo);
 $plansMe = function_exists('current_admin') ? current_admin() : null;
 $plansParent = ($plansMe && function_exists('account_user_boss_id')) ? (int) account_user_boss_id($pdo, (int) $plansMe['id']) : 0;
 if ($plansParent <= 0 && function_exists('account_viewer_parent_id')) {
     $plansParent = (int) account_viewer_parent_id($pdo);
 }
-$plansCanToggle = ($plansParent <= 0);
+$plansCanToggle = ($plansParent <= 0) && !$plansFtth;
+if ($plansFtth && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    flash('error', (isset($lang) && $lang === 'en')
+        ? 'FTTH packages come from this company SAS only — not the shared WiFi plan table'
+        : 'باقات FTTH تنزل من ساس هالشركة فقط — مو من جدول باقات الواي فاي');
+    redirect('plans.php');
+}
 
 function plans_priced_user_id($pdo)
 {
@@ -344,7 +350,30 @@ if ($editId > 0) {
     }
 }
 
-$plans = $pdo->query('SELECT * FROM service_plans ORDER BY sort_order ASC, monthly_price ASC, id ASC')->fetchAll();
+$plans = array();
+$ftthPlanRows = array();
+if ($plansFtth) {
+    $ftthSrc = function_exists('sas_tenant_profile_rows')
+        ? sas_tenant_profile_rows($pdo, isset($config) ? $config : null)
+        : array();
+    foreach ($ftthSrc as $fp) {
+        if (!is_array($fp)) {
+            continue;
+        }
+        $ftthPlanRows[] = array(
+            'id' => 0,
+            'name' => isset($fp['name']) ? (string) $fp['name'] : '',
+            'monthly_price' => isset($fp['price']) ? (float) $fp['price'] : 0,
+            'cost_price' => isset($fp['price']) ? (float) $fp['price'] : 0,
+            'sas_profile_id' => isset($fp['id']) ? (int) $fp['id'] : 0,
+            'sort_order' => 0,
+            'is_active' => 1,
+            'from_ftth_sas' => 1,
+        );
+    }
+} else {
+    $plans = $pdo->query('SELECT * FROM service_plans ORDER BY sort_order ASC, monthly_price ASC, id ASC')->fetchAll();
+}
 $priceBook = plans_account_book($pdo);
 list($floorByName, $floorByPid) = plans_price_floors($pdo);
 $editFloor = 0;
@@ -378,7 +407,6 @@ if (!$plansCanToggle) {
 $showAdd = $editPlan || (isset($_GET['add']) && (string) $_GET['add'] === '1');
 
 render_header(t('plans'), 'plans');
-render_settings_tabs('plans');
 ?>
 <style>
 .plans-head {
@@ -401,19 +429,112 @@ render_settings_tabs('plans');
     <div class="plans-head">
         <div>
             <h2><?php echo e($lang === 'en' ? 'Packages' : 'الباقات'); ?></h2>
-            <?php if (!$plansLeaf): ?>
+            <?php if (!$plansFtth && !$plansLeaf): ?>
             <p style="color:#6b7a88;margin:4px 0 0;font-weight:600"><?php echo e(t('drag_hint')); ?></p>
             <?php endif; ?>
         </div>
-        <?php if (!$plansLeaf): ?>
+        <?php if (!$plansLeaf && !$plansFtth): ?>
         <div class="actions" style="margin:0;gap:8px;align-items:center">
             <a class="btn secondary sm" href="agent_prices.php"><?php echo e($lang === 'en' ? 'Price table' : 'جدول الأسعار'); ?></a>
             <a class="plans-add-btn" href="plans.php?add=1" title="<?php echo e($lang === 'en' ? 'Add package' : 'إضافة باقة'); ?>" aria-label="<?php echo e($lang === 'en' ? 'Add package' : 'إضافة باقة'); ?>">+</a>
         </div>
+        <?php elseif ($plansFtth): ?>
+        <div class="actions" style="margin:0;gap:8px;align-items:center">
+            <a class="btn secondary sm" href="agent_prices.php"><?php echo e($lang === 'en' ? 'Price table' : 'جدول الأسعار'); ?></a>
+        </div>
         <?php endif; ?>
     </div>
 
-    <?php if (!$plansLeaf): ?>
+    <?php if ($plansFtth): ?>
+    <style>
+    .ftth-plans-wrap {
+      margin-top: 10px;
+      border: 1px solid #e2e8f0;
+      border-radius: 16px;
+      overflow: hidden;
+      background: #fff;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04);
+    }
+    .ftth-plans-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-family: var(--font, Tajawal, sans-serif);
+    }
+    .ftth-plans-table thead th {
+      background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+      color: #334155;
+      font-size: 13px;
+      font-weight: 800;
+      padding: 12px 16px;
+      border-bottom: 1px solid #e2e8f0;
+    }
+    .ftth-plans-table thead th.col-name { text-align: right; }
+    .ftth-plans-table thead th.col-id { text-align: left; width: 140px; }
+    .ftth-plans-table tbody td {
+      padding: 13px 16px;
+      border-bottom: 1px solid #f1f5f9;
+      font-size: 14px;
+      font-weight: 700;
+      color: #0f172a;
+      vertical-align: middle;
+    }
+    .ftth-plans-table tbody tr:last-child td { border-bottom: 0; }
+    .ftth-plans-table tbody tr:nth-child(even) td { background: #fafbfc; }
+    .ftth-plans-table tbody tr:hover td { background: #f0f9ff; }
+    .ftth-plans-table .col-name { text-align: right; }
+    .ftth-plans-table .col-id {
+      text-align: left;
+      direction: ltr;
+      unicode-bidi: isolate;
+      color: #64748b;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+    .ftth-plans-table .ftth-id-pill {
+      display: inline-block;
+      min-width: 52px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: #e2e8f0;
+      color: #334155;
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .ftth-plans-empty {
+      padding: 22px 16px;
+      text-align: center;
+      color: #64748b;
+      font-weight: 700;
+    }
+    </style>
+    <div class="ftth-plans-wrap">
+        <table class="ftth-plans-table">
+            <thead>
+            <tr>
+                <th class="col-name"><?php echo e($lang === 'en' ? 'Package' : 'الباقة'); ?></th>
+                <th class="col-id"><?php echo e($lang === 'en' ? 'SAS id' : 'رقم الساس'); ?></th>
+            </tr>
+            </thead>
+            <tbody>
+            <?php foreach ($ftthPlanRows as $fpRow): ?>
+                <tr>
+                    <td class="col-name"><?php echo e($fpRow['name']); ?></td>
+                    <td class="col-id">
+                        <?php if ($fpRow['sas_profile_id'] > 0): ?>
+                            <span class="ftth-id-pill">#<?php echo (int) $fpRow['sas_profile_id']; ?></span>
+                        <?php else: ?>
+                            <span class="ftth-id-pill">—</span>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+            <?php endforeach; ?>
+            <?php if (!$ftthPlanRows): ?>
+                <tr><td class="ftth-plans-empty" colspan="2"><?php echo e($lang === 'en' ? 'Packages did not load from SAS yet' : 'الباقات ما نزلت من الساس بعد'); ?></td></tr>
+            <?php endif; ?>
+            </tbody>
+        </table>
+    </div>
+    <?php elseif (!$plansLeaf): ?>
     <div class="plans-add-panel" id="plansAddPanel"<?php echo $showAdd ? '' : ' hidden'; ?>>
         <h2 style="margin-top:0"><?php echo $editPlan ? t('edit') . ' — ' . e($editPlan['name']) : ($lang === 'en' ? 'Add package' : 'إضافة باقة جديدة'); ?></h2>
         <form method="post">
@@ -456,6 +577,7 @@ render_settings_tabs('plans');
     </div>
     <?php endif; ?>
 
+    <?php if (!$plansFtth): ?>
     <div class="table-wrap" style="margin-top:14px">
         <table>
             <thead>
@@ -552,6 +674,7 @@ render_settings_tabs('plans');
             </tbody>
         </table>
     </div>
+    <?php endif; ?>
 </div>
 
 <script>

@@ -2109,49 +2109,8 @@ class SASConnector
             return array();
         }
         $maxSeries = max(1, min(30, (int) $maxSeries));
+        // فقط سلاسل مالك الجلسة — بدون فئات فارغة من كل بروفايلات الشركة
         $groups = array();
-
-        // ابدأ من بروفايلات الساس حتى تظهر الفئات الفارغة
-        if (method_exists($this, 'getProfiles')) {
-            $profiles = $this->getProfiles();
-            if (is_array($profiles)) {
-                if (isset($profiles['data']) && is_array($profiles['data'])) {
-                    $profiles = $profiles['data'];
-                }
-                foreach ($profiles as $pr) {
-                    if (!is_array($pr)) {
-                        continue;
-                    }
-                    $pid = 0;
-                    if (isset($pr['id']) && is_numeric($pr['id'])) {
-                        $pid = (int) $pr['id'];
-                    }
-                    $pname = '';
-                    if (!empty($pr['name']) && !is_array($pr['name'])) {
-                        $pname = trim((string) $pr['name']);
-                    } elseif (!empty($pr['profile_name']) && !is_array($pr['profile_name'])) {
-                        $pname = trim((string) $pr['profile_name']);
-                    }
-                    if ($pname === '' && $pid <= 0) {
-                        continue;
-                    }
-                    if ($pname === '') {
-                        $pname = '#' . $pid;
-                    }
-                    $key = strtolower($pname);
-                    if (!isset($groups[$key])) {
-                        $groups[$key] = array(
-                            'name' => $pname,
-                            'profile_id' => $pid,
-                            'total' => 0,
-                            'used' => 0,
-                            'unused' => 0,
-                            'cards' => array(),
-                        );
-                    }
-                }
-            }
-        }
 
         $payload = array(
             'page' => 1,
@@ -2254,7 +2213,18 @@ class SASConnector
             });
         }
         unset($g);
-        $out = array_values($groups);
+        $out = array();
+        foreach ($groups as $g) {
+            if (!is_array($g)) {
+                continue;
+            }
+            $tot = isset($g['total']) ? (int) $g['total'] : 0;
+            $nu = isset($g['unused']) ? (int) $g['unused'] : 0;
+            if ($tot <= 0 && $nu <= 0) {
+                continue;
+            }
+            $out[] = $g;
+        }
         usort($out, function ($a, $b) {
             if ($a['total'] !== $b['total']) {
                 return ($a['total'] > $b['total']) ? -1 : 1;
@@ -4013,6 +3983,7 @@ class SASConnector
                     'sortBy' => 'username',
                     'direction' => 'asc',
                     'search' => '',
+                    'with_traffic' => 1,
                 );
                 $full = $this->decodeApiBody($this->post($route, $payload, true), false);
                 if (!is_array($full) || isset($full['__http_error']) || isset($full['__auth_error']) || isset($full['__curl_error'])) {
