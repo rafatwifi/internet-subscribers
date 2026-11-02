@@ -76,7 +76,8 @@ if (isset($_GET['ajax']) && (string) $_GET['ajax'] === 'log_ring') {
         }
         if (function_exists('wa_retry_due_batch') && isset($config)) {
             try {
-                wa_retry_due_batch($pdo, $config, 2);
+                // رسالة واحدة لكل نبضة — التباعد يحمي من حظر واتساب
+                wa_retry_due_batch($pdo, $config, 1);
             } catch (Exception $e) {
             }
         }
@@ -891,7 +892,7 @@ if ($mode === 'log') {
     if (function_exists('ensure_message_log_extra')) {
         ensure_message_log_extra($pdo);
     }
-    $where = '1=1';
+    $where = '1=1 AND REPLACE(m.message_type, \'_retry\', \'\') NOT IN (\'card_transfer\', \'card_pull\')';
     $params = array();
     $mineSess = function_exists('whatsapp_session_id') ? whatsapp_session_id() : '';
     $waLogScope = ($mineSess !== '' && $mineSess !== 'default'
@@ -959,7 +960,7 @@ if ($mode === 'log') {
     }
     $offset = ($logPage - 1) * $logPerPage;
     $st = $pdo->prepare(
-        "SELECT m.*, s.name AS subscriber_name
+        "SELECT m.*, s.name AS subscriber_name, s.sas_username AS subscriber_user
          FROM message_logs m
          LEFT JOIN subscribers s ON s.id = m.subscriber_id
          WHERE $where
@@ -1922,7 +1923,13 @@ $sendFilters = array(
                         }
                         ?>
                         <?php if (!empty($row['subscriber_id'])): ?>
-                            <a href="subscriber.php?id=<?php echo (int) $row['subscriber_id']; ?>"><?php echo e($logWho); ?></a>
+                            <?php
+                            $logUser = isset($row['subscriber_user']) ? trim((string) $row['subscriber_user']) : '';
+                            $logHref = ($logUser !== '' && function_exists('sas_user_url'))
+                                ? sas_user_url($logUser)
+                                : ('subscriber.php?id=' . (int) $row['subscriber_id']);
+                            ?>
+                            <a href="<?php echo e($logHref); ?>"><?php echo e($logWho); ?></a>
                         <?php elseif ($logWho !== ''): ?>
                             <span class="log-agent"><?php echo e($logWho); ?></span>
                         <?php else: ?>
@@ -1936,7 +1943,16 @@ $sendFilters = array(
                     <?php
                     $failText = (!$ok && function_exists('message_log_fail_text')) ? message_log_fail_text($row) : '';
                     ?>
-                    <td class="msg-status-log" data-log-live="<?php echo (!$ok && !$resolved) ? (int) $row['id'] : 0; ?>"<?php echo ($failText !== '' && !$ok) ? (' title="' . e($failText) . '"') : ''; ?>>
+                    <?php
+                        $statusTip = '';
+                        if (!$ok && function_exists('message_log_live_tip')) {
+                            $statusTip = message_log_live_tip($row, $isEnMsg ? 'en' : 'ar');
+                        }
+                        if ($statusTip === '' && $failText !== '') {
+                            $statusTip = $failText;
+                        }
+                    ?>
+                    <td class="msg-status-log" data-log-live="<?php echo (!$ok && !$resolved) ? (int) $row['id'] : 0; ?>"<?php echo ($statusTip !== '' && !$ok) ? (' title="' . e($statusTip) . '"') : ''; ?>>
                         <?php
                         $tryN = isset($row['attempt']) ? (int) $row['attempt'] : 0;
                         if ($tryN < 1) {
@@ -1952,7 +1968,7 @@ $sendFilters = array(
                         <?php if ($ok): ?>
                             <span class="msg-st-line"><span class="dot-msg ok" title="<?php echo e($isEnMsg ? 'Sent' : 'تم'); ?>"></span><span class="msg-ok-word"><?php echo e($isEnMsg ? 'OK' : 'تم'); ?></span></span>
                         <?php elseif ($resolved): ?>
-                            <span class="msg-st-line"><span class="dot-msg resolved"></span><span class="msg-resolved-ok" title="<?php echo e($failText !== '' ? $failText : ($isEnMsg ? 'Failure reason is not stored' : 'ماكو سبب محفوظ')); ?>"><?php echo e($isEnMsg ? 'Processed' : 'تمت المعالجة'); ?></span></span>
+                            <span class="msg-st-line"><span class="dot-msg resolved"></span><span class="msg-resolved-ok" title="<?php echo e($statusTip !== '' ? $statusTip : ($isEnMsg ? 'Failure reason is not stored' : 'ماكو سبب محفوظ')); ?>"><?php echo e($isEnMsg ? 'Processed' : 'تمت المعالجة'); ?></span></span>
                         <?php else: ?>
                             <?php
                             $liveHtml = function_exists('message_log_live_html') ? message_log_live_html($row, $isEnMsg ? 'en' : 'ar') : '';
@@ -2300,7 +2316,9 @@ $sendFilters = array(
           cell.innerHTML = '<span class="msg-st-line"><span class="dot-msg fail"></span><span>' + labels.fail + '</span></span>';
           return;
         }
-        cell.innerHTML = '<span class="msg-live is-' + kind + '"><i class="msg-ring" aria-hidden="true"></i><b>' + (label || '') + '</b></span>';
+        var ring = (kind === 'nophone') ? '' : '<i class="msg-ring" aria-hidden="true"></i>';
+        cell.innerHTML = '<span class="msg-live is-' + kind + '">' + ring + '<b>' + (label || '') + '</b></span>';
+        if (kind === 'nophone') cell.setAttribute('title', <?php echo json_encode($isEnMsg ? 'This subscriber has no phone number.' : 'هذا المشترك ما عنده رقم هاتف.'); ?>);
       }
       function tick() {
         fetch('messages.php?ajax=log_ring&ids=' + ids.join(',') + '&_=' + Date.now(), { credentials: 'same-origin' })

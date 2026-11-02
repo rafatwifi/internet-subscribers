@@ -6,21 +6,32 @@ const path = require('path');
 const pino = require('pino');
 const https = require('https');
 
-const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  DisconnectReason,
-  delay,
-  Browsers,
-  fetchLatestWaWebVersion,
-  fetchLatestBaileysVersion
-} = require('@whiskeysockets/baileys');
+let makeWASocket;
+let useMultiFileAuthState;
+let DisconnectReason;
+let delay;
+let Browsers;
+let fetchLatestWaWebVersion;
+let fetchLatestBaileysVersion;
+
+async function loadBaileys() {
+  const m = await import('@whiskeysockets/baileys');
+  makeWASocket = m.default || m.makeWASocket;
+  useMultiFileAuthState = m.useMultiFileAuthState;
+  DisconnectReason = m.DisconnectReason;
+  delay = m.delay;
+  Browsers = m.Browsers;
+  fetchLatestWaWebVersion = m.fetchLatestWaWebVersion;
+  fetchLatestBaileysVersion = m.fetchLatestBaileysVersion;
+}
 
 const PORT = process.env.PORT || 3001;
+const HOST = process.env.HOST || '0.0.0.0';
 const API_KEY = process.env.API_KEY || 'local-secret-change-me';
-const AUTH_DIR = path.join(__dirname, 'auth');
+const AUTH_DIR = process.env.AUTH_DIR ? path.resolve(process.env.AUTH_DIR) : path.join(__dirname, 'auth');
 const SESSIONS_DIR = path.join(AUTH_DIR, 'sessions');
-const SEND_DELAY_MS = Number(process.env.SEND_DELAY_MS || 2500);
+const SEND_DELAY_MS = Number(process.env.SEND_DELAY_MS || 4000);
+const QR_TTL_MS = 20000;
 
 let useInsecureTls = String(process.env.WA_TLS_INSECURE || '') === '1';
 
@@ -280,7 +291,10 @@ function createWaSession(sessionId) {
         generateHighQualityLinkPreview: false,
         connectTimeoutMs: 60000,
         keepAliveIntervalMs: 20000,
-        browser: Browsers && Browsers.ubuntu ? Browsers.ubuntu('Chrome') : ['Ubuntu', 'Chrome', '22.04.4'],
+        // اسم الجهاز الظاهر بالموبايل — Desktop أوضح من Chrome عشوائي
+        browser: Browsers && Browsers.ubuntu
+          ? Browsers.ubuntu('Desktop')
+          : ['Ubuntu', 'Desktop', '22.04.4'],
         agent: makeTlsAgent(),
         fetchAgent: makeTlsAgent()
       };
@@ -300,28 +314,24 @@ function createWaSession(sessionId) {
 
         if (qr) {
           const now = Date.now();
+          // جلسة مسجّلة فعلاً: لا تعرض QR أثناء إعادة الاتصال
           if (savedLogin) {
-            if (reconnectTimer) {
-              return;
-            }
             qrWhileSaved += 1;
-            if (qrWhileSaved < 2) {
-              lastQr = null;
-              lastQrDataUrl = null;
-              lastQrAt = 0;
-              lastStatusMsg = 'reconnecting';
-              log('QR ignored — saved login stays, reconnecting');
-              scheduleReconnect(2000, false);
-              return;
+            lastQr = null;
+            lastQrDataUrl = null;
+            lastQrAt = 0;
+            lastStatusMsg = 'reconnecting';
+            log('QR ignored — saved login stays (try ' + qrWhileSaved + ')');
+            if (!reconnectTimer) {
+              scheduleReconnect(Math.min(30000, 2500 + qrWhileSaved * 1500), false);
             }
+            return;
           }
-          savedLogin = false;
-          qrWhileSaved = 0;
           ready = false;
           lastQr = qr;
           lastQrAt = now;
-          qrHoldUntil = now + 12000;
-          pairingQuietUntil = now + 12000;
+          qrHoldUntil = now + QR_TTL_MS;
+          pairingQuietUntil = now + QR_TTL_MS;
           lastStatusMsg = 'qr_ready';
           lastQrDataUrl = null;
           try {
@@ -405,11 +415,20 @@ function createWaSession(sessionId) {
               scheduleReconnect(4000, false);
               return;
             }
+            // لا تمسح الجلسة بسرعة — أعد الاتصال عدة مرات أولاً
+            failCount += 1;
+            if (failCount < 10 && listAuthFiles(authDir).length > 0) {
+              lastStatusMsg = badSession ? 'reconnecting' : 'cert_expired';
+              log('Session error — keep auth, reconnect try ' + failCount);
+              scheduleReconnect(Math.min(120000, 8000 * failCount), false);
+              return;
+            }
             const nowWipe = Date.now();
-            const canWipe = (nowWipe - lastWipeAt) > 15 * 60 * 1000;
-            if (canWipe) {
+            const canWipe = (nowWipe - lastWipeAt) > 30 * 60 * 1000;
+            if (canWipe && failCount >= 10) {
               lastWipeAt = nowWipe;
               wipeAuthDir();
+              savedLogin = false;
               lastQr = null;
               lastQrDataUrl = null;
               lastQrAt = 0;
@@ -420,10 +439,8 @@ function createWaSession(sessionId) {
               scheduleReconnect(20000, false);
               return;
             }
-            failCount += 1;
-            const waitMs = Math.min(300000, 45000 * Math.max(1, failCount));
             lastStatusMsg = 'cert_expired';
-            scheduleReconnect(waitMs, false);
+            scheduleReconnect(Math.min(300000, 45000 * Math.max(1, failCount)), false);
             return;
           }
 
@@ -640,22 +657,66 @@ function createWaSession(sessionId) {
     return run;
   }
 
+  async function checkNumber(phone) {
+    if (!sock || !ready) {
+      const err = new Error('WhatsApp not ready. Scan QR first.');
+      err.code = 'not_ready';
+      throw err;
+    }
+    const normalized = normalizePhone(phone);
+    if (!normalized || normalized.length < 10) {
+      const err = new Error('Invalid phone number');
+      err.code = 'bad_phone';
+      throw err;
+    }
+    try {
+      const target = await resolveRecipientJid(normalized);
+      rememberWa(normalized, target.jid);
+      return {
+        success: true,
+        exists: true,
+        phone: normalized,
+        jid: target.jid,
+        session: sessionId
+      };
+    } catch (e) {
+      if (e && e.code === 'no_whatsapp') {
+        return {
+          success: true,
+          exists: false,
+          phone: normalized,
+          code: 'no_whatsapp',
+          session: sessionId
+        };
+      }
+      throw e;
+    }
+  }
+
   function qrAgeMs() {
     return lastQrAt > 0 ? (Date.now() - lastQrAt) : 0;
   }
 
+  function qrLeftMs() {
+    if (!lastQr) return 0;
+    return Math.max(0, QR_TTL_MS - qrAgeMs());
+  }
+
   function getStatus() {
     const age = qrAgeMs();
-    const fresh = !savedLogin && !!(lastQr || lastQrDataUrl) && age > 0 && age <= 45000;
+    const left = qrLeftMs();
+    const fresh = !savedLogin && left > 0;
     return {
       success: true,
       session: sessionId,
       ready: ready,
       has_qr: fresh,
       phone: connectedPhone,
-      status: (savedLogin && !ready) ? 'reconnecting' : lastStatusMsg,
+      status: (savedLogin && !ready) ? 'reconnecting' : (fresh ? 'qr_ready' : lastStatusMsg),
       registered: !!savedLogin,
       qr_age_ms: age,
+      qr_left_ms: left,
+      qr_ttl_ms: QR_TTL_MS,
       tls_insecure: !!useInsecureTls
     };
   }
@@ -676,16 +737,17 @@ function createWaSession(sessionId) {
       };
     }
     const age = qrAgeMs();
-    if (!lastQr || age > 45000) {
+    const left = qrLeftMs();
+    if (!lastQr || left <= 0) {
       if (lastQr) {
         lastQr = null;
         lastQrDataUrl = null;
-        lastQrAt = 0;
         lastStatusMsg = 'qr_wait';
-        log('Dropped expired QR');
+        log('QR expired after ' + QR_TTL_MS + 'ms — waiting for the next picture');
       }
-      if (!starting && !reconnectTimer) {
-        scheduleReconnect(800, false);
+      if (!starting && !reconnectTimer && lastQrAt > 0 && (Date.now() - lastQrAt) > (QR_TTL_MS + 8000)) {
+        log('No fresh QR — requesting a new picture');
+        scheduleReconnect(400, false);
       }
       return {
         success: true,
@@ -694,7 +756,9 @@ function createWaSession(sessionId) {
         qr_data_url: null,
         registered: false,
         status: 'qr_wait',
-        qr_age_ms: age
+        qr_age_ms: age,
+        qr_left_ms: 0,
+        qr_ttl_ms: QR_TTL_MS
       };
     }
     let dataUrl = lastQrDataUrl;
@@ -709,7 +773,9 @@ function createWaSession(sessionId) {
       qr_data_url: dataUrl,
       registered: false,
       status: 'qr_ready',
-      qr_age_ms: age
+      qr_age_ms: age,
+      qr_left_ms: left,
+      qr_ttl_ms: QR_TTL_MS
     };
   }
 
@@ -735,6 +801,7 @@ function createWaSession(sessionId) {
     startSocket: startSocket,
     hardLogout: hardLogout,
     sendTextQueued: sendTextQueued,
+    checkNumber: checkNumber,
     getStatus: getStatus,
     getQr: getQr,
     renderLinkPage: renderLinkPage
@@ -819,9 +886,35 @@ app.post('/send', checkKey, attachSession, async (req, res) => {
   }
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log('WhatsApp gateway on http://0.0.0.0:' + PORT);
-  console.log('Multi-session: pass ?session=id (default: default)');
-  console.log('Admin QR: http://127.0.0.1:' + PORT + '/link?key=' + API_KEY + '&session=default');
-  getOrCreateSession('default');
+async function checkHandler(req, res) {
+  try {
+    const body = req.body || {};
+    const phone = (req.query && req.query.phone) || body.phone || '';
+    if (!phone) {
+      return res.status(400).json({ success: false, error: 'phone required', session: req.waSessionId });
+    }
+    const result = await req.waSession.checkNumber(phone);
+    res.json(result);
+  } catch (err) {
+    const msg = (err && err.message) ? err.message : String(err);
+    const code = (err && err.code) ? String(err.code) : '';
+    console.error('CHECK [' + req.waSessionId + ']', msg);
+    const payload = { success: false, error: msg, session: req.waSessionId };
+    if (code) payload.code = code;
+    const http = (code === 'not_ready' || code === 'bad_phone') ? 400 : 500;
+    res.status(http).json(payload);
+  }
+}
+app.get('/check', checkKey, attachSession, checkHandler);
+app.post('/check', checkKey, attachSession, checkHandler);
+
+loadBaileys().then(function () {
+  app.listen(PORT, HOST, () => {
+    console.log('WhatsApp gateway on http://' + HOST + ':' + PORT);
+    console.log('Multi-session: pass ?session=id (default: default)');
+    getOrCreateSession('default');
+  });
+}).catch(function (err) {
+  console.error(err);
+  process.exit(1);
 });

@@ -548,6 +548,9 @@ $activityLogs = fetch_subscriber_activity($pdo, $id, 150);
 $canEditDebts = function_exists('user_can_edit_debts') ? user_can_edit_debts() : false;
 
 $editMode = isset($_GET['edit']) && $_GET['edit'] === '1';
+if ($editMode && !empty($subscriber['sas_username']) && function_exists('sas_user_url')) {
+    redirect(sas_user_url($subscriber['sas_username']));
+}
 $debtTab = 'list';
 if (isset($_GET['tab'])) {
     $tabGet = (string) $_GET['tab'];
@@ -743,74 +746,16 @@ return;
 endif;
 ?>
 
-<div class="cards sub-profile-cards">
-    <div class="card-stat glass g-red">
-        <div class="label">المتبقي / الدين</div>
-        <div class="value"><?php echo e(money_format_iqd($unpaid, $config['currency'])); ?></div>
-    </div>
-    <div class="card-stat glass g-green">
-        <div class="label">المستلم</div>
-        <div class="value"><?php echo e(money_format_iqd($paid, $config['currency'])); ?></div>
-    </div>
-    <?php
-    $activeSubCard = null;
-    $latestSubCard = !empty($subs) ? $subs[0] : null;
-    foreach ($subs as $subRow) {
-        if ($subRow['status'] === 'active' && $subRow['end_date'] >= date('Y-m-d')) {
-            $activeSubCard = $subRow;
-            break;
-        }
+<?php
+$activeSubCard = null;
+$latestSubCard = !empty($subs) ? $subs[0] : null;
+foreach ($subs as $subRow) {
+    if ($subRow['status'] === 'active' && $subRow['end_date'] >= date('Y-m-d')) {
+        $activeSubCard = $subRow;
+        break;
     }
-    $daysSrc = $activeSubCard ? $activeSubCard : $latestSubCard;
-    $daysCardInfo = ($daysSrc && !empty($daysSrc['start_date']) && !empty($daysSrc['end_date']))
-        ? subscription_days_info($daysSrc['start_date'], $daysSrc['end_date'])
-        : null;
-    $daysCardVal = $daysCardInfo ? (int) $daysCardInfo['left'] : null;
-    ?>
-    <button type="button" class="card-stat glass g-blue days-edit-card" id="openDaysModalBtn"
-            data-days="<?php echo $daysCardVal !== null ? (int) $daysCardVal : '0'; ?>"
-            data-has-sub="<?php echo $daysSrc ? '1' : '0'; ?>"
-            title="<?php echo e($lang === 'en' ? 'Edit days left' : 'تعديل الأيام المتبقية'); ?>">
-        <div class="label"><?php echo e(t('days_left')); ?></div>
-        <div class="value<?php echo ($daysCardVal !== null && $daysCardVal < 0) ? ' days-neg' : ''; ?>"><?php echo $daysCardVal !== null ? (int) $daysCardVal : '—'; ?></div>
-        <div class="hint"><?php echo e($lang === 'en' ? 'Tap to edit' : 'اضغط للتعديل'); ?></div>
-    </button>
-    <div class="card-stat glass <?php
-        if (!$lastMsg) {
-            echo 'g-cyan';
-        } elseif (!empty($lastMsg['success'])) {
-            echo 'g-green';
-        } elseif (!empty($lastNoWa)) {
-            echo 'g-red';
-        } else {
-            echo 'g-orange';
-        }
-    ?>">
-        <div class="label"><?php echo e(t('msg_status')); ?></div>
-        <div class="value" style="font-size:16px;line-height:1.35">
-            <?php
-            if (!$lastMsg) {
-                echo e($lang === 'en' ? 'Not sent' : 'ما انرسلت');
-            } elseif (!empty($lastMsg['success'])) {
-                echo e($lang === 'en' ? 'Sent' : 'أُرسلت');
-            } elseif (!empty($lastNoWa)) {
-                echo e($lang === 'en' ? 'No WhatsApp' : 'ماكو واتساب');
-            } else {
-                echo e($lang === 'en' ? 'Failed' : 'فشلت');
-            }
-            ?>
-        </div>
-        <?php if ($lastMsg): ?>
-            <div class="hint"><?php
-                if (!empty($lastNoWa)) {
-                    echo e($lang === 'en' ? 'This number is not on WhatsApp' : 'لا يتوفر واتساب لدى المشترك');
-                } else {
-                    echo e(message_short_summary($lastMsg['message_type'], $lastMsg['body'], !empty($lastMsg['success'])));
-                }
-            ?></div>
-        <?php endif; ?>
-    </div>
-</div>
+}
+?>
 
 <?php
 $settingsRental = settings_load();

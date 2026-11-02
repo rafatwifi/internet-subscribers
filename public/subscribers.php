@@ -2546,6 +2546,45 @@ window.DEBT_ENTRY = {
   (function setupInlineEdit() {
     var csrf = <?php echo json_encode(csrf_token()); ?>;
     var saving = false;
+    function clearPhoneWaMarks(el) {
+      var td = el && el.closest ? el.closest('td') : null;
+      if (!td) return null;
+      var old = td.querySelectorAll('.wa-miss, .wa-check-spin');
+      for (var i = 0; i < old.length; i++) {
+        if (old[i].parentNode) old[i].parentNode.removeChild(old[i]);
+      }
+      return td;
+    }
+    function runPhoneWaCheck(el, phone, id) {
+      var td = clearPhoneWaMarks(el);
+      if (!td) return;
+      var digits = String(phone || '').replace(/\D/g, '');
+      if (digits.length < 10) return;
+      var spin = document.createElement('span');
+      spin.className = 'wa-check-spin';
+      spin.setAttribute('title', <?php echo json_encode($lang === 'en' ? 'Checking WhatsApp…' : 'جاري فحص واتساب…'); ?>);
+      spin.setAttribute('aria-label', spin.getAttribute('title'));
+      td.appendChild(spin);
+      var url = 'wa_proxy.php?action=check&phone=' + encodeURIComponent(digits)
+        + '&sub=' + encodeURIComponent(id || '')
+        + '&_=' + Date.now();
+      fetch(url, { credentials: 'same-origin', cache: 'no-store' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (spin.parentNode) spin.parentNode.removeChild(spin);
+          if (!data || !data.success) return;
+          if (data.exists === false) {
+            var miss = document.createElement('span');
+            miss.className = 'wa-miss';
+            miss.title = <?php echo json_encode($lang === 'en' ? 'Warning: number exists but has no WhatsApp' : 'تحذير: الرقم موجود بس مو على واتساب'); ?>;
+            miss.textContent = '⊘';
+            td.appendChild(miss);
+          }
+        })
+        .catch(function () {
+          if (spin.parentNode) spin.parentNode.removeChild(spin);
+        });
+    }
     function saveField(el, field, id, value) {
       if (saving) return;
       saving = true;
@@ -2570,6 +2609,9 @@ window.DEBT_ENTRY = {
           if (field === 'name') {
             el.setAttribute('href', 'subscriber.php?id=' + id);
           }
+          if (field === 'phone') {
+            runPhoneWaCheck(el, data.raw || value || data.value, id);
+          }
         })
         .catch(function () {
           saving = false;
@@ -2585,6 +2627,7 @@ window.DEBT_ENTRY = {
       el.setAttribute('data-display', el.textContent.trim());
       el.classList.add('editing');
       el.contentEditable = 'true';
+      if (field === 'phone') clearPhoneWaMarks(el);
       el.focus();
       try {
         var range = document.createRange();

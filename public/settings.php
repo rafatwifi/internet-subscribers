@@ -2371,6 +2371,10 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
 .wa-qr-stage.is-scan { border-style:solid; border-color:#fde68a; background:#fffbeb; }
 .wa-qr-stage img { width:min(260px,100%); height:auto; border-radius:12px; background:#fff; padding:10px; box-shadow:0 10px 30px rgba(15,23,42,.12); }
 .wa-qr-stage .wa-qr-hint, #wa-qr-placeholder { margin-top:12px; color:#475569; font-weight:750; font-size:13.5px; line-height:1.6; max-width:32ch; }
+.wa-qr-count { margin-top:10px; display:none; align-items:baseline; justify-content:center; gap:6px; color:#0f172a; font-weight:800; }
+.wa-qr-count b { font-size:32px; line-height:1; font-variant-numeric:tabular-nums; min-width:2ch; }
+.wa-qr-count span { font-size:13px; color:#475569; }
+.wa-qr-count.is-low b { color:#b91c1c; }
 .wa-qr-stage.is-ok #wa-qr-placeholder { color:#047857; }
 .wa-qr-stage.is-down #wa-qr-placeholder { color:#b91c1c; }
 .wa-actions-row { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
@@ -2438,6 +2442,7 @@ if (function_exists('whatsapp_notifications_enabled') && isset($pdo)) {
   </div>
   <div id="wa-qr" class="wa-qr-stage">
     <img id="wa-qr-img" alt="QR" style="display:none">
+    <div id="wa-qr-count" class="wa-qr-count" aria-live="polite"><b id="wa-qr-sec">20</b><span><?php echo e($lang === 'en' ? 'seconds left' : 'ثانية وتنتهي صلاحية الرمز'); ?></span></div>
     <div id="wa-qr-placeholder"><?php echo e($lang === 'en' ? 'Checking the saved link…' : 'جاري فحص الربط المحفوظ…'); ?></div>
     <div class="wa-qr-hint" id="wa-qr-title" style="display:none"></div>
   </div>
@@ -2613,6 +2618,46 @@ function setStatus(cls, text) {
   if (tx) tx.textContent = text; else box.textContent = text;
 }
 var lastQrUrl = '';
+var qrDeadline = 0;
+var qrTicker = null;
+var QR_TTL_MS = 20000;
+function qrLeftOf(data) {
+  if (!data) return 0;
+  if (typeof data.qr_left_ms === 'number') return data.qr_left_ms;
+  var ttl = (typeof data.qr_ttl_ms === 'number' && data.qr_ttl_ms > 0) ? data.qr_ttl_ms : QR_TTL_MS;
+  var age = (typeof data.qr_age_ms === 'number') ? data.qr_age_ms : 0;
+  return Math.max(0, ttl - age);
+}
+function clearQrCount() {
+  if (qrTicker) { clearInterval(qrTicker); qrTicker = null; }
+  qrDeadline = 0;
+  var box = document.getElementById('wa-qr-count');
+  if (box) box.style.display = 'none';
+}
+function paintQrCount() {
+  var box = document.getElementById('wa-qr-count');
+  var num = document.getElementById('wa-qr-sec');
+  if (!box || !qrDeadline) return;
+  var sec = Math.max(0, Math.ceil((qrDeadline - Date.now()) / 1000));
+  box.style.display = 'flex';
+  box.className = 'wa-qr-count' + (sec <= 5 ? ' is-low' : '');
+  if (num) num.textContent = String(sec);
+  if (sec <= 0) {
+    clearQrCount();
+    lastQrUrl = '';
+    showWaitingBox(L.freshQr, '');
+    setStatus('warn', L.freshQr);
+    checkWhatsApp();
+  }
+}
+function armQrCount(leftMs, force) {
+  var left = parseInt(leftMs, 10);
+  if (!(left >= 0)) left = QR_TTL_MS;
+  var next = Date.now() + left;
+  if (force || !qrDeadline || next < qrDeadline - 400) qrDeadline = next;
+  if (!qrTicker) qrTicker = setInterval(paintQrCount, 200);
+  paintQrCount();
+}
 function paintConnected(on) {
   var row = document.getElementById('waActions');
   if (row) row.style.display = on ? '' : 'none';
@@ -2636,24 +2681,29 @@ function stageMode(mode) {
   var stage = document.getElementById('wa-qr');
   if (stage) stage.className = 'wa-qr-stage' + (mode ? (' is-' + mode) : '');
 }
-function showQr(dataUrl) {
+function showQr(dataUrl, leftMs) {
   var img = document.getElementById('wa-qr-img');
   var ph = document.getElementById('wa-qr-placeholder');
   if (!dataUrl || !img) return false;
+  if (!(leftMs > 0)) return false;
   stageMode('scan');
-  if (dataUrl !== lastQrUrl) {
+  var changed = dataUrl !== lastQrUrl;
+  if (changed) {
     lastQrUrl = dataUrl;
     img.src = dataUrl;
     setHint(L.scanBelow);
+    qrDeadline = 0;
   }
   img.style.display = 'inline-block';
   if (ph) ph.style.display = 'none';
+  armQrCount(leftMs, changed);
   return true;
 }
 function showWaitingBox(text, mode) {
   var img = document.getElementById('wa-qr-img');
   var ph = document.getElementById('wa-qr-placeholder');
   lastQrUrl = '';
+  clearQrCount();
   stageMode(mode || '');
   if (img) {
     img.style.display = 'none';
@@ -2680,7 +2730,7 @@ function paintState(data) {
     return 'stop';
   }
   paintConnected(false);
-  if (data.registered) {
+  if (data.registered || data.status === 'reconnecting') {
     setStatus('warn', L.restoring);
     showWaitingBox(L.restoring, '');
     return 'stop';
@@ -2696,7 +2746,7 @@ function paintState(data) {
     showWaitingBox(tls, '');
     return 'stop';
   }
-  if (waMine(data) && data.qr_data_url && (!data.qr_age_ms || data.qr_age_ms <= 45000) && showQr(data.qr_data_url)) {
+  if (waMine(data) && data.qr_data_url && showQr(data.qr_data_url, qrLeftOf(data))) {
     setStatus('warn', L.scanBelow);
     return 'stop';
   }
@@ -2754,7 +2804,7 @@ function waitForQr(tries) {
         waBusy = false;
         return;
       }
-      if (qr && qr.qr_data_url && waMine(qr) && (!qr.qr_age_ms || qr.qr_age_ms <= 45000) && showQr(qr.qr_data_url)) {
+      if (qr && qr.qr_data_url && waMine(qr) && showQr(qr.qr_data_url, qrLeftOf(qr))) {
         paintConnected(false);
         setStatus('warn', L.scanNew);
         waBusy = false;
@@ -2807,7 +2857,7 @@ paintConnected(false);
 checkWhatsApp();
 setInterval(function () {
   if (!waBusy) checkWhatsApp();
-}, 8000);
+}, 2000);
 </script>
 <?php endif; ?>
 <?php endif; ?>

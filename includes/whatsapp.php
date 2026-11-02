@@ -600,16 +600,8 @@ function whatsapp_notify_agent_card($pdo, $config, $senderId, $agentId, $profile
     $kind = ($kind === 'pull') ? 'pull' : 'transfer';
     $case = ($kind === 'pull') ? 'card_pull' : 'card_transfer';
     $logNotice = function ($ok, $phone, $body, $note) use ($pdo, $case) {
-        if (!$pdo || !function_exists('log_message')) {
-            return;
-        }
-        log_message($pdo, null, array(
-            'success' => $ok ? true : false,
-            'phone' => (string) $phone,
-            'body' => trim((string) $body) !== '' ? (string) $body : (string) $note,
-            'type' => $case,
-            'response' => (string) $note,
-        ));
+        // إشعار الكروت يطلع بصفحة الوكيل (وارد + منبثق)، مو بسجل رسائل واتساب
+        return;
     };
     if ($senderId <= 0 || $agentId <= 0 || $qty < 1 || $unit <= 0 || !$pdo || !function_exists('whatsapp_send')) {
         return 'no_price';
@@ -1196,6 +1188,10 @@ function subscriber_msg_is_no_whatsapp($response)
     if ($response === '') {
         return false;
     }
+    // رقم تغيّر أو اتأكد — مو علامة حظر
+    if ($response === 'phone_changed_retry' || $response === 'phone_verified_ok') {
+        return false;
+    }
     $decoded = json_decode($response, true);
     if (is_array($decoded)) {
         if (array_key_exists('no_whatsapp', $decoded)) {
@@ -1522,6 +1518,74 @@ function subscriber_should_hide_no_whatsapp($phones, $everOk = false)
 }
 }
 
+if (!function_exists('wa_known_no_whatsapp')) {
+/**
+ * هذا الرقم انفحص وطلع مو على واتساب، وما تغيّر بعده.
+ * التذكير التلقائي يقف هنا وما يكرر الرسالة.
+ */
+function wa_known_no_whatsapp($pdo, $subscriberId, $phone)
+{
+    if (!$pdo) {
+        return false;
+    }
+    $subscriberId = (int) $subscriberId;
+    $phone = function_exists('normalize_phone') ? normalize_phone($phone) : preg_replace('/\D+/', '', (string) $phone);
+    if ($subscriberId <= 0 && $phone === '') {
+        return false;
+    }
+    try {
+        if ($subscriberId > 0) {
+            $st = $pdo->prepare(
+                "SELECT phone, success, response_json, fail_reason
+                 FROM message_logs
+                 WHERE subscriber_id = :sid
+                   AND created_at >= DATE_SUB(NOW(), INTERVAL 120 DAY)
+                 ORDER BY id DESC
+                 LIMIT 15"
+            );
+            $st->execute(array(':sid' => $subscriberId));
+        } else {
+            $st = $pdo->prepare(
+                "SELECT phone, success, response_json, fail_reason
+                 FROM message_logs
+                 WHERE phone = :ph
+                   AND created_at >= DATE_SUB(NOW(), INTERVAL 120 DAY)
+                 ORDER BY id DESC
+                 LIMIT 15"
+            );
+            $st->execute(array(':ph' => $phone));
+        }
+        $rows = $st->fetchAll();
+    } catch (Exception $e) {
+        return false;
+    }
+    if (!$rows) {
+        return false;
+    }
+    foreach ($rows as $row) {
+        $logPhone = isset($row['phone']) ? (string) $row['phone'] : '';
+        if ($phone !== '' && $logPhone !== '' && function_exists('phones_wa_same') && !phones_wa_same($logPhone, $phone)) {
+            continue;
+        }
+        $resp = isset($row['response_json']) ? (string) $row['response_json'] : '';
+        if ($resp === 'phone_changed_retry' || $resp === 'phone_verified_ok') {
+            continue;
+        }
+        if (!empty($row['success'])) {
+            return false;
+        }
+        $reason = isset($row['fail_reason']) ? (string) $row['fail_reason'] : '';
+        if ($reason === 'no_whatsapp' || $reason === 'not_on_whatsapp') {
+            return true;
+        }
+        if (function_exists('subscriber_msg_is_no_whatsapp') && subscriber_msg_is_no_whatsapp($resp)) {
+            return true;
+        }
+    }
+    return false;
+}
+}
+
 if (!function_exists('msg_table_status_html')) {
 function msg_table_status_html($hasMsg, $msgOk, $noWa, $rowId, $logId, $lang = 'ar', $noPhone = false)
 {
@@ -1573,16 +1637,30 @@ function whatsapp_fail_user_message($result, $fallback = 'فشل إرسال وا
     if ($resp !== '' && function_exists('subscriber_msg_is_no_whatsapp') && subscriber_msg_is_no_whatsapp($resp)) {
         return 'لا يتوفر واتساب لدى المشترك';
     }
-    if (!empty($result['skipped'])) {
-        return 'واتساب غير مفعّل بالإعدادات';
+    if ($resp === 'phone_changed_retry' || $resp === 'phone_verified_ok') {
+        return '';
     }
-
     $err = '';
     $decoded = json_decode($resp, true);
     if (is_array($decoded) && isset($decoded['error']) && (string) $decoded['error'] !== '') {
         $err = (string) $decoded['error'];
     } elseif ($resp !== '') {
         $err = $resp;
+    }
+    if (!empty($result['skipped'])) {
+        if ($err !== '') {
+            if (strpos($err, 'رقم هاتف') !== false || stripos($err, 'invalid phone') !== false || stripos($err, 'bad_phone') !== false) {
+                return 'ماكو رقم هاتف صالح للمشترك';
+            }
+            if (strpos($err, 'متوقفة') !== false || stripos($err, 'disabled') !== false) {
+                return 'إشعارات واتساب متوقفة لهذه الوكالة';
+            }
+            if (strpos($err, 'يرجى ربط') !== false || strpos($err, 'لا توجد جلسة') !== false) {
+                return 'يرجى ربط واتساب';
+            }
+            return $err;
+        }
+        return 'واتساب غير مفعّل بالإعدادات';
     }
 
     $http = isset($result['http_code']) ? (int) $result['http_code'] : 0;
@@ -2269,24 +2347,22 @@ function retry_failed_message($pdo, $config, $logId, $subscriberId = 0, $manual 
     $logSid = isset($log['sid']) ? (int) $log['sid'] : (int) (isset($log['subscriber_id']) ? $log['subscriber_id'] : 0);
     $logTypeBase = preg_replace('/_retry$/', '', (string) $log['message_type']);
     $agentNotice = ($logSid <= 0 && ($logTypeBase === 'card_transfer' || $logTypeBase === 'card_pull'));
-    if (!$agentNotice && function_exists('whatsapp_may_message_subscriber') && !whatsapp_may_message_subscriber($pdo, $logSid)) {
-        $own = wa_session_for_subscriber($pdo, (int) $log['sid']);
+    if ($retrySession === '' && !$agentNotice) {
+        $own = wa_session_for_subscriber($pdo, $logSid);
         if ($own !== '') {
             $retrySession = $own;
-        } else {
-            try {
-                $pdo->prepare('UPDATE message_logs SET queued_at = NULL, next_retry_at = NOW() WHERE id = :id AND success = 0')
-                    ->execute(array(':id' => (int) $log['id']));
-            } catch (Exception $e) {
-            }
-            return array(false, 'هذا المشترك مو تابع لواتساب الحساب المفتوح');
         }
+    }
+    if ($retrySession === '' && !$agentNotice && function_exists('whatsapp_may_message_subscriber') && !whatsapp_may_message_subscriber($pdo, $logSid)) {
+        try {
+            $pdo->prepare('UPDATE message_logs SET queued_at = NULL, next_retry_at = NULL, retry_hold = \'wait_link\' WHERE id = :id AND success = 0')
+                ->execute(array(':id' => (int) $log['id']));
+        } catch (Exception $e) {
+        }
+        return array(false, 'هذا المشترك مو تابع لواتساب الحساب المفتوح');
     }
     if ($retrySession === '') {
         $retrySession = function_exists('whatsapp_session_id') ? whatsapp_session_id() : '';
-    }
-    if ($retrySession === '') {
-        $retrySession = wa_session_for_subscriber($pdo, (int) $log['sid']);
     }
     if ($manual && function_exists('wa_recent_same_sent') && wa_recent_same_sent($pdo, (int) $log['sid'], $phone, $body, (int) $log['id'])) {
         message_log_apply_result($pdo, (int) $log['id'], array(
@@ -2371,15 +2447,291 @@ function message_log_live_pack($row, $lang = 'ar')
     return array('kind' => 'fail', 'label' => $en ? 'Failed' : 'فشل');
 }
 
+function message_log_live_tip($row, $lang = 'ar')
+{
+    $en = ($lang === 'en');
+    $hold = (is_array($row) && isset($row['retry_hold'])) ? (string) $row['retry_hold'] : '';
+    if ($hold === 'no_phone') {
+        return $en ? 'This subscriber has no phone number.' : 'هذا المشترك ما عنده رقم هاتف.';
+    }
+    if ($hold === 'wait_on') {
+        return $en ? 'WhatsApp alerts are turned off for this agency.' : 'إشعارات واتساب متوقفة لهذه الوكالة.';
+    }
+    if ($hold === 'wait_link') {
+        return $en ? 'WhatsApp is not linked yet.' : 'واتساب بعد ما مربوط.';
+    }
+    if ($hold === 'wait_net') {
+        return $en ? 'WhatsApp is reconnecting.' : 'واتساب يعيد الاتصال.';
+    }
+    $respMark = (is_array($row) && isset($row['response_json'])) ? (string) $row['response_json'] : '';
+    if ($respMark === 'phone_changed_retry') {
+        return $en ? 'Resending to the new number now.' : 'يُعاد الإرسال الآن على الرقم الجديد.';
+    }
+    if (function_exists('message_log_fail_text')) {
+        $tip = message_log_fail_text($row);
+        if ($tip !== '') {
+            if (strpos($tip, 'غير مفعّل بالإعدادات') !== false || stripos($tip, 'disabled in config') !== false) {
+                if ($hold === 'no_phone' || (is_array($row) && (!isset($row['phone']) || trim((string) $row['phone']) === '' || (string) $row['phone'] === '-'))) {
+                    return $en ? 'This subscriber has no phone number.' : 'هذا المشترك ما عنده رقم هاتف.';
+                }
+            }
+            return $tip;
+        }
+    }
+    return '';
+}
+
 function message_log_live_html($row, $lang = 'ar')
 {
     $pack = message_log_live_pack($row, $lang);
     if ($pack['kind'] === 'ok' || $pack['kind'] === 'fail') {
         return '';
     }
-    return '<span class="msg-live is-' . e($pack['kind']) . '">'
-        . '<i class="msg-ring" aria-hidden="true"></i>'
+    $tip = message_log_live_tip($row, $lang);
+    $spin = ($pack['kind'] === 'nophone') ? '' : '<i class="msg-ring" aria-hidden="true"></i>';
+    return '<span class="msg-live is-' . e($pack['kind']) . '"'
+        . ($tip !== '' ? (' title="' . e($tip) . '"') : '')
+        . '>'
+        . $spin
         . '<b>' . e($pack['label']) . '</b></span>';
+}
+
+/**
+ * نتيجة فحص الرقم على واتساب (بدون إرسال): يحفظها عشان علامة ⊘ تظهر/تختفي بعد تحديث الصفحة.
+ */
+function wa_apply_phone_check_result($pdo, $subscriberId, $phone, $exists)
+{
+    $subscriberId = (int) $subscriberId;
+    if ($subscriberId <= 0 || !$pdo) {
+        return false;
+    }
+    $phone = function_exists('normalize_phone') ? normalize_phone($phone) : preg_replace('/\D+/', '', (string) $phone);
+    if ($phone === '') {
+        return false;
+    }
+    if (function_exists('ensure_message_log_extra')) {
+        ensure_message_log_extra($pdo);
+    }
+    try {
+        if ($exists) {
+            $st = $pdo->prepare(
+                "UPDATE message_logs
+                 SET response_json = CASE
+                       WHEN IFNULL(response_json,'') LIKE '%no_whatsapp%' THEN 'phone_verified_ok'
+                       WHEN IFNULL(response_json,'') = 'phone_changed_retry' THEN response_json
+                       ELSE response_json
+                     END,
+                     fail_reason = CASE
+                       WHEN fail_reason IN ('no_whatsapp','not_on_whatsapp') THEN ''
+                       WHEN fail_reason LIKE '%واتساب%' THEN ''
+                       ELSE fail_reason
+                     END,
+                     retry_hold = CASE
+                       WHEN retry_hold = 'no_whatsapp' THEN NULL
+                       ELSE retry_hold
+                     END
+                 WHERE subscriber_id = :sid AND success = 0
+                   AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                 LIMIT 40"
+            );
+            $st->execute(array(':sid' => $subscriberId));
+            return true;
+        }
+        $resp = json_encode(array(
+            'no_whatsapp' => true,
+            'code' => 'no_whatsapp',
+            'checked' => 1,
+            'error' => 'Number not on WhatsApp',
+        ));
+        $st = $pdo->prepare(
+            "UPDATE message_logs
+             SET phone = :phone,
+                 response_json = :resp,
+                 fail_reason = 'no_whatsapp',
+                 retry_hold = 'no_whatsapp',
+                 next_retry_at = NULL
+             WHERE subscriber_id = :sid AND success = 0
+               AND (
+                 IFNULL(response_json,'') = 'phone_changed_retry'
+                 OR IFNULL(response_json,'') LIKE '%no_whatsapp%'
+                 OR IFNULL(fail_reason,'') IN ('no_whatsapp','not_on_whatsapp')
+               )
+               AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+             ORDER BY id DESC
+             LIMIT 5"
+        );
+        $st->execute(array(
+            ':phone' => $phone,
+            ':resp' => $resp,
+            ':sid' => $subscriberId,
+        ));
+        if ($st->rowCount() > 0) {
+            return true;
+        }
+        // ماكو سجل فاشل حديث — سجّل فحص بسيط عشان العلامة تبقى بعد الريفرش
+        $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+        $ins = $pdo->prepare(
+            "INSERT INTO message_logs
+                (subscriber_id, phone, message_type, body, success, response_json, fail_reason, retry_hold, tenant_id)
+             VALUES
+                (:sid, :phone, 'wa_check', :body, 0, :resp, 'no_whatsapp', 'no_whatsapp', :tid)"
+        );
+        $ins->execute(array(
+            ':sid' => $subscriberId,
+            ':phone' => $phone,
+            ':body' => '[wa_check]',
+            ':resp' => $resp,
+            ':tid' => $tid > 0 ? $tid : null,
+        ));
+        return true;
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+/**
+ * يستدعي بوابة واتساب: هل الرقم عليه واتساب؟
+ * @return array{success:bool,exists?:bool,code?:string,error?:string,phone?:string}
+ */
+function whatsapp_check_number($wa, $phone, $sessionId = '')
+{
+    $base = isset($wa['local_url']) ? rtrim((string) $wa['local_url'], '/') : '';
+    $key = isset($wa['local_key']) ? (string) $wa['local_key'] : '';
+    $sessionId = trim((string) $sessionId);
+    if ($sessionId === '' && function_exists('whatsapp_session_id')) {
+        $sessionId = whatsapp_session_id();
+    }
+    if ($base === '' || strpos($base, 'http') !== 0 || $sessionId === '') {
+        return array('success' => false, 'error' => 'بوابة واتساب غير مضبوطة', 'code' => 'gateway_down');
+    }
+    $phone = function_exists('normalize_phone') ? normalize_phone($phone) : preg_replace('/\D+/', '', (string) $phone);
+    if ($phone === '') {
+        return array('success' => false, 'error' => 'رقم فارغ', 'code' => 'bad_phone');
+    }
+    $url = $base . '/check?key=' . rawurlencode($key)
+        . '&session=' . rawurlencode($sessionId)
+        . '&phone=' . rawurlencode($phone);
+    $ch = curl_init($url);
+    curl_setopt_array($ch, array(
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_CONNECTTIMEOUT => 5,
+        CURLOPT_TIMEOUT => 14,
+        CURLOPT_HTTPHEADER => array(
+            'X-Api-Key: ' . $key,
+            'X-Wa-Session: ' . $sessionId,
+            'Accept: application/json',
+        ),
+    ));
+    $raw = curl_exec($ch);
+    $http = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    if ($raw === false || $raw === '') {
+        return array('success' => false, 'error' => 'بوابة واتساب متوقفة', 'code' => 'gateway_down');
+    }
+    $data = json_decode($raw, true);
+    if (!is_array($data)) {
+        return array('success' => false, 'error' => 'رد غير مفهوم من البوابة', 'code' => 'bad_response');
+    }
+    if (empty($data['success'])) {
+        return array(
+            'success' => false,
+            'error' => isset($data['error']) ? (string) $data['error'] : 'فشل الفحص',
+            'code' => isset($data['code']) ? (string) $data['code'] : '',
+            'phone' => $phone,
+            'http' => $http,
+        );
+    }
+    return array(
+        'success' => true,
+        'exists' => !empty($data['exists']),
+        'phone' => isset($data['phone']) ? (string) $data['phone'] : $phone,
+        'code' => isset($data['code']) ? (string) $data['code'] : '',
+        'session' => $sessionId,
+    );
+}
+
+/**
+ * لما يتغيّر رقم المشترك: افتح الرسائل الفاشلة (خصوصاً ماكو واتساب) وأعد جدولتها على الرقم الجديد.
+ */
+function wa_on_subscriber_phone_changed($pdo, $subscriberId, $oldPhone, $newPhone)
+{
+    $subscriberId = (int) $subscriberId;
+    if ($subscriberId <= 0 || !$pdo) {
+        return 0;
+    }
+    if (!function_exists('wa_phone_ready') || !wa_phone_ready($newPhone)) {
+        return 0;
+    }
+    $newPhone = function_exists('normalize_phone') ? normalize_phone($newPhone) : preg_replace('/\D+/', '', (string) $newPhone);
+    if ($newPhone === '') {
+        return 0;
+    }
+    $oldNorm = function_exists('normalize_phone') ? normalize_phone($oldPhone) : preg_replace('/\D+/', '', (string) $oldPhone);
+    if ($oldNorm === $newPhone) {
+        return 0;
+    }
+    ensure_message_log_extra($pdo);
+    $released = 0;
+    try {
+        $st = $pdo->prepare(
+            "SELECT id, attempt, fail_reason, response_json, retry_hold
+             FROM message_logs
+             WHERE subscriber_id = :sid AND success = 0
+               AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+             ORDER BY id DESC
+             LIMIT 40"
+        );
+        $st->execute(array(':sid' => $subscriberId));
+        $rows = $st->fetchAll();
+    } catch (Exception $e) {
+        return 0;
+    }
+    if (!$rows) {
+        return 0;
+    }
+    $mark = $pdo->prepare(
+        "UPDATE message_logs
+         SET phone = :phone,
+             retry_hold = NULL,
+             queued_at = NULL,
+             next_retry_at = :next,
+             attempt = IF(attempt >= 3, 1, attempt),
+             fail_reason = '',
+             response_json = :resp
+         WHERE id = :id AND success = 0"
+    );
+    $slot = 0;
+    foreach ($rows as $row) {
+        $id = (int) $row['id'];
+        if ($id <= 0) {
+            continue;
+        }
+        $hold = isset($row['retry_hold']) ? (string) $row['retry_hold'] : '';
+        if ($hold === 'dup') {
+            continue;
+        }
+        $nextAt = date('Y-m-d H:i:s', time() + ($slot * 4));
+        try {
+            $mark->execute(array(
+                ':phone' => $newPhone,
+                ':next' => $nextAt,
+                ':resp' => 'phone_changed_retry',
+                ':id' => $id,
+            ));
+            if ($mark->rowCount() > 0) {
+                $released++;
+                $slot++;
+            }
+        } catch (Exception $e) {
+        }
+    }
+    if ($released > 0 && function_exists('wa_retry_due_batch') && isset($GLOBALS['config'])) {
+        try {
+            @wa_retry_due_batch($pdo, $GLOBALS['config'], 2);
+        } catch (Exception $e) {
+        }
+    }
+    return $released;
 }
 
 /**
@@ -2420,10 +2772,11 @@ function wa_retry_release($pdo, $config)
     }
     $mark = $pdo->prepare(
         "UPDATE message_logs
-         SET retry_hold = NULL, next_retry_at = NOW(), queued_at = NULL,
+         SET retry_hold = NULL, next_retry_at = :next, queued_at = NULL,
              attempt = IF(attempt >= 3, 2, attempt)
          WHERE id = :id AND success = 0"
     );
+    $releaseSlot = 0;
     try {
         $st = $pdo->query(
             "SELECT m.id, s.phone AS sub_phone
@@ -2438,8 +2791,62 @@ function wa_retry_release($pdo, $config)
                 if (!wa_phone_ready(isset($row['sub_phone']) ? $row['sub_phone'] : '')) {
                     continue;
                 }
-                $mark->execute(array(':id' => (int) $row['id']));
+                $nextAt = date('Y-m-d H:i:s', time() + ($releaseSlot * 4));
+                $mark->execute(array(':id' => (int) $row['id'], ':next' => $nextAt));
+                $releaseSlot++;
                 $released++;
+            }
+        }
+    } catch (Exception $e) {
+    }
+    // رقم المشترك تغيّر بعد فشل «ماكو واتساب» — أعد الجدولة على الرقم الجديد
+    try {
+        $stCh = $pdo->query(
+            "SELECT m.id, m.phone AS log_phone, s.phone AS sub_phone
+             FROM message_logs m
+             INNER JOIN subscribers s ON s.id = m.subscriber_id
+             WHERE m.success = 0
+               AND m.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+               AND (m.retry_hold IS NULL OR m.retry_hold = '' OR m.retry_hold IN ('no_phone'))
+               AND (
+                    m.fail_reason LIKE '%لا يتوفر واتساب%'
+                    OR m.response_json LIKE '%no_whatsapp%'
+                    OR m.response_json LIKE '%not on WhatsApp%'
+               )
+             ORDER BY m.id DESC
+             LIMIT 40"
+        );
+        $markPhone = $pdo->prepare(
+            "UPDATE message_logs
+             SET phone = :phone, retry_hold = NULL, queued_at = NULL,
+                 next_retry_at = :next, attempt = IF(attempt >= 3, 1, attempt),
+                 fail_reason = '', response_json = 'phone_changed_retry'
+             WHERE id = :id AND success = 0"
+        );
+        if ($stCh) {
+            while ($row = $stCh->fetch()) {
+                $subPhone = isset($row['sub_phone']) ? $row['sub_phone'] : '';
+                if (!wa_phone_ready($subPhone)) {
+                    continue;
+                }
+                $logPhone = isset($row['log_phone']) ? $row['log_phone'] : '';
+                if (function_exists('phones_wa_same') && phones_wa_same($logPhone, $subPhone)) {
+                    continue;
+                }
+                $norm = function_exists('normalize_phone') ? normalize_phone($subPhone) : preg_replace('/\D+/', '', (string) $subPhone);
+                if ($norm === '') {
+                    continue;
+                }
+                $nextAt = date('Y-m-d H:i:s', time() + ($releaseSlot * 4));
+                $markPhone->execute(array(
+                    ':phone' => $norm,
+                    ':next' => $nextAt,
+                    ':id' => (int) $row['id'],
+                ));
+                if ($markPhone->rowCount() > 0) {
+                    $releaseSlot++;
+                    $released++;
+                }
             }
         }
     } catch (Exception $e) {
@@ -2498,8 +2905,14 @@ function wa_retry_release($pdo, $config)
             "SELECT id, subscriber_id, retry_hold, message_type
              FROM message_logs
              WHERE success = 0 AND retry_hold IN ('wait_link', 'wait_net', 'wait_on')
-               AND created_at >= DATE_SUB(NOW(), INTERVAL 14 DAY)
-             ORDER BY id DESC
+               AND (
+                    created_at >= DATE_SUB(NOW(), INTERVAL 14 DAY)
+                    OR (
+                      IFNULL(response_json, '') = 'phone_changed_retry'
+                      AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                    )
+                  )
+             ORDER BY (IFNULL(response_json, '') = 'phone_changed_retry') DESC, id DESC
              LIMIT 80"
         );
         $rows = $stWait ? $stWait->fetchAll() : array();
@@ -2582,7 +2995,10 @@ function wa_retry_release($pdo, $config)
             } elseif (!$linkedAny) {
                 continue;
             }
-            $mark->execute(array(':id' => (int) $row['id']));
+            // تباعد زمني: رسالة كل ~4 ثواني حتى واتساب ما ينخضر
+            $nextAt = date('Y-m-d H:i:s', time() + ($releaseSlot * 4));
+            $mark->execute(array(':id' => (int) $row['id'], ':next' => $nextAt));
+            $releaseSlot++;
             $released++;
         }
     } catch (Exception $e) {
@@ -2591,9 +3007,9 @@ function wa_retry_release($pdo, $config)
 }
 
 /**
- * إعادة رسائل فاشلة مستحقة: رسالتين كحد أقصى، بعد 5 دقائق، لحد 3 محاولات.
+ * إعادة رسائل فاشلة مستحقة — واحدة أو أكثر مع تباعد زمني، لحد 3 محاولات.
  */
-function wa_retry_due_batch($pdo, $config, $limit = 2)
+function wa_retry_due_batch($pdo, $config, $limit = 1)
 {
     if (!$pdo) {
         return 0;
@@ -2602,7 +3018,7 @@ function wa_retry_due_batch($pdo, $config, $limit = 2)
     $now = time();
     if (is_file($lock)) {
         $prev = (int) trim((string) @file_get_contents($lock));
-        if ($prev > 0 && ($now - $prev) < 15) {
+        if ($prev > 0 && ($now - $prev) < 4) {
             return 0;
         }
     }
@@ -2618,39 +3034,35 @@ function wa_retry_due_batch($pdo, $config, $limit = 2)
     if ($limit < 1) {
         $limit = 1;
     }
-    if ($limit > 5) {
-        $limit = 5;
+    if ($limit > 3) {
+        $limit = 3;
     }
     $tid = 0;
     if (!empty($_SESSION['admin_logged_in']) && function_exists('current_tenant_id')) {
         $tid = (int) current_tenant_id();
     }
-    $pull = 'UPDATE message_logs m';
-    if ($tid > 0) {
-        $pull .= ' INNER JOIN subscribers s ON s.id = m.subscriber_id AND s.tenant_id = ' . $tid;
-    }
-    $pull .= " SET m.next_retry_at = NOW(), m.queued_at = NULL,
-                   m.attempt = IF(m.attempt >= 3, 1, m.attempt)
-               WHERE m.success = 0 AND m.subscriber_id IS NOT NULL
-                 AND (m.retry_hold IS NULL OR m.retry_hold = '')
-                 AND (
-                      m.fail_reason LIKE '%ربط%'
-                      OR m.fail_reason LIKE '%غير مفع%'
-                      OR m.fail_reason LIKE '%متصل%'
-                      OR m.fail_reason LIKE '%متوقف%'
-                 )";
-    try {
-        $pdo->exec($pull);
-    } catch (Exception $e) {
-    }
-    $sql = 'SELECT m.id FROM message_logs m';
+    $sql = 'SELECT m.id, m.subscriber_id, m.message_type, m.tenant_id FROM message_logs m';
     if ($tid > 0) {
         $sql .= ' LEFT JOIN subscribers s ON s.id = m.subscriber_id';
     }
     $sql .= ' WHERE m.success = 0
               AND m.queued_at IS NULL
               AND (m.retry_hold IS NULL OR m.retry_hold = \'\')
-              AND m.next_retry_at IS NOT NULL AND m.next_retry_at <= NOW() AND m.attempt < 3
+              AND m.attempt < 3
+              AND (
+                    (
+                      IFNULL(m.fail_reason, \'\') NOT LIKE \'%لا يتوفر واتساب%\'
+                      AND IFNULL(m.response_json, \'\') NOT LIKE \'%no_whatsapp%\'
+                    )
+                    OR IFNULL(m.response_json, \'\') = \'phone_changed_retry\'
+                  )
+              AND (
+                    m.created_at >= DATE_SUB(NOW(), INTERVAL 14 DAY)
+                    OR (
+                      IFNULL(m.response_json, \'\') = \'phone_changed_retry\'
+                      AND m.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                    )
+                  )
               AND (
                     m.subscriber_id IS NOT NULL
                     OR m.message_type IN (\'card_transfer\', \'card_pull\')
@@ -2665,22 +3077,92 @@ function wa_retry_due_batch($pdo, $config, $limit = 2)
                     )
                   )';
     }
-    $sql .= ' ORDER BY m.next_retry_at ASC LIMIT ' . $limit;
+    $sql .= ' ORDER BY (IFNULL(m.response_json, \'\') = \'phone_changed_retry\') DESC, m.id DESC LIMIT 60';
     try {
-        $ids = $pdo->query($sql)->fetchAll(PDO::FETCH_COLUMN);
+        $cands = $pdo->query($sql)->fetchAll(PDO::FETCH_ASSOC);
     } catch (Exception $e) {
         return 0;
     }
-    if (!is_array($ids) || !$ids) {
+    if (!is_array($cands) || !$cands) {
+        return 0;
+    }
+    try {
+        $pdo->exec(
+            "UPDATE message_logs
+             SET next_retry_at = NULL
+             WHERE success = 0 AND queued_at IS NULL
+               AND (retry_hold IS NULL OR retry_hold = '')
+               AND next_retry_at IS NOT NULL
+               AND IFNULL(response_json, '') <> 'phone_changed_retry'"
+        );
+    } catch (Exception $e) {
+    }
+    $waCfg = (is_array($config) && isset($config['whatsapp'])) ? $config['whatsapp'] : array();
+    $readyCache = array();
+    $sendIds = array();
+    $parkLink = array();
+    $parkNet = array();
+    foreach ($cands as $cand) {
+        $cid = isset($cand['id']) ? (int) $cand['id'] : 0;
+        if ($cid <= 0) {
+            continue;
+        }
+        $sid = isset($cand['subscriber_id']) ? (int) $cand['subscriber_id'] : 0;
+        $mtype = isset($cand['message_type']) ? (string) $cand['message_type'] : '';
+        $agentNotice = ($sid <= 0 && ($mtype === 'card_transfer' || $mtype === 'card_pull'));
+        $sess = '';
+        if (!$agentNotice && $sid > 0 && function_exists('wa_session_for_subscriber')) {
+            $sess = (string) wa_session_for_subscriber($pdo, $sid);
+        }
+        if ($sess === '' && $agentNotice && function_exists('whatsapp_session_for_tenant')) {
+            $sess = (string) whatsapp_session_for_tenant($pdo, isset($cand['tenant_id']) ? (int) $cand['tenant_id'] : 0);
+        }
+        if ($sess === '') {
+            $parkLink[] = $cid;
+            continue;
+        }
+        if (!isset($readyCache[$sess])) {
+            $gst = function_exists('whatsapp_gateway_status_for_account')
+                ? whatsapp_gateway_status_for_account($waCfg, $sess)
+                : array();
+            $readyCache[$sess] = is_array($gst) ? $gst : array();
+        }
+        $gst = $readyCache[$sess];
+        if (!empty($gst['ready'])) {
+            if (count($sendIds) < $limit) {
+                $sendIds[] = $cid;
+            }
+            continue;
+        }
+        // الجلسة محفوظة بس لسه تعيد الاتصال — مو «يحتاج ربط»
+        if (!empty($gst['unreachable']) || !empty($gst['registered'])) {
+            $parkNet[] = $cid;
+        } else {
+            $parkLink[] = $cid;
+        }
+    }
+    $park = $pdo->prepare(
+        "UPDATE message_logs
+         SET retry_hold = :h, next_retry_at = NULL, queued_at = NULL
+         WHERE id = :id AND success = 0 AND (retry_hold IS NULL OR retry_hold = '')"
+    );
+    foreach (array('wait_link' => $parkLink, 'wait_net' => $parkNet) as $holdName => $parkIds) {
+        foreach ($parkIds as $pid) {
+            try {
+                $park->execute(array(':h' => $holdName, ':id' => (int) $pid));
+            } catch (Exception $e) {
+            }
+        }
+    }
+    if (!$sendIds) {
         return 0;
     }
     $claim = $pdo->prepare(
         "UPDATE message_logs SET next_retry_at = NULL, queued_at = NOW()
-         WHERE id = :id AND success = 0 AND queued_at IS NULL
-           AND next_retry_at IS NOT NULL AND next_retry_at <= NOW()"
+         WHERE id = :id AND success = 0 AND queued_at IS NULL"
     );
     $done = 0;
-    foreach ($ids as $id) {
+    foreach ($sendIds as $id) {
         $id = (int) $id;
         if ($id <= 0) {
             continue;
@@ -2693,13 +3175,19 @@ function wa_retry_due_batch($pdo, $config, $limit = 2)
         } catch (Exception $e) {
             continue;
         }
+        if ($done > 0) {
+            // بين كل رسالة وأخرى ~4 ثواني
+            usleep(4000000);
+        }
         try {
             retry_failed_message($pdo, $config, $id, 0);
             $done++;
         } catch (Exception $e) {
             try {
-                $pdo->prepare('UPDATE message_logs SET queued_at = NULL, next_retry_at = NOW() WHERE id = :id AND success = 0')
-                    ->execute(array(':id' => $id));
+                $pdo->prepare(
+                    'UPDATE message_logs SET queued_at = NULL, next_retry_at = DATE_ADD(NOW(), INTERVAL 20 SECOND)
+                     WHERE id = :id AND success = 0'
+                )->execute(array(':id' => $id));
             } catch (Exception $e2) {
             }
         }
@@ -4686,6 +5174,16 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
             $out['skipped']++;
             continue;
         }
+        if (function_exists('wa_known_no_whatsapp') && wa_known_no_whatsapp($pdo, $sid, $phone)) {
+            if (!$dailyNow) {
+                expiry_remind_mark($pdo, $username, $remindTid, $endDate, 0, $sid);
+            }
+            expiry_remind_unlock($pdo, $phone);
+            $doneUsers[$username] = true;
+            $donePhones[$phone] = true;
+            $out['skipped']++;
+            continue;
+        }
         $startDate = date('Y-m-d', strtotime($endDate . ' -30 days'));
         $info = subscription_days_info($startDate, $endDate);
         $pkg = isset($crow['profile_name']) ? (string) $crow['profile_name'] : '';
@@ -4838,6 +5336,20 @@ function run_expiry_soon_reminders($pdo, $config, $limit = 40)
                     expiry_remind_mark($pdo, $u, $remindTid, (string) $row['end_date'], (int) $row['sub_id'], (int) $row['subscriber_id']);
                 }
                 expiry_remind_unlock($pdo, $lockKey);
+                if ($localPhone !== '') {
+                    $donePhones[$localPhone] = true;
+                }
+                $out['skipped']++;
+                continue;
+            }
+            if (function_exists('wa_known_no_whatsapp') && wa_known_no_whatsapp($pdo, (int) $row['subscriber_id'], $localPhone !== '' ? $localPhone : (isset($row['phone']) ? $row['phone'] : ''))) {
+                if (!$dailyNow) {
+                    expiry_remind_mark($pdo, $u, $remindTid, (string) $row['end_date'], (int) $row['sub_id'], (int) $row['subscriber_id']);
+                }
+                expiry_remind_unlock($pdo, $lockKey);
+                if ($u !== '') {
+                    $doneUsers[$u] = true;
+                }
                 if ($localPhone !== '') {
                     $donePhones[$localPhone] = true;
                 }

@@ -1532,9 +1532,16 @@ function portal_sas_host_key($host)
     return rtrim($host, '/');
 }
 
-function portal_sas_manager_tree_file()
+function portal_sas_manager_tree_file($tenantId = 0)
 {
-    return dirname(__DIR__) . '/storage/sas_manager_tree.json';
+    $tenantId = (int) $tenantId;
+    if ($tenantId <= 0 && function_exists('current_tenant_id')) {
+        $tenantId = (int) current_tenant_id();
+    }
+    if ($tenantId <= 0) {
+        $tenantId = 1;
+    }
+    return dirname(__DIR__) . '/storage/sas_manager_tree_t' . $tenantId . '.json';
 }
 
 /** شجرة مدراء الساس: id واسم والأب. تتحدث مرة باليوم حتى ما نسأل السيرفر بكل صفحة */
@@ -1557,8 +1564,8 @@ function portal_sas_manager_tree($pdo)
         }
     }
     $treeVer = isset($treeVer) ? (int) $treeVer : 0;
-    $treeFresh = ($saved && $treeVer >= 3 && $age >= 0 && $age < 86400);
-    if ($treeFresh || (!empty($GLOBALS['portal_sas_tree_no_fetch']) && $saved && $treeVer >= 3)) {
+    $treeFresh = ($saved && $treeVer >= 4 && $age >= 0 && $age < 86400);
+    if ($treeFresh || (!empty($GLOBALS['portal_sas_tree_no_fetch']) && $saved && $treeVer >= 4)) {
         $memo = $saved;
         return $memo;
     }
@@ -1568,7 +1575,7 @@ function portal_sas_manager_tree($pdo)
         if (!is_dir($dir)) {
             @mkdir($dir, 0755, true);
         }
-        @file_put_contents($file, json_encode(array('v' => 3, 'at' => time(), 'rows' => $fresh)));
+        @file_put_contents($file, json_encode(array('v' => 4, 'at' => time(), 'rows' => $fresh)));
         $memo = $fresh;
         return $memo;
     }
@@ -1750,6 +1757,32 @@ function portal_sas_manager_tree_fetch($pdo)
     $byName = array();
     foreach ($out as $node) {
         $byName[strtolower($node['username'])] = (int) $node['id'];
+    }
+    // الحساب اللي سحبنا بيه الشجرة غالباً مو موجود بالقائمة، والأبناء يشيرون لأبوه
+    $external = array();
+    foreach ($out as $node) {
+        $pid = isset($node['parent_id']) ? (int) $node['parent_id'] : 0;
+        if ($pid > 0 && !isset($seen[$pid])) {
+            if (!isset($external[$pid])) {
+                $external[$pid] = 0;
+            }
+            $external[$pid]++;
+        }
+    }
+    if ($external && !empty($acc['sas_username'])) {
+        arsort($external);
+        $topId = (int) key($external);
+        $login = strtolower(trim((string) $acc['sas_username']));
+        if ($topId > 0 && $login !== '' && !isset($byName[$login])) {
+            $out[] = array(
+                'id' => $topId,
+                'username' => (string) $acc['sas_username'],
+                'parent_id' => 0,
+                'parent_name' => '',
+            );
+            $byName[$login] = $topId;
+            $seen[$topId] = true;
+        }
     }
     foreach ($out as $i => $node) {
         if (!empty($node['parent_locked']) || (int) $node['parent_id'] > 0) {
@@ -1944,7 +1977,7 @@ function portal_agencies_under_current($pdo, $q = '')
     $q = trim((string) $q);
     $meCache = current_admin();
     $cacheId = $meCache ? (int) $meCache['id'] : 0;
-    $cacheFile = dirname(__DIR__) . '/storage/cache/agencies_under_' . $cacheId . '.json';
+    $cacheFile = dirname(__DIR__) . '/storage/cache/agencies_under_' . $cacheId . '_v2.json';
     if ($q === '' && $cacheId > 0 && is_file($cacheFile) && (time() - (int) @filemtime($cacheFile)) < 120) {
         $cached = json_decode((string) @file_get_contents($cacheFile), true);
         if (is_array($cached)) {

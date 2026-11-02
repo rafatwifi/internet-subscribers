@@ -47,7 +47,7 @@ if (function_exists('wa_resend_has_work') && wa_resend_has_work() && function_ex
 }
 if (function_exists('wa_retry_due_batch')) {
     try {
-        @wa_retry_due_batch($pdo, $config, 4);
+        @wa_retry_due_batch($pdo, $config, 2);
     } catch (Exception $e) {
     }
 }

@@ -69,6 +69,17 @@ function ensure_card_accounting_tables($pdo)
             tenants_ensure_column($pdo, 'agent_card_transfers', 'tenant_id', 'INT UNSIGNED NOT NULL DEFAULT 1');
             tenants_ensure_column($pdo, 'agent_card_transfers', 'sas_ranges', 'TEXT NULL');
             tenants_ensure_column($pdo, 'agent_card_transfers', 'xfer_state', 'VARCHAR(12) NOT NULL DEFAULT \'done\'');
+            tenants_ensure_column($pdo, 'agent_card_transfers', 'in_seen_at', 'DATETIME NULL DEFAULT NULL');
+            $seenMark = dirname(__DIR__) . '/storage/cache/schema_card_in_seen.txt';
+            if (!is_file($seenMark)) {
+                try {
+                    $pdo->exec('UPDATE agent_card_transfers SET in_seen_at = created_at WHERE in_seen_at IS NULL');
+                } catch (Exception $eSeen) {
+                }
+                if (function_exists('app_schema_touch')) {
+                    app_schema_touch('card_in_seen');
+                }
+            }
         }
 
         $ready = true;
@@ -1754,7 +1765,7 @@ function card_transfer_finish_return($pdo, $pendingId, $homeId, $config = null)
     }
 }
 
-function card_transfer_where($agentUserId, $createdBy, &$params)
+function card_transfer_where($agentUserId, $createdBy, &$params, $box = '', $partyId = 0, $actorId = 0)
 {
     $where = array();
     $params = array();
@@ -1774,14 +1785,125 @@ function card_transfer_where($agentUserId, $createdBy, &$params)
         $where[] = 't.created_by = :by';
         $params[':by'] = (int) $createdBy;
     }
+    $partyId = (int) $partyId;
+    $actorId = (int) $actorId;
+    if ($partyId > 0 && $box === 'out') {
+        $where[] = 't.from_agent_id = :boxfrom';
+        $where[] = 't.to_agent_id <> :boxnot';
+        $params[':boxfrom'] = $partyId;
+        $params[':boxnot'] = $partyId;
+        $senders = array();
+        if ($partyId > 0) {
+            $senders[$partyId] = $partyId;
+        }
+        if ($actorId > 0) {
+            $senders[$actorId] = $actorId;
+        }
+        $or = array();
+        $n = 0;
+        foreach ($senders as $sid) {
+            $key = ':boxby' . $n;
+            $or[] = 't.created_by = ' . $key;
+            $params[$key] = (int) $sid;
+            $n++;
+        }
+        if ($or) {
+            $where[] = '(' . implode(' OR ', $or) . ')';
+        }
+    } elseif ($partyId > 0 && $box === 'in') {
+        $where[] = 't.to_agent_id = :boxto';
+        $where[] = '(t.from_agent_id IS NULL OR t.from_agent_id <> :boxfromin)';
+        $params[':boxto'] = $partyId;
+        $params[':boxfromin'] = $partyId;
+    }
     return $where;
 }
 
-function count_card_transfers($pdo, $agentUserId = null, $createdBy = null)
+function card_incoming_line($row, $en = false)
+{
+    $qty = is_array($row) && isset($row['qty']) ? (int) $row['qty'] : 0;
+    $pack = is_array($row) && isset($row['profile_name']) ? trim((string) $row['profile_name']) : '';
+    $from = '';
+    if (is_array($row)) {
+        if (!empty($row['from_name'])) {
+            $from = trim((string) $row['from_name']);
+        } elseif (!empty($row['from_username'])) {
+            $from = trim((string) $row['from_username']);
+        }
+    }
+    if ($from === '') {
+        $from = $en ? 'the office' : 'المكتب';
+    }
+    if ($en) {
+        return 'You received ' . $qty . ' cards (' . $pack . ') from ' . $from;
+    }
+    return 'وصلك ' . $qty . ' كارت (' . $pack . ') من ' . $from;
+}
+
+function card_incoming_unseen($pdo, $userId, $limit = 5)
+{
+    $empty = array('count' => 0, 'rows' => array());
+    $userId = (int) $userId;
+    if ($userId <= 0 || !$pdo) {
+        return $empty;
+    }
+    ensure_card_accounting_tables($pdo);
+    $limit = max(1, min(20, (int) $limit));
+    try {
+        $stc = $pdo->prepare(
+            'SELECT COUNT(*) FROM agent_card_transfers
+             WHERE to_agent_id = :u AND from_agent_id <> :u2
+               AND (xfer_state IS NULL OR xfer_state = \'\' OR xfer_state = \'done\')
+               AND in_seen_at IS NULL
+               AND (return_of_id IS NULL OR return_of_id = 0)'
+        );
+        $stc->execute(array(':u' => $userId, ':u2' => $userId));
+        $count = (int) $stc->fetchColumn();
+        if ($count < 1) {
+            return $empty;
+        }
+        $st = $pdo->prepare(
+            'SELECT t.id, t.qty, t.profile_name, t.created_at,
+                    COALESCE(NULLIF(fa.display_name, \'\'), fa.username, \'\') AS from_name
+             FROM agent_card_transfers t
+             LEFT JOIN admin_users fa ON fa.id = t.from_agent_id
+             WHERE t.to_agent_id = :u AND t.from_agent_id <> :u2
+               AND (t.xfer_state IS NULL OR t.xfer_state = \'\' OR t.xfer_state = \'done\')
+               AND t.in_seen_at IS NULL
+               AND (t.return_of_id IS NULL OR t.return_of_id = 0)
+             ORDER BY t.id DESC
+             LIMIT ' . $limit
+        );
+        $st->execute(array(':u' => $userId, ':u2' => $userId));
+        $rows = $st->fetchAll();
+        return array('count' => $count, 'rows' => is_array($rows) ? $rows : array());
+    } catch (Exception $e) {
+        return $empty;
+    }
+}
+
+function card_incoming_mark_seen($pdo, $userId)
+{
+    $userId = (int) $userId;
+    if ($userId <= 0 || !$pdo) {
+        return;
+    }
+    ensure_card_accounting_tables($pdo);
+    try {
+        $st = $pdo->prepare(
+            'UPDATE agent_card_transfers SET in_seen_at = NOW()
+             WHERE to_agent_id = :u AND in_seen_at IS NULL'
+        );
+        $st->execute(array(':u' => $userId));
+    } catch (Exception $e) {
+    }
+}
+
+function count_card_transfers($pdo, $agentUserId = null, $createdBy = null, $box = '', $partyId = 0, $actorId = 0)
 {
     ensure_card_accounting_tables($pdo);
     $params = array();
-    $where = card_transfer_where($agentUserId, $createdBy, $params);
+    $where = card_transfer_where($agentUserId, $createdBy, $params, $box, $partyId, $actorId);
     $sql = 'SELECT COUNT(*) FROM agent_card_transfers t';
     if ($where) {
         $sql .= ' WHERE ' . implode(' AND ', $where);
@@ -1875,7 +1997,7 @@ function list_card_transfers_by_ids($pdo, $ids, $createdBy = null)
     }
 }
 
-function list_recent_card_transfers($pdo, $limit = 30, $agentUserId = null, $createdBy = null, $offset = 0)
+function list_recent_card_transfers($pdo, $limit = 30, $agentUserId = null, $createdBy = null, $offset = 0, $box = '', $partyId = 0, $actorId = 0)
 {
     ensure_card_accounting_tables($pdo);
     $limit = max(1, min(200, (int) $limit));
@@ -1889,7 +2011,7 @@ function list_recent_card_transfers($pdo, $limit = 30, $agentUserId = null, $cre
             JOIN admin_users ta ON ta.id = t.to_agent_id
             LEFT JOIN admin_users cb ON cb.id = t.created_by';
     $params = array();
-    $where = card_transfer_where($agentUserId, $createdBy, $params);
+    $where = card_transfer_where($agentUserId, $createdBy, $params, $box, $partyId, $actorId);
     if ($where) {
         $sql .= ' WHERE ' . implode(' AND ', $where);
     }

@@ -54,6 +54,65 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect(sas_user_url($username) . '#rental');
     }
 
+    if (!$isNew && $action === 'send_identity') {
+        list($localIdSend, $errSend) = function_exists('sas_cache_ensure_local')
+            ? sas_cache_ensure_local($pdo, $config, $cache)
+            : array(0, '');
+        $sendPhone = '';
+        if ($localIdSend > 0) {
+            $stPh = $pdo->prepare('SELECT phone FROM subscribers WHERE id = :id LIMIT 1');
+            $stPh->execute(array(':id' => (int) $localIdSend));
+            $sendPhone = (string) $stPh->fetchColumn();
+        }
+        if ($sendPhone === '' && !empty($cache['phone'])) {
+            $sendPhone = (string) $cache['phone'];
+        }
+        $cardText = isset($_POST['card_text']) ? trim((string) $_POST['card_text']) : '';
+        if ($cardText === '') {
+            flash('error', 'ماكو نص للهوية');
+            redirect(sas_user_url($username));
+        }
+        if (function_exists('sas_sessions_pull')) {
+            $packSend = sas_sessions_pull(
+                $pdo,
+                $config,
+                !empty($cache['username']) ? (string) $cache['username'] : $username,
+                !empty($cache['sas_user_id']) ? (int) $cache['sas_user_id'] : 0
+            );
+            $sessLines = array();
+            if (is_array($packSend) && !empty($packSend['rows']) && is_array($packSend['rows'])) {
+                $n = 0;
+                foreach ($packSend['rows'] as $ps) {
+                    if ($n >= 8) {
+                        break;
+                    }
+                    $n++;
+                    $sessLines[] = ($n) . ') '
+                        . (!empty($ps['open']) ? 'متصل' : 'غير متصل')
+                        . ' ' . (isset($ps['start']) ? $ps['start'] : '')
+                        . ' ' . (isset($ps['ip']) ? $ps['ip'] : '')
+                        . ' ' . (isset($ps['used']) ? $ps['used'] : '');
+                }
+            }
+            if ($sessLines) {
+                $cardText .= "\nالجلسات:\n" . implode("\n", $sessLines);
+            }
+        }
+        if (function_exists('mb_substr')) {
+            $cardText = mb_substr($cardText, 0, 3500, 'UTF-8');
+        } elseif (strlen($cardText) > 3500) {
+            $cardText = substr($cardText, 0, 3500);
+        }
+        $result = whatsapp_send($config, $sendPhone, $cardText, 'text');
+        if ($localIdSend > 0) {
+            log_message($pdo, (int) $localIdSend, $result);
+        }
+        flash(!empty($result['success']) ? 'success' : 'error', !empty($result['success'])
+            ? 'تم إرسال هوية المشترك على واتساب'
+            : (function_exists('whatsapp_fail_user_message') ? whatsapp_fail_user_message($result) : 'فشل الإرسال'));
+        redirect(sas_user_url($username));
+    }
+
     if (!$isNew && $action === 'update_local_details') {
         $address = (string) post('address', '');
         $notes = (string) post('notes', '');
@@ -280,6 +339,156 @@ $isOnlineNow = !empty($cache['is_online']);
 $ipShow = isset($cache['framed_ip']) ? trim((string) $cache['framed_ip']) : '';
 $macShow = isset($cache['mac_address']) ? trim((string) $cache['mac_address']) : '';
 $phoneShow = function_exists('format_phone_display') ? format_phone_display($phone) : $phone;
+$paidTotal = 0.0;
+$lastMsgRow = null;
+$msgState = $isEn ? 'Not sent' : 'ما انرسلت';
+$msgHint = '';
+if (!$isNew && $localId > 0) {
+    if (function_exists('subscriber_paid_total')) {
+        $paidTotal = (float) subscriber_paid_total($pdo, $localId);
+    }
+    try {
+        $stMsg = $pdo->prepare(
+            'SELECT success, message_type, body, response_json, phone
+             FROM message_logs WHERE subscriber_id = :id ORDER BY id DESC LIMIT 1'
+        );
+        $stMsg->execute(array(':id' => $localId));
+        $lastMsgRow = $stMsg->fetch();
+    } catch (Exception $eMsg) {
+        $lastMsgRow = null;
+    }
+    if ($lastMsgRow) {
+        $noWa = function_exists('subscriber_msg_is_no_whatsapp')
+            && subscriber_msg_is_no_whatsapp(isset($lastMsgRow['response_json']) ? $lastMsgRow['response_json'] : '');
+        if (!empty($lastMsgRow['success'])) {
+            $msgState = $isEn ? 'Sent' : 'أُرسلت';
+        } elseif ($noWa) {
+            $msgState = $isEn ? 'No WhatsApp' : 'ماكو واتساب';
+        } else {
+            $msgState = $isEn ? 'Failed' : 'فشلت';
+        }
+        if (function_exists('message_short_summary')) {
+            $msgHint = message_short_summary(
+                isset($lastMsgRow['message_type']) ? $lastMsgRow['message_type'] : '',
+                isset($lastMsgRow['body']) ? $lastMsgRow['body'] : '',
+                !empty($lastMsgRow['success'])
+            );
+        }
+        if ($noWa) {
+            $msgHint = $isEn ? 'This number is not on WhatsApp' : 'لا يتوفر واتساب لدى المشترك';
+        }
+    }
+}
+$daysShow = ($daysLeft === '' || $daysLeft === null) ? '—' : (string) $daysLeft;
+$graceShow = $graceIsCustom
+    ? ((string) (int) $localGraceNum . ($isEn ? ' days' : ' يوم'))
+    : ($isEn ? ('System (' . (int) $sysGraceNum . ')') : ('حسب النظام (' . (int) $sysGraceNum . ')'));
+$idCardText = '';
+if (!$isNew) {
+    $idBits = array();
+    $idBits[] = ($isEn ? 'Subscriber card' : 'هوية المشترك');
+    $idBits[] = ($isEn ? 'Name: ' : 'الاسم: ') . $dispName;
+    $idBits[] = ($isEn ? 'Username: ' : 'اليوزر: ') . $username;
+    $idBits[] = ($isEn ? 'Phone: ' : 'الهاتف: ') . ($phoneShow !== '' ? $phoneShow : '—');
+    $idBits[] = ($isEn ? 'Profile: ' : 'الباقة: ') . ($profileLabel !== '' ? $profileLabel : '—');
+    $idBits[] = ($isEn ? 'Status: ' : 'الحالة: ') . ($enabled ? ($isEn ? 'Enabled' : 'مفعّل') : ($isEn ? 'Disabled' : 'موقف'));
+    $idBits[] = ($isEn ? 'Link: ' : 'الاتصال: ') . ($isOnlineNow ? ($isEn ? 'Online' : 'متصل') : ($isEn ? 'Offline' : 'غير متصل'));
+    $idBits[] = ($isEn ? 'Days left: ' : 'الأيام المتبقية: ') . $daysShow;
+    $idBits[] = ($isEn ? 'Debt: ' : 'الدين: ') . money_format_iqd($debtTotal, $config['currency']);
+    $idBits[] = ($isEn ? 'Received: ' : 'المستلم: ') . money_format_iqd($paidTotal, $config['currency']);
+    $idBits[] = ($isEn ? 'Message: ' : 'الرسالة: ') . $msgState . ($msgHint !== '' ? (' — ' . $msgHint) : '');
+    $idBits[] = ($isEn ? 'Grace: ' : 'أيام السماح: ') . $graceShow;
+    $idBits[] = ($isEn ? 'Expires: ' : 'الانتهاء: ') . ($expireShow !== '' ? $expireShow : '—');
+    if ($hasRent) {
+        $idBits[] = ($isEn ? 'Rental: ' : 'إيجار: ') . ($currentRentDev && !empty($currentRentDev['name']) ? $currentRentDev['name'] : ($isEn ? 'Yes' : 'نعم'));
+    }
+    $idCardText = implode("\n", $idBits);
+}
+
+if (!$isNew && isset($_GET['print']) && (string) $_GET['print'] === '1') {
+    $printSessions = array();
+    if (function_exists('sas_sessions_pull')) {
+        $packPrint = sas_sessions_pull($pdo, $config, $username, !empty($cache['sas_user_id']) ? (int) $cache['sas_user_id'] : 0);
+        if (is_array($packPrint) && !empty($packPrint['rows']) && is_array($packPrint['rows'])) {
+            $printSessions = $packPrint['rows'];
+        }
+    }
+    header('Content-Type: text/html; charset=utf-8');
+    $printTitle = $dispName !== '' ? $dispName : $username;
+    echo '<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>'
+        . e($printTitle) . '</title><style>
+        body{font-family:Tahoma,Arial,sans-serif;color:#0f172a;margin:24px;background:#fff}
+        h1{margin:0 0 4px;font-size:22px}
+        .sub{margin:0 0 14px;color:#475569}
+        .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:12px 0}
+        .cell{border:1px solid #e2e8f0;border-radius:10px;padding:8px 10px}
+        .cell span{display:block;font-size:11px;color:#64748b;font-weight:700}
+        .cell b{font-size:14px}
+        table{width:100%;border-collapse:collapse;margin-top:8px;font-size:12px}
+        th,td{border-bottom:1px solid #e2e8f0;padding:6px 4px;text-align:right}
+        th{background:#f8fafc}
+        @media print { body{margin:12px} .noprint{display:none} }
+        </style></head><body>';
+    echo '<h1>' . e($printTitle) . '</h1>';
+    echo '<p class="sub" dir="ltr">' . e($username) . '</p>';
+    echo '<div class="grid">';
+    $printCells = array(
+        array($isEn ? 'Phone' : 'الهاتف', $phoneShow !== '' ? $phoneShow : '—'),
+        array($isEn ? 'Profile' : 'الباقة', $profileLabel !== '' ? $profileLabel : '—'),
+        array($isEn ? 'Status' : 'الحالة', $enabled ? ($isEn ? 'Enabled' : 'مفعّل') : ($isEn ? 'Disabled' : 'موقف')),
+        array($isEn ? 'Link' : 'الاتصال', $isOnlineNow ? ($isEn ? 'Online' : 'متصل') : ($isEn ? 'Offline' : 'غير متصل')),
+        array($isEn ? 'Days left' : 'الأيام المتبقية', $daysShow),
+        array($isEn ? 'Debt' : 'الدين', money_format_iqd($debtTotal, $config['currency'])),
+        array($isEn ? 'Received' : 'المستلم', money_format_iqd($paidTotal, $config['currency'])),
+        array($isEn ? 'Message' : 'الرسالة', $msgState),
+        array($isEn ? 'Grace' : 'أيام السماح', $graceShow),
+        array($isEn ? 'Expires' : 'الانتهاء', $expireShow !== '' ? $expireShow : '—'),
+        array($isEn ? 'Belongs to' : 'تابع الى', $parentLabel !== '' ? $parentLabel : '—'),
+        array('IP', $ipShow !== '' ? $ipShow : '—'),
+        array('MAC', $macShow !== '' ? $macShow : '—'),
+    );
+    if ($hasRent) {
+        $printCells[] = array($isEn ? 'Rental' : 'إيجار', $currentRentDev && !empty($currentRentDev['name']) ? $currentRentDev['name'] : ($isEn ? 'Yes' : 'نعم'));
+    }
+    if ($localAddress !== '') {
+        $printCells[] = array($isEn ? 'Address' : 'العنوان', $localAddress);
+    }
+    if ($msgHint !== '') {
+        $printCells[] = array($isEn ? 'Last message' : 'آخر رسالة', $msgHint);
+    }
+    foreach ($printCells as $cell) {
+        echo '<div class="cell"><span>' . e($cell[0]) . '</span><b>' . e($cell[1]) . '</b></div>';
+    }
+    echo '</div>';
+    echo '<h2 style="font-size:16px;margin:16px 0 6px">' . e($isEn ? 'Sessions' : 'الجلسات') . '</h2>';
+    if (!$printSessions) {
+        echo '<p>' . e($isEn ? 'No sessions' : 'ماكو جلسات') . '</p>';
+    } else {
+        echo '<table><thead><tr><th>' . e($isEn ? 'Status' : 'الحالة') . '</th><th>MAC</th><th>IP</th><th>'
+            . e($isEn ? 'Start' : 'البداية') . '</th><th>' . e($isEn ? 'End' : 'النهاية') . '</th><th>'
+            . e($isEn ? 'Usage' : 'الاستهلاك') . '</th></tr></thead><tbody>';
+        $shown = 0;
+        foreach ($printSessions as $ps) {
+            if ($shown >= 40) {
+                break;
+            }
+            $shown++;
+            $openPs = !empty($ps['open']);
+            echo '<tr><td>' . e($openPs ? ($isEn ? 'Online' : 'متصل') : ($isEn ? 'Offline' : 'غير متصل')) . '</td>'
+                . '<td dir="ltr">' . e(isset($ps['mac']) ? $ps['mac'] : '—') . '</td>'
+                . '<td dir="ltr">' . e(isset($ps['ip']) ? $ps['ip'] : '—') . '</td>'
+                . '<td dir="ltr">' . e(isset($ps['start']) ? $ps['start'] : '—') . '</td>'
+                . '<td dir="ltr">' . e(isset($ps['stop']) ? $ps['stop'] : '—') . '</td>'
+                . '<td dir="ltr">' . e(isset($ps['used']) ? $ps['used'] : '—') . '</td></tr>';
+        }
+        echo '</tbody></table>';
+    }
+    echo '<p class="noprint" style="margin-top:16px"><button onclick="window.print()">'
+        . e($isEn ? 'Save PDF' : 'حفظ PDF') . '</button></p>';
+    echo '<script>window.addEventListener("load",function(){setTimeout(function(){window.print();},250);});</script>';
+    echo '</body></html>';
+    exit;
+}
 
 render_header($pageTitle, 'sas', $isNew ? '' : $username);
 ?>
@@ -291,6 +500,7 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
   background: linear-gradient(135deg, #0f172a 0%, #1e293b 70%, #1d4ed8 140%);
   box-shadow: 0 14px 34px rgba(15, 23, 42, .16);
 }
+.su-hero-main { flex: 1; min-width: 0; }
 .su-hero-who { display: flex; align-items: center; gap: 14px; min-width: 0; }
 .su-hero h1 { margin: 0 0 4px; font-size: 22px; font-weight: 800; letter-spacing: -.02em; }
 .su-avatar {
@@ -310,7 +520,33 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
 }
 .su-pill.is-on { background: #16a34a; border-color: #16a34a; }
 .su-pill.is-off { background: rgba(255,255,255,.08); }
-.su-pill.is-debt { background: #b45309; border-color: #b45309; }
+.su-pill.is-down { background: #dc2626; border-color: #dc2626; }
+.su-pill.is-rent { background: #0284c7; border-color: #0284c7; }
+.su-pill svg { width: 14px; height: 14px; margin-inline-end: 4px; }
+.su-stats {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px 14px; margin-top: 14px; padding-top: 12px;
+  border-top: 1px solid rgba(255,255,255,.16);
+}
+.su-stat span { display: block; font-size: 11px; font-weight: 700; opacity: .75; margin-bottom: 2px; }
+.su-stat strong { display: block; font-size: 15px; font-weight: 800; line-height: 1.35; }
+.su-hero-side { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
+.su-hero-side .su-back, .su-hero-side button.su-back { justify-content: center; cursor: pointer; font: inherit; }
+.su-panel[hidden] { display: none !important; }
+.su-nav button.is-open { background: #0f172a; color: #fff; border-color: #0f172a; }
+.id-ask {
+  position: fixed; inset: 0; z-index: 80; display: grid; place-items: center;
+  background: rgba(15, 23, 42, .45); padding: 16px;
+}
+.id-ask[hidden] { display: none !important; }
+.id-ask .box {
+  width: min(420px, 100%); background: #fff; color: #0f172a; border-radius: 16px;
+  padding: 16px; box-shadow: 0 18px 40px rgba(0,0,0,.2);
+}
+.id-ask h3 { margin: 0 0 6px; }
+.id-ask p { margin: 0 0 14px; color: #475569; font-size: 13px; }
+.id-ask .row { display: flex; gap: 8px; flex-wrap: wrap; }
+.id-ask .row .btn, .id-ask .row button, .id-ask .row a { flex: 1; text-align: center; }
 .su-back {
   flex: 0 0 auto; height: 34px; padding: 0 14px; border-radius: 999px;
   background: rgba(255,255,255,.12); color: #fff; border: 1px solid rgba(255,255,255,.2);
@@ -333,7 +569,11 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
   box-shadow: 0 8px 24px rgba(15, 23, 42, .04); padding: 16px 16px 14px;
   scroll-margin-top: 72px;
 }
-.su-page > .su-card + .su-card { margin-top: 12px; }
+.su-page > .su-card + .su-card,
+.su-page > .su-card + .su-pair,
+.su-page > .su-pair + .su-card { margin-top: 22px; }
+#su-sessions { margin-bottom: 8px; }
+#rentalMsgActions { margin-top: 16px !important; }
 .su-card h2 { margin: 0; font-size: 16px; font-weight: 800; color: #0f172a; }
 .su-card-h { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
 .su-card .meta { margin: 0; color: #64748b; font-size: 12px; font-weight: 700; }
@@ -343,6 +583,12 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
 }
 .su-fact span { display: block; font-size: 11px; font-weight: 800; color: #64748b; margin-bottom: 3px; }
 .su-fact strong { font-size: 14px; color: #0f172a; font-weight: 800; word-break: break-word; }
+.su-grace { margin-top: 12px; padding-top: 12px; border-top: 1px solid #eef2f7; }
+.su-grace label { display: block; font-size: 12px; font-weight: 800; color: #334155; margin-bottom: 6px; }
+.su-grace-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.su-grace-row select, .su-grace-row input { height: 40px; border: 1px solid #e2e8f0; border-radius: 10px; padding: 0 10px; font: inherit; background: #fff; }
+.su-grace-row select { min-width: 180px; flex: 1; }
+.su-grace-row input { width: 90px; }
 .su-debt-sum {
   display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
   padding: 12px 14px; border-radius: 14px; background: #fff7ed; border: 1px solid #fed7aa; margin-bottom: 10px;
@@ -383,15 +629,65 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
 #sasSessionsTable th, #sasSessionsTable td { padding: 8px 10px; border-bottom: 1px solid #eef2f7; text-align: start; font-size: 13px; white-space: nowrap; }
 #sasSessionsTable th { background: #f8fafc; font-weight: 800; color: #334155; }
 #sasSessionsPanel .table-wrap { overflow-x: auto; }
-.su-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.su-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 22px; }
 @media (max-width: 860px) {
-  .su-split, .su-pair, .sas-grid, .su-facts { grid-template-columns: 1fr; }
+  .su-split, .su-pair, .sas-grid, .su-facts, .su-stats { grid-template-columns: 1fr 1fr; }
   .su-hero { flex-direction: column; }
+  .su-hero-side { flex-direction: row; width: 100%; }
+  .su-nav { display: grid; grid-template-columns: 1fr 1fr; }
+  .su-nav a, .su-nav button { width: 100%; }
+}
+@media (max-width: 520px) {
+  .su-page { margin-bottom: 18px; }
+  .su-hero { padding: 14px; border-radius: 16px; }
+  .su-hero h1 { font-size: 18px; }
+  .su-avatar { width: 52px; height: 52px; font-size: 22px; }
+  .su-stats { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .su-stat strong { font-size: 14px; }
+}
+.su-sess-limit {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 800; color: #475569;
+}
+.su-sess-limit select {
+  height: 32px; border-radius: 999px; border: 1px solid #e2e8f0;
+  padding: 0 10px; font: inherit; font-weight: 800; background: #fff; color: #0f172a;
+}
+.su-to-top {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  width: min(240px, calc(100% - 24px));
+  margin: 22px auto 6px; height: 46px; border: 0; border-radius: 999px;
+  background: linear-gradient(135deg, #0f172a 0%, #1d4ed8 100%);
+  color: #fff; font: inherit; font-weight: 800; cursor: pointer;
+  box-shadow: 0 12px 26px rgba(15, 23, 42, .2);
+}
+.su-to-top span { font-size: 16px; line-height: 1; }
+@media print {
+  .sidebar, .sidebar-backdrop, .bg-bubbles, .main-top, .id-ask, .su-to-top,
+  .su-hero-side, .su-nav, .sas-toast, #appRing { display: none !important; }
+  .app { display: block !important; min-height: 0 !important; background: #fff !important; }
+  .main, .su-page, .su-hero, .su-card, .su-split, .su-facts, .su-fact, .su-stat, .su-pill {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+    filter: none !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+  .main, .su-page { display: block !important; width: 100% !important; max-width: none !important; margin: 0 !important; }
+  .su-hero { box-shadow: none; }
+  #su-sessions, #sasSessionsPanel { display: block !important; opacity: 1 !important; }
+  #sasSessionsTable { display: table !important; width: 100% !important; }
+  #sasSessionsTable tr { display: table-row !important; }
+  #sasSessionsTable th, #sasSessionsTable td { display: table-cell !important; }
+  #su-edit[hidden], #rental[hidden] { display: none !important; }
+  @page { margin: 8mm; }
 }
 </style>
 
 <div class="su-page">
 <div class="su-hero">
+  <div class="su-hero-main">
     <div class="su-hero-who">
         <?php if (!$isNew): ?>
             <?php
@@ -413,21 +709,52 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
         <?php if (!$isNew): ?>
         <div class="su-pills">
             <span class="su-pill<?php echo $enabled ? ' is-on' : ' is-off'; ?>"><?php echo e($enabled ? ($isEn ? 'Enabled' : 'مفعّل') : ($isEn ? 'Disabled' : 'موقف')); ?></span>
-            <span class="su-pill<?php echo $isOnlineNow ? ' is-on' : ' is-off'; ?>"><?php echo e($isOnlineNow ? ($isEn ? 'Online' : 'متصل') : ($isEn ? 'Offline' : 'منفصل')); ?></span>
+            <span class="su-pill<?php echo $isOnlineNow ? ' is-on' : ' is-down'; ?>"><?php echo e($isOnlineNow ? ($isEn ? 'Online' : 'متصل') : ($isEn ? 'Offline' : 'غير متصل')); ?></span>
             <?php if ($profileLabel !== ''): ?><span class="su-pill"><?php echo e($profileLabel); ?></span><?php endif; ?>
-            <?php if ($debtTotal > 0): ?><span class="su-pill is-debt"><?php echo e(money_format_iqd($debtTotal, $config['currency'])); ?></span><?php endif; ?>
+            <?php if ($hasRent): ?>
+            <span class="su-pill is-rent" title="<?php echo e($currentRentDev && !empty($currentRentDev['name']) ? $currentRentDev['name'] : ($isEn ? 'Rental' : 'إيجار')); ?>">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 10.5 12 4l8 6.5V20a1 1 0 0 1-1 1h-5v-6H10v6H5a1 1 0 0 1-1-1v-9.5z"/></svg>
+                <?php echo e($isEn ? 'Rental' : 'إيجار'); ?>
+            </span>
+            <?php endif; ?>
         </div>
         <?php endif; ?>
         </div>
     </div>
-    <a class="su-back" href="sas.php"><?php echo e($isEn ? 'Back' : 'رجوع'); ?></a>
+    <?php if (!$isNew): ?>
+    <div class="su-stats">
+        <div class="su-stat">
+            <span><?php echo e($isEn ? 'Days left' : 'الأيام المتبقية'); ?></span>
+            <strong><?php echo e($daysShow); ?></strong>
+        </div>
+        <div class="su-stat">
+            <span><?php echo e($isEn ? 'Debt' : 'الديون'); ?></span>
+            <strong><?php echo e(money_format_iqd($debtTotal, $config['currency'])); ?></strong>
+        </div>
+        <div class="su-stat">
+            <span><?php echo e($isEn ? 'Received' : 'المستلم'); ?></span>
+            <strong><?php echo e(money_format_iqd($paidTotal, $config['currency'])); ?></strong>
+        </div>
+        <div class="su-stat" title="<?php echo e($msgHint); ?>">
+            <span><?php echo e($isEn ? 'Message' : 'الرسالة'); ?></span>
+            <strong><?php echo e($msgState); ?></strong>
+        </div>
+    </div>
+    <?php endif; ?>
+  </div>
+    <div class="su-hero-side">
+        <?php if (!$isNew): ?>
+        <button type="button" class="su-back" id="idPrintOpen"><?php echo e($isEn ? 'Print card' : 'طباعة الهوية'); ?></button>
+        <?php endif; ?>
+        <a class="su-back" href="sas.php"><?php echo e($isEn ? 'Back' : 'رجوع'); ?></a>
+    </div>
 </div>
 <?php if (!$isNew): ?>
 <nav class="su-nav">
     <a href="#su-info"><?php echo e($isEn ? 'Subscriber' : 'بيانات المشترك'); ?></a>
-    <a href="#su-edit"><?php echo e($isEn ? 'Edit' : 'تعديل البيانات'); ?></a>
-    <a href="#su-debt"><?php echo e($isEn ? 'Debts' : 'موجز الديون'); ?></a>
+    <button type="button" data-su-toggle="su-edit"><?php echo e($isEn ? 'Edit' : 'تعديل البيانات'); ?></button>
     <button type="button" id="sasSessionsBtn"><?php echo e($isEn ? 'Sessions' : 'الجلسات'); ?></button>
+    <button type="button" data-su-toggle="rental"><?php echo e($isEn ? 'Rental' : 'الإيجار'); ?></button>
 </nav>
 <div class="su-split">
     <section class="su-card" id="su-info">
@@ -449,7 +776,27 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
             <?php if ($localNotes !== ''): ?>
             <div class="su-fact"><span><?php echo e($isEn ? 'Notes' : 'ملاحظات'); ?></span><strong><?php echo e($localNotes); ?></strong></div>
             <?php endif; ?>
+            <div class="su-fact"><span><?php echo e($isEn ? 'Grace days' : 'أيام السماح'); ?></span><strong><?php echo e($graceShow); ?></strong></div>
         </div>
+        <form method="post" class="su-grace">
+            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+            <input type="hidden" name="action" value="update_local_details">
+            <input type="hidden" name="address" value="<?php echo e($localAddress); ?>">
+            <input type="hidden" name="notes" value="<?php echo e($localNotes); ?>">
+            <label><?php echo e($isEn ? 'Grace days after activation' : 'أيام السماح بعد التفعيل'); ?></label>
+            <div class="su-grace-row">
+                <select name="grace_mode" id="graceModeSel">
+                    <option value="system" <?php echo !$graceIsCustom ? 'selected' : ''; ?>>
+                        <?php echo e($isEn ? ('Follow system (' . $sysGraceNum . ' days)') : ('حسب النظام (' . $sysGraceNum . ' يوم)')); ?>
+                    </option>
+                    <option value="custom" <?php echo $graceIsCustom ? 'selected' : ''; ?>>
+                        <?php echo e($isEn ? 'Custom number' : 'رقم مخصص'); ?>
+                    </option>
+                </select>
+                <input type="number" name="grace_days" id="graceDaysInp" min="0" max="90" step="1" value="<?php echo (int) $localGraceNum; ?>">
+                <button class="btn sm" type="submit"><?php echo e($isEn ? 'Save' : 'حفظ'); ?></button>
+            </div>
+        </form>
     </section>
     <section class="su-card" id="su-debt">
         <div class="su-card-h">
@@ -477,7 +824,7 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
     </section>
 </div>
 <?php endif; ?>
-<section class="su-card" id="su-edit">
+<section class="su-card su-panel" id="su-edit"<?php echo $isNew ? '' : ' hidden'; ?>>
     <div class="su-card-h">
         <h2><?php echo e($isNew ? ($isEn ? 'New' : 'مشترك جديد') : ($isEn ? 'Edit' : 'تعديل البيانات')); ?></h2>
     </div>
@@ -565,10 +912,17 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
     </form>
 </section>
 <?php if (!$isNew): ?>
-<section class="su-card" id="su-sessions">
+<section class="su-card su-panel" id="su-sessions" hidden>
     <div class="su-card-h">
         <h2><?php echo e($isEn ? 'Sessions' : 'الجلسات'); ?></h2>
-        <span class="meta" id="sasSessionsHint"><?php echo e($isEn ? 'Latest connections from SAS' : 'آخر الاتصالات من الساس'); ?></span>
+        <label class="su-sess-limit"><?php echo e($isEn ? 'Show' : 'العدد'); ?>
+            <select id="sasSessionsLimit">
+                <option value="10">10</option>
+                <option value="30">30</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+            </select>
+        </label>
     </div>
     <div id="sasSessionsPanel" hidden>
         <div id="sasSessionsNote"></div>
@@ -596,7 +950,7 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
 
 <?php if (!$isNew): ?>
 <div class="su-pair">
-<section class="su-card" id="rental">
+<section class="su-card su-panel" id="rental" hidden>
     <div class="su-card-h">
         <h2><?php echo e($isEn ? 'Rental device' : 'جهاز إيجار'); ?></h2>
         <span class="meta"><?php echo e($isEn ? 'On this server only' : 'على السيرفر فقط'); ?></span>
@@ -654,49 +1008,28 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
         </form>
     </div>
 </section>
-
-<section class="su-card" id="local">
-    <div class="su-card-h">
-        <h2><?php echo e($isEn ? 'Local details' : 'تفاصيل محلية'); ?></h2>
-    </div>
-    <form method="post">
-        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
-        <input type="hidden" name="action" value="update_local_details">
-        <div class="sas-grid">
-            <div>
-                <label><?php echo e($isEn ? 'Address' : 'العنوان'); ?></label>
-                <input name="address" value="<?php echo e($localAddress); ?>">
-            </div>
-            <div>
-                <label><?php echo e($isEn ? 'Notes' : 'ملاحظات'); ?></label>
-                <input name="notes" value="<?php echo e($localNotes); ?>">
-            </div>
-            <div>
-                <label><?php echo e($isEn ? 'Grace days after activation' : 'أيام السماح بعد التفعيل'); ?></label>
-                <select name="grace_mode" id="graceModeSel" style="width:100%;margin-top:4px">
-                    <option value="system" <?php echo !$graceIsCustom ? 'selected' : ''; ?>>
-                        <?php echo e($isEn ? ('Follow system (' . $sysGraceNum . ' days)') : ('حسب النظام (' . $sysGraceNum . ' يوم)')); ?>
-                    </option>
-                    <option value="custom" <?php echo $graceIsCustom ? 'selected' : ''; ?>>
-                        <?php echo e($isEn ? 'Custom number only' : 'رقم مخصص (حصراً)'); ?>
-                    </option>
-                </select>
-                <input type="number" name="grace_days" id="graceDaysInp" min="0" max="90" step="1"
-                       value="<?php echo (int) $localGraceNum; ?>"
-                       style="margin-top:6px;<?php echo $graceIsCustom ? '' : 'display:none'; ?>">
-                <p class="meta" style="margin:6px 0 0"><?php echo e($isEn
-                    ? 'System = settings default. Custom = this subscriber only.'
-                    : 'حسب النظام = قيمة الإعدادات. الرقم المخصص يستثني المشترك من إعداد النظام.'); ?></p>
-            </div>
-        </div>
-        <div class="sas-form-actions">
-            <button class="btn" type="submit"><?php echo e($isEn ? 'Save details' : 'حفظ التفاصيل'); ?></button>
-        </div>
-    </form>
-</section>
 </div>
 <?php endif; ?>
+<button type="button" class="su-to-top" id="suToTop"><span aria-hidden="true">↑</span><?php echo e($isEn ? 'Back to top' : 'الرجوع للأعلى'); ?></button>
 </div>
+<?php if (!$isNew): ?>
+<div class="id-ask" id="idPrintAsk" hidden>
+    <div class="box">
+        <h3><?php echo e($isEn ? 'Subscriber card' : 'هوية المشترك'); ?></h3>
+        <p><?php echo e($isEn ? 'Download a PDF, or send the card to the subscriber on WhatsApp.' : 'تنزيل PDF، أو إرسال الهوية لواتساب المشترك.'); ?></p>
+        <div class="row">
+            <button type="button" class="btn" id="idPrintDownload"><?php echo e($isEn ? 'Download' : 'تنزيل'); ?></button>
+            <form method="post" style="flex:1;display:flex">
+                <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                <input type="hidden" name="action" value="send_identity">
+                <input type="hidden" name="card_text" value="<?php echo e($idCardText); ?>">
+                <button class="btn secondary" type="submit" style="width:100%"><?php echo e($isEn ? 'Send to subscriber' : 'إرسال للمشترك'); ?></button>
+            </form>
+        </div>
+        <button type="button" class="btn ghost" id="idPrintClose" style="margin-top:10px;width:100%"><?php echo e($isEn ? 'Cancel' : 'إلغاء'); ?></button>
+    </div>
+</div>
+<?php endif; ?>
 <script>
 (function () {
   var phoneInp = document.querySelector('input[name="phone"]');
@@ -730,6 +1063,43 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
     }
     mode.addEventListener('change', syncGrace);
     syncGrace();
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('[data-su-toggle]'), function (tog) {
+    tog.addEventListener('click', function () {
+      var el = document.getElementById(tog.getAttribute('data-su-toggle'));
+      if (!el) return;
+      var show = !!el.hidden;
+      el.hidden = !show;
+      tog.classList.toggle('is-open', show);
+      if (show && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
+  var printOpen = document.getElementById('idPrintOpen');
+  var printAsk = document.getElementById('idPrintAsk');
+  var printClose = document.getElementById('idPrintClose');
+  if (printOpen && printAsk) {
+    printOpen.addEventListener('click', function () { printAsk.hidden = false; });
+  }
+  var printDownload = document.getElementById('idPrintDownload');
+  if (printDownload) {
+    printDownload.addEventListener('click', function () {
+      if (printAsk) printAsk.hidden = true;
+      var start = function () { setTimeout(function () { window.print(); }, 250); };
+      if (window.suPreparePrint) window.suPreparePrint(start);
+      else start();
+    });
+  }
+  var toTop = document.getElementById('suToTop');
+  if (toTop) {
+    toTop.addEventListener('click', function () {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+  }
+  if (printClose && printAsk) {
+    printClose.addEventListener('click', function () { printAsk.hidden = true; });
+    printAsk.addEventListener('click', function (ev) {
+      if (ev.target === printAsk) printAsk.hidden = true;
+    });
   }
   var moreBtn = document.getElementById('sasMoreBtn');
   var moreBox = document.getElementById('sasMoreBox');
@@ -823,6 +1193,13 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
   var timer = null;
   var busy = false;
   var open = false;
+  var lastPack = null;
+  var limitEl = document.getElementById('sasSessionsLimit');
+  function rowLimit() {
+    var n = limitEl ? parseInt(limitEl.value, 10) : 10;
+    if (n !== 10 && n !== 30 && n !== 50 && n !== 100) n = 10;
+    return n;
+  }
   var url = 'sas_user.php?u=' + encodeURIComponent(<?php echo json_encode($username); ?>) + '&ajax=sessions';
   var txtOpen = <?php echo json_encode($isEn ? 'Online' : 'متصل'); ?>;
   var txtOff = <?php echo json_encode($isEn ? 'Offline' : 'منفصل'); ?>;
@@ -838,7 +1215,9 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
     });
   }
   function paint(d) {
-    var rows = (d && d.rows) ? d.rows : [];
+    if (d) lastPack = d;
+    var src = (d && d.rows) ? d.rows : [];
+    var rows = src.slice(0, rowLimit());
     if (!d || !d.ok) {
       if (note && !body.querySelector('tr td[dir="ltr"]')) note.textContent = txtFail;
       return;
@@ -876,35 +1255,74 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
     }
     body.innerHTML = html;
   }
-  function load() {
-    if (!open || busy) return;
+  function showSessions() {
+    open = true;
+    var sec = document.getElementById('su-sessions');
+    if (sec) {
+      sec.hidden = false;
+      sec.removeAttribute('hidden');
+      sec.style.display = 'block';
+    }
+    panel.hidden = false;
+    panel.removeAttribute('hidden');
+    panel.style.display = 'block';
+    btn.classList.add('is-open');
+  }
+  function load(done) {
+    if (busy) {
+      if (done) done();
+      return;
+    }
     busy = true;
+    if (note) note.textContent = <?php echo json_encode($isEn ? 'Loading sessions…' : 'جاري جلب الجلسات…'); ?>;
     fetch(url, { credentials: 'same-origin', cache: 'no-store' })
       .then(function (r) { return r.json(); })
       .then(function (d) {
         busy = false;
-        if (open) paint(d);
+        paint(d);
+        if (done) done();
       })
       .catch(function () {
         busy = false;
-        if (open) paint(null);
+        paint(null);
+        if (done) done();
       });
   }
-  btn.addEventListener('click', function () {
-    open = !open;
-    panel.hidden = !open;
-    if (timer) { clearInterval(timer); timer = null; }
-    if (open) {
-      var sec = document.getElementById('su-sessions');
-      if (sec && sec.scrollIntoView) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      load();
-      timer = setInterval(load, 4000);
+  window.suPreparePrint = function (done) {
+    showSessions();
+    if (lastPack && lastPack.ok && lastPack.rows && lastPack.rows.length) {
+      paint(lastPack);
+      if (done) done();
+      return;
     }
+    load(done);
+  };
+  if (limitEl) {
+    limitEl.addEventListener('change', function () {
+      if (lastPack) paint(lastPack);
+    });
+  }
+  btn.addEventListener('click', function () {
+    if (open) {
+      open = false;
+      var secClose = document.getElementById('su-sessions');
+      if (secClose) {
+        secClose.hidden = true;
+        secClose.style.display = 'none';
+      }
+      panel.hidden = true;
+      panel.style.display = 'none';
+      btn.classList.remove('is-open');
+      if (timer) { clearInterval(timer); timer = null; }
+      return;
+    }
+    showSessions();
+    var sec = document.getElementById('su-sessions');
+    if (sec && sec.scrollIntoView) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    load();
+    if (timer) clearInterval(timer);
+    timer = setInterval(function () { load(); }, 8000);
   });
-  open = true;
-  panel.hidden = false;
-  load();
-  timer = setInterval(load, 4000);
 })();
 </script>
 <?php endif; ?>

@@ -79,7 +79,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     <link rel="icon" href="assets/favicon.png?v=2" type="image/png" sizes="32x32">
     <?php endif; ?>
     <link rel="apple-touch-icon" href="<?php echo e($brandIcon !== '' ? $brandIcon : 'assets/apple-touch-icon.png?v=2'); ?>">
-    <link rel="stylesheet" href="assets/style.css?v=ui23">
+    <link rel="stylesheet" href="assets/style.css?v=ui24">
     <?php
     // خلفية صورة حتى يشتغل blur — شخصي ثم نظام ثم الافتراضي
     $glassBgSrc = 'assets/glass-bg.jpg?v=1';
@@ -1213,6 +1213,37 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
                     <?php endif; ?>
                 </div>
             <?php endif; ?>
+            <?php
+            $cardToastText = '';
+            if (!$flash && isset($pdo) && function_exists('current_admin')) {
+                $cardToastMe = current_admin();
+                $cardToastId = $cardToastMe ? (int) $cardToastMe['id'] : 0;
+                if ($cardToastId > 0) {
+                    if (!function_exists('card_incoming_unseen')) {
+                        require_once __DIR__ . '/card_accounting.php';
+                    }
+                    if (function_exists('card_incoming_unseen')) {
+                        $cardToastPack = card_incoming_unseen($pdo, $cardToastId, 1);
+                        $cardToastN = isset($cardToastPack['count']) ? (int) $cardToastPack['count'] : 0;
+                        $cardToastRow = ($cardToastN > 0 && !empty($cardToastPack['rows'][0])) ? $cardToastPack['rows'][0] : null;
+                        if ($cardToastRow) {
+                            $cardToastText = card_incoming_line($cardToastRow, !empty($isEn));
+                            if ($cardToastN > 1) {
+                                $cardToastText .= !empty($isEn)
+                                    ? (' +' . ($cardToastN - 1) . ' more')
+                                    : (' و ' . ($cardToastN - 1) . ' غيرها');
+                            }
+                        }
+                    }
+                }
+            }
+            if ($cardToastText !== ''):
+            ?>
+                <div class="sas-toast sas-toast-success sas-toast-stay" data-card-seen="1" role="status">
+                    <span class="sas-toast-text"><?php echo e($cardToastText); ?></span>
+                    <button type="button" class="sas-toast-x" aria-label="<?php echo e(!empty($isEn) ? 'Close' : 'إغلاق'); ?>">×</button>
+                </div>
+            <?php endif; ?>
             <style>
             #appVeil[hidden], #appRing[hidden] { display: none !important; }
             #appVeil {
@@ -1990,7 +2021,12 @@ window.showCornerToast = function (msg, kind) {
       }, 820);
     };
     var xbtn = toast.querySelector('.sas-toast-x');
-    if (xbtn) xbtn.addEventListener('click', closeToast);
+    if (xbtn) xbtn.addEventListener('click', function () {
+      if (toast.getAttribute('data-card-seen') === '1') {
+        try { fetch('cards.php?ajax=xfer_seen', { credentials: 'same-origin' }); } catch (e) {}
+      }
+      closeToast();
+    });
     if (!toast.classList.contains('sas-toast-stay')) {
       setTimeout(closeToast, 3000);
     }

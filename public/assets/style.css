@@ -3573,6 +3573,20 @@ th.status-cell {
   line-height: 1;
   cursor: help;
 }
+.wa-check-spin {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-inline-start: 5px;
+  border: 2px solid #cbd5e1;
+  border-top-color: #2563eb;
+  border-radius: 50%;
+  vertical-align: -1px;
+  animation: wa-check-spin 0.7s linear infinite;
+}
+@keyframes wa-check-spin {
+  to { transform: rotate(360deg); }
+}
 
 .status-sq {
   display: inline-block;

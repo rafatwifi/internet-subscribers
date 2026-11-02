@@ -317,6 +317,12 @@ function log_subscriber_phone_change($pdo, $subscriberId, $oldPhone, $newPhone, 
         'تغيير رقم الهاتف',
         $details
     );
+    if (function_exists('wa_on_subscriber_phone_changed')) {
+        try {
+            wa_on_subscriber_phone_changed($pdo, $subscriberId, $oldRaw, $newRaw);
+        } catch (Exception $e) {
+        }
+    }
     return true;
 }
 

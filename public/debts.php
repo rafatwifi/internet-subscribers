@@ -350,7 +350,7 @@ $q = isset($_GET['q']) ? trim((string) $_GET['q']) : '';
 $filterSubscriberId = isset($_GET['subscriber_id']) ? (int) $_GET['subscriber_id'] : 0;
 $showAdd = isset($_GET['add']);
 
-$sql = 'SELECT i.*, s.name, s.phone
+$sql = 'SELECT i.*, s.name, s.phone, s.sas_username
         FROM invoices i
         JOIN subscribers s ON s.id = i.subscriber_id
         WHERE 1=1';
@@ -729,7 +729,13 @@ render_header(t('debts'), 'debts');
                     data-status="<?php echo e($row['status']); ?>"
                 >
                     <td>
-                        <a href="subscriber.php?id=<?php echo $rowSubId; ?>"><strong><?php echo e($row['name']); ?></strong></a>
+                        <?php
+                        $debtUser = isset($row['sas_username']) ? trim((string) $row['sas_username']) : '';
+                        $debtHref = ($debtUser !== '' && function_exists('sas_user_url'))
+                            ? sas_user_url($debtUser)
+                            : ('subscriber.php?id=' . $rowSubId);
+                        ?>
+                        <a href="<?php echo e($debtHref); ?>"><strong><?php echo e($row['name']); ?></strong></a>
                         <div class="meta"><?php echo e(format_phone_display($row['phone'])); ?></div>
                     </td>
                     <td>

@@ -3,6 +3,16 @@
 require_once __DIR__ . '/../includes/bootstrap.php';
 require_once __DIR__ . '/../includes/layout.php';
 require_login();
+if (isset($_GET['ajax']) && (string) $_GET['ajax'] === 'xfer_seen') {
+    header('Content-Type: application/json; charset=utf-8');
+    $seenMe = function_exists('current_admin') ? current_admin() : null;
+    $seenId = $seenMe ? (int) $seenMe['id'] : 0;
+    if (function_exists('card_incoming_mark_seen')) {
+        card_incoming_mark_seen($pdo, $seenId);
+    }
+    echo json_encode(array('ok' => true));
+    exit;
+}
 if (isset($_SERVER['REQUEST_METHOD']) && strtoupper((string) $_SERVER['REQUEST_METHOD']) === 'GET' && function_exists('app_session_close')) {
     app_session_close();
 }
@@ -806,7 +816,16 @@ $xferPage = isset($_GET['xfer_p']) ? (int) $_GET['xfer_p'] : 1;
 if ($xferPage < 1) {
     $xferPage = 1;
 }
-$xferTotal = function_exists('count_card_transfers') ? count_card_transfers($pdo, null, $xferActor) : 0;
+$xferBoxAsked = isset($_GET['xfer_box']) && ((string) $_GET['xfer_box'] === 'in' || (string) $_GET['xfer_box'] === 'out');
+$xferBox = (isset($_GET['xfer_box']) && (string) $_GET['xfer_box'] === 'in') ? 'in' : 'out';
+if (!$xferBoxAsked && function_exists('count_card_transfers')) {
+    $xferOutN = count_card_transfers($pdo, null, $xferActor, 'out', $homeId, $meId);
+    $xferInN = count_card_transfers($pdo, null, $xferActor, 'in', $homeId, $meId);
+    if ($xferOutN < 1 && $xferInN > 0) {
+        $xferBox = 'in';
+    }
+}
+$xferTotal = function_exists('count_card_transfers') ? count_card_transfers($pdo, null, $xferActor, $xferBox, $homeId, $meId) : 0;
 $xferPages = $xferPer > 0 ? (int) ceil($xferTotal / $xferPer) : 1;
 if ($xferPages < 1) {
     $xferPages = 1;
@@ -814,7 +833,10 @@ if ($xferPages < 1) {
 if ($xferPage > $xferPages) {
     $xferPage = $xferPages;
 }
-$recentTransfers = list_recent_card_transfers($pdo, $xferPer, null, $xferActor, ($xferPage - 1) * $xferPer);
+$recentTransfers = list_recent_card_transfers($pdo, $xferPer, null, $xferActor, ($xferPage - 1) * $xferPer, $xferBox, $homeId, $meId);
+if ($xferBox === 'in' && function_exists('card_incoming_mark_seen')) {
+    card_incoming_mark_seen($pdo, $homeId);
+}
 $agentStockPanel = null;
 if ($scopeAgentId > 0 && function_exists('card_agent_dashboard')) {
     $agentStockPanel = card_agent_dashboard($pdo, $scopeAgentId);
@@ -1767,67 +1789,51 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
   margin: 0 0 8px; min-height: 36px;
 }
 .cards-page .xfer-head h3 { margin: 0; font-size: 16px; line-height: 1.2; }
+.cards-page .xfer-box-tabs { display:flex; gap:8px; margin:0 0 10px; }
+.cards-page .xfer-box-tabs a { display:inline-flex; align-items:center; gap:6px; padding:7px 14px; border-radius:999px; border:1px solid #e2e8f0; background:#fff; color:#334155; font-weight:800; text-decoration:none; }
+.cards-page .xfer-box-tabs a.is-on { background:#0f172a; color:#fff; border-color:#0f172a; }
+.cards-page .xfer-box-tabs b { min-width:18px; height:18px; padding:0 5px; border-radius:999px; background:#dc2626; color:#fff; font-size:11px; display:inline-grid; place-items:center; }
 .cards-page .xfer-head .btn.sm { height: 32px; padding: 0 12px; line-height: 1; display: inline-flex; align-items: center; }
 .cards-page .xfer-scroll {
-  border: 0; border-radius: 0;
+  border: 1px solid #e2e8f0; border-radius: 12px;
   max-width: 100%;
-  overflow: visible;
+  overflow-x: auto;
 }
 .cards-page .xfer-panel > h2,
 .cards-page .xfer-panel > p.meta { display: none; }
-.cards-page .xfer-table thead,
-.cards-page .xfer-full { display: none; }
-.cards-page .xfer-table,
-.cards-page .xfer-table tbody,
-.cards-page .xfer-table tr { display: block; width: 100%; }
-.cards-page .xfer-table tr {
-  border: 1px solid #e2e8f0; border-radius: 10px; margin: 0 0 5px; padding: 0;
-  background: #fff; box-shadow: none;
+.cards-page .xfer-compact { display: none; }
+.cards-page .xfer-table {
+  width: 100%; min-width: 720px; border-collapse: collapse; font-size: 13px;
+  margin: 0; table-layout: fixed;
 }
-.cards-page tr[data-state="done"] {
-  background: #f0fdf4; border-color: #dcfce7;
+.cards-page .xfer-table thead th {
+  background: #f8fafc; color: #475569; font-weight: 800; font-size: 12px;
+  border-bottom: 1px solid #e2e8f0; padding: 10px 8px; white-space: nowrap;
+  text-align: start;
 }
-.cards-page .xfer-compact {
-  display: flex; align-items: center; gap: 12px;
-  width: 100%; box-sizing: border-box; min-width: 0;
-  padding: 7px 12px; text-align: start; line-height: 1.2;
+.cards-page .xfer-table tbody td {
+  border-bottom: 1px solid #eef2f7; padding: 10px 8px; vertical-align: middle;
+  text-align: start; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.cards-page .xfer-c-meta {
-  flex: 0 0 178px; min-width: 0;
-  display: flex; align-items: center; gap: 6px;
-}
-.cards-page .xfer-c-top {
-  direction: ltr; unicode-bidi: isolate;
-  font-size: 12px; color: #64748b; white-space: nowrap;
-  font-variant-numeric: tabular-nums; line-height: 1.2;
-}
-.cards-page .xfer-c-by {
-  font-size: 11px; color: #94a3b8; white-space: nowrap;
-  overflow: hidden; text-overflow: ellipsis; max-width: 78px; line-height: 1.2;
-}
-.cards-page .xfer-c-by:not(:empty)::before {
-  content: "·"; margin-inline-end: 6px; color: #cbd5e1;
-}
+.cards-page .xfer-table tbody tr:last-child td { border-bottom: 0; }
+.cards-page .xfer-table .col-when { width: 148px; }
+.cards-page .xfer-table .col-from,
+.cards-page .xfer-table .col-to { width: 120px; }
+.cards-page .xfer-table .col-pack { width: 130px; }
+.cards-page .xfer-table .col-qty { width: 56px; text-align: center; }
+.cards-page .xfer-table .col-profit { width: 90px; }
+.cards-page .xfer-table .col-note { width: 110px; }
+.cards-page .xfer-table .col-by { width: 90px; }
+.cards-page .xfer-table .col-act { width: 72px; text-align: center; }
+.cards-page tr[data-state="done"] { background: #f0fdf4; }
+.cards-page tr[data-state="done"] td { border-color: #dcfce7; }
+.cards-page .xfer-c-meta,
+.cards-page .xfer-c-top,
+.cards-page .xfer-c-by,
 .cards-page .xfer-c-route,
 .cards-page .xfer-c-pack,
-.cards-page .xfer-c-note {
-  min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.2;
-}
-.cards-page .xfer-c-route {
-  flex: 1 1 160px; font-size: 13px; font-weight: 800;
-  direction: ltr; text-align: left; unicode-bidi: isolate;
-}
-.cards-page .xfer-c-pack {
-  flex: 0 1 210px; font-size: 12px; font-weight: 700; color: #334155;
-  font-variant-numeric: tabular-nums;
-}
-.cards-page .xfer-c-note { flex: 0 1 110px; font-size: 11px; color: #64748b; }
-.cards-page .xfer-c-note:empty { display: none; }
-.cards-page .xfer-c-act {
-  flex: 0 0 auto; margin: 0; min-width: 44px;
-  display: inline-flex; align-items: center; justify-content: center;
-  text-align: center; line-height: 1;
-}
+.cards-page .xfer-c-note,
+.cards-page .xfer-c-act { min-width: 0; }
 .cards-page .cards-swipe-hint {
   margin: 0 0 10px; color: #475569; font-size: 13px; font-weight: 700;
 }
@@ -1975,11 +1981,6 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 .cards-page .xfer-grid input, .cards-page .xfer-grid select {
   width: 100%; padding: 8px 10px; border: 1px solid #d8dee8; border-radius: 8px; font: inherit;
 }
-.cards-page .xfer-table { width: 100%; min-width: 0; border-collapse: collapse; font-size: 13px; margin-top: 12px; table-layout: fixed; }
-.cards-page .xfer-table th, .cards-page .xfer-table td {
-  border-bottom: 1px solid #e8edf4; padding: 8px 6px; text-align: inherit;
-  word-break: break-word; overflow-wrap: anywhere;
-}
 .cards-page #xferQty.is-over {
   border-color: #dc2626;
   color: #b91c1c;
@@ -2018,28 +2019,29 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
     justify-content: space-between; text-align: start; width: 100%; gap: 8px;
   }
   .cards-page .xfer-scroll { overflow: visible; border: 0; }
-  .cards-page .xfer-table { table-layout: auto; margin-inline: 0; }
+  .cards-page .xfer-table { min-width: 0; table-layout: auto; margin: 0; width: 100%; }
   .cards-page .xfer-table thead,
-  .cards-page .xfer-full { display: none; }
+  .cards-page .xfer-full { display: none !important; }
+  .cards-page .xfer-compact { display: flex !important; flex-wrap: wrap; gap: 4px 10px; padding: 8px 10px; align-items: center; width: 100%; box-sizing: border-box; }
   .cards-page .xfer-table,
   .cards-page .xfer-table tbody,
   .cards-page .xfer-table tr { display: block; width: 100%; }
-  .cards-page .xfer-compact {
-    flex-wrap: wrap; gap: 4px 10px; padding: 8px 10px; align-items: center;
-  }
   .cards-page .xfer-table tr {
-    border-radius: 10px; margin: 0 0 5px; text-align: start; max-width: none;
+    border: 1px solid #e2e8f0; border-radius: 10px; margin: 0 0 5px; text-align: start; max-width: none; padding: 0;
   }
-  .cards-page .xfer-table tr:not(:has(.xfer-compact)) td {
-    display: block; width: 100%; border: 0; padding: 2px 0; text-align: start;
-    word-break: normal; overflow-wrap: break-word;
-  }
-  .cards-page .xfer-table tr:not(:has(.xfer-compact)) td:empty { display: none; }
-  .cards-page .xfer-c-meta { flex: 1 1 auto; max-width: calc(100% - 56px); }
-  .cards-page .xfer-c-by { max-width: 96px; }
-  .cards-page .xfer-c-act { margin-inline-start: auto; }
-  .cards-page .xfer-c-route { flex: 1 1 100%; font-size: 13px; }
-  .cards-page .xfer-c-pack { flex: 1 1 auto; }
+  .cards-page tr[data-state="done"] { background: #f0fdf4; border-color: #dcfce7; }
+  .cards-page .xfer-c-meta { flex: 1 1 auto; max-width: calc(100% - 56px); display: flex; align-items: center; gap: 6px; }
+  .cards-page .xfer-c-top { direction: ltr; unicode-bidi: isolate; font-size: 12px; color: #64748b; white-space: nowrap; }
+  .cards-page .xfer-c-by { font-size: 11px; color: #94a3b8; max-width: 96px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cards-page .xfer-c-by:not(:empty)::before { content: "·"; margin-inline-end: 6px; color: #cbd5e1; }
+  .cards-page .xfer-c-route,
+  .cards-page .xfer-c-pack,
+  .cards-page .xfer-c-note { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cards-page .xfer-c-route { flex: 1 1 100%; font-size: 13px; font-weight: 800; direction: ltr; text-align: left; }
+  .cards-page .xfer-c-pack { flex: 1 1 auto; font-size: 12px; font-weight: 700; color: #334155; }
+  .cards-page .xfer-c-note { flex: 0 1 110px; font-size: 11px; color: #64748b; }
+  .cards-page .xfer-c-note:empty { display: none; }
+  .cards-page .xfer-c-act { flex: 0 0 auto; margin-inline-start: auto; min-width: 44px; display: inline-flex; align-items: center; justify-content: center; }
   .cards-page .xfer-c-note {
     flex: 1 1 100%; white-space: normal;
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
@@ -2872,8 +2874,22 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
         })();
         </script>
 
+        <?php
+        $xferInUnseen = 0;
+        if (function_exists('card_incoming_unseen')) {
+            $xferInPack = card_incoming_unseen($pdo, $homeId, 1);
+            $xferInUnseen = isset($xferInPack['count']) ? (int) $xferInPack['count'] : 0;
+        }
+        $xferBoxHref = function ($box) use ($xferPer) {
+            return 'cards.php?xfer_box=' . $box . '&xfer_n=' . (int) $xferPer . '#card-transfer';
+        };
+        ?>
+        <div class="xfer-box-tabs">
+            <a class="<?php echo $xferBox === 'out' ? 'is-on' : ''; ?>" href="<?php echo e($xferBoxHref('out')); ?>"><?php echo e($isEn ? 'Sent' : 'الصادر'); ?></a>
+            <a class="<?php echo $xferBox === 'in' ? 'is-on' : ''; ?>" href="<?php echo e($xferBoxHref('in')); ?>"><?php echo e($isEn ? 'Received' : 'الوارد'); ?><?php if ($xferInUnseen > 0 && $xferBox !== 'in'): ?> <b><?php echo (int) $xferInUnseen; ?></b><?php endif; ?></a>
+        </div>
         <div class="xfer-head">
-            <h3><?php echo e($isEn ? 'Recent transfers' : 'آخر التحويلات'); ?></h3>
+            <h3><?php echo e($xferBox === 'in' ? ($isEn ? 'Received cards' : 'كروت وصلت لك') : ($isEn ? 'Sent cards' : 'كروت أرسلتها')); ?></h3>
             <?php if ($recentTransfers): ?>
             <form method="post" style="margin:0" onsubmit="return confirm(<?php echo json_encode($isEn
                 ? 'Clear this transfer history? Cards in SAS stay where they are.'
@@ -2888,15 +2904,15 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
             <table class="xfer-table" id="xferTable">
                 <thead>
                 <tr>
-                    <th><?php echo e($isEn ? 'Date' : 'التاريخ'); ?></th>
-                    <th><?php echo e($isEn ? 'From' : 'من'); ?></th>
-                    <th><?php echo e($isEn ? 'To' : 'إلى'); ?></th>
-                    <th><?php echo e($isEn ? 'Package' : 'الفئة'); ?></th>
-                    <th><?php echo e($isEn ? 'Qty' : 'كم'); ?></th>
-                    <th><?php echo e($isEn ? 'Profit' : 'ربح'); ?></th>
-                    <th><?php echo e($isEn ? 'Note' : 'ملاحظة'); ?></th>
-                    <th><?php echo e($isEn ? 'By' : 'بواسطة'); ?></th>
-                    <th></th>
+                    <th class="col-when"><?php echo e($isEn ? 'Date' : 'التاريخ'); ?></th>
+                    <th class="col-from"><?php echo e($isEn ? 'From' : 'من'); ?></th>
+                    <th class="col-to"><?php echo e($isEn ? 'To' : 'إلى'); ?></th>
+                    <th class="col-pack"><?php echo e($isEn ? 'Package' : 'الفئة'); ?></th>
+                    <th class="col-qty"><?php echo e($isEn ? 'Qty' : 'كم'); ?></th>
+                    <th class="col-profit"><?php echo e($isEn ? 'Profit' : 'ربح'); ?></th>
+                    <th class="col-note"><?php echo e($isEn ? 'Note' : 'ملاحظة'); ?></th>
+                    <th class="col-by"><?php echo e($isEn ? 'By' : 'بواسطة'); ?></th>
+                    <th class="col-act"></th>
                 </tr>
                 </thead>
                 <tbody>
@@ -2925,15 +2941,15 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
                             <?php if (!empty($tr['note'])): ?><div class="xfer-c-note" data-col="note"><?php echo e($tr['note']); ?></div><?php endif; ?>
                             <div class="xfer-c-act" data-col="act"><?php echo cards_xfer_action_html($tr, $canTransfer, $homeId, $isEn, $returnedIds, $pendingReturnIds, $xferPer); ?></div>
                         </td>
-                        <td class="xfer-full" data-col="when" data-label="<?php echo e($isEn ? 'Date' : 'التاريخ'); ?>"><?php echo e(isset($tr['created_at']) ? $tr['created_at'] : ''); ?></td>
-                        <td class="xfer-full" data-label="<?php echo e($isEn ? 'From' : 'من'); ?>"><?php echo e($fromLbl); ?></td>
-                        <td class="xfer-full" data-label="<?php echo e($isEn ? 'To' : 'إلى'); ?>"><?php echo e(isset($tr['to_name']) ? $tr['to_name'] : ''); ?></td>
-                        <td class="xfer-full" data-label="<?php echo e($isEn ? 'Package' : 'الفئة'); ?>"><?php echo e(isset($tr['profile_name']) ? $tr['profile_name'] : ''); ?><?php if ($isReturn): ?> <span class="meta"><?php echo e($isEn ? 'return' : 'استرجاع'); ?></span><?php endif; ?></td>
-                        <td class="xfer-full" data-label="<?php echo e($isEn ? 'Qty' : 'كم'); ?>"><?php echo (int) $tr['qty']; ?></td>
-                        <td class="xfer-full" data-label="<?php echo e($isEn ? 'Profit' : 'ربح'); ?>"><?php echo e(money_format_iqd($isReturn ? (0 - $profit) : $profit, $config['currency'])); ?></td>
-                        <td class="xfer-full" data-label="<?php echo e($isEn ? 'Note' : 'ملاحظة'); ?>" data-col="note"><?php echo e(isset($tr['note']) ? $tr['note'] : ''); ?></td>
-                        <td class="xfer-full" data-label="<?php echo e($isEn ? 'By' : 'بواسطة'); ?>"><?php echo e(isset($tr['created_by_name']) ? $tr['created_by_name'] : ''); ?></td>
-                        <td class="xfer-full" data-label="<?php echo e($isEn ? 'Action' : 'إجراء'); ?>" data-col="act"><?php echo cards_xfer_action_html($tr, $canTransfer, $homeId, $isEn, $returnedIds, $pendingReturnIds, $xferPer); ?></td>
+                        <td class="xfer-full col-when" data-col="when" data-label="<?php echo e($isEn ? 'Date' : 'التاريخ'); ?>"><?php echo e(isset($tr['created_at']) ? $tr['created_at'] : ''); ?></td>
+                        <td class="xfer-full col-from" data-label="<?php echo e($isEn ? 'From' : 'من'); ?>"><?php echo e($fromLbl); ?></td>
+                        <td class="xfer-full col-to" data-label="<?php echo e($isEn ? 'To' : 'إلى'); ?>"><?php echo e(isset($tr['to_name']) ? $tr['to_name'] : ''); ?></td>
+                        <td class="xfer-full col-pack" data-label="<?php echo e($isEn ? 'Package' : 'الفئة'); ?>"><?php echo e(isset($tr['profile_name']) ? $tr['profile_name'] : ''); ?><?php if ($isReturn): ?> <span class="meta"><?php echo e($isEn ? 'return' : 'استرجاع'); ?></span><?php endif; ?></td>
+                        <td class="xfer-full col-qty" data-label="<?php echo e($isEn ? 'Qty' : 'كم'); ?>"><?php echo (int) $tr['qty']; ?></td>
+                        <td class="xfer-full col-profit" data-label="<?php echo e($isEn ? 'Profit' : 'ربح'); ?>"><?php echo e(money_format_iqd($isReturn ? (0 - $profit) : $profit, $config['currency'])); ?></td>
+                        <td class="xfer-full col-note" data-label="<?php echo e($isEn ? 'Note' : 'ملاحظة'); ?>" data-col="note"><?php echo e(isset($tr['note']) ? $tr['note'] : ''); ?></td>
+                        <td class="xfer-full col-by" data-label="<?php echo e($isEn ? 'By' : 'بواسطة'); ?>"><?php echo e(isset($tr['created_by_name']) ? $tr['created_by_name'] : ''); ?></td>
+                        <td class="xfer-full col-act" data-label="<?php echo e($isEn ? 'Action' : 'إجراء'); ?>" data-col="act"><?php echo cards_xfer_action_html($tr, $canTransfer, $homeId, $isEn, $returnedIds, $pendingReturnIds, $xferPer); ?></td>
                     </tr>
                 <?php endforeach; ?>
                 </tbody>
@@ -2942,10 +2958,11 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
         <?php if ($xferTotal > 0): ?>
         <div class="xfer-pager" id="xferPager">
             <?php
-            $prevHref = 'cards.php?xfer_n=' . (int) $xferPer . '&xfer_p=' . max(1, $xferPage - 1) . '#card-transfer';
-            $nextHref = 'cards.php?xfer_n=' . (int) $xferPer . '&xfer_p=' . min($xferPages, $xferPage + 1) . '#card-transfer';
+            $prevHref = 'cards.php?xfer_box=' . $xferBox . '&xfer_n=' . (int) $xferPer . '&xfer_p=' . max(1, $xferPage - 1) . '#card-transfer';
+            $nextHref = 'cards.php?xfer_box=' . $xferBox . '&xfer_n=' . (int) $xferPer . '&xfer_p=' . min($xferPages, $xferPage + 1) . '#card-transfer';
             ?>
             <form method="get" action="cards.php#card-transfer" class="xfer-size">
+                <input type="hidden" name="xfer_box" value="<?php echo e($xferBox); ?>">
                 <label>
                     <span><?php echo e($isEn ? 'Show' : 'عرض'); ?></span>
                     <select name="xfer_n" onchange="this.form.submit()">

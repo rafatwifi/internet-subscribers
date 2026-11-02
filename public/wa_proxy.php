@@ -2,7 +2,7 @@
 
 /**
  * Proxy WhatsApp gateway so browser never hits CORS / blocked LAN from mixed origins.
- * usage: wa_proxy.php?action=status|qr|logout
+ * usage: wa_proxy.php?action=status|qr|logout|check
  */
 
 require_once __DIR__ . '/../includes/bootstrap.php';
@@ -16,7 +16,7 @@ header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store');
 
 $action = isset($_GET['action']) ? (string) $_GET['action'] : 'status';
-$allowed = array('status', 'qr', 'logout');
+$allowed = array('status', 'qr', 'logout', 'check');
 if (!in_array($action, $allowed, true)) {
     http_response_code(400);
     echo json_encode(array('success' => false, 'error' => 'bad action'));
@@ -96,6 +96,53 @@ function wa_proxy_status_name($raw)
         return $raw;
     }
     return 'connecting';
+}
+
+function wa_proxy_resolve_subscriber_id($pdo, $raw)
+{
+    $raw = trim((string) $raw);
+    if ($raw === '' || !$pdo) {
+        return 0;
+    }
+    if (ctype_digit($raw)) {
+        $id = (int) $raw;
+        return $id > 0 ? $id : 0;
+    }
+    try {
+        $st = $pdo->prepare('SELECT id FROM subscribers WHERE sas_username = :u LIMIT 1');
+        $st->execute(array(':u' => $raw));
+        $id = (int) $st->fetchColumn();
+        return $id > 0 ? $id : 0;
+    } catch (Exception $e) {
+        return 0;
+    }
+}
+
+if ($action === 'check') {
+    $phone = isset($_GET['phone']) ? (string) $_GET['phone'] : '';
+    if ($phone === '' && isset($_POST['phone'])) {
+        $phone = (string) $_POST['phone'];
+    }
+    $subRaw = '';
+    if (isset($_GET['sub'])) {
+        $subRaw = (string) $_GET['sub'];
+    } elseif (isset($_GET['sid'])) {
+        $subRaw = (string) $_GET['sid'];
+    } elseif (isset($_POST['sub'])) {
+        $subRaw = (string) $_POST['sub'];
+    }
+    if (!function_exists('whatsapp_check_number')) {
+        wa_proxy_emit(array('success' => false, 'error' => 'check unavailable'), 500);
+    }
+    $result = whatsapp_check_number($wa, $phone, $sessionId);
+    if (!empty($result['success']) && isset($pdo) && $pdo && $subRaw !== '' && function_exists('wa_apply_phone_check_result')) {
+        $sid = wa_proxy_resolve_subscriber_id($pdo, $subRaw);
+        if ($sid > 0 && function_exists('user_can_access_subscriber') && user_can_access_subscriber($pdo, $sid)) {
+            wa_apply_phone_check_result($pdo, $sid, $phone, !empty($result['exists']));
+        }
+    }
+    $http = !empty($result['success']) ? 200 : (isset($result['code']) && $result['code'] === 'gateway_down' ? 502 : 400);
+    wa_proxy_emit($result, $http);
 }
 
 list($raw, $code) = wa_proxy_request(
