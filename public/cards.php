@@ -1635,28 +1635,32 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 }
 .cards-page .cards-wids {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 14px;
-  margin: 0 0 16px;
+  grid-template-columns: repeat(var(--wid-n, 4), minmax(0, 1fr));
+  gap: 8px;
+  margin: 0 0 10px;
   width: 100%;
 }
-@media (max-width: 1100px) { .cards-page .cards-wids { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 560px) { .cards-page .cards-wids { grid-template-columns: 1fr; gap: 11px; } }
+@media (max-width: 720px) {
+  .cards-page .cards-wids { grid-template-columns: repeat(var(--wid-phone, 2), minmax(0, 1fr)); gap: 8px; }
+}
 .cards-page .sas-box {
   --c1: #0f766e; --c2: #115e59; --ink: #ffffff;
   position: relative; overflow: hidden; display: flex; flex-direction: column; justify-content: space-between;
   touch-action: pan-y;
-  color: var(--ink); text-decoration: none; border: 0; border-radius: 2px 20px 2px 16px;
-  min-height: 112px; padding: 16px 16px 14px 18px; width: 100%; text-align: inherit; font: inherit;
+  color: var(--ink); text-decoration: none; border: 0; border-radius: 2px 14px 2px 12px;
+  min-height: 72px; padding: 8px 10px; width: 100%; text-align: inherit; font: inherit;
   cursor: pointer;
   background: linear-gradient(145deg, var(--c1) 0%, var(--c2) 100%);
-  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
+  box-shadow: 0 6px 14px rgba(15, 23, 42, 0.1);
   transition: transform .15s ease, box-shadow .15s ease;
 }
 .cards-page .sas-box:hover { transform: translateY(-1px); box-shadow: 0 10px 22px rgba(15, 23, 42, 0.16); }
-.cards-page .sas-box-title { font-size: 13px; font-weight: 800; opacity: .95; }
-.cards-page .sas-box-sub { font-size: 11px; font-weight: 600; opacity: .8; margin-top: 2px; }
-.cards-page .sas-box-val { font-size: 28px; font-weight: 800; margin-top: 10px; }
+.cards-page .sas-box-title {
+  font-size: 12px; font-weight: 800; opacity: .95; line-height: 1.2;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.cards-page .sas-box-sub { font-size: 10px; font-weight: 600; opacity: .8; margin-top: 1px; }
+.cards-page .sas-box-val { font-size: 20px; font-weight: 800; margin-top: 4px; line-height: 1; }
 .cards-page .sas-box.tone-blue { --c1: #38bdf8; --c2: #0369a1; }
 .cards-page .sas-box.tone-green { --c1: #4ade80; --c2: #15803d; }
 .cards-page .sas-box.tone-red { --c1: #fb7185; --c2: #be123c; }
@@ -1838,8 +1842,8 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
   margin: 0 0 10px; color: #475569; font-size: 13px; font-weight: 700;
 }
 .cards-page .card-xfer-go {
-  position: relative; z-index: 2; margin-top: 8px; align-self: flex-start;
-  display: inline-flex; align-items: center; height: 26px; padding: 0 10px;
+  position: relative; z-index: 2; margin-top: 4px; align-self: flex-start;
+  display: inline-flex; align-items: center; height: 20px; padding: 0 8px;
   border-radius: 999px; background: rgba(255,255,255,.22); font-size: 12px; font-weight: 800;
 }
 .cards-page .sas-box.is-dragging { transition: none; }
@@ -1997,7 +2001,7 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
 @media (max-width: 760px) {
   .cards-page { align-items: stretch; }
   .cards-page .cards-section-title { text-align: start; }
-  .cards-page .sas-box { text-align: start; align-items: flex-start; min-height: 86px; padding: 12px; }
+  .cards-page .sas-box { text-align: start; align-items: flex-start; min-height: 68px; padding: 8px; }
   .cards-page .sas-box-val { margin-top: 4px; }
   .cards-page .cat-head {
     flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 8px;
@@ -3080,7 +3084,17 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
     <?php elseif (!$groups): ?>
         <p style="font-weight:700;color:#64748b" id="cardsEmpty"><?php echo e($isEn ? 'Loading…' : 'جاري التحميل…'); ?></p>
     <?php else: ?>
-        <div class="cards-wids" id="cardsWids">
+        <?php
+        $widN = count($groups);
+        if ($widN < 1) {
+            $widN = 1;
+        }
+        $widPhone = (int) ceil($widN / 2);
+        if ($widPhone < 1) {
+            $widPhone = 1;
+        }
+        ?>
+        <div class="cards-wids" id="cardsWids" style="--wid-n: <?php echo (int) $widN; ?>; --wid-phone: <?php echo (int) $widPhone; ?>;">
             <?php
             $cardTones = array('tone-blue', 'tone-green', 'tone-red', 'tone-yellow', 'tone-teal', 'tone-navy', 'tone-lime', 'tone-purple', 'tone-aqua');
             foreach ($groups as $wi => $wg):
@@ -3282,7 +3296,9 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
     }
     var html = '';
     var tones = ['tone-blue','tone-green','tone-red','tone-yellow','tone-teal','tone-navy','tone-lime','tone-purple','tone-aqua'];
-    html += '<div class="cards-wids" id="cardsWids">';
+    var widN = groups.length || 1;
+    var widPhone = Math.max(1, Math.ceil(widN / 2));
+    html += '<div class="cards-wids" id="cardsWids" style="--wid-n:' + widN + ';--wid-phone:' + widPhone + '">';
     groups.forEach(function (g, wi) {
       var tone = tones[wi % tones.length];
       html += '<button type="button" class="sas-box ' + tone + '" data-wid="' + wi + '" data-total="' + (g.total || 0) + '" data-used="' + (g.used || 0) + '" data-unused="' + (g.unused || 0) + '">';

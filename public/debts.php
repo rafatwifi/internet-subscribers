@@ -550,6 +550,17 @@ render_header(t('debts'), 'debts');
   .debts-hero { padding: 14px; }
   .debts-hero-stat, .debts-hero-side { min-width: 100%; }
 }
+.pay-spin {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255,255,255,.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  vertical-align: -3px;
+  animation: pay-spin .7s linear infinite;
+}
+@keyframes pay-spin { to { transform: rotate(360deg); } }
 </style>
 <div class="debts-page">
 <div class="debts-hero">
@@ -1032,7 +1043,7 @@ render_header(t('debts'), 'debts');
         </div>
     </div>
 </div>
-<form method="post" id="payConfirmForm" class="hidden" hidden>
+<form method="post" id="payConfirmForm" class="hidden" hidden data-no-wait="1">
     <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
     <input type="hidden" name="action" id="payConfirmAction" value="pay">
     <input type="hidden" name="id" id="payConfirmId" value="">
@@ -1107,12 +1118,14 @@ render_header(t('debts'), 'debts');
   var cancelBtn = document.getElementById('payFloatCancel');
   if (okBtn) {
     okBtn.addEventListener('click', function () {
-      if (!pending || !form) return;
+      if (!pending || !form || okBtn.getAttribute('data-busy') === '1') return;
       act.value = pending.mode === 'all' ? 'pay_all' : 'pay';
       idEl.value = pending.invoice;
       subEl.value = pending.sub;
       amtIn.value = String(pending.amount);
       waEl.value = (tog && tog.checked) ? '1' : '0';
+      okBtn.setAttribute('data-busy', '1');
+      okBtn.innerHTML = '<span class="pay-spin" aria-hidden="true"></span>';
       form.submit();
     });
   }

@@ -2971,6 +2971,17 @@ if ($sasTenantIdUi > 1) {
         <div class="sas-acc-list">
             <?php
             $seenSasAcc = array();
+            $liveSas = function_exists('sas_connection_status')
+                ? sas_connection_status($pdo, $config, $sasTenantIdUi, false)
+                : array();
+            $liveKey = '';
+            if (function_exists('sas_config_for_tenant') && function_exists('tenant_sas_account_key')) {
+                $liveCfg = sas_config_for_tenant($pdo, $config, $sasTenantIdUi);
+                $liveKey = tenant_sas_account_key(
+                    isset($liveCfg['host']) ? $liveCfg['host'] : '',
+                    isset($liveCfg['username']) ? $liveCfg['username'] : ''
+                );
+            }
             foreach ($sasAccountsList as $acc):
                 $accKey = function_exists('tenant_sas_account_key')
                     ? tenant_sas_account_key($acc['sas_host'], $acc['sas_username'])
@@ -2983,6 +2994,15 @@ if ($sasTenantIdUi > 1) {
                 }
                 $logged = !empty($acc['last_ok_at']) && trim((string) (isset($acc['last_error']) ? $acc['last_error'] : '')) === '';
                 $loginFail = trim((string) (isset($acc['last_error']) ? $acc['last_error'] : '')) !== '';
+                $liveDetail = (is_array($liveSas) && isset($liveSas['detail'])) ? (string) $liveSas['detail'] : '';
+                $liveDown = ($accKey !== '' && $accKey === $liveKey && is_array($liveSas) && !empty($liveSas['at']) && empty($liveSas['ok']));
+                if ($liveDown) {
+                    $logged = false;
+                    $loginFail = true;
+                    if ($liveDetail !== '') {
+                        $acc['last_error'] = $liveDetail;
+                    }
+                }
                 $accName = trim((string) $acc['label']) !== '' ? $acc['label'] : $acc['sas_username'];
                 ?>
             <div class="sas-acc-card">
@@ -3004,16 +3024,25 @@ if ($sasTenantIdUi > 1) {
                 </div>
                 <div class="sas-acc-actions">
                     <?php if ($logged): ?>
-                    <span class="sas-logged"><?php echo e($isEn ? 'Logged in' : 'تم تسجيل الدخول'); ?></span>
+                    <span class="sas-logged"><?php echo e($isEn ? 'Connected' : 'متصل'); ?></span>
                     <form method="post" class="inline-form">
                         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                         <input type="hidden" name="section" value="sas">
                         <input type="hidden" name="action" value="logout_account">
                         <input type="hidden" name="account_id" value="<?php echo (int) $acc['id']; ?>">
-                        <button class="btn ghost sm" type="submit"><?php echo e($isEn ? 'Log out' : 'تسجيل خروج'); ?></button>
+                        <button class="btn ghost sm" type="submit"><?php echo e($isEn ? 'Disconnect' : 'قطع الربط'); ?></button>
                     </form>
                     <?php elseif ($loginFail): ?>
-                    <span class="sas-logged-bad" title="<?php echo e($acc['last_error']); ?>"><?php echo e($isEn ? 'Login failed' : 'فشل الدخول'); ?></span>
+                    <?php
+                    $failLabel = $isEn ? 'Login failed' : 'فشل الدخول';
+                    $failBlob = isset($acc['last_error']) ? (string) $acc['last_error'] : '';
+                    if ($liveDown && (stripos($failBlob, '429') !== false || stripos($failBlob, 'too_many') !== false)) {
+                        $failLabel = $isEn ? 'Too many tries' : 'محاولات كثيرة';
+                    } elseif ($liveDown) {
+                        $failLabel = $isEn ? 'Not connected' : 'غير متصل';
+                    }
+                    ?>
+                    <span class="sas-logged-bad" title="<?php echo e($failBlob); ?>"><?php echo e($failLabel); ?></span>
                     <?php else: ?>
                     <span class="sas-logged-off"><?php echo e($isEn ? 'Not connected' : 'غير متصل'); ?></span>
                     <?php endif; ?>
