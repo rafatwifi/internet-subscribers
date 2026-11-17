@@ -345,6 +345,138 @@ function sas_save_user_local_details($pdo, $config, $username, $address, $notes)
     return array(true, 'تم حفظ التفاصيل');
 }
 
+function sas_save_user_auto_activate($pdo, $config, $username, $enabled, $notify = false)
+{
+    $username = trim((string) $username);
+    if ($username === '' || !function_exists('sas_cache_get') || !function_exists('sas_cache_ensure_local')) {
+        return array(false, 'مشترك غير محدد');
+    }
+    $cache = sas_cache_get($pdo, $username);
+    if (!$cache) {
+        return array(false, 'المشترك مو موجود بالكاش — حدّث القائمة');
+    }
+    list($localId, $err) = sas_cache_ensure_local($pdo, $config, $cache);
+    if ($localId <= 0) {
+        return array(false, $err !== '' ? $err : 'تعذر ربط المشترك محلياً');
+    }
+    if (function_exists('ensure_subscriber_auto_activate_column')) {
+        ensure_subscriber_auto_activate_column($pdo);
+    }
+    $wasOn = false;
+    try {
+        $stWas = $pdo->prepare('SELECT auto_activate_on_expire FROM subscribers WHERE id = :id LIMIT 1');
+        $stWas->execute(array(':id' => (int) $localId));
+        $wasOn = ((int) $stWas->fetchColumn() === 1);
+    } catch (Exception $eWas) {
+        $wasOn = false;
+    }
+    $on = $enabled ? 1 : 0;
+    try {
+        $pdo->prepare('UPDATE subscribers SET auto_activate_on_expire = :a WHERE id = :id')
+            ->execute(array(':a' => $on, ':id' => (int) $localId));
+    } catch (Exception $e) {
+        return array(false, 'تعذر حفظ التفعيل التلقائي');
+    }
+    if (function_exists('activity_log')) {
+        activity_log(
+            $pdo,
+            $localId,
+            'subscriber',
+            $localId,
+            'update',
+            'تفعيل تلقائي عند الانتهاء',
+            'اليوزرنيم: ' . $username . "\nالحالة: " . ($on ? 'تشغيل' : 'إيقاف')
+        );
+    }
+    $msg = $on ? 'تم تفعيل التجديد التلقائي' : 'تم إيقاف التجديد التلقائي';
+    // إشعار واتساب فقط عند التحويل من مطفي → تشغيل مع خيار الإشعار
+    if ($on && !$wasOn && $notify && function_exists('sas_notify_auto_activate_on')) {
+        $wa = sas_notify_auto_activate_on($pdo, $config, $username, $localId, $cache);
+        if (!empty($wa['ok'])) {
+            $msg .= ' — تم إشعار المشترك';
+        } elseif (!empty($wa['message'])) {
+            $msg .= ' — ' . $wa['message'];
+        }
+    }
+    return array(true, $msg);
+}
+
+/**
+ * إرسال واتساب عند تشغيل التفعيل التلقائي.
+ */
+function sas_notify_auto_activate_on($pdo, $config, $username, $localId = 0, $cache = null)
+{
+    $username = trim((string) $username);
+    $localId = (int) $localId;
+    if ($username === '' || !function_exists('whatsapp_send') || !function_exists('auto_activate_on_message')) {
+        return array('ok' => false, 'message' => '');
+    }
+    if (!is_array($cache) && function_exists('sas_cache_get')) {
+        $cache = sas_cache_get($pdo, $username);
+    }
+    if ($localId <= 0 && is_array($cache) && function_exists('sas_cache_ensure_local')) {
+        list($localId) = sas_cache_ensure_local($pdo, $config, $cache);
+    }
+    $local = null;
+    if ($localId > 0) {
+        try {
+            $st = $pdo->prepare('SELECT * FROM subscribers WHERE id = :id LIMIT 1');
+            $st->execute(array(':id' => $localId));
+            $local = $st->fetch();
+        } catch (Exception $e) {
+            $local = null;
+        }
+    }
+    $phone = '';
+    if (is_array($local) && !empty($local['phone'])) {
+        $phone = (string) $local['phone'];
+    } elseif (is_array($cache) && !empty($cache['phone'])) {
+        $phone = (string) $cache['phone'];
+    }
+    if ($phone === '') {
+        return array('ok' => false, 'message' => 'ماكو رقم لإشعار المشترك');
+    }
+    $name = '';
+    if (is_array($local) && !empty($local['name'])) {
+        $name = (string) $local['name'];
+    } elseif (is_array($cache)) {
+        $fn = isset($cache['firstname']) ? trim((string) $cache['firstname']) : '';
+        $ln = isset($cache['lastname']) ? trim((string) $cache['lastname']) : '';
+        $name = trim($fn . ' ' . $ln);
+        if ($name === '' && !empty($cache['display_name'])) {
+            $name = (string) $cache['display_name'];
+        }
+    }
+    if ($name === '') {
+        $name = $username;
+    }
+    $package = '';
+    if (is_array($cache) && !empty($cache['profile_name'])) {
+        $package = (string) $cache['profile_name'];
+    } elseif (is_array($local) && !empty($local['service_name'])) {
+        $package = (string) $local['service_name'];
+    }
+    $msg = auto_activate_on_message(array(
+        'name' => $name,
+        'username' => $username,
+        'package' => $package,
+        'service_name' => $package,
+    ), $config);
+    if (trim((string) $msg) === '') {
+        return array('ok' => false, 'message' => 'قالب الإشعار فارغ أو موقف');
+    }
+    $result = whatsapp_send($config, $phone, $msg, 'auto_activate_on');
+    if ($localId > 0 && function_exists('log_message')) {
+        log_message($pdo, $localId, $result);
+    }
+    return array(
+        'ok' => !empty($result['success']),
+        'message' => !empty($result['success'])
+            ? ''
+            : (function_exists('whatsapp_fail_user_message') ? whatsapp_fail_user_message($result) : 'فشل إرسال الإشعار'),
+    );
+}
+
 function sas_save_user_grace_days($pdo, $config, $username, $days)
 {
     $username = trim((string) $username);

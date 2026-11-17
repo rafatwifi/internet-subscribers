@@ -769,8 +769,9 @@ function dash_platform_company_pings($live)
             continue;
         }
         $id = isset($co['id']) ? (int) $co['id'] : 0;
-        $host = isset($co['sas_host']) ? trim((string) $co['sas_host']) : '';
-        $host = preg_replace('#^https?://#i', '', rtrim($host, '/'));
+        $host = function_exists('platform_company_ping_target')
+            ? platform_company_ping_target($co)
+            : preg_replace('#^https?://#i', '', rtrim(trim((string) (isset($co['sas_host']) ? $co['sas_host'] : '')), '/'));
         $name = isset($co['name']) ? trim((string) $co['name']) : '';
         if ($id <= 0 || $host === '' || $name === '') {
             continue;
@@ -787,7 +788,7 @@ function dash_platform_company_pings($live)
         } elseif (isset($saved[$id]['ms']) && $saved[$id]['ms'] !== null && $saved[$id]['ms'] !== '') {
             $ms = (int) $saved[$id]['ms'];
         }
-        $out[] = array('id' => $id, 'name' => $name, 'ms' => $ms);
+        $out[] = array('id' => $id, 'name' => $name, 'ms' => $ms, 'host' => $host);
     }
     if ($live) {
         $dir = dirname($file);

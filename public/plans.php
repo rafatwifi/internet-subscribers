@@ -352,6 +352,9 @@ if ($editId > 0) {
 
 $plans = array();
 $ftthPlanRows = array();
+$elPlanRows = array();
+$plansHasEarthlink = function_exists('tenant_has_earthlink_account')
+    && tenant_has_earthlink_account($pdo, function_exists('current_tenant_id') ? (int) current_tenant_id() : 0);
 if ($plansFtth) {
     $ftthSrc = function_exists('sas_tenant_profile_rows')
         ? sas_tenant_profile_rows($pdo, isset($config) ? $config : null)
@@ -373,6 +376,19 @@ if ($plansFtth) {
     }
 } else {
     $plans = $pdo->query('SELECT * FROM service_plans ORDER BY sort_order ASC, monthly_price ASC, id ASC')->fetchAll();
+}
+if ($plansHasEarthlink && function_exists('earthlink_packages_for_ui')) {
+    $elSrc = earthlink_packages_for_ui($pdo, isset($config) ? $config : null, 0);
+    foreach ($elSrc as $ep) {
+        if (!is_array($ep)) {
+            continue;
+        }
+        $elPlanRows[] = array(
+            'name' => isset($ep['name']) ? (string) $ep['name'] : '',
+            'users' => isset($ep['users']) ? (int) $ep['users'] : 0,
+            'id' => isset($ep['id']) ? (string) $ep['id'] : '',
+        );
+    }
 }
 $priceBook = plans_account_book($pdo);
 list($floorByName, $floorByPid) = plans_price_floors($pdo);
@@ -445,7 +461,7 @@ render_header(t('plans'), 'plans');
         <?php endif; ?>
     </div>
 
-    <?php if ($plansFtth): ?>
+    <?php if ($plansFtth || $elPlanRows || $plansHasEarthlink): ?>
     <style>
     .ftth-plans-wrap {
       margin-top: 10px;
@@ -506,7 +522,15 @@ render_header(t('plans'), 'plans');
       color: #64748b;
       font-weight: 700;
     }
+    .el-plans-head {
+      margin: 18px 0 8px;
+      font-size: 15px;
+      font-weight: 800;
+      color: #0f172a;
+    }
     </style>
+    <?php endif; ?>
+    <?php if ($plansFtth): ?>
     <div class="ftth-plans-wrap">
         <table class="ftth-plans-table">
             <thead>
@@ -534,7 +558,32 @@ render_header(t('plans'), 'plans');
             </tbody>
         </table>
     </div>
-    <?php elseif (!$plansLeaf): ?>
+    <?php endif; ?>
+    <?php if ($plansHasEarthlink): ?>
+    <div class="el-plans-head"><?php echo e($lang === 'en' ? 'Earthlink packages' : 'باقات إيرث لنك'); ?></div>
+    <div class="ftth-plans-wrap">
+        <table class="ftth-plans-table">
+            <thead>
+            <tr>
+                <th class="col-name"><?php echo e($lang === 'en' ? 'Package' : 'الباقة'); ?></th>
+                <th class="col-id"><?php echo e($lang === 'en' ? 'Subscribers' : 'المشتركين'); ?></th>
+            </tr>
+            </thead>
+            <tbody>
+            <?php foreach ($elPlanRows as $elRow): ?>
+                <tr>
+                    <td class="col-name"><?php echo e($elRow['name']); ?></td>
+                    <td class="col-id"><span class="ftth-id-pill"><?php echo (int) $elRow['users']; ?></span></td>
+                </tr>
+            <?php endforeach; ?>
+            <?php if (!$elPlanRows): ?>
+                <tr><td class="ftth-plans-empty" colspan="2"><?php echo e($lang === 'en' ? 'No Earthlink packages in cache yet — sync subscribers first' : 'ماكو باقات إيرث بالكاش بعد — زامن المشتركين أولاً'); ?></td></tr>
+            <?php endif; ?>
+            </tbody>
+        </table>
+    </div>
+    <?php endif; ?>
+    <?php if (!$plansFtth && !$plansLeaf): ?>
     <div class="plans-add-panel" id="plansAddPanel"<?php echo $showAdd ? '' : ' hidden'; ?>>
         <h2 style="margin-top:0"><?php echo $editPlan ? t('edit') . ' — ' . e($editPlan['name']) : ($lang === 'en' ? 'Add package' : 'إضافة باقة جديدة'); ?></h2>
         <form method="post">

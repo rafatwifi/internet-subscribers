@@ -1332,24 +1332,217 @@ class SASConnector
         return null;
     }
 
-    public function changeUserProfile($userId, $profileId)
+    public function changeUserProfile($userId, $profileId, $username = '')
     {
         $userId = (int) $userId;
         $profileId = (int) $profileId;
-        $payload = array(
-            'id' => $userId,
-            'user_id' => $userId,
-            'profile_id' => $profileId,
-            'when' => 'immediate',
-        );
-        $last = array();
-        foreach (array('user/changeProfile', 'user/change-profile', 'user/' . $userId . '/changeProfile') as $route) {
-            $last = $this->parseApiResponse($this->post($route, $payload, true));
-            if ($this->isActivateOk($last)) {
-                return $last;
+        $username = trim((string) $username);
+        if ($userId <= 0 || $profileId <= 0) {
+            return array('status' => -1, 'message' => 'invalid_profile_change', 'success' => false);
+        }
+        $routes = array('user/changeProfile', 'user/change-profile');
+        $whenList = array('immediate', 'expire', 'on_expire');
+        $last = array('status' => -1, 'message' => 'change_profile_failed', 'success' => false);
+        $sawStillActive = false;
+        foreach ($whenList as $when) {
+            $payload = array(
+                'id' => $userId,
+                'user_id' => $userId,
+                'profile_id' => $profileId,
+                'when' => $when,
+            );
+            foreach ($routes as $route) {
+                $last = $this->parseApiResponse($this->post($route, $payload, true));
+                if ($this->isProfileStillActiveRes($last)) {
+                    $sawStillActive = true;
+                }
+                if ($this->isProfileChangeAccepted($last) && $this->liveProfileMatches($userId, $profileId, $when)) {
+                    return $last;
+                }
+                if ($this->isProfileChangeAccepted($last)
+                    && ($when === 'expire' || $when === 'on_expire')
+                    && $this->liveProfileChangeQueued($userId, $profileId)
+                ) {
+                    $last['_scheduled'] = 1;
+                    return $last;
+                }
             }
         }
-        return $this->updateUser($userId, array('profile_id' => $profileId));
+        // بعض نسخ الساس ترفض التغيير والمشترك فعّال/متصل — قطع ثم أعد فوراً
+        if (method_exists($this, 'disconnectUser')) {
+            $this->disconnectUser($userId, $username);
+            usleep(350000);
+            $payload = array(
+                'id' => $userId,
+                'user_id' => $userId,
+                'profile_id' => $profileId,
+                'when' => 'immediate',
+            );
+            foreach ($routes as $route) {
+                $last = $this->parseApiResponse($this->post($route, $payload, true));
+                if ($this->isProfileStillActiveRes($last)) {
+                    $sawStillActive = true;
+                }
+                if ($this->isProfileChangeAccepted($last) && $this->liveProfileMatches($userId, $profileId, 'immediate')) {
+                    $last['_disconnected_first'] = 1;
+                    return $last;
+                }
+            }
+        }
+        // لا تعتمد على updateUser status=200 — غالباً يتجاهل profile_id بدون خطأ
+        $upd = $this->updateUser($userId, array('profile_id' => $profileId));
+        if ($this->isProfileStillActiveRes($upd)) {
+            $sawStillActive = true;
+        }
+        if ($this->liveProfileMatches($userId, $profileId, 'immediate')) {
+            if (!is_array($upd)) {
+                $upd = array();
+            }
+            $upd['success'] = true;
+            $upd['_verified'] = 1;
+            return $upd;
+        }
+        // لا تعتبر still_active نجاحاً — ولا تضيّعها برد 404 لمسار بديل
+        if ($sawStillActive || $this->isProfileStillActiveRes($last) || $this->isProfileStillActiveRes($upd)) {
+            return array(
+                'status' => -1,
+                'success' => false,
+                'message' => 'rsp_user_still_active',
+                '_profile_blocked' => 1,
+            );
+        }
+        // إن مدة الاشتراك ما زالت شغّالة على الساس — نفس القيد حتى لو الرد مو واضح
+        if ($this->liveSubscriptionStillActive($userId)) {
+            return array(
+                'status' => -1,
+                'success' => false,
+                'message' => 'rsp_user_still_active',
+                '_profile_blocked' => 1,
+            );
+        }
+        return array(
+            'status' => -1,
+            'success' => false,
+            'message' => is_array($last) && !empty($last['message'])
+                ? (string) $last['message']
+                : 'change_profile_failed',
+        );
+    }
+
+    private function liveSubscriptionStillActive($userId)
+    {
+        $userId = (int) $userId;
+        if ($userId <= 0 || !method_exists($this, 'getUserById')) {
+            return false;
+        }
+        $live = $this->getUserById($userId);
+        if (!is_array($live)) {
+            return false;
+        }
+        if (isset($live['data']) && is_array($live['data']) && !isset($live['status'])) {
+            $live = $live['data'];
+        }
+        if (isset($live['status']) && is_array($live['status']) && array_key_exists('expiration', $live['status'])) {
+            return !empty($live['status']['expiration']);
+        }
+        if (!empty($live['expiration'])) {
+            $ts = strtotime((string) $live['expiration']);
+            return ($ts && $ts > time());
+        }
+        return false;
+    }
+
+    private function liveProfileId($userId)
+    {
+        $userId = (int) $userId;
+        if ($userId <= 0 || !method_exists($this, 'getUserById')) {
+            return 0;
+        }
+        $live = $this->getUserById($userId);
+        if (!is_array($live)) {
+            return 0;
+        }
+        if (isset($live['data']) && is_array($live['data']) && !isset($live['profile_id'])) {
+            $live = $live['data'];
+        }
+        if (isset($live['profile_id']) && is_numeric($live['profile_id'])) {
+            return (int) $live['profile_id'];
+        }
+        return 0;
+    }
+
+    private function liveProfileMatches($userId, $profileId, $when = 'immediate')
+    {
+        $profileId = (int) $profileId;
+        if ($profileId <= 0) {
+            return false;
+        }
+        // التغيير المجدول عند الانتهاء ما يبدّل profile_id فوراً
+        if ($when === 'expire' || $when === 'on_expire') {
+            return false;
+        }
+        return $this->liveProfileId($userId) === $profileId;
+    }
+
+    private function liveProfileChangeQueued($userId, $profileId)
+    {
+        $userId = (int) $userId;
+        $profileId = (int) $profileId;
+        if ($userId <= 0 || $profileId <= 0 || !method_exists($this, 'getUserById')) {
+            return false;
+        }
+        $live = $this->getUserById($userId);
+        if (!is_array($live)) {
+            return false;
+        }
+        if (isset($live['data']) && is_array($live['data']) && !isset($live['profileChange'])) {
+            $live = $live['data'];
+        }
+        $pc = isset($live['profileChange']) ? $live['profileChange'] : null;
+        if ($pc === false || $pc === null || $pc === '' || $pc === 0) {
+            return false;
+        }
+        if (is_array($pc)) {
+            foreach (array('profile_id', 'profileId', 'id', 'new_profile_id') as $k) {
+                if (isset($pc[$k]) && is_numeric($pc[$k]) && (int) $pc[$k] === $profileId) {
+                    return true;
+                }
+            }
+            return !empty($pc);
+        }
+        return true;
+    }
+
+    private function isProfileStillActiveRes($res)
+    {
+        if (!is_array($res)) {
+            return false;
+        }
+        $msg = isset($res['message']) ? strtolower((string) $res['message']) : '';
+        return ($msg !== '' && (
+            strpos($msg, 'still_active') !== false
+            || strpos($msg, 'user_still_active') !== false
+            || strpos($msg, 'rsp_user_still_active') !== false
+        ));
+    }
+
+    private function isProfileChangeAccepted($res)
+    {
+        if (!is_array($res) || $this->isProfileStillActiveRes($res)) {
+            return false;
+        }
+        if (isset($res['success']) && ($res['success'] === false || $res['success'] === 0 || $res['success'] === '0')) {
+            return false;
+        }
+        $msg = isset($res['message']) ? strtolower((string) $res['message']) : '';
+        // فقط ردود تثبت تغيير البروفايل — لا تأخذ status=200 الفارغ (updateUser يرجّعه بدون تغيير)
+        if ($msg !== '' && (
+            strpos($msg, 'rsp_profile_changed') !== false
+            || strpos($msg, 'profile_changed') !== false
+        )) {
+            return true;
+        }
+        return false;
     }
 
     private function sasCardPinValue($row)
@@ -2239,10 +2432,20 @@ class SASConnector
      */
     public function listOwnedFreePins($maxPins = 20)
     {
+        return $this->listOwnedFreePinsForOwner($this->loggedManagerId(), $maxPins);
+    }
+
+    /** كروت شاغرة لمالك ساس محدد (وكيل بعد التحويل) — مو بس حساب الدخول. */
+    public function listOwnedFreePinsForOwner($ownerId, $maxPins = 20)
+    {
         if (!$this->token && !$this->login()) {
             return array();
         }
-        $maxPins = max(1, min(40, (int) $maxPins));
+        $ownerId = (int) $ownerId;
+        if ($ownerId <= 0) {
+            return array();
+        }
+        $maxPins = max(1, min(80, (int) $maxPins));
         $payload = array(
             'page' => 1,
             'count' => 100,
@@ -2251,7 +2454,6 @@ class SASConnector
             'search' => '',
         );
         $series = $this->sasCardFetchPaged(array('index/series'), $payload, 1);
-        $me = $this->loggedManagerId();
         $jobs = array();
         foreach ($series as $srow) {
             if (!is_array($srow)) {
@@ -2261,7 +2463,7 @@ class SASConnector
                 continue;
             }
             $owner = $this->sasSeriesOwnerId($srow);
-            if ($me <= 0 || $owner !== $me) {
+            if ($owner !== $ownerId) {
                 continue;
             }
             $hint = $this->sasCardSeriesUnusedCount($srow);
@@ -2286,7 +2488,7 @@ class SASConnector
         $seen = array();
         $tried = 0;
         foreach ($jobs as $job) {
-            if (count($out) >= $maxPins || $tried >= 6) {
+            if (count($out) >= $maxPins || $tried >= 12) {
                 break;
             }
             $tried++;
@@ -4506,6 +4708,12 @@ class SASConnector
         }
         $msg = isset($res['message']) ? strtolower((string) $res['message']) : '';
         if ($msg !== '' && (strpos($msg, 'invalid_profile') !== false || strpos($msg, 'rsp_invalid_profile') !== false)) {
+            return false;
+        }
+        if ($msg !== '' && (
+            strpos($msg, 'still_active') !== false
+            || strpos($msg, 'rsp_user_still_active') !== false
+        )) {
             return false;
         }
         if ($msg !== '' && $this->isHardActivateFail($res)) {

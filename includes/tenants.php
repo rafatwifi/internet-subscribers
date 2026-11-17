@@ -546,10 +546,15 @@ function tenants_sas_company_catalog($pdo, $config = null)
         if ($pc) {
             $out = array();
             foreach ($pc as $r) {
+                $prov = function_exists('platform_company_normalize_provider')
+                    ? platform_company_normalize_provider(isset($r['provider_type']) ? $r['provider_type'] : 'sas')
+                    : 'sas';
                 $out[] = array(
                     'id' => (int) $r['id'],
                     'name' => $r['name'],
                     'sas_host' => $r['sas_host'],
+                    'provider_type' => $prov,
+                    'logo_path' => isset($r['logo_path']) ? $r['logo_path'] : '',
                     'sas_enabled' => 1,
                     'owner_user_id' => null,
                     '_from' => 'platform',
@@ -770,6 +775,17 @@ function sas_writes_allowed($pdo, $config, $tenantId = null)
 
 function sas_mark_connection($pdo, $config, $ok, $detail = '', $tenantId = null)
 {
+    // رفرش السهم الهادئ: لا تكتب حالة أوفـلاين من تايم-آوت عابر
+    if (!$ok && !empty($GLOBALS['sas_quiet_refresh'])) {
+        return array(
+            'ok' => false,
+            'ready' => true,
+            'label' => 'ساس غير متصل',
+            'detail' => (string) $detail,
+            'skipped' => 1,
+            'at' => time(),
+        );
+    }
     $tenantId = $tenantId === null ? current_tenant_id() : max(1, (int) $tenantId);
     $lock = __DIR__ . '/../config/sas_status_t' . $tenantId . '.json';
     $out = array(
@@ -1076,6 +1092,30 @@ function user_apply_wa_pack_to_config(&$config, $pdo = null, $userId = 0)
             }
             $config['wa_templates'][$tKey] = $tplRow;
         }
+        // بذرة ناعمة لقالب التفعيل التلقائي إن ناقص من باقة قديمة
+        if (!isset($config['templates']['auto_activate_on'])) {
+            $seedBody = "مرحباً {name}\nتم تفعيل خدمة التفعيل التلقائي لخطك\nنتمنى لك تجربة مميزة";
+            if (function_exists('settings_defaults')) {
+                $defs = settings_defaults();
+                if (!empty($defs['tpl_auto_activate_on'])) {
+                    $seedBody = (string) $defs['tpl_auto_activate_on'];
+                }
+            }
+            $seedLabel = 'تفعيل التجديد التلقائي';
+            if (function_exists('wa_default_template_labels')) {
+                $labs = wa_default_template_labels(isset($config['language']) ? $config['language'] : 'ar');
+                if (!empty($labs['auto_activate_on'])) {
+                    $seedLabel = (string) $labs['auto_activate_on'];
+                }
+            }
+            $config['templates']['auto_activate_on'] = $seedBody;
+            $config['template_labels']['auto_activate_on'] = $seedLabel;
+            $config['wa_templates']['auto_activate_on'] = array(
+                'label' => $seedLabel,
+                'body' => $seedBody,
+                'builtin' => true,
+            );
+        }
     }
     $cases = (isset($pack['cases']) && is_array($pack['cases'])) ? $pack['cases'] : array();
     if (!$cases || empty($config['templates']) || !is_array($config['templates'])) {
@@ -1097,6 +1137,8 @@ function user_apply_wa_pack_to_config(&$config, $pdo = null, $userId = 0)
         'schedule_cut' => 'schedule_cut',
         'card_transfer' => '',
         'card_pull' => '',
+        'account_created' => 'account_created',
+        'auto_activate_on' => 'auto_activate_on',
     );
     $config['wa_cases'] = array();
     $config['wa_case_issues'] = array();

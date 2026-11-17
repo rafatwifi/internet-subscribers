@@ -70,6 +70,7 @@ function dash_layout_catalog($pdo = null)
         'activations' => array('ar' => 'التفعيلات', 'en' => 'Activations', 'tone' => 'tone-aqua', 'perm' => 'subscriptions'),
         'rentals' => array('ar' => 'الإيجار', 'en' => 'Rentals', 'tone' => 'tone-navy', 'perm' => 'rentals'),
         'points' => array('ar' => 'نقاط تشجيعية', 'en' => 'Reward points', 'tone' => 'tone-lime', 'perm' => ''),
+        'balance' => array('ar' => 'رصيد الريسلر', 'en' => 'Reseller balance', 'tone' => 'tone-teal', 'perm' => ''),
         'latency' => array('ar' => 'بنك الريسلر', 'en' => 'Reseller ping', 'tone' => 'tone-navy', 'perm' => ''),
         'cabinets' => array('ar' => 'الكابينات', 'en' => 'Cabinets', 'tone' => 'tone-teal', 'perm' => 'subscribers'),
         'version' => array('ar' => 'إصدار النظام', 'en' => 'System version', 'tone' => 'tone-purple', 'perm' => ''),

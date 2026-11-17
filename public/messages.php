@@ -238,7 +238,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $caseKeys = array(
             'activation_cash', 'activation_credit', 'activation_debts', 'activation_credit_debts',
             'debt_created', 'payment_ok', 'debt_remind', 'reminder_auto', 'days_left',
-            'expiry_soon', 'schedule_cut', 'card_transfer', 'card_pull'
+            'expiry_soon', 'schedule_cut', 'card_transfer', 'card_pull',
+            'account_created', 'auto_activate_on'
         );
 
         $keysIn = isset($_POST['tpl_key']) && is_array($_POST['tpl_key']) ? $_POST['tpl_key'] : array();

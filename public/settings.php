@@ -47,10 +47,18 @@ if ($tab === 'templates') {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'sas') {
     $tab = 'sas';
 }
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'ui_theme') {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && (post('section') === 'ui_theme' || post('section') === 'user_prefs')) {
     $tab = 'theme';
 }
 if (!in_array($tab, array('general', 'whatsapp', 'rental', 'users', 'plans', 'sas', 'saas', 'schedule', 'sensitive', 'update', 'maintenance', 'widgets', 'theme'), true)) {
+    $tab = 'general';
+}
+// تبويبات محذوفة من إعدادات أدمن البوابة
+if ($tab === 'rental' || $tab === 'plans') {
+    $tab = (function_exists('is_super_admin_user') && is_super_admin_user()) ? 'general' : 'theme';
+}
+if ($tab === 'sas' && function_exists('is_super_admin_user') && is_super_admin_user()
+    && (!function_exists('current_tenant_id') || (int) current_tenant_id() <= 1)) {
     $tab = 'general';
 }
 
@@ -183,11 +191,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $pingMode = function_exists('sas_ping_mode_normalize')
             ? sas_ping_mode_normalize(post('sub_ping_mode', 'off'))
             : 'off';
-        if (function_exists('admin_ui_prefs_save')) {
-            admin_ui_prefs_save($pdo, 'sub_ping_mode', $pingMode);
+        $pingAccId = (int) post('account_id', 0);
+        $pingTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+        $saved = array('ok' => false, 'mode' => 'off', 'message' => $lang === 'en' ? 'Add a reseller first' : 'أضف رسلر أولاً');
+        if ($pingTid > 1 && $pingAccId > 0 && function_exists('sas_ping_mode_save_account')) {
+            $saved = sas_ping_mode_save_account($pdo, $pingTid, $pingAccId, $pingMode);
         }
-        flash('success', $lang === 'en' ? 'Saved' : 'تم الحفظ');
+        if (!empty($saved['ok'])) {
+            flash('success', $lang === 'en' ? 'Saved for this reseller' : 'انحفظ لهذا الرسلر');
+        } else {
+            flash('error', isset($saved['message']) ? $saved['message'] : ($lang === 'en' ? 'Could not save' : 'ما انحفظ'));
+        }
         redirect('settings.php?tab=sas');
+    }
+    if ($section === 'user_prefs') {
+        $periodMode = post('subscription_period_mode', 'days_30') === 'calendar_month'
+            ? 'calendar_month'
+            : 'days_30';
+        $prefLang = post('language') === 'en' ? 'en' : 'ar';
+        $prefCur = trim((string) post('currency', 'د.ع'));
+        if ($prefCur === '') {
+            $prefCur = 'د.ع';
+        }
+        $prefGrace = max(0, (int) post('grace_days', '3'));
+        if (function_exists('admin_ui_prefs_save')) {
+            admin_ui_prefs_save($pdo, 'language', $prefLang);
+            admin_ui_prefs_save($pdo, 'currency', $prefCur);
+            admin_ui_prefs_save($pdo, 'grace_days', $prefGrace);
+            admin_ui_prefs_save($pdo, 'subscription_period_mode', $periodMode);
+        }
+        if (function_exists('set_lang_preference')) {
+            set_lang_preference($prefLang);
+        }
+        flash('success', $lang === 'en' ? 'Saved for your account only' : 'انحفظ لحسابك فقط');
+        redirect('settings.php?tab=theme');
     }
     if ($section === 'ui_theme') {
         $themePick = function_exists('ui_theme_normalize')
@@ -535,18 +572,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     if ($section === 'general') {
-        $periodMode = post('subscription_period_mode', 'days_30') === 'calendar_month'
-            ? 'calendar_month'
-            : 'days_30';
         $data = array(
             'site_name' => (string) post('site_name', 'WiFi-Net-SALES'),
-            'language' => post('language') === 'en' ? 'en' : 'ar',
-            'currency' => (string) post('currency', 'د.ع'),
-            'grace_days' => (int) post('grace_days', '3'),
-            'subscription_period_mode' => $periodMode,
             'login_session_days' => max(1, min(30, (int) post('login_session_days', '3'))),
         );
-        set_lang_preference($data['language']);
         $tab = 'general';
     } elseif ($section === 'login_bg') {
         $tab = 'general';
@@ -655,16 +684,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         );
         $tab = 'rental';
     } elseif ($section === 'whatsapp') {
-        $url = trim((string) post('whatsapp_local_url', 'http://172.16.16.13:3001'));
-        if ($url !== '' && strpos($url, 'http://') !== 0 && strpos($url, 'https://') !== 0) {
+        $url = trim((string) post('whatsapp_local_url', ''));
+        $gwKey = trim((string) post('whatsapp_local_key', ''));
+        if ($url === '' || $gwKey === '') {
+            flash('error', $lang === 'en'
+                ? 'Enter the gateway URL and key'
+                : 'أدخل رابط البوابة ومفتاح البوابة');
+            redirect('settings.php?tab=whatsapp');
+        }
+        if (strpos($url, 'http://') !== 0 && strpos($url, 'https://') !== 0) {
             $url = 'http://' . ltrim($url, '/');
+        }
+        if (post('whatsapp_enabled') !== '1' && post('whatsapp_enabled') !== '0') {
+            flash('error', $lang === 'en' ? 'Choose WhatsApp on or off' : 'اختر تشغيل أو إيقاف واتساب');
+            redirect('settings.php?tab=whatsapp');
         }
         $data = array(
             'whatsapp_enabled' => post('whatsapp_enabled') === '1',
             'whatsapp_provider' => 'local',
             'whatsapp_local_url' => $url,
-            'whatsapp_local_key' => (string) post('whatsapp_local_key', 'local-secret-change-me'),
-            'whatsapp_sender_note' => (string) post('whatsapp_sender_note', ''),
+            'whatsapp_local_key' => $gwKey,
+            'whatsapp_sender_note' => '',
         );
         $tab = 'whatsapp';
     } elseif ($section === 'templates') {
@@ -791,6 +831,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 flash($okL ? 'success' : 'error', $msgL);
                 redirect('settings.php?tab=sas');
             }
+            if ($accAction === 'retry_login' && function_exists('tenant_sas_account_retry_login')) {
+                $retryId = (int) post('account_id', '0');
+                if (function_exists('set_time_limit')) {
+                    @set_time_limit(45);
+                }
+                list($okR, $msgR, $metaR) = array_pad(
+                    tenant_sas_account_retry_login($pdo, $tidSas, $retryId, $config),
+                    3,
+                    array()
+                );
+                if ($okR) {
+                    flash('success', ($lang === 'en' ? 'Connected: ' : 'تم الدخول: ') . $msgR);
+                } else {
+                    $extra = '';
+                    if (is_array($metaR) && !empty($metaR['next_retry_sec'])) {
+                        $mins = max(1, (int) ceil(((int) $metaR['next_retry_sec']) / 60));
+                        $extra = $lang === 'en'
+                            ? (' — auto-retry in ~' . $mins . ' min')
+                            : (' — إعادة تلقائية بعد ~' . $mins . ' د');
+                    }
+                    flash('error', ($lang === 'en' ? 'Retry failed: ' : 'فشلت إعادة المحاولة: ') . $msgR . $extra);
+                }
+                redirect('settings.php?tab=sas');
+            }
             if ($accAction === 'set_default') {
                 $defId = (int) post('account_id', '0');
                 flash(tenant_sas_account_set_default($pdo, $tidSas, $defId) ? 'success' : 'error',
@@ -863,38 +927,91 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
             $fieldsAcc['sas_password'] = $passKeep !== '' ? $passKeep : $pass;
-            list($okT, $msgT) = tenant_test_sas_connection(
-                $fieldsAcc['sas_host'],
-                $fieldsAcc['sas_username'],
-                $fieldsAcc['sas_password']
-            );
+            $coProvider = 'sas';
+            if ($companyId > 0 && function_exists('platform_company_row')) {
+                $coRowLink = platform_company_row($pdo, $companyId);
+                if ($coRowLink && function_exists('platform_company_normalize_provider')) {
+                    $coProvider = platform_company_normalize_provider(
+                        isset($coRowLink['provider_type']) ? $coRowLink['provider_type'] : 'sas'
+                    );
+                }
+            }
+            if ($coProvider === 'earthlink' && function_exists('earthlink_test_connection')) {
+                $elAlt = function_exists('earthlink_company_alt_host')
+                    ? earthlink_company_alt_host($pdo, $companyId)
+                    : '';
+                $elTest = earthlink_test_connection(
+                    $fieldsAcc['sas_host'],
+                    $fieldsAcc['sas_username'],
+                    $fieldsAcc['sas_password'],
+                    $elAlt
+                );
+                $okT = !empty($elTest['ok']);
+                $msgT = isset($elTest['message']) ? (string) $elTest['message'] : '';
+            } else {
+                list($okT, $msgT) = tenant_test_sas_connection(
+                    $fieldsAcc['sas_host'],
+                    $fieldsAcc['sas_username'],
+                    $fieldsAcc['sas_password']
+                );
+            }
             if (!$okT) {
                 flash('error', ($lang === 'en' ? 'Not added. Login failed: ' : 'ما انضاف. فشل الدخول: ') . $msgT);
                 redirect('settings.php?tab=sas');
             }
             list($okS, $msgS, $newId) = tenant_sas_account_save($pdo, $tidSas, $fieldsAcc, $editId);
             if ($okS) {
-                if (function_exists('sas_mark_connection')) {
+                if ($coProvider === 'earthlink' && function_exists('earthlink_sync_to_cache')) {
+                    $syncEl = earthlink_sync_to_cache(
+                        $pdo,
+                        $tidSas,
+                        $fieldsAcc['sas_host'],
+                        $fieldsAcc['sas_username'],
+                        $fieldsAcc['sas_password'],
+                        $companyId
+                    );
+                    if (!empty($syncEl['ok'])) {
+                        $msgT .= ' — ' . (isset($syncEl['message']) ? $syncEl['message'] : '');
+                    } else {
+                        $msgT .= ' — ' . (isset($syncEl['message']) ? $syncEl['message'] : 'فشل جلب المشتركين');
+                    }
+                }
+                // بانر/حالة «الساس» فقط لحسابات SAS — إيرث لنك ما يوقف الساس
+                if ($coProvider !== 'earthlink' && function_exists('sas_mark_connection')) {
                     sas_mark_connection($pdo, $config, $okT, $msgT, $tidSas);
                 }
                 $accIdMark = (int) $newId > 0 ? (int) $newId : $editId;
                 if ($accIdMark > 0) {
                     try {
                         if ($okT) {
-                            $pdo->prepare('UPDATE tenant_sas_accounts SET last_ok_at = NOW(), last_error = NULL WHERE id = :id AND tenant_id = :t')
-                                ->execute(array(':id' => $accIdMark, ':t' => $tidSas));
+                            $pdo->prepare(
+                                'UPDATE tenant_sas_accounts
+                                 SET last_ok_at = NOW(), last_error = NULL,
+                                     login_fail_count = 0, login_next_retry_at = NULL
+                                 WHERE id = :id AND tenant_id = :t'
+                            )->execute(array(':id' => $accIdMark, ':t' => $tidSas));
                         } else {
-                            $pdo->prepare('UPDATE tenant_sas_accounts SET last_ok_at = NULL, last_error = :e WHERE id = :id AND tenant_id = :t')
-                                ->execute(array(
-                                    ':e' => function_exists('mb_substr') ? mb_substr((string) $msgT, 0, 250, 'UTF-8') : substr((string) $msgT, 0, 250),
-                                    ':id' => $accIdMark,
-                                    ':t' => $tidSas,
-                                ));
+                            $nextFail = 1;
+                            $nextAt = function_exists('tenant_sas_login_retry_schedule_sql')
+                                ? tenant_sas_login_retry_schedule_sql($nextFail)
+                                : date('Y-m-d H:i:s', time() + 60);
+                            $pdo->prepare(
+                                'UPDATE tenant_sas_accounts
+                                 SET last_ok_at = NULL, last_error = :e,
+                                     login_fail_count = :fc, login_next_retry_at = :nr
+                                 WHERE id = :id AND tenant_id = :t'
+                            )->execute(array(
+                                ':e' => function_exists('mb_substr') ? mb_substr((string) $msgT, 0, 250, 'UTF-8') : substr((string) $msgT, 0, 250),
+                                ':fc' => $nextFail,
+                                ':nr' => $nextAt,
+                                ':id' => $accIdMark,
+                                ':t' => $tidSas,
+                            ));
                         }
                     } catch (Exception $eMark) {
                     }
                 }
-                if ($okT) {
+                if ($okT && $coProvider !== 'earthlink') {
                     if (!function_exists('sas_sync_request_now')) {
                         $warmFile = dirname(__DIR__) . '/includes/portal_warm.php';
                         if (is_file($warmFile)) {
@@ -1187,12 +1304,76 @@ $uiThemeNow = ($uiThemeNow === 'glass') ? 'glass' : 'classic';
 $showThemePanel = ($tab === 'theme');
 $glassBgNow = function_exists('ui_glass_bg_url') ? ui_glass_bg_url($pdo, isset($settings) ? $settings : null) : '';
 $glassBgPersonal = '';
-if (function_exists('admin_ui_prefs_load') && function_exists('ui_glass_bg_filename')) {
-    $glassBgPersonal = ui_glass_bg_filename(admin_ui_prefs_load($pdo));
+$userWorkPrefs = function_exists('admin_ui_prefs_load') ? admin_ui_prefs_load($pdo) : array();
+if (!is_array($userWorkPrefs)) {
+    $userWorkPrefs = array();
 }
+if (function_exists('ui_glass_bg_filename')) {
+    $glassBgPersonal = ui_glass_bg_filename($userWorkPrefs);
+}
+$prefLangUi = (isset($userWorkPrefs['language']) && $userWorkPrefs['language'] === 'en')
+    ? 'en'
+    : ((isset($userWorkPrefs['language']) && $userWorkPrefs['language'] === 'ar')
+        ? 'ar'
+        : ((isset($lang) && $lang === 'en') ? 'en' : 'ar'));
+$prefCurUi = isset($userWorkPrefs['currency']) && trim((string) $userWorkPrefs['currency']) !== ''
+    ? (string) $userWorkPrefs['currency']
+    : (isset($s['currency']) ? (string) $s['currency'] : 'د.ع');
+$prefGraceUi = array_key_exists('grace_days', $userWorkPrefs)
+    ? max(0, (int) $userWorkPrefs['grace_days'])
+    : (int) (isset($s['grace_days']) ? $s['grace_days'] : 3);
+$prefPeriodUi = (isset($userWorkPrefs['subscription_period_mode']) && $userWorkPrefs['subscription_period_mode'] === 'calendar_month')
+    ? 'calendar_month'
+    : ((isset($s['subscription_period_mode']) && $s['subscription_period_mode'] === 'calendar_month')
+        ? 'calendar_month'
+        : 'days_30');
 ?>
 
 <?php if ($showThemePanel): ?>
+<div class="panel" id="userWorkPrefsPanel">
+    <h2><?php echo e($lang === 'en' ? 'My work preferences' : 'تفضيلات عملي'); ?></h2>
+    <p class="meta" style="margin-top:-6px">
+        <?php echo e($lang === 'en'
+            ? 'Saved for your login only. Other users keep their own values.'
+            : 'ينحفظ لحسابك فقط. كل مستخدم يخصص لنفسه بدون تأثير على غيره.'); ?>
+    </p>
+    <form method="post" action="settings.php?tab=theme">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="section" value="user_prefs">
+        <div class="form-grid">
+            <div>
+                <label><?php echo e(t('language')); ?></label>
+                <select name="language">
+                    <option value="ar" <?php echo $prefLangUi === 'ar' ? 'selected' : ''; ?>>العربية</option>
+                    <option value="en" <?php echo $prefLangUi === 'en' ? 'selected' : ''; ?>>English</option>
+                </select>
+            </div>
+            <div>
+                <label><?php echo e($lang === 'en' ? 'Currency' : 'العملة'); ?></label>
+                <input name="currency" value="<?php echo e($prefCurUi); ?>">
+            </div>
+            <div>
+                <label><?php echo e($lang === 'en' ? 'Default grace days' : 'أيام السماح الافتراضية'); ?></label>
+                <input type="number" min="0" name="grace_days" value="<?php echo (int) $prefGraceUi; ?>">
+                <small style="color:#6b7a88;font-weight:600"><?php echo e($lang === 'en' ? 'Default after activation. Can still change per subscriber.' : 'الافتراضي بعد التفعيل. يبقى قابل للتعديل لكل مشترك.'); ?></small>
+            </div>
+            <div>
+                <label><?php echo e($lang === 'en' ? 'Subscription period' : 'مدة الاشتراك'); ?></label>
+                <select name="subscription_period_mode">
+                    <option value="days_30" <?php echo $prefPeriodUi === 'days_30' ? 'selected' : ''; ?>>
+                        <?php echo e($lang === 'en' ? '30 days (30 Jul → 29 Aug)' : '30 يوم (30-7 → 29-8)'); ?>
+                    </option>
+                    <option value="calendar_month" <?php echo $prefPeriodUi === 'calendar_month' ? 'selected' : ''; ?>>
+                        <?php echo e($lang === 'en' ? 'Calendar month (30 Jul → 30 Aug)' : 'شهر ميلادي (30-7 → 30-8)'); ?>
+                    </option>
+                </select>
+            </div>
+        </div>
+        <div class="actions">
+            <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
+        </div>
+    </form>
+</div>
 <div class="panel theme-pick-panel" id="themePickPanel">
     <h2><?php echo e($lang === 'en' ? 'Interface theme' : 'ثيم الواجهة'); ?></h2>
     <p class="meta" style="margin-top:-6px">
@@ -1910,6 +2091,11 @@ $gLatTone = ($gMs === null || !$gOk) ? 'bad' : (($gMs >= 200) ? 'bad' : (($gMs >
 
 <div class="panel">
     <h2><?php echo e(t('settings_general')); ?></h2>
+    <p class="meta" style="margin-top:-6px">
+        <?php echo e($lang === 'en'
+            ? 'Language, currency, grace days and subscription period are set per user under Theme.'
+            : 'اللغة والعملة وأيام السماح ومدة الاشتراك تُضبط لكل مستخدم من تبويب الثيم.'); ?>
+    </p>
     <form method="post">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <input type="hidden" name="section" value="general">
@@ -1919,37 +2105,9 @@ $gLatTone = ($gMs === null || !$gOk) ? 'bad' : (($gMs >= 200) ? 'bad' : (($gMs >
                 <input name="site_name" value="<?php echo e($s['site_name']); ?>" required>
             </div>
             <div>
-                <label><?php echo e(t('language')); ?></label>
-                <select name="language">
-                    <option value="ar" <?php echo $s['language'] === 'ar' ? 'selected' : ''; ?>>العربية</option>
-                    <option value="en" <?php echo $s['language'] === 'en' ? 'selected' : ''; ?>>English</option>
-                </select>
-            </div>
-            <div>
-                <label><?php echo e($lang === 'en' ? 'Currency' : 'العملة'); ?></label>
-                <input name="currency" value="<?php echo e($s['currency']); ?>">
-            </div>
-            <div>
-                <label><?php echo e($lang === 'en' ? 'Default grace days' : 'أيام السماح الافتراضية'); ?></label>
-                <input type="number" min="0" name="grace_days" value="<?php echo (int) $s['grace_days']; ?>">
-                <small style="color:#6b7a88;font-weight:600"><?php echo e($lang === 'en' ? 'Default 3 days after activation. Can be changed per subscriber.' : 'الافتراضي 3 أيام بعد التفعيل. قابل للتعديل لكل مشترك.'); ?></small>
-            </div>
-            <div>
                 <label><?php echo e($lang === 'en' ? 'Keep me logged in (days)' : 'مدة حفظ الدخول (أيام)'); ?></label>
                 <input type="number" min="1" max="30" name="login_session_days" value="<?php echo (int) (isset($s['login_session_days']) ? $s['login_session_days'] : 3); ?>">
                 <small style="color:#6b7a88;font-weight:600"><?php echo e($lang === 'en' ? 'Session cookie duration (1–30). Default 3 days.' : 'مدة كوكي الجلسة (1–30). الافتراضي 3 أيام.'); ?></small>
-            </div>
-            <div>
-                <label><?php echo e($lang === 'en' ? 'Subscription period' : 'مدة الاشتراك'); ?></label>
-                <?php $periodMode = (isset($s['subscription_period_mode']) && $s['subscription_period_mode'] === 'calendar_month') ? 'calendar_month' : 'days_30'; ?>
-                <select name="subscription_period_mode">
-                    <option value="days_30" <?php echo $periodMode === 'days_30' ? 'selected' : ''; ?>>
-                        <?php echo e($lang === 'en' ? '30 days (30 Jul → 29 Aug)' : '30 يوم (30-7 → 29-8)'); ?>
-                    </option>
-                    <option value="calendar_month" <?php echo $periodMode === 'calendar_month' ? 'selected' : ''; ?>>
-                        <?php echo e($lang === 'en' ? 'Calendar month (30 Jul → 30 Aug)' : 'شهر ميلادي (30-7 → 30-8)'); ?>
-                    </option>
-                </select>
             </div>
         </div>
         <div class="actions">
@@ -2435,15 +2593,15 @@ if (function_exists('whatsapp_notifications_enabled') && isset($pdo)) {
 <section class="wa-hero">
   <div>
     <h2 id="wa-title"><?php echo e($lang === 'en' ? 'Link WhatsApp' : 'ربط واتساب'); ?></h2>
-    <div id="wa-status" class="wa-status-pill warn"><span class="wa-status-dot"></span><span id="wa-status-text"><?php echo e($lang === 'en' ? 'Checking the saved link…' : 'جاري فحص الربط المحفوظ…'); ?></span></div>
-    <div class="wa-actions-row" id="waActions" style="display:none">
-      <button class="btn danger" type="button" id="waLogoutBtn" onclick="logoutWhatsApp()"><?php echo e($lang === 'en' ? 'Disconnect and show a new code' : 'قطع الاتصال وإظهار رمز جديد'); ?></button>
+    <div id="wa-status" class="wa-status-pill warn"><span class="wa-status-dot"></span><span id="wa-status-text"><?php echo e($lang === 'en' ? 'Please wait until the QR code appears' : 'يرجى الانتظار لحين ظهور رمز QR'); ?></span></div>
+    <div class="wa-actions-row" id="waActions">
+      <button class="btn" type="button" id="waLogoutBtn"><?php echo e($lang === 'en' ? 'Reload' : 'إعادة تحميل'); ?></button>
     </div>
   </div>
   <div id="wa-qr" class="wa-qr-stage">
     <img id="wa-qr-img" alt="QR" style="display:none">
     <div id="wa-qr-count" class="wa-qr-count" aria-live="polite"><b id="wa-qr-sec">20</b><span><?php echo e($lang === 'en' ? 'seconds left' : 'ثانية وتنتهي صلاحية الرمز'); ?></span></div>
-    <div id="wa-qr-placeholder"><?php echo e($lang === 'en' ? 'Checking the saved link…' : 'جاري فحص الربط المحفوظ…'); ?></div>
+    <div id="wa-qr-placeholder"><?php echo e($lang === 'en' ? 'Please wait until the QR code appears' : 'يرجى الانتظار لحين ظهور رمز QR'); ?></div>
     <div class="wa-qr-hint" id="wa-qr-title" style="display:none"></div>
   </div>
 </section>
@@ -2457,23 +2615,19 @@ if (function_exists('whatsapp_notifications_enabled') && isset($pdo)) {
     <input type="hidden" name="section" value="whatsapp">
     <div class="form-grid">
       <div>
-        <label><?php echo e(t('gateway_url')); ?></label>
+        <label><?php echo e($lang === 'en' ? 'Gateway URL' : 'رابط البوابة'); ?></label>
         <input class="ltr" id="gwUrl" name="whatsapp_local_url" value="<?php echo e($s['whatsapp_local_url']); ?>" required>
       </div>
       <div>
-        <label><?php echo e(t('gateway_key')); ?></label>
+        <label><?php echo e($lang === 'en' ? 'Gateway key' : 'مفتاح البوابة'); ?></label>
         <input class="ltr" name="whatsapp_local_key" value="<?php echo e($s['whatsapp_local_key']); ?>" required>
       </div>
       <div>
-        <label><?php echo e(t('whatsapp_on')); ?></label>
-        <select name="whatsapp_enabled">
+        <label><?php echo e($lang === 'en' ? 'Enable WhatsApp' : 'تفعيل واتساب'); ?></label>
+        <select name="whatsapp_enabled" required>
           <option value="1" <?php echo !empty($s['whatsapp_enabled']) ? 'selected' : ''; ?>><?php echo e($lang === 'en' ? 'ON' : 'تشغيل'); ?></option>
           <option value="0" <?php echo empty($s['whatsapp_enabled']) ? 'selected' : ''; ?>><?php echo e($lang === 'en' ? 'OFF' : 'إيقاف'); ?></option>
         </select>
-      </div>
-      <div>
-        <label><?php echo e($lang === 'en' ? 'Fixed note' : 'ملاحظة ثابتة'); ?></label>
-        <input name="whatsapp_sender_note" value="<?php echo e($s['whatsapp_sender_note']); ?>">
       </div>
     </div>
     <div class="actions" style="margin-top:12px">
@@ -2586,6 +2740,8 @@ $waCoverGroups = array(
 
 var waBusy = false;
 var qrWaitTimer = null;
+var waAutoResetDone = false;
+var waLinked = false;
 var waExpect = <?php echo json_encode(function_exists('whatsapp_session_id') ? (string) whatsapp_session_id() : ''); ?>;
 function waMine(data) {
   return !!(data && waExpect && data.session && String(data.session) === String(waExpect));
@@ -2596,19 +2752,20 @@ var L = {
   connected: <?php echo json_encode($lang === 'en' ? 'Connected' : 'متصل'); ?>,
   connectedBox: <?php echo json_encode($lang === 'en' ? 'Linked.' : 'الربط محفوظ.'); ?>,
   scanBelow: <?php echo json_encode($lang === 'en' ? 'WhatsApp → Linked devices → Link a device.' : 'واتساب ← الأجهزة المرتبطة ← ربط جهاز.'); ?>,
-  restoring: <?php echo json_encode($lang === 'en' ? 'Saved link is reconnecting. No new scan.' : 'الربط محفوظ ويعيد الاتصال وحده. ما تحتاج تمسح رمز.'); ?>,
-  freshQr: <?php echo json_encode($lang === 'en' ? 'Preparing a new code. Do not scan an old picture.' : 'نجهز رمز جديد. لا تمسح صورة قديمة.'); ?>,
+  waitQr: <?php echo json_encode($lang === 'en' ? 'Please wait until the QR code appears' : 'يرجى الانتظار لحين ظهور رمز QR'); ?>,
   gatewayDown: <?php echo json_encode($lang === 'en' ? 'WhatsApp is not connected.' : 'واتساب غير متصل.'); ?>,
   lost: <?php echo json_encode($lang === 'en' ? 'The phone unlinked this device.' : 'الموبايل فك الربط.'); ?>,
   needOnce: <?php echo json_encode($lang === 'en' ? 'This account is not linked yet.' : 'هذا الحساب بعد ما مربوط.'); ?>,
-  waiting: <?php echo json_encode($lang === 'en' ? 'Waiting for the picture from the gateway…' : 'ننتظر صورة الربط من البوابة…'); ?>,
+  waiting: <?php echo json_encode($lang === 'en' ? 'Please wait until the QR code appears' : 'يرجى الانتظار لحين ظهور رمز QR'); ?>,
   scanNew: <?php echo json_encode($lang === 'en' ? 'New picture ready' : 'صورة جديدة جاهزة'); ?>,
-  confirmLogout: <?php echo json_encode($lang === 'en' ? 'Disconnect? The saved link is erased and you must scan a new picture.' : 'تقطع الاتصال؟ الربط المحفوظ ينمسح وتحتاج تمسح صورة جديدة.'); ?>,
-  loggingOut: <?php echo json_encode($lang === 'en' ? 'Disconnecting… a new picture comes in a few seconds' : 'جاري قطع الاتصال… صورة جديدة خلال ثواني'); ?>,
+  btnReload: <?php echo json_encode($lang === 'en' ? 'Reload' : 'إعادة تحميل'); ?>,
+  btnDisconnect: <?php echo json_encode($lang === 'en' ? 'Disconnect' : 'قطع الاتصال'); ?>,
+  confirmLogout: <?php echo json_encode($lang === 'en' ? 'Disconnect this WhatsApp link?' : 'تقطع ربط واتساب؟'); ?>,
+  loggingOut: <?php echo json_encode($lang === 'en' ? 'Please wait until the QR code appears' : 'يرجى الانتظار لحين ظهور رمز QR'); ?>,
   certExpired: <?php echo json_encode($lang === 'en'
     ? 'Certificate problem on the PC. The gateway retries by itself. Wait, do not refresh many times.'
     : 'مشكلة شهادة على الحاسبة. البوابة تعيد المحاولة وحدها. انتظر ولا تحدّث الصفحة كثير.'); ?>,
-  tlsRetry: <?php echo json_encode($lang === 'en' ? 'Reconnecting…' : 'إعادة اتصال…'); ?>
+  tlsRetry: <?php echo json_encode($lang === 'en' ? 'Please wait until the QR code appears' : 'يرجى الانتظار لحين ظهور رمز QR'); ?>
 };
 
 function setStatus(cls, text) {
@@ -2645,22 +2802,35 @@ function paintQrCount() {
   if (sec <= 0) {
     clearQrCount();
     lastQrUrl = '';
-    showWaitingBox(L.freshQr, '');
-    setStatus('warn', L.freshQr);
+    showWaitingBox(L.waitQr, '');
+    setStatus('warn', L.waitQr);
     checkWhatsApp();
   }
 }
 function armQrCount(leftMs, force) {
   var left = parseInt(leftMs, 10);
-  if (!(left >= 0)) left = QR_TTL_MS;
+  if (!(left > 0)) left = QR_TTL_MS;
   var next = Date.now() + left;
   if (force || !qrDeadline || next < qrDeadline - 400) qrDeadline = next;
   if (!qrTicker) qrTicker = setInterval(paintQrCount, 200);
   paintQrCount();
 }
-function paintConnected(on) {
+function syncWaBtn(linked) {
+  var btn = document.getElementById('waLogoutBtn');
   var row = document.getElementById('waActions');
-  if (row) row.style.display = on ? '' : 'none';
+  if (row) row.style.display = '';
+  if (!btn) return;
+  waLinked = !!linked;
+  if (linked) {
+    btn.textContent = L.btnDisconnect;
+    btn.className = 'btn danger';
+  } else {
+    btn.textContent = L.btnReload;
+    btn.className = 'btn';
+  }
+}
+function paintConnected(on) {
+  syncWaBtn(on);
   var hero = document.querySelector('.wa-hero');
   if (hero) hero.classList.toggle('is-linked', !!on);
   var title = document.getElementById('wa-title');
@@ -2685,7 +2855,8 @@ function showQr(dataUrl, leftMs) {
   var img = document.getElementById('wa-qr-img');
   var ph = document.getElementById('wa-qr-placeholder');
   if (!dataUrl || !img) return false;
-  if (!(leftMs > 0)) return false;
+  var left = parseInt(leftMs, 10);
+  if (!(left > 0)) left = QR_TTL_MS;
   stageMode('scan');
   var changed = dataUrl !== lastQrUrl;
   if (changed) {
@@ -2696,7 +2867,7 @@ function showQr(dataUrl, leftMs) {
   }
   img.style.display = 'inline-block';
   if (ph) ph.style.display = 'none';
-  armQrCount(leftMs, changed);
+  armQrCount(left, changed);
   return true;
 }
 function showWaitingBox(text, mode) {
@@ -2723,36 +2894,37 @@ function paintState(data) {
     showWaitingBox(down, 'down');
     return 'stop';
   }
-  if (waMine(data) && data.ready) {
+  if ((waMine(data) || !waExpect) && data.ready) {
+    waAutoResetDone = false;
     paintConnected(true);
     setStatus('ok', L.connected + (data.phone ? (' — ' + data.phone) : ''));
     showWaitingBox(L.connectedBox, 'ok');
     return 'stop';
   }
   paintConnected(false);
-  if (data.registered || data.status === 'reconnecting') {
-    setStatus('warn', L.restoring);
-    showWaitingBox(L.restoring, '');
-    return 'stop';
-  }
-  if (data.status === 'qr_wait') {
-    setStatus('warn', L.freshQr);
-    showWaitingBox(L.freshQr, '');
-    return 'qr';
-  }
-  if (data.status === 'cert_expired' || data.status === 'tls_retry') {
-    var tls = data.status === 'tls_retry' ? L.tlsRetry : L.certExpired;
-    setStatus('warn', tls);
-    showWaitingBox(tls, '');
-    return 'stop';
-  }
-  if (waMine(data) && data.qr_data_url && showQr(data.qr_data_url, qrLeftOf(data))) {
+  if (data.qr_data_url && showQr(data.qr_data_url, qrLeftOf(data))) {
     setStatus('warn', L.scanBelow);
     return 'stop';
   }
-  if (data.status === 'logout_cooldown') {
-    setStatus('warn', L.loggingOut);
-    if (!lastQrUrl) showWaitingBox(L.loggingOut, '');
+  if (data.registered || data.status === 'reconnecting') {
+    setStatus('warn', L.waitQr);
+    if (!lastQrUrl) showWaitingBox(L.waitQr, '');
+    /* جلسة محفوظة بدون اتصال = امسحها فوراً واطلب QR (مثل باقي الحسابات) */
+    if (!waAutoResetDone && !waBusy) {
+      waAutoResetDone = true;
+      reloadWaQr(false);
+    }
+    return 'stop';
+  }
+  if (data.status === 'qr_wait' || data.status === 'logout_cooldown' || data.status === 'need_link'
+      || data.status === 'connecting' || data.status === 'starting' || data.status === 'tls_retry') {
+    setStatus('warn', L.waitQr);
+    if (!lastQrUrl) showWaitingBox(L.waitQr, '');
+    return 'qr';
+  }
+  if (data.status === 'cert_expired') {
+    setStatus('warn', L.certExpired);
+    showWaitingBox(L.certExpired, '');
     return 'stop';
   }
   if (data.status === 'closed_401') {
@@ -2760,13 +2932,8 @@ function paintState(data) {
     showWaitingBox(L.lost, '');
     return 'qr';
   }
-  if (data.status === 'need_link') {
-    setStatus('warn', L.needOnce);
-    if (!lastQrUrl) showWaitingBox(L.needOnce, '');
-    return 'qr';
-  }
-  setStatus('warn', L.restoring);
-  if (!lastQrUrl) showWaitingBox(L.restoring, '');
+  setStatus('warn', L.waitQr);
+  if (!lastQrUrl) showWaitingBox(L.waitQr, '');
   return 'qr';
 }
 var waChecking = false;
@@ -2799,43 +2966,42 @@ function waitForQr(tries) {
   fetch('wa_proxy.php?action=qr&_=' + Date.now())
     .then(function (r) { return r.json(); })
     .then(function (qr) {
-      if (qr && qr.registered) {
+      if (qr && qr.ready) {
         paintState(qr);
         waBusy = false;
         return;
       }
-      if (qr && qr.qr_data_url && waMine(qr) && showQr(qr.qr_data_url, qrLeftOf(qr))) {
+      if (qr && qr.qr_data_url && showQr(qr.qr_data_url, qrLeftOf(qr))) {
         paintConnected(false);
         setStatus('warn', L.scanNew);
         waBusy = false;
         return;
       }
-      if (qr && waMine(qr) && qr.ready) {
-        paintState(qr);
-        waBusy = false;
-        return;
-      }
       if (qr && (qr.success === false || qr.status === 'gateway_down')) {
-        paintState(qr);
+        setStatus('err', (qr && qr.error) ? qr.error : L.gatewayDown);
+        showWaitingBox((qr && qr.error) ? qr.error : L.gatewayDown, 'down');
         qrWaitTimer = setTimeout(function () { waitForQr(tries - 1); }, 4000);
         return;
       }
-      setStatus('warn', L.waiting);
-      showWaitingBox(L.waiting, '');
-      qrWaitTimer = setTimeout(function () { waitForQr(tries - 1); }, 4000);
+      /* registered بعد القطع = البوابة بعد تمسح — نكمل الانتظار */
+      setStatus('warn', L.waitQr);
+      if (!lastQrUrl) showWaitingBox(L.waitQr, '');
+      qrWaitTimer = setTimeout(function () { waitForQr(tries - 1); }, 2000);
     })
     .catch(function () {
       setStatus('err', L.gatewayDown);
       showWaitingBox(L.gatewayDown, 'down');
-      qrWaitTimer = setTimeout(function () { waitForQr(tries - 1); }, 5000);
+      qrWaitTimer = setTimeout(function () { waitForQr(tries - 1); }, 4000);
     });
 }
-function logoutWhatsApp() {
-  if (!confirm(L.confirmLogout)) return;
+function reloadWaQr(askConfirm) {
+  if (askConfirm && !confirm(L.confirmLogout)) return;
   if (qrWaitTimer) clearTimeout(qrWaitTimer);
   waBusy = true;
-  setStatus('warn', L.loggingOut);
-  showWaitingBox(L.loggingOut);
+  waAutoResetDone = true;
+  lastQrUrl = '';
+  setStatus('warn', L.waitQr);
+  showWaitingBox(L.waitQr, '');
   fetch('wa_proxy.php?action=logout&_=' + Date.now())
     .then(function (r) { return r.json(); })
     .then(function (data) {
@@ -2845,7 +3011,7 @@ function logoutWhatsApp() {
         waBusy = false;
         return;
       }
-      setTimeout(function () { waitForQr(20); }, 8000);
+      setTimeout(function () { waitForQr(30); }, 2000);
     })
     .catch(function () {
       setStatus('err', L.gatewayDown);
@@ -2853,6 +3019,18 @@ function logoutWhatsApp() {
       waBusy = false;
     });
 }
+function logoutWhatsApp() {
+  reloadWaQr(true);
+}
+(function () {
+  var btn = document.getElementById('waLogoutBtn');
+  if (btn) {
+    btn.addEventListener('click', function () {
+      if (waLinked) reloadWaQr(true);
+      else reloadWaQr(false);
+    });
+  }
+})();
 paintConnected(false);
 checkWhatsApp();
 setInterval(function () {
@@ -2902,37 +3080,14 @@ if ($sasTenantIdUi > 1) {
     <div style="margin:0 0 14px">
         <div style="font-weight:800;margin-bottom:6px"><?php echo e($isEn ? 'Subscriber ping' : 'بينغ المشتركين'); ?></div>
         <p style="color:#64748b;font-weight:600;margin:0 0 8px;font-size:13px"><?php echo e($isEn
-            ? 'Saved for this login. Each portal agent keeps their own choice. Middle is off.'
-            : 'ينحفظ لهذا الحساب. كل وكيل بالبوابة يختار لحاله. الوسط طافي.'); ?></p>
+            ? 'Per reseller below. Disabled until you add at least one reseller. Middle is off.'
+            : 'لكل رسلر من البطاقة أدناه. ما ينفع قبل ما تضيف رسلر واحد على الأقل. الوسط طافي.'); ?></p>
         <?php
-        $pingModeNow = function_exists('sas_ping_mode') ? sas_ping_mode($pdo) : 'off';
         if (function_exists('sas_ping_mode_style')) {
             echo sas_ping_mode_style();
         }
-        if (function_exists('sas_ping_mode_buttons')) {
-            echo sas_ping_mode_buttons($isEn, $pingModeNow);
-        }
         ?>
     </div>
-    <script>
-    (function () {
-      var box = document.getElementById('subPingMode');
-      if (!box) return;
-      var csrf = <?php echo json_encode(csrf_token()); ?>;
-      box.addEventListener('click', function (e) {
-        var btn = e.target && e.target.closest ? e.target.closest('[data-ping-mode]') : null;
-        if (!btn || !box.contains(btn)) return;
-        var mode = btn.getAttribute('data-ping-mode') || 'off';
-        if (box.getAttribute('data-mode') === mode) return;
-        var body = new FormData();
-        body.append('csrf', csrf);
-        body.append('section', 'sub_ping');
-        body.append('sub_ping_mode', mode);
-        fetch('settings.php?tab=sas', { method: 'POST', credentials: 'same-origin', body: body, redirect: 'manual' })
-          .then(function () { window.location.href = 'settings.php?tab=sas'; });
-      });
-    })();
-    </script>
     <?php if ($sasTenantIdUi <= 1): ?>
     <p style="color:#6b7a88;font-weight:600;margin-top:0">
         <?php echo e($isEn
@@ -2964,9 +3119,31 @@ if ($sasTenantIdUi > 1) {
         }
         .sas-logged-off { background:#f1f5f9; color:#64748b; font-weight:700; border-radius:999px; padding:4px 10px; font-size:13px; }
         .sas-logged-bad { background:#fee2e2; color:#991b1b; font-weight:800; border-radius:999px; padding:4px 10px; font-size:13px; }
+        .sas-retry-btn {
+          background:#0f766e; color:#fff; border:0; border-radius:999px; font-weight:800;
+          padding:6px 14px; box-shadow:0 6px 16px rgba(15,118,110,.22);
+        }
+        .sas-retry-btn:hover { background:#0d9488; color:#fff; }
+        .sas-retry-btn:disabled { opacity:.65; cursor:wait; }
+        .sas-acc-err {
+          margin-top:8px; padding:8px 10px; border-radius:10px;
+          background:#fef2f2; color:#991b1b; font-size:12.5px; font-weight:700;
+          line-height:1.45; word-break:break-word; max-width:42rem;
+        }
+        .sas-acc-retry-meta {
+          margin-top:4px; color:#9a3412; font-size:11.5px; font-weight:600;
+        }
         </style>
         <?php if (!$sasAccountsList): ?>
         <p class="meta"><?php echo e($isEn ? 'No reseller yet. Add one below.' : 'ماكو ريسيلر بعد. أضف واحد من الزر.'); ?></p>
+        <div class="sas-acc-ping" style="margin:8px 0 14px;opacity:.7">
+            <div class="sas-acc-meta" style="margin-bottom:4px"><?php echo e($isEn ? 'Subscriber ping (locked)' : 'بينغ المشتركين (مقفل)'); ?></div>
+            <?php
+            if (function_exists('sas_ping_mode_buttons')) {
+                echo sas_ping_mode_buttons($isEn, 'off', 'subPingModeLocked', 0, true);
+            }
+            ?>
+        </div>
         <?php else: ?>
         <div class="sas-acc-list">
             <?php
@@ -2992,10 +3169,14 @@ if ($sasTenantIdUi > 1) {
                     }
                     $seenSasAcc[$accKey] = 1;
                 }
+                $isElAcc = function_exists('tenant_sas_account_is_earthlink')
+                    && tenant_sas_account_is_earthlink($pdo, $acc);
                 $logged = !empty($acc['last_ok_at']) && trim((string) (isset($acc['last_error']) ? $acc['last_error'] : '')) === '';
                 $loginFail = trim((string) (isset($acc['last_error']) ? $acc['last_error'] : '')) !== '';
                 $liveDetail = (is_array($liveSas) && isset($liveSas['detail'])) ? (string) $liveSas['detail'] : '';
-                $liveDown = ($accKey !== '' && $accKey === $liveKey && is_array($liveSas) && !empty($liveSas['at']) && empty($liveSas['ok']));
+                // حالة الساس الحية تخص حسابات SAS فقط — لا تلصّق فشل الساس على بطاقة إيرث
+                $liveDown = (!$isElAcc && $accKey !== '' && $accKey === $liveKey
+                    && is_array($liveSas) && !empty($liveSas['at']) && empty($liveSas['ok']));
                 if ($liveDown) {
                     $logged = false;
                     $loginFail = true;
@@ -3020,7 +3201,56 @@ if ($sasTenantIdUi > 1) {
                         }
                     }
                     ?>
-                    <div class="sas-acc-meta"><?php echo e($isEn ? 'Bank' : 'البنك'); ?>: <span class="ltr"><?php echo e($accBank); ?></span></div>
+                    <div class="sas-acc-meta"><?php echo e($isEn ? 'Latency' : 'زمن الاستجابة'); ?>: <span class="ltr"><?php echo e($accBank); ?></span></div>
+                    <div class="sas-acc-ping">
+                        <div class="sas-acc-meta" style="margin-bottom:4px"><?php echo e($isEn ? 'Subscriber ping' : 'بينغ المشتركين'); ?></div>
+                        <?php
+                        $accPingMode = function_exists('sas_ping_mode_for_account')
+                            ? sas_ping_mode_for_account($pdo, (int) $acc['id'])
+                            : 'off';
+                        if (function_exists('sas_ping_mode_buttons')) {
+                            echo sas_ping_mode_buttons(
+                                $isEn,
+                                $accPingMode,
+                                'subPingMode-' . (int) $acc['id'],
+                                (int) $acc['id'],
+                                false
+                            );
+                        }
+                        ?>
+                    </div>
+                    <?php
+                    $failBlobEarly = isset($acc['last_error']) ? trim((string) $acc['last_error']) : '';
+                    $failCountUi = isset($acc['login_fail_count']) ? (int) $acc['login_fail_count'] : 0;
+                    $nextRetryUi = isset($acc['login_next_retry_at']) ? trim((string) $acc['login_next_retry_at']) : '';
+                    if ($loginFail && $failBlobEarly !== ''):
+                    ?>
+                    <div class="sas-acc-err"><?php echo e($failBlobEarly); ?></div>
+                    <?php
+                    if ($nextRetryUi !== '') {
+                        $nextTs = strtotime($nextRetryUi);
+                        $waitSec = $nextTs ? max(0, $nextTs - time()) : 0;
+                        if ($waitSec > 0) {
+                            $waitLabel = ($waitSec >= 60)
+                                ? (ceil($waitSec / 60) . ($isEn ? ' min' : ' د'))
+                                : ($waitSec . ($isEn ? 's' : ' ث'));
+                            echo '<div class="sas-acc-retry-meta">'
+                                . e($isEn
+                                    ? ('Auto-retry in ' . $waitLabel . ($failCountUi > 0 ? (' · try #' . $failCountUi) : ''))
+                                    : ('إعادة تلقائية بعد ' . $waitLabel . ($failCountUi > 0 ? (' · محاولة #' . $failCountUi) : '')))
+                                . '</div>';
+                        } else {
+                            echo '<div class="sas-acc-retry-meta">'
+                                . e($isEn ? 'Auto-retry soon' : 'إعادة تلقائية قريباً')
+                                . '</div>';
+                        }
+                    } else {
+                        echo '<div class="sas-acc-retry-meta">'
+                            . e($isEn ? 'Background retries are scheduled' : 'إعادة المحاولة التلقائية مفعّلة')
+                            . '</div>';
+                    }
+                    ?>
+                    <?php endif; ?>
                 </div>
                 <div class="sas-acc-actions">
                     <?php if ($logged): ?>
@@ -3035,7 +3265,7 @@ if ($sasTenantIdUi > 1) {
                     <?php elseif ($loginFail): ?>
                     <?php
                     $failLabel = $isEn ? 'Login failed' : 'فشل الدخول';
-                    $failBlob = isset($acc['last_error']) ? (string) $acc['last_error'] : '';
+                    $failBlob = $failBlobEarly;
                     if ($liveDown && (stripos($failBlob, '429') !== false || stripos($failBlob, 'too_many') !== false)) {
                         $failLabel = $isEn ? 'Too many tries' : 'محاولات كثيرة';
                     } elseif ($liveDown) {
@@ -3043,8 +3273,22 @@ if ($sasTenantIdUi > 1) {
                     }
                     ?>
                     <span class="sas-logged-bad" title="<?php echo e($failBlob); ?>"><?php echo e($failLabel); ?></span>
+                    <form method="post" class="inline-form sas-retry-form">
+                        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                        <input type="hidden" name="section" value="sas">
+                        <input type="hidden" name="action" value="retry_login">
+                        <input type="hidden" name="account_id" value="<?php echo (int) $acc['id']; ?>">
+                        <button class="btn sm sas-retry-btn" type="submit"><?php echo e($isEn ? 'Retry' : 'إعادة محاولة'); ?></button>
+                    </form>
                     <?php else: ?>
                     <span class="sas-logged-off"><?php echo e($isEn ? 'Not connected' : 'غير متصل'); ?></span>
+                    <form method="post" class="inline-form sas-retry-form">
+                        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                        <input type="hidden" name="section" value="sas">
+                        <input type="hidden" name="action" value="retry_login">
+                        <input type="hidden" name="account_id" value="<?php echo (int) $acc['id']; ?>">
+                        <button class="btn sm sas-retry-btn" type="submit"><?php echo e($isEn ? 'Retry' : 'إعادة محاولة'); ?></button>
+                    </form>
                     <?php endif; ?>
                     <form method="post" class="inline-form" onsubmit="return confirm(<?php echo json_encode($isEn ? 'Delete this reseller?' : 'حذف هذا الريسيلر؟'); ?>);">
                         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
@@ -3057,6 +3301,50 @@ if ($sasTenantIdUi > 1) {
             </div>
             <?php endforeach; ?>
         </div>
+        <script>
+        (function () {
+          var csrf = <?php echo json_encode(csrf_token()); ?>;
+          var boxes = document.querySelectorAll('.sas-acc-ping .ping-mode[data-account-id]');
+          for (var i = 0; i < boxes.length; i++) {
+            (function (box) {
+              box.addEventListener('click', function (e) {
+                var btn = e.target && e.target.closest ? e.target.closest('[data-ping-mode]') : null;
+                if (!btn || !box.contains(btn) || btn.disabled) return;
+                var mode = btn.getAttribute('data-ping-mode') || 'off';
+                var accId = box.getAttribute('data-account-id') || '0';
+                if (box.getAttribute('data-mode') === mode) return;
+                var prev = box.getAttribute('data-mode') || 'off';
+                var all = box.querySelectorAll('[data-ping-mode]');
+                for (var j = 0; j < all.length; j++) all[j].classList.remove('is-on');
+                btn.classList.add('is-on');
+                box.setAttribute('data-mode', mode);
+                var body = new FormData();
+                body.append('csrf', csrf);
+                body.append('section', 'sub_ping');
+                body.append('sub_ping_mode', mode);
+                body.append('account_id', accId);
+                fetch('settings.php?tab=sas', { method: 'POST', credentials: 'same-origin', body: body, redirect: 'manual' })
+                  .then(function () { window.location.href = 'settings.php?tab=sas'; })
+                  .catch(function () {
+                    box.setAttribute('data-mode', prev);
+                    for (var k = 0; k < all.length; k++) all[k].classList.remove('is-on');
+                    var pb = box.querySelector('[data-ping-mode="' + prev + '"]');
+                    if (pb) pb.classList.add('is-on');
+                  });
+              });
+            })(boxes[i]);
+          }
+          document.addEventListener('submit', function (e) {
+            var f = e.target;
+            if (!f || !f.classList || !f.classList.contains('sas-retry-form')) return;
+            var b = f.querySelector('.sas-retry-btn');
+            if (b) {
+              b.disabled = true;
+              b.textContent = <?php echo json_encode($isEn ? 'Checking…' : 'جاري الفحص…'); ?>;
+            }
+          });
+        })();
+        </script>
         <?php endif; ?>
 
         <?php if (!$sasCompanyCatalog): ?>
@@ -3081,9 +3369,12 @@ if ($sasTenantIdUi > 1) {
                     <?php foreach ($sasCompanyCatalog as $co):
                         $cid = (int) $co['id'];
                         $cHost = preg_replace('#^https?://#i', '', rtrim(trim((string) $co['sas_host']), '/'));
+                        $cProv = isset($co['provider_type']) ? (string) $co['provider_type'] : 'sas';
+                        $cProv = function_exists('platform_company_normalize_provider')
+                            ? platform_company_normalize_provider($cProv) : $cProv;
                         ?>
-                        <option value="<?php echo $cid; ?>" data-host="<?php echo e($cHost); ?>" data-name="<?php echo e($co['name']); ?>">
-                            <?php echo e($co['name']); ?>
+                        <option value="<?php echo $cid; ?>" data-host="<?php echo e($cHost); ?>" data-name="<?php echo e($co['name']); ?>" data-provider="<?php echo e($cProv); ?>">
+                            <?php echo e($co['name'] . ($cProv === 'earthlink' ? ' · Earthlink' : ' · SAS')); ?>
                         </option>
                     <?php endforeach; ?>
                 </select>
@@ -3115,7 +3406,7 @@ if ($sasTenantIdUi > 1) {
         <div id="sasWait" hidden>
             <div class="sas-wait-card">
                 <div class="sas-spin"></div>
-                <div style="margin-top:10px;font-weight:800"><?php echo e($isEn ? 'Signing in to SAS…' : 'جاري تسجيل الدخول للساس…'); ?></div>
+                <div style="margin-top:10px;font-weight:800"><?php echo e($isEn ? 'Signing in…' : 'جاري تسجيل الدخول…'); ?></div>
             </div>
         </div>
         <style>
@@ -3135,6 +3426,7 @@ if ($sasTenantIdUi > 1) {
             });
           }
           if (addBox) {
+            addBox.setAttribute('data-no-wait', '1');
             addBox.addEventListener('submit', function () {
               var wait = document.getElementById('sasWait');
               var btn = document.getElementById('sasAddSubmit');

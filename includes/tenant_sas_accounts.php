@@ -44,6 +44,9 @@ function ensure_tenant_sas_accounts_schema($pdo)
             tenants_ensure_column($pdo, 'sas_users_cache', 'sas_account_id', 'INT UNSIGNED NULL DEFAULT NULL');
             tenants_ensure_column($pdo, 'tenant_sas_accounts', 'last_ok_at', 'DATETIME NULL DEFAULT NULL');
             tenants_ensure_column($pdo, 'tenant_sas_accounts', 'last_error', 'VARCHAR(255) NULL DEFAULT NULL');
+            tenants_ensure_column($pdo, 'tenant_sas_accounts', 'ping_mode', "VARCHAR(16) NOT NULL DEFAULT 'off'");
+            tenants_ensure_column($pdo, 'tenant_sas_accounts', 'login_fail_count', 'INT UNSIGNED NOT NULL DEFAULT 0');
+            tenants_ensure_column($pdo, 'tenant_sas_accounts', 'login_next_retry_at', 'DATETIME NULL DEFAULT NULL');
         } catch (Exception $e) {
         }
     }
@@ -287,6 +290,52 @@ function tenant_sas_accounts_ready($pdo, $tenantId)
     return $out;
 }
 
+/**
+ * نوع مزود الحساب: sas | earthlink
+ * لا تعتمد فقط على company_id — الهوست يكفي لكشف إيرث.
+ */
+function tenant_sas_account_provider($pdo, $acc)
+{
+    if (!is_array($acc)) {
+        return 'sas';
+    }
+    $host = strtolower(preg_replace('#^https?://#i', '', rtrim(trim((string) (isset($acc['sas_host']) ? $acc['sas_host'] : '')), '/')));
+    if ($host !== '' && (
+        strpos($host, 'earthlink') !== false
+        || strpos($host, 'spicywifi') !== false
+        || strpos($host, 'earthlink-api') !== false
+    )) {
+        return 'earthlink';
+    }
+    $cid = !empty($acc['company_id']) ? (int) $acc['company_id'] : 0;
+    if ($cid > 0 && function_exists('platform_company_row')) {
+        $co = platform_company_row($pdo, $cid);
+        if ($co && function_exists('platform_company_normalize_provider')) {
+            return platform_company_normalize_provider(
+                isset($co['provider_type']) ? $co['provider_type'] : 'sas'
+            );
+        }
+    }
+    return 'sas';
+}
+
+function tenant_sas_account_is_earthlink($pdo, $acc)
+{
+    return tenant_sas_account_provider($pdo, $acc) === 'earthlink';
+}
+
+/** حسابات جاهزة من نوع SAS فقط (لإشعارات/مزامنة الساس). */
+function tenant_sas_accounts_ready_sas($pdo, $tenantId)
+{
+    $out = array();
+    foreach (tenant_sas_accounts_ready($pdo, $tenantId) as $r) {
+        if (!tenant_sas_account_is_earthlink($pdo, $r)) {
+            $out[] = $r;
+        }
+    }
+    return $out;
+}
+
 function sas_config_from_account_row($row)
 {
     if (!$row || !is_array($row)) {
@@ -498,6 +547,197 @@ function tenant_sas_account_save($pdo, $tenantId, $fields, $accountId = 0)
     } catch (Exception $e) {
         return array(false, 'فشل الحفظ: ' . $e->getMessage(), 0);
     }
+}
+
+/**
+ * تأخير إعادة المحاولة بالثواني حسب رقم الفشل (بعد هذه المحاولة).
+ * 1–10: كل دقيقة، 11–22: كل 5 دقائق، بعدها كل 15 دقيقة.
+ */
+function tenant_sas_login_retry_delay_sec($failCount)
+{
+    $n = (int) $failCount;
+    if ($n <= 0) {
+        $n = 1;
+    }
+    if ($n <= 10) {
+        return 60;
+    }
+    if ($n <= 22) {
+        return 300;
+    }
+    return 900;
+}
+
+function tenant_sas_login_retry_schedule_sql($failCount)
+{
+    $sec = tenant_sas_login_retry_delay_sec($failCount);
+    return date('Y-m-d H:i:s', time() + $sec);
+}
+
+/**
+ * إعادة محاولة الدخول بنفس بيانات الحساب المحفوظة (SAS أو Earthlink).
+ * @return array {0:bool ok, 1:string message, 2?:array meta}
+ */
+function tenant_sas_account_retry_login($pdo, $tenantId, $accountId, $config = null)
+{
+    ensure_tenant_sas_accounts_schema($pdo);
+    $tenantId = (int) $tenantId;
+    $accountId = (int) $accountId;
+    $row = tenant_sas_account_row($pdo, $accountId, $tenantId);
+    if (!$row) {
+        return array(false, 'الحساب غير موجود', array());
+    }
+    $host = trim((string) (isset($row['sas_host']) ? $row['sas_host'] : ''));
+    $user = trim((string) (isset($row['sas_username']) ? $row['sas_username'] : ''));
+    $pass = (string) (isset($row['sas_password']) ? $row['sas_password'] : '');
+    if ($host === '' || $user === '' || $pass === '') {
+        return array(false, 'بيانات الدخول ناقصة — احذف الحساب وأضفه من جديد', array());
+    }
+    $isEl = function_exists('tenant_sas_account_is_earthlink')
+        && tenant_sas_account_is_earthlink($pdo, $row);
+    $ok = false;
+    $msg = '';
+    if ($isEl && function_exists('earthlink_test_connection')) {
+        $cid = !empty($row['company_id']) ? (int) $row['company_id'] : 0;
+        $alt = ($cid > 0 && function_exists('earthlink_company_alt_host'))
+            ? earthlink_company_alt_host($pdo, $cid)
+            : '';
+        $test = earthlink_test_connection($host, $user, $pass, $alt);
+        $ok = !empty($test['ok']);
+        $msg = isset($test['message']) ? (string) $test['message'] : '';
+        if (!$ok && empty($msg) && isset($test['error'])) {
+            $msg = (string) $test['error'];
+        }
+    } elseif (function_exists('tenant_test_sas_connection')) {
+        list($ok, $msg) = tenant_test_sas_connection($host, $user, $pass);
+    } else {
+        return array(false, 'دالة فحص الاتصال غير موجودة', array());
+    }
+    $errStore = $ok
+        ? null
+        : (function_exists('mb_substr')
+            ? mb_substr((string) $msg, 0, 250, 'UTF-8')
+            : substr((string) $msg, 0, 250));
+    $prevFails = isset($row['login_fail_count']) ? (int) $row['login_fail_count'] : 0;
+    try {
+        if ($ok) {
+            $pdo->prepare(
+                'UPDATE tenant_sas_accounts
+                 SET sas_enabled = 1, last_ok_at = NOW(), last_error = NULL,
+                     login_fail_count = 0, login_next_retry_at = NULL, updated_at = NOW()
+                 WHERE id = :id AND tenant_id = :t'
+            )->execute(array(':id' => $accountId, ':t' => $tenantId));
+            if ($isEl && function_exists('earthlink_sync_to_cache')) {
+                $cid = !empty($row['company_id']) ? (int) $row['company_id'] : 0;
+                // مزامنة خفيفة لاحقاً — لا تمنع ردّ النجاح
+                try {
+                    earthlink_sync_to_cache($pdo, $tenantId, $host, $user, $pass, $cid);
+                } catch (Exception $eSync) {
+                }
+            }
+            if (!$isEl && function_exists('sas_mark_connection') && is_array($config)) {
+                sas_mark_connection($pdo, $config, true, $msg !== '' ? $msg : 'ok', $tenantId);
+            }
+            return array(true, $msg !== '' ? $msg : 'تم الدخول بنجاح', array('fail_count' => 0));
+        }
+        $failCount = $prevFails + 1;
+        $nextAt = tenant_sas_login_retry_schedule_sql($failCount);
+        $pdo->prepare(
+            'UPDATE tenant_sas_accounts
+             SET last_ok_at = NULL, last_error = :e,
+                 login_fail_count = :fc, login_next_retry_at = :nr, updated_at = NOW()
+             WHERE id = :id AND tenant_id = :t'
+        )->execute(array(
+            ':e' => $errStore,
+            ':fc' => $failCount,
+            ':nr' => $nextAt,
+            ':id' => $accountId,
+            ':t' => $tenantId,
+        ));
+        if (!$isEl && function_exists('sas_mark_connection') && is_array($config)) {
+            sas_mark_connection($pdo, $config, false, (string) $msg, $tenantId);
+        }
+        return array(false, $msg !== '' ? $msg : 'فشل الدخول', array(
+            'fail_count' => $failCount,
+            'next_retry_at' => $nextAt,
+            'next_retry_sec' => tenant_sas_login_retry_delay_sec($failCount),
+        ));
+    } catch (Exception $e) {
+        return array(false, 'تعذر حفظ نتيجة المحاولة', array());
+    }
+}
+
+/**
+ * حسابات فاشلة حان وقت إعادة محاولتها — خفيف: حد أقصى قليل لكل دورة.
+ * @return int عدد المحاولات التي نُفّذت
+ */
+function tenant_sas_accounts_retry_due($pdo, $config = null, $max = 1)
+{
+    ensure_tenant_sas_accounts_schema($pdo);
+    $max = max(1, min(3, (int) $max));
+    $rows = array();
+    try {
+        $st = $pdo->query(
+            "SELECT id, tenant_id, last_error, login_fail_count, login_next_retry_at
+             FROM tenant_sas_accounts
+             WHERE sas_enabled = 1
+               AND sas_username IS NOT NULL AND TRIM(sas_username) <> ''
+               AND sas_password IS NOT NULL AND sas_password <> ''
+               AND last_error IS NOT NULL AND TRIM(last_error) <> ''
+               AND (login_next_retry_at IS NULL OR login_next_retry_at <= NOW())
+             ORDER BY COALESCE(login_next_retry_at, '1970-01-01') ASC, id ASC
+             LIMIT " . (int) $max
+        );
+        $rows = $st ? $st->fetchAll(PDO::FETCH_ASSOC) : array();
+    } catch (Exception $e) {
+        return 0;
+    }
+    $n = 0;
+    foreach ($rows as $r) {
+        $tid = (int) $r['tenant_id'];
+        $aid = (int) $r['id'];
+        if ($tid <= 0 || $aid <= 0) {
+            continue;
+        }
+        // إن ماكو موعد بعد — حدّد أول محاولة بعد دقيقة بدون فحص ثقيل الآن إن فشل حديث جداً
+        if (empty($r['login_next_retry_at'])) {
+            $updated = 0;
+            try {
+                $chk = $pdo->prepare(
+                    'SELECT TIMESTAMPDIFF(SECOND, updated_at, NOW()) FROM tenant_sas_accounts WHERE id = :id LIMIT 1'
+                );
+                $chk->execute(array(':id' => $aid));
+                $updated = (int) $chk->fetchColumn();
+            } catch (Exception $eAge) {
+                $updated = 60;
+            }
+            if ($updated >= 0 && $updated < 45) {
+                $next = tenant_sas_login_retry_schedule_sql(max(1, (int) $r['login_fail_count']));
+                try {
+                    $pdo->prepare(
+                        'UPDATE tenant_sas_accounts SET login_next_retry_at = :nr WHERE id = :id'
+                    )->execute(array(':nr' => $next, ':id' => $aid));
+                } catch (Exception $eSet) {
+                }
+                continue;
+            }
+        }
+        $cfg = $config;
+        if (is_array($config) && function_exists('sas_config_for_tenant')) {
+            try {
+                $cfg = sas_config_for_tenant($pdo, $config, $tid);
+            } catch (Exception $eCfg) {
+                $cfg = $config;
+            }
+        }
+        tenant_sas_account_retry_login($pdo, $tid, $aid, $cfg);
+        $n++;
+        // استراحة قصيرة بين حسابين حتى ما نضغط الشبكة/المعالج
+        if ($n < $max) {
+            usleep(200000);
+        }
+    }
+    return $n;
 }
 
 function tenant_sas_account_logout($pdo, $tenantId, $accountId)

@@ -25,11 +25,16 @@ if (!$isNew) {
     if (isset($_GET['ajax']) && (string) $_GET['ajax'] === 'sessions') {
         header('Content-Type: application/json; charset=utf-8');
         $storeName = !empty($cache['username']) ? (string) $cache['username'] : $username;
+        $localOnly = isset($_GET['local']) && (string) $_GET['local'] === '1';
+        if ($localOnly && function_exists('sas_sessions_local_pack')) {
+            echo json_encode(sas_sessions_local_pack($pdo, $storeName, $cache));
+            exit;
+        }
         if (!function_exists('sas_sessions_pull')) {
             echo json_encode(array('ok' => false, 'fresh' => 0, 'rows' => array()));
             exit;
         }
-        $pack = sas_sessions_pull($pdo, $config, $storeName, $sasUserId);
+        $pack = sas_sessions_pull($pdo, $config, $storeName, $sasUserId, $cache);
         echo json_encode($pack);
         exit;
     }
@@ -113,6 +118,51 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect(sas_user_url($username));
     }
 
+    if (!$isNew && $action === 'su_activate') {
+        if (function_exists('app_maintenance_blocks') && app_maintenance_blocks('activate', $config)) {
+            flash('error', app_maintenance_message('activate', $lang));
+            redirect(sas_user_url($username));
+        }
+        $isElAct = !empty($cache['provider']) && strtolower((string) $cache['provider']) === 'earthlink';
+        if ($isElAct) {
+            flash('error', $isEn ? 'Activate from the subscribers table for Earthlink' : 'تفعيل إيرث من جدول المشتركين');
+            redirect(sas_user_url($username));
+        }
+        $pidAct = !empty($cache['profile_id']) ? (int) $cache['profile_id'] : 0;
+        $pnameAct = !empty($cache['profile_name']) ? (string) $cache['profile_name'] : '';
+        if ($pidAct <= 0) {
+            flash('error', $isEn ? 'No package on this subscriber' : 'ماكو باقة على هذا المشترك');
+            redirect(sas_user_url($username));
+        }
+        list($okA, $msgA) = sas_write_user($pdo, $config, 'sas_activate_credit', $username, array(
+            'profile_id' => $pidAct,
+            'profile_name' => $pnameAct,
+            'units' => 1,
+            'pay_mode' => 'cash',
+        ));
+        flash($okA ? 'success' : 'error', $msgA);
+        redirect(sas_user_url($username));
+    }
+
+    if (!$isNew && $action === 'su_give_day') {
+        if (function_exists('app_maintenance_blocks') && app_maintenance_blocks('give_test', $config)) {
+            flash('error', app_maintenance_message('give_test', $lang));
+            redirect(sas_user_url($username));
+        }
+        $isElDay = !empty($cache['provider']) && strtolower((string) $cache['provider']) === 'earthlink';
+        if ($isElDay) {
+            flash('error', $isEn ? '+1 day is for SAS subscribers' : '+1 يوم لمشتركين الساس فقط');
+            redirect(sas_user_url($username));
+        }
+        if (!function_exists('sas_extend_one_day')) {
+            flash('error', 'دالة التمديد غير موجودة');
+            redirect(sas_user_url($username));
+        }
+        list($okD, $msgD) = sas_extend_one_day($pdo, $config, $username);
+        flash($okD ? 'success' : 'error', $msgD);
+        redirect(sas_user_url($username));
+    }
+
     if (!$isNew && $action === 'update_local_details') {
         $address = (string) post('address', '');
         $notes = (string) post('notes', '');
@@ -131,8 +181,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $msg = $gMsg;
             }
         }
+        if ($ok && function_exists('sas_save_user_auto_activate')) {
+            $autoOn = post('auto_activate_on_expire') === '1';
+            $autoNotify = $autoOn && post('auto_activate_notify') === '1';
+            list($aOk, $aMsg) = sas_save_user_auto_activate($pdo, $config, $username, $autoOn, $autoNotify);
+            if (!$aOk) {
+                $ok = false;
+                $msg = $aMsg;
+            } elseif ($aMsg !== '') {
+                $msg = $aMsg;
+            }
+        }
         flash($ok ? 'success' : 'error', $msg);
-        redirect(sas_user_url($username) . '#local');
+        redirect(sas_user_url($username));
     }
 
     if (!$isNew && ($action === 'msg_rental_only' || $action === 'msg_rental_return')) {
@@ -179,11 +240,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         'password' => post('password', ''),
         'confirm_password' => post('confirm_password', ''),
     );
-    $pid = (int) $fields['profile_id'];
-    $par = (int) $fields['parent_id'];
+    $isElUser = !$isNew && !empty($cache['provider']) && strtolower((string) $cache['provider']) === 'earthlink';
+    $pidRaw = trim((string) $fields['profile_id']);
+    $parRaw = trim((string) $fields['parent_id']);
+    $pid = (int) $pidRaw;
+    $par = (int) $parRaw;
+    if ($isElUser && function_exists('earthlink_package_name_from_ui_id')) {
+        $elProf = earthlink_package_name_from_ui_id($pidRaw);
+        if ($elProf !== '') {
+            $fields['profile_name'] = $elProf;
+            $fields['profile_id'] = '0';
+            $pid = 0;
+        }
+        if (stripos($parRaw, 'elp:') === 0) {
+            $fields['parent_name'] = rawurldecode(substr($parRaw, 4));
+            $fields['parent_id'] = '0';
+            $par = 0;
+        }
+    }
     if (isset($_SESSION['sas_profiles_ui']) && is_array($_SESSION['sas_profiles_ui'])) {
         foreach ($_SESSION['sas_profiles_ui'] as $pr) {
-            if ((int) $pr['id'] === $pid) {
+            if ((string) $pr['id'] === (string) $pidRaw || (int) $pr['id'] === $pid) {
                 $fields['profile_name'] = $pr['name'];
                 break;
             }
@@ -191,13 +268,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     if (isset($_SESSION['sas_managers_ui']) && is_array($_SESSION['sas_managers_ui'])) {
         foreach ($_SESSION['sas_managers_ui'] as $mn) {
-            if ((int) $mn['id'] === $par) {
+            if ((string) $mn['id'] === (string) $parRaw || (int) $mn['id'] === $par) {
                 $fields['parent_name'] = $mn['name'];
                 break;
             }
         }
     }
-    if (empty($fields['profile_name']) || empty($fields['parent_name'])) {
+    if (!$isElUser && (empty($fields['profile_name']) || empty($fields['parent_name']))) {
         $apiTmp = function_exists('sas_page_connector') ? sas_page_connector($config) : null;
         if ($apiTmp) {
             if (empty($fields['profile_name'])) {
@@ -216,6 +293,102 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                 }
             }
+        }
+    }
+    // إيرث لنك: اكتب على البوابة ثم حدّث الكاش
+    if ($isElUser && ($action === 'sas_update_info' || $action === 'sas_create')) {
+        if ($action === 'sas_create') {
+            flash('error', $isEn ? 'Create via Earthlink portal is not supported yet' : 'إنشاء مشترك إيرث من هنا غير مدعوم بعد');
+            redirect('sas_user.php?new=1');
+        }
+        // حقل الاسم بالواجهة = الاسم العربي (ArabicName / DisplayName) على إيرث
+        $elName = trim((string) $fields['firstname']);
+        $elChanges = array(
+            'arabic_name' => $elName,
+            'display_name' => $elName,
+            'enabled' => (int) $fields['enabled'],
+        );
+        $curProf = isset($cache['profile_name']) ? trim((string) $cache['profile_name']) : '';
+        $newProf = !empty($fields['profile_name']) ? trim((string) $fields['profile_name']) : '';
+        if ($newProf !== '' && strcasecmp($newProf, $curProf) !== 0) {
+            $elChanges['profile_name'] = $newProf;
+        }
+        if (!empty($fields['password'])) {
+            $elChanges['password'] = $fields['password'];
+            $elChanges['confirm_password'] = $fields['confirm_password'];
+        }
+        $remote = array('ok' => false, 'error' => 'دالة التحديث غير موجودة');
+        if (function_exists('earthlink_update_user_for_cache')) {
+            $remote = earthlink_update_user_for_cache($pdo, $cache, $elChanges);
+        }
+        if (empty($remote['ok'])) {
+            flash('error', isset($remote['error']) ? $remote['error'] : ($isEn ? 'Earthlink update failed' : 'فشل الحفظ على إيرث لنك'));
+            redirect(sas_user_url($username));
+        }
+        $savedName = !empty($remote['display_name']) ? trim((string) $remote['display_name']) : $elName;
+        $patch = array(
+            'display_name' => $savedName,
+            'lastname' => $fields['lastname'],
+            'phone' => $fields['phone'],
+            'city' => $fields['city'],
+            'email' => $fields['email'],
+            'company' => $fields['company'],
+            'enabled' => (int) $fields['enabled'],
+        );
+        // لا تستبدل firstname الإنجليزي بالبوابة — خلّي العرض على display_name
+        if ($newProf !== '') {
+            $patch['profile_name'] = !empty($remote['account_name']) ? $remote['account_name'] : $newProf;
+            $patch['profile_id'] = null;
+        }
+        if (!empty($fields['parent_name'])) {
+            $patch['parent_name'] = $fields['parent_name'];
+        }
+        if (function_exists('sas_cache_patch')) {
+            sas_cache_patch($pdo, $username, $patch);
+        }
+        // حدّث الاسم المحلي ليطابق DisplayName
+        if ($savedName !== '' && function_exists('sas_cache_ensure_local')) {
+            list($localIdUp) = sas_cache_ensure_local($pdo, $config, array_merge($cache, $patch));
+            if ($localIdUp > 0) {
+                try {
+                    $pdo->prepare('UPDATE subscribers SET name = :n WHERE id = :id')
+                        ->execute(array(':n' => $savedName, ':id' => (int) $localIdUp));
+                } catch (Exception $e) {
+                }
+            }
+        }
+        flash('success', isset($remote['message']) ? $remote['message'] : ($isEn ? 'Saved on Earthlink' : 'تم الحفظ على إيرث لنك'));
+        redirect(sas_user_url($username));
+    }
+    // إنشاء مشترك: حدّد حساب الشركة المختارة
+    $createCompanyId = (int) post('company_id', '0');
+    $createAccountId = (int) post('account_id', '0');
+    if (($isNew || $action === 'sas_create') && function_exists('tenant_sas_accounts_list')) {
+        $createTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+        $pickedAcc = null;
+        foreach (tenant_sas_accounts_list($pdo, $createTid) as $accRow) {
+            $aid = isset($accRow['id']) ? (int) $accRow['id'] : 0;
+            $acid = !empty($accRow['company_id']) ? (int) $accRow['company_id'] : 0;
+            if ($createAccountId > 0 && $aid === $createAccountId) {
+                $pickedAcc = $accRow;
+                break;
+            }
+            if ($createAccountId <= 0 && $createCompanyId > 0 && $acid === $createCompanyId) {
+                $pickedAcc = $accRow;
+                break;
+            }
+        }
+        if ($pickedAcc && function_exists('tenant_sas_account_is_earthlink')
+            && tenant_sas_account_is_earthlink($pdo, $pickedAcc)
+        ) {
+            flash('error', $isEn ? 'Create via Earthlink is not supported yet — pick a SAS company' : 'إنشاء مشترك إيرث غير مدعوم بعد — اختار شركة ساس');
+            redirect('sas_user.php?new=1');
+        }
+        if ($pickedAcc) {
+            $GLOBALS['sas_force_account'] = $pickedAcc;
+        } elseif ($createCompanyId > 0 || $createAccountId > 0) {
+            flash('error', $isEn ? 'Choose a valid company' : 'اختار شركة صحيحة');
+            redirect('sas_user.php?new=1');
         }
     }
     if ($isNew || $action === 'sas_create') {
@@ -240,41 +413,124 @@ $fn = isset($cache['firstname']) ? $cache['firstname'] : '';
 $ln = isset($cache['lastname']) ? $cache['lastname'] : '';
 $phone = isset($cache['phone']) ? $cache['phone'] : '';
 $enabled = $isNew ? true : !empty($cache['enabled']);
+$isEarthlinkUser = !$isNew && !empty($cache['provider']) && strtolower((string) $cache['provider']) === 'earthlink';
+$elCompanyId = ($isEarthlinkUser && !empty($cache['company_id'])) ? (int) $cache['company_id'] : 0;
+// إيرث: حقل الاسم القابل للتعديل = الاسم العربي (display_name / ArabicName)
+if ($isEarthlinkUser && !empty($cache['display_name'])) {
+    $fn = (string) $cache['display_name'];
+}
+$companyPickOptions = array();
+if ($isNew && function_exists('tenant_sas_accounts_list')) {
+    $pickTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+    foreach (tenant_sas_accounts_list($pdo, $pickTid) as $accOpt) {
+        if (empty($accOpt['sas_enabled'])) {
+            continue;
+        }
+        $cid = !empty($accOpt['company_id']) ? (int) $accOpt['company_id'] : 0;
+        $prov = function_exists('tenant_sas_account_provider')
+            ? tenant_sas_account_provider($pdo, $accOpt)
+            : 'sas';
+        $coName = isset($accOpt['label']) ? trim((string) $accOpt['label']) : '';
+        if ($cid > 0 && function_exists('platform_company_row')) {
+            $coRow = platform_company_row($pdo, $cid);
+            if ($coRow && !empty($coRow['name'])) {
+                $coName = (string) $coRow['name'];
+            }
+        }
+        if ($coName === '') {
+            $coName = $prov === 'earthlink' ? 'Earthlink' : 'SAS';
+        }
+        $companyPickOptions[] = array(
+            'account_id' => isset($accOpt['id']) ? (int) $accOpt['id'] : 0,
+            'company_id' => $cid,
+            'name' => $coName,
+            'provider' => $prov,
+        );
+    }
+}
+$needCompanyPick = $isNew && count($companyPickOptions) > 1;
 $profileId = !empty($cache['profile_id']) ? (int) $cache['profile_id'] : 0;
 $parentId = !empty($cache['parent_id']) ? (int) $cache['parent_id'] : 0;
+$profileUiId = (string) $profileId;
+$parentUiId = (string) $parentId;
+$profileLabelNow = !empty($cache['profile_name']) ? (string) $cache['profile_name'] : '';
+$parentLabelNow = !empty($cache['parent_name']) ? (string) $cache['parent_name'] : '';
+if ($isEarthlinkUser && $profileLabelNow !== '' && function_exists('earthlink_package_ui_id')) {
+    $profileUiId = earthlink_package_ui_id($profileLabelNow);
+}
+if ($isEarthlinkUser && $parentLabelNow !== '') {
+    $parentUiId = 'elp:' . rawurlencode($parentLabelNow);
+}
 if ($isNew && function_exists('sas_config')) {
     $sc = sas_config($config);
     if ($parentId <= 0 && !empty($sc['parent_id'])) {
         $parentId = (int) $sc['parent_id'];
+        $parentUiId = (string) $parentId;
     }
 }
 
 $profiles = array();
 $managers = array();
-if (!$isNew) {
-    if ($profileId > 0) {
-        $profiles[] = array(
-            'id' => $profileId,
-            'name' => !empty($cache['profile_name']) ? $cache['profile_name'] : ('#' . $profileId),
-        );
+if (!empty($needCompanyPick)) {
+    // مشترك جديد + أكثر من شركة: لا تملأ بروفايلات قبل اختيار الشركة
+    $profiles = array();
+    $managers = array();
+} elseif ($isEarthlinkUser && function_exists('earthlink_packages_for_ui')) {
+    $profiles = earthlink_packages_for_ui($pdo, $config, $elCompanyId);
+    if ($profileLabelNow !== '' && function_exists('earthlink_package_ui_id')) {
+        $have = false;
+        foreach ($profiles as $pr) {
+            if (isset($pr['name']) && strcasecmp((string) $pr['name'], $profileLabelNow) === 0) {
+                $have = true;
+                break;
+            }
+        }
+        if (!$have) {
+            array_unshift($profiles, array(
+                'id' => earthlink_package_ui_id($profileLabelNow),
+                'name' => $profileLabelNow,
+                'price' => 0,
+                'provider' => 'earthlink',
+            ));
+        }
     }
-    if ($parentId > 0) {
-        $managers[] = array(
-            'id' => $parentId,
-            'name' => !empty($cache['parent_name']) ? $cache['parent_name'] : ('#' . $parentId),
-        );
+    if ($parentLabelNow !== '') {
+        $managers[] = array('id' => 'elp:' . rawurlencode($parentLabelNow), 'name' => $parentLabelNow);
     }
-}
-if (isset($_SESSION['sas_profiles_ui']) && is_array($_SESSION['sas_profiles_ui']) && $_SESSION['sas_profiles_ui']) {
-    $profiles = $_SESSION['sas_profiles_ui'];
-}
-if (isset($_SESSION['sas_managers_ui']) && is_array($_SESSION['sas_managers_ui']) && $_SESSION['sas_managers_ui']) {
-    $managers = $_SESSION['sas_managers_ui'];
+} else {
+    if (!$isNew) {
+        if ($profileId > 0) {
+            $profiles[] = array(
+                'id' => $profileId,
+                'name' => $profileLabelNow !== '' ? $profileLabelNow : ('#' . $profileId),
+            );
+        }
+        if ($parentId > 0) {
+            $managers[] = array(
+                'id' => $parentId,
+                'name' => $parentLabelNow !== '' ? $parentLabelNow : ('#' . $parentId),
+            );
+        }
+    }
+    if (!$isNew || count($companyPickOptions) <= 1) {
+        if (isset($_SESSION['sas_profiles_ui']) && is_array($_SESSION['sas_profiles_ui']) && $_SESSION['sas_profiles_ui']) {
+            $profiles = $_SESSION['sas_profiles_ui'];
+        }
+        if (isset($_SESSION['sas_managers_ui']) && is_array($_SESSION['sas_managers_ui']) && $_SESSION['sas_managers_ui']) {
+            $managers = $_SESSION['sas_managers_ui'];
+        }
+    }
 }
 
 $pageTitle = $isNew
     ? ($isEn ? 'New User' : 'مشترك جديد')
     : ($username !== '' ? $username : ($isEn ? 'Edit User' : 'تعديل مشترك'));
+
+// جلسات محلية جاهزة فوراً — بدون انتظار المزود
+$sessionsSeed = array('ok' => true, 'fresh' => 0, 'from_cache' => 1, 'rows' => array(), 'month_used' => '', 'month_up' => '', 'month_down' => '');
+if (!$isNew && $username !== '' && function_exists('sas_sessions_local_pack')) {
+    $sessionsSeed = sas_sessions_local_pack($pdo, $username, $cache);
+}
 
 $localSub = null;
 if (!$isNew && $cache) {
@@ -304,6 +560,9 @@ $localNotes = ($localSub && isset($localSub['notes'])) ? $localSub['notes'] : ''
 $graceIsCustom = $localSub && function_exists('subscriber_grace_is_custom') && subscriber_grace_is_custom($localSub);
 $localGraceNum = $graceIsCustom ? (int) $localSub['grace_days'] : (function_exists('subscriber_default_grace_days') ? subscriber_default_grace_days($config) : 3);
 $sysGraceNum = function_exists('subscriber_default_grace_days') ? subscriber_default_grace_days($config) : 3;
+$autoActivateOn = $localSub && function_exists('subscriber_auto_activate_on_expire')
+    ? subscriber_auto_activate_on_expire($localSub)
+    : ($localSub && !empty($localSub['auto_activate_on_expire']));
 $localId = ($localSub && !empty($localSub['id'])) ? (int) $localSub['id'] : 0;
 $debtTotal = 0.0;
 $debtRows = array();
@@ -323,7 +582,13 @@ if (!$isNew && $localId > 0 && function_exists('subscriber_unpaid_total')) {
         $debtRows = array();
     }
 }
-$dispName = trim($fn . ' ' . $ln);
+$dispName = '';
+if (!empty($isEarthlinkUser) && !empty($cache['display_name'])) {
+    $dispName = trim((string) $cache['display_name']);
+}
+if ($dispName === '') {
+    $dispName = trim($fn . ' ' . $ln);
+}
 if ($dispName === '' && !empty($cache['display_name'])) {
     $dispName = trim((string) $cache['display_name']);
 }
@@ -391,7 +656,11 @@ if (!$isNew) {
     $idBits[] = ($isEn ? 'Username: ' : 'اليوزر: ') . $username;
     $idBits[] = ($isEn ? 'Phone: ' : 'الهاتف: ') . ($phoneShow !== '' ? $phoneShow : '—');
     $idBits[] = ($isEn ? 'Profile: ' : 'الباقة: ') . ($profileLabel !== '' ? $profileLabel : '—');
-    $idBits[] = ($isEn ? 'Status: ' : 'الحالة: ') . ($enabled ? ($isEn ? 'Enabled' : 'مفعّل') : ($isEn ? 'Disabled' : 'موقف'));
+    $subExpired = ($daysLeft !== '' && $daysLeft !== null && (int) $daysLeft < 0);
+    $statusLabel = !$enabled
+        ? ($isEn ? 'Disabled' : 'موقف')
+        : ($subExpired ? ($isEn ? 'Expired' : 'منتهي') : ($isEn ? 'Active' : 'فعّال'));
+    $idBits[] = ($isEn ? 'Status: ' : 'الحالة: ') . $statusLabel;
     $idBits[] = ($isEn ? 'Link: ' : 'الاتصال: ') . ($isOnlineNow ? ($isEn ? 'Online' : 'متصل') : ($isEn ? 'Offline' : 'غير متصل'));
     $idBits[] = ($isEn ? 'Days left: ' : 'الأيام المتبقية: ') . $daysShow;
     $idBits[] = ($isEn ? 'Debt: ' : 'الدين: ') . money_format_iqd($debtTotal, $config['currency']);
@@ -532,6 +801,47 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
 .su-stat strong { display: block; font-size: 15px; font-weight: 800; line-height: 1.35; }
 .su-hero-side { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
 .su-hero-side .su-back, .su-hero-side button.su-back { justify-content: center; cursor: pointer; font: inherit; }
+.su-hero-acts {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  margin: 0 0 14px; padding: 0 0 12px;
+  border-bottom: 1px solid rgba(255,255,255,.16);
+}
+.su-hero-acts .su-quick-form { margin: 0; }
+.su-hero-act-btn,
+.su-hero-day-btn {
+  position: relative; overflow: hidden;
+  height: 40px; padding: 0 16px; border: 0; border-radius: 12px;
+  font: inherit; font-weight: 800; font-size: 14px; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: #fff; text-decoration: none;
+}
+.su-hero-act-btn {
+  background: linear-gradient(135deg, #16a34a 0%, #22c55e 55%, #4ade80 100%);
+  box-shadow: 0 10px 22px rgba(22, 163, 74, 0.35);
+  animation: suHeroPulse 1.9s ease-in-out infinite;
+}
+.su-hero-act-btn::before {
+  content: ''; position: absolute; inset: -40% auto auto -30%;
+  width: 45%; height: 180%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent);
+  transform: rotate(18deg); animation: suHeroShine 2.2s ease-in-out infinite; pointer-events: none;
+}
+.su-hero-act-btn:hover { filter: brightness(1.06); color: #fff; }
+.su-hero-day-btn {
+  background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.28) !important;
+  box-shadow: 0 6px 14px rgba(2, 6, 23, 0.18);
+}
+.su-hero-day-btn:hover { background: rgba(255,255,255,.22); color: #fff; }
+.su-hero-act-btn:disabled, .su-hero-day-btn:disabled { opacity: .55; cursor: not-allowed; filter: none; animation: none; }
+@keyframes suHeroPulse {
+  0%, 100% { box-shadow: 0 10px 22px rgba(22, 163, 74, 0.35), 0 0 0 0 rgba(74, 222, 128, 0.35); }
+  50% { box-shadow: 0 12px 26px rgba(22, 163, 74, 0.42), 0 0 0 10px rgba(74, 222, 128, 0); }
+}
+@keyframes suHeroShine {
+  0% { left: -40%; opacity: 0; }
+  30% { opacity: 1; }
+  100% { left: 120%; opacity: 0; }
+}
 .su-panel[hidden] { display: none !important; }
 .su-nav button.is-open { background: #0f172a; color: #fff; border-color: #0f172a; }
 .id-ask {
@@ -575,6 +885,11 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
 #su-sessions { margin-bottom: 8px; }
 #rentalMsgActions { margin-top: 16px !important; }
 .su-card h2 { margin: 0; font-size: 16px; font-weight: 800; color: #0f172a; }
+.su-quick-form { margin: 0; }
+@media (max-width: 640px) {
+  .su-hero-acts { flex-direction: column; align-items: stretch; }
+  .su-hero-act-btn, .su-hero-day-btn, .su-hero-acts .su-quick-form { width: 100%; }
+}
 .su-card-h { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
 .su-card .meta { margin: 0; color: #64748b; font-size: 12px; font-weight: 700; }
 .su-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -584,11 +899,58 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
 .su-fact span { display: block; font-size: 11px; font-weight: 800; color: #64748b; margin-bottom: 3px; }
 .su-fact strong { font-size: 14px; color: #0f172a; font-weight: 800; word-break: break-word; }
 .su-grace { margin-top: 12px; padding-top: 12px; border-top: 1px solid #eef2f7; }
-.su-grace label { display: block; font-size: 12px; font-weight: 800; color: #334155; margin-bottom: 6px; }
+.su-grace > label { display: block; font-size: 12px; font-weight: 800; color: #334155; margin-bottom: 6px; }
 .su-grace-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.su-grace-row select, .su-grace-row input { height: 40px; border: 1px solid #e2e8f0; border-radius: 10px; padding: 0 10px; font: inherit; background: #fff; }
+.su-grace-row select, .su-grace-row input[type="number"] { height: 40px; border: 1px solid #e2e8f0; border-radius: 10px; padding: 0 10px; font: inherit; background: #fff; }
 .su-grace-row select { min-width: 180px; flex: 1; }
-.su-grace-row input { width: 90px; }
+.su-grace-row input[type="number"] { width: 90px; }
+.su-auto-box {
+  margin: 14px 0 16px; padding: 12px 14px;
+  border-radius: 14px; background: #f8fafc; border: 1px solid #e8eef5;
+}
+.su-auto-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+}
+.su-auto-row .su-auto-txt { font-size: 13px; font-weight: 800; color: #0f172a; line-height: 1.35; }
+.su-auto-notify {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin-top: 12px; padding-top: 12px; border-top: 1px solid #e8eef5;
+}
+.su-auto-notify[hidden] { display: none !important; }
+.su-auto-notify .su-auto-txt { font-size: 12px; font-weight: 800; color: #334155; line-height: 1.35; }
+.su-tog {
+  position: relative; display: inline-flex; align-items: center; flex: 0 0 auto;
+  width: 56px; height: 32px; cursor: pointer; margin: 0;
+}
+.su-tog input { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+.su-tog-ui {
+  position: absolute; inset: 0; border-radius: 999px;
+  background: #cbd5e1; box-shadow: inset 0 1px 3px rgba(15, 23, 42, 0.12);
+  transition: background .2s ease, box-shadow .2s ease;
+}
+.su-tog-ui::after {
+  content: ''; position: absolute; top: 3px; inset-inline-start: 3px;
+  width: 26px; height: 26px; border-radius: 50%; background: #fff;
+  box-shadow: 0 4px 10px rgba(15, 23, 42, 0.18);
+  transition: inset-inline-start .22s cubic-bezier(.2, .9, .2, 1), inset-inline-end .22s cubic-bezier(.2, .9, .2, 1);
+}
+.su-tog input:checked + .su-tog-ui {
+  background: linear-gradient(135deg, #16a34a 0%, #22c55e 100%);
+  box-shadow: 0 6px 16px rgba(22, 163, 74, 0.28);
+}
+.su-tog input:checked + .su-tog-ui::after {
+  inset-inline-start: calc(100% - 29px);
+}
+.su-grace-foot {
+  display: flex; align-items: center; gap: 10px; margin-top: 4px;
+}
+.su-grace-save {
+  flex: 1 1 auto; width: 100%; height: 52px; border: 0; border-radius: 14px;
+  background: linear-gradient(145deg, #0f172a 0%, #1e293b 100%);
+  color: #fff; font: inherit; font-weight: 800; font-size: 16px;
+  cursor: pointer; box-shadow: 0 10px 22px rgba(15, 23, 42, 0.18);
+}
+.su-grace-save:hover { filter: brightness(1.06); }
 .su-debt-sum {
   display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
   padding: 12px 14px; border-radius: 14px; background: #fff7ed; border: 1px solid #fed7aa; margin-bottom: 10px;
@@ -632,13 +994,23 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
 .su-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 22px; }
 @media (max-width: 860px) {
   .su-split, .su-pair, .sas-grid, .su-facts, .su-stats { grid-template-columns: 1fr 1fr; }
-  .su-hero { flex-direction: column; }
-  .su-hero-side { flex-direction: row; width: 100%; }
+  .su-page { width: 100%; max-width: 100%; margin-inline: 0; box-sizing: border-box; }
+  .su-hero {
+    flex-direction: column; align-items: center; text-align: center;
+    width: 100%; max-width: 100%; box-sizing: border-box; margin-inline: 0;
+  }
+  .su-hero-main { width: 100%; display: flex; flex-direction: column; align-items: center; }
+  .su-hero-who { flex-direction: column; align-items: center; justify-content: center; text-align: center; width: 100%; }
+  .su-hero .su-user { text-align: center; }
+  .su-pills { justify-content: center; }
+  .su-hero-acts { justify-content: center; width: 100%; }
+  .su-stats { width: 100%; text-align: center; }
+  .su-hero-side { flex-direction: row; width: 100%; justify-content: center; }
   .su-nav { display: grid; grid-template-columns: 1fr 1fr; }
   .su-nav a, .su-nav button { width: 100%; }
 }
 @media (max-width: 520px) {
-  .su-page { margin-bottom: 18px; }
+  .su-page { margin-bottom: 18px; padding-inline: 0; }
   .su-hero { padding: 14px; border-radius: 16px; }
   .su-hero h1 { font-size: 18px; }
   .su-avatar { width: 52px; height: 52px; font-size: 22px; }
@@ -653,18 +1025,9 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
   height: 32px; border-radius: 999px; border: 1px solid #e2e8f0;
   padding: 0 10px; font: inherit; font-weight: 800; background: #fff; color: #0f172a;
 }
-.su-to-top {
-  display: flex; align-items: center; justify-content: center; gap: 8px;
-  width: min(240px, calc(100% - 24px));
-  margin: 22px auto 6px; height: 46px; border: 0; border-radius: 999px;
-  background: linear-gradient(135deg, #0f172a 0%, #1d4ed8 100%);
-  color: #fff; font: inherit; font-weight: 800; cursor: pointer;
-  box-shadow: 0 12px 26px rgba(15, 23, 42, .2);
-}
-.su-to-top span { font-size: 16px; line-height: 1; }
 @media print {
-  .sidebar, .sidebar-backdrop, .bg-bubbles, .main-top, .id-ask, .su-to-top,
-  .su-hero-side, .su-nav, .sas-toast, #appRing { display: none !important; }
+  .sidebar, .sidebar-backdrop, .bg-bubbles, .main-top, .id-ask,
+  .su-hero-side, .su-hero-acts, .su-nav, .sas-toast, #appRing { display: none !important; }
   .app { display: block !important; min-height: 0 !important; background: #fff !important; }
   .main, .su-page, .su-hero, .su-card, .su-split, .su-facts, .su-fact, .su-stat, .su-pill {
     animation: none !important;
@@ -688,6 +1051,41 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
 <div class="su-page">
 <div class="su-hero">
   <div class="su-hero-main">
+    <?php if (!$isNew && $username !== ''): ?>
+    <div class="su-hero-acts">
+        <?php
+        $suActBlocked = function_exists('app_maintenance_blocks') && app_maintenance_blocks('activate', $config);
+        $suDayBlocked = function_exists('app_maintenance_blocks') && app_maintenance_blocks('give_test', $config);
+        $suActQs = array(
+            'q' => $username,
+            'act' => '1',
+            'pid' => !empty($cache['profile_id']) ? (string) (int) $cache['profile_id'] : '0',
+            'pn' => !empty($cache['profile_name']) ? (string) $cache['profile_name'] : '',
+            'sid' => !empty($cache['sas_user_id']) ? (string) (int) $cache['sas_user_id'] : '0',
+            'prov' => !empty($cache['provider']) ? (string) $cache['provider'] : 'sas',
+            'co' => !empty($cache['company_id']) ? (string) (int) $cache['company_id'] : '0',
+            'fn' => !empty($cache['firstname']) ? (string) $cache['firstname'] : (!empty($cache['display_name']) ? (string) $cache['display_name'] : ''),
+            'nm' => !empty($cache['display_name']) ? (string) $cache['display_name'] : '',
+        );
+        $suActHref = 'sas.php?' . http_build_query($suActQs);
+        ?>
+        <a class="su-hero-act-btn<?php echo $suActBlocked ? ' is-off' : ''; ?>"
+           href="<?php echo e($suActHref); ?>"
+           <?php echo $suActBlocked ? ' aria-disabled="true" onclick="return false;"' : ''; ?>><?php
+            echo e($isEn ? 'Activate' : 'تفعيل');
+        ?></a>
+        <?php if (empty($isEarthlinkUser)): ?>
+        <form method="post" class="su-quick-form" data-no-wait="1"
+              onsubmit="return confirm(<?php echo json_encode($isEn ? 'Add +1 day to this subscriber?' : 'إضافة +1 يوم لهذا المشترك؟'); ?>);">
+            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+            <input type="hidden" name="action" value="su_give_day">
+            <button class="su-hero-day-btn" type="submit"<?php echo $suDayBlocked ? ' disabled' : ''; ?>><?php
+                echo e($isEn ? '+1 day' : 'إضافة +1 يوم');
+            ?></button>
+        </form>
+        <?php endif; ?>
+    </div>
+    <?php endif; ?>
     <div class="su-hero-who">
         <?php if (!$isNew): ?>
             <?php
@@ -708,7 +1106,18 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
         <?php endif; ?>
         <?php if (!$isNew): ?>
         <div class="su-pills">
-            <span class="su-pill<?php echo $enabled ? ' is-on' : ' is-off'; ?>"><?php echo e($enabled ? ($isEn ? 'Enabled' : 'مفعّل') : ($isEn ? 'Disabled' : 'موقف')); ?></span>
+            <span class="su-pill<?php
+                $subExpiredPill = ($daysLeft !== '' && $daysLeft !== null && (int) $daysLeft < 0);
+                echo !$enabled || $subExpiredPill ? ' is-off' : ' is-on';
+            ?>"><?php
+                if (!$enabled) {
+                    echo e($isEn ? 'Disabled' : 'موقف');
+                } elseif ($subExpiredPill) {
+                    echo e($isEn ? 'Expired' : 'منتهي');
+                } else {
+                    echo e($isEn ? 'Active' : 'فعّال');
+                }
+            ?></span>
             <span class="su-pill<?php echo $isOnlineNow ? ' is-on' : ' is-down'; ?>"><?php echo e($isOnlineNow ? ($isEn ? 'Online' : 'متصل') : ($isEn ? 'Offline' : 'غير متصل')); ?></span>
             <?php if ($profileLabel !== ''): ?><span class="su-pill"><?php echo e($profileLabel); ?></span><?php endif; ?>
             <?php if ($hasRent): ?>
@@ -778,12 +1187,12 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
             <?php endif; ?>
             <div class="su-fact"><span><?php echo e($isEn ? 'Grace days' : 'أيام السماح'); ?></span><strong><?php echo e($graceShow); ?></strong></div>
         </div>
-        <form method="post" class="su-grace">
+        <form method="post" class="su-grace" id="suGraceForm">
             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
             <input type="hidden" name="action" value="update_local_details">
             <input type="hidden" name="address" value="<?php echo e($localAddress); ?>">
             <input type="hidden" name="notes" value="<?php echo e($localNotes); ?>">
-            <label><?php echo e($isEn ? 'Grace days after activation' : 'أيام السماح بعد التفعيل'); ?></label>
+            <label for="graceModeSel"><?php echo e($isEn ? 'Grace days after activation' : 'أيام السماح بعد التفعيل'); ?></label>
             <div class="su-grace-row">
                 <select name="grace_mode" id="graceModeSel">
                     <option value="system" <?php echo !$graceIsCustom ? 'selected' : ''; ?>>
@@ -794,7 +1203,25 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
                     </option>
                 </select>
                 <input type="number" name="grace_days" id="graceDaysInp" min="0" max="90" step="1" value="<?php echo (int) $localGraceNum; ?>">
-                <button class="btn sm" type="submit"><?php echo e($isEn ? 'Save' : 'حفظ'); ?></button>
+            </div>
+            <div class="su-auto-box">
+                <div class="su-auto-row">
+                    <span class="su-auto-txt"><?php echo e($isEn ? 'Auto-activate when subscription ends' : 'تفعيل تلقائي عند انتهاء الاشتراك'); ?></span>
+                    <label class="su-tog" title="<?php echo e($isEn ? 'On / Off' : 'تشغيل / إيقاف'); ?>">
+                        <input type="checkbox" name="auto_activate_on_expire" id="suAutoActivate" value="1"<?php echo !empty($autoActivateOn) ? ' checked' : ''; ?>>
+                        <span class="su-tog-ui" aria-hidden="true"></span>
+                    </label>
+                </div>
+                <div class="su-auto-notify" id="suAutoNotifyWrap"<?php echo empty($autoActivateOn) ? ' hidden' : ''; ?>>
+                    <span class="su-auto-txt"><?php echo e($isEn ? 'Notify subscriber about this feature' : 'إشعار المشترك بهذه الخاصية'); ?></span>
+                    <label class="su-tog" title="<?php echo e($isEn ? 'Notify' : 'إشعار'); ?>">
+                        <input type="checkbox" name="auto_activate_notify" id="suAutoNotify" value="1" checked>
+                        <span class="su-tog-ui" aria-hidden="true"></span>
+                    </label>
+                </div>
+            </div>
+            <div class="su-grace-foot">
+                <button class="su-grace-save" type="submit"><?php echo e($isEn ? 'Save' : 'حفظ'); ?></button>
             </div>
         </form>
     </section>
@@ -841,6 +1268,25 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
                 </label>
             </div>
             <div class="sas-grid">
+                <?php if (!empty($needCompanyPick)): ?>
+                <div style="grid-column:1/-1">
+                    <label><?php echo e($isEn ? 'Company' : 'الشركة'); ?> <span class="req">*</span></label>
+                    <select name="account_id" id="sasCompanySelect" required>
+                        <option value=""><?php echo e($isEn ? 'Select company…' : 'اختار الشركة…'); ?></option>
+                        <?php foreach ($companyPickOptions as $coOpt): ?>
+                            <option value="<?php echo (int) $coOpt['account_id']; ?>"
+                                data-company="<?php echo (int) $coOpt['company_id']; ?>"
+                                data-provider="<?php echo e($coOpt['provider']); ?>">
+                                <?php echo e($coOpt['name'] . ($coOpt['provider'] === 'earthlink' ? ' · Earthlink' : ' · SAS')); ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                    <input type="hidden" name="company_id" id="sasCompanyIdHidden" value="">
+                </div>
+                <?php elseif ($isNew && count($companyPickOptions) === 1): ?>
+                    <input type="hidden" name="account_id" value="<?php echo (int) $companyPickOptions[0]['account_id']; ?>">
+                    <input type="hidden" name="company_id" value="<?php echo (int) $companyPickOptions[0]['company_id']; ?>">
+                <?php endif; ?>
                 <div>
                     <label><?php echo e($isEn ? 'Username' : 'اليوزرنيم'); ?> <span class="req">*</span></label>
                     <input name="username" value="<?php echo e($username); ?>" required>
@@ -857,26 +1303,38 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
                     <label><?php echo e($isEn ? 'Confirm Password' : 'تأكيد كلمة السر'); ?><?php echo $isNew ? ' <span class="req">*</span>' : ''; ?></label>
                     <input type="password" name="confirm_password" id="sasPass2" autocomplete="new-password"<?php echo $isNew ? ' required' : ''; ?>>
                 </div>
-                <div>
+                <div id="sasProfWrap"<?php echo !empty($needCompanyPick) ? ' hidden' : ''; ?>>
                     <label><?php echo e($isEn ? 'Service Profile' : 'البروفايل'); ?> <span class="req">*</span></label>
-                    <select name="profile_id" id="sasProfileSelect" required>
-                        <option value=""><?php echo e($isEn ? 'Loading…' : 'جاري التحميل…'); ?></option>
+                    <select name="profile_id" id="sasProfileSelect"<?php echo !empty($needCompanyPick) ? '' : ' required'; ?>>
+                        <option value=""><?php echo e(!empty($needCompanyPick)
+                            ? ($isEn ? 'Pick a company first' : 'اختار الشركة أولاً')
+                            : (($isEarthlinkUser) ? ($isEn ? 'Select…' : 'اختر…') : ($isEn ? 'Loading…' : 'جاري التحميل…'))); ?></option>
+                        <?php if (empty($needCompanyPick)): ?>
                         <?php foreach ($profiles as $pr): ?>
-                            <option value="<?php echo (int) $pr['id']; ?>"<?php echo ((int) $pr['id'] === $profileId) ? ' selected' : ''; ?>><?php echo e($pr['name']); ?></option>
+                            <?php $prVal = isset($pr['id']) ? (string) $pr['id'] : ''; ?>
+                            <option value="<?php echo e($prVal); ?>"<?php echo ($prVal !== '' && $prVal === (string) $profileUiId) ? ' selected' : ''; ?>><?php echo e($pr['name']); ?></option>
                         <?php endforeach; ?>
+                        <?php endif; ?>
                     </select>
                 </div>
-                <div>
-                    <label><?php echo e($isEn ? 'Belongs to' : 'تابع الى'); ?> <span class="req">*</span></label>
-                    <select name="parent_id" id="sasParentSelect" required>
-                        <option value=""><?php echo e($isEn ? 'Loading…' : 'جاري التحميل…'); ?></option>
+                <div id="sasParentWrap"<?php echo !empty($needCompanyPick) ? ' hidden' : ''; ?>>
+                    <label><?php echo e($isEn ? 'Belongs to' : 'تابع الى'); ?><?php echo $isEarthlinkUser ? '' : ' <span class="req">*</span>'; ?></label>
+                    <select name="parent_id" id="sasParentSelect"<?php echo ($isEarthlinkUser || !empty($needCompanyPick)) ? '' : ' required'; ?>>
+                        <option value=""><?php echo e(!empty($needCompanyPick)
+                            ? ($isEn ? 'Pick a company first' : 'اختار الشركة أولاً')
+                            : ($isEn ? 'Select…' : 'اختر…')); ?></option>
+                        <?php if (empty($needCompanyPick)): ?>
                         <?php foreach ($managers as $mn): ?>
-                            <option value="<?php echo (int) $mn['id']; ?>"<?php echo ((int) $mn['id'] === $parentId) ? ' selected' : ''; ?>><?php echo e($mn['name']); ?></option>
+                            <?php $mnVal = isset($mn['id']) ? (string) $mn['id'] : ''; ?>
+                            <option value="<?php echo e($mnVal); ?>"<?php echo ($mnVal !== '' && $mnVal === (string) $parentUiId) ? ' selected' : ''; ?>><?php echo e($mn['name']); ?></option>
                         <?php endforeach; ?>
+                        <?php endif; ?>
                     </select>
                 </div>
                 <div>
-                    <label><?php echo e($isEn ? 'First Name' : 'الاسم الأول'); ?></label>
+                    <label><?php echo e($isEarthlinkUser
+                        ? ($isEn ? 'Arabic / display name' : 'الاسم العربي')
+                        : ($isEn ? 'First Name' : 'الاسم الأول')); ?></label>
                     <input name="firstname" value="<?php echo e($fn); ?>">
                 </div>
             </div>
@@ -1010,7 +1468,6 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
 </section>
 </div>
 <?php endif; ?>
-<button type="button" class="su-to-top" id="suToTop"><span aria-hidden="true">↑</span><?php echo e($isEn ? 'Back to top' : 'الرجوع للأعلى'); ?></button>
 </div>
 <?php if (!$isNew): ?>
 <div class="id-ask" id="idPrintAsk" hidden>
@@ -1064,6 +1521,18 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
     mode.addEventListener('change', syncGrace);
     syncGrace();
   }
+  var autoAct = document.getElementById('suAutoActivate');
+  var autoNotifyWrap = document.getElementById('suAutoNotifyWrap');
+  var autoNotify = document.getElementById('suAutoNotify');
+  if (autoAct && autoNotifyWrap) {
+    function syncAutoNotify() {
+      var on = !!autoAct.checked;
+      autoNotifyWrap.hidden = !on;
+      if (on && autoNotify) autoNotify.checked = true;
+    }
+    autoAct.addEventListener('change', syncAutoNotify);
+    syncAutoNotify();
+  }
   Array.prototype.forEach.call(document.querySelectorAll('[data-su-toggle]'), function (tog) {
     tog.addEventListener('click', function () {
       var el = document.getElementById(tog.getAttribute('data-su-toggle'));
@@ -1087,12 +1556,6 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
       var start = function () { setTimeout(function () { window.print(); }, 250); };
       if (window.suPreparePrint) window.suPreparePrint(start);
       else start();
-    });
-  }
-  var toTop = document.getElementById('suToTop');
-  if (toTop) {
-    toTop.addEventListener('click', function () {
-      window.scrollTo({ top: 0, behavior: 'smooth' });
     });
   }
   if (printClose && printAsk) {
@@ -1140,16 +1603,95 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
   }
   var profSel = document.getElementById('sasProfileSelect');
   var parSel = document.getElementById('sasParentSelect');
-  var profNow = <?php echo json_encode((string) $profileId); ?>;
-  var parNow = <?php echo json_encode((string) $parentId); ?>;
-  fetch('sas.php?ajax=profiles', { credentials: 'same-origin' })
-    .then(function (r) { return r.json(); })
-    .then(function (d) { fillSelect(profSel, (d && d.profiles) ? d.profiles : [], profNow); })
-    .catch(function () {});
-  fetch('sas.php?ajax=managers', { credentials: 'same-origin' })
-    .then(function (r) { return r.json(); })
-    .then(function (d) { fillSelect(parSel, (d && d.managers) ? d.managers : [], parNow); })
-    .catch(function () {});
+  var profWrap = document.getElementById('sasProfWrap');
+  var parentWrap = document.getElementById('sasParentWrap');
+  var coSel = document.getElementById('sasCompanySelect');
+  var coHidden = document.getElementById('sasCompanyIdHidden');
+  var profNow = <?php echo json_encode((string) $profileUiId); ?>;
+  var parNow = <?php echo json_encode((string) $parentUiId); ?>;
+  var isElUser = <?php echo !empty($isEarthlinkUser) ? 'true' : 'false'; ?>;
+  var needCoPick = <?php echo !empty($needCompanyPick) ? 'true' : 'false'; ?>;
+  var pickFirstLabel = <?php echo json_encode($isEn ? 'Pick a company first' : 'اختار الشركة أولاً'); ?>;
+  var singleCoQs = <?php echo json_encode(($isNew && !$needCompanyPick && count($companyPickOptions) === 1)
+      ? ('&account_id=' . (int) $companyPickOptions[0]['account_id']
+          . '&company=' . (int) $companyPickOptions[0]['company_id']
+          . '&provider=' . rawurlencode($companyPickOptions[0]['provider']))
+      : ($isEarthlinkUser
+          ? ('&provider=earthlink&company=' . (int) $elCompanyId . '&u=' . rawurlencode($username))
+          : '')); ?>;
+  function setProfVisible(on) {
+    [profWrap, parentWrap].forEach(function (el) {
+      if (!el) return;
+      if (on) {
+        el.removeAttribute('hidden');
+        el.style.display = '';
+      } else {
+        el.setAttribute('hidden', 'hidden');
+      }
+    });
+    if (profSel) {
+      if (on) profSel.setAttribute('required', 'required');
+      else { profSel.removeAttribute('required'); profSel.value = ''; }
+    }
+    if (parSel && !isElUser) {
+      if (on) parSel.setAttribute('required', 'required');
+      else { parSel.removeAttribute('required'); parSel.value = ''; }
+    }
+  }
+  function companyQs() {
+    if (isElUser) return singleCoQs;
+    if (!coSel) return singleCoQs;
+    var opt = coSel.options[coSel.selectedIndex];
+    if (!opt || !opt.value) return '';
+    var co = opt.getAttribute('data-company') || '0';
+    var prov = opt.getAttribute('data-provider') || 'sas';
+    if (coHidden) coHidden.value = co;
+    return '&account_id=' + encodeURIComponent(opt.value)
+      + '&company=' + encodeURIComponent(co)
+      + '&provider=' + encodeURIComponent(prov);
+  }
+  function loadProfMgr(keepSel) {
+    var qs = companyQs();
+    if (needCoPick && !qs) {
+      setProfVisible(false);
+      if (profSel) {
+        fillSelect(profSel, [], '');
+        if (profSel.options[0]) profSel.options[0].textContent = pickFirstLabel;
+      }
+      if (parSel) {
+        fillSelect(parSel, [], '');
+        if (parSel.options[0]) parSel.options[0].textContent = pickFirstLabel;
+      }
+      return;
+    }
+    setProfVisible(true);
+    var keepP = keepSel ? (profSel ? profSel.value : '') : '';
+    var keepM = keepSel ? (parSel ? parSel.value : '') : '';
+    fetch('sas.php?ajax=profiles' + qs, { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        fillSelect(profSel, (d && d.profiles) ? d.profiles : [], keepP || (needCoPick ? '' : profNow));
+      })
+      .catch(function () {});
+    fetch('sas.php?ajax=managers' + qs, { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (isElUser && (!d || !d.managers || !d.managers.length) && parNow) {
+          fillSelect(parSel, [{ id: parNow, name: <?php echo json_encode($parentLabelNow !== '' ? $parentLabelNow : '—'); ?> }], parNow);
+          return;
+        }
+        fillSelect(parSel, (d && d.managers) ? d.managers : [], keepM || (needCoPick ? '' : parNow));
+      })
+      .catch(function () {});
+  }
+  if (coSel) {
+    coSel.addEventListener('change', function () { loadProfMgr(false); });
+  }
+  if (needCoPick) {
+    setProfVisible(false);
+  } else {
+    loadProfMgr(true);
+  }
 
   var rentChk = document.getElementById('rentalEnabledChk');
   var rentDetails = document.getElementById('rentalDetails');
@@ -1201,14 +1743,17 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
     return n;
   }
   var url = 'sas_user.php?u=' + encodeURIComponent(<?php echo json_encode($username); ?>) + '&ajax=sessions';
+  var urlLocal = url + '&local=1';
   var txtOpen = <?php echo json_encode($isEn ? 'Online' : 'متصل'); ?>;
   var txtOff = <?php echo json_encode($isEn ? 'Offline' : 'منفصل'); ?>;
   var txtEmpty = <?php echo json_encode($isEn ? 'No sessions for this subscriber' : 'ماكو جلسات لهذا المشترك'); ?>;
   var txtStale = <?php echo json_encode($isEn ? 'Could not refresh from SAS. Showing the saved sessions.' : 'تعذر التحديث من الساس. هذه آخر جلسات محفوظة.'); ?>;
   var txtFail = <?php echo json_encode($isEn ? 'Could not load sessions from SAS' : 'تعذر جلب الجلسات من الساس'); ?>;
+  var txtRefresh = <?php echo json_encode($isEn ? 'Updating…' : 'جارٍ التحديث…'); ?>;
   var txtMonth = <?php echo json_encode($isEn ? 'This month' : 'استهلاك هذا الشهر'); ?>;
   var txtUp = <?php echo json_encode($isEn ? 'Upload' : 'رفع'); ?>;
   var txtDown = <?php echo json_encode($isEn ? 'Download' : 'تحميل'); ?>;
+  lastPack = <?php echo json_encode($sessionsSeed); ?>;
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
       return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c];
@@ -1268,23 +1813,34 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
     panel.style.display = 'block';
     btn.classList.add('is-open');
   }
-  function load(done) {
+  function load(done, soft) {
     if (busy) {
       if (done) done();
       return;
     }
     busy = true;
-    if (note) note.textContent = <?php echo json_encode($isEn ? 'Loading sessions…' : 'جاري جلب الجلسات…'); ?>;
+    // عندنا لقطة محلية: اعرضها فوراً وما تعلّق على «جاري الجلب»
+    if (lastPack && lastPack.ok) {
+      paint(lastPack);
+      if (note && soft && lastPack.rows && lastPack.rows.length) {
+        note.textContent = (note.textContent ? (note.textContent + ' — ') : '') + txtRefresh;
+      }
+    } else if (note && !soft) {
+      note.textContent = <?php echo json_encode($isEn ? 'Loading sessions…' : 'جاري جلب الجلسات…'); ?>;
+    }
     fetch(url, { credentials: 'same-origin', cache: 'no-store' })
       .then(function (r) { return r.json(); })
       .then(function (d) {
         busy = false;
-        paint(d);
+        if (d && d.ok) paint(d);
+        else if (!lastPack || !lastPack.rows || !lastPack.rows.length) paint(d);
+        else if (note) note.textContent = txtStale;
         if (done) done();
       })
       .catch(function () {
         busy = false;
-        paint(null);
+        if (lastPack && lastPack.ok) paint(lastPack);
+        else paint(null);
         if (done) done();
       });
   }
@@ -1295,7 +1851,7 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
       if (done) done();
       return;
     }
-    load(done);
+    load(done, false);
   };
   if (limitEl) {
     limitEl.addEventListener('change', function () {
@@ -1312,6 +1868,7 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
       }
       panel.hidden = true;
       panel.style.display = 'none';
+      btn.classList.remove('is-on');
       btn.classList.remove('is-open');
       if (timer) { clearInterval(timer); timer = null; }
       return;
@@ -1319,9 +1876,11 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
     showSessions();
     var sec = document.getElementById('su-sessions');
     if (sec && sec.scrollIntoView) sec.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    load();
+    // أولاً اللقطة المحمّلة مع الصفحة، ثم تحديث خلفي
+    if (lastPack && lastPack.ok) paint(lastPack);
+    load(null, true);
     if (timer) clearInterval(timer);
-    timer = setInterval(function () { load(); }, 8000);
+    timer = setInterval(function () { load(null, true); }, 20000);
   });
 })();
 </script>

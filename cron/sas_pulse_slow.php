@@ -61,4 +61,14 @@ if (function_exists('sas_make_connector') && function_exists('sas_dash_card_grou
     }
 }
 
+// إعادة محاولة دخول الريسيلر الفاشل — حساب واحد فقط لكل دورة، حسب الجدول المتدرّج
+if (function_exists('tenant_sas_accounts_retry_due')) {
+    try {
+        @set_time_limit(50);
+        tenant_sas_accounts_retry_due($pdo, $config, 1);
+    } catch (Exception $e) {
+    } catch (Error $e) {
+    }
+}
+
 exit(0);

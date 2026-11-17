@@ -1426,6 +1426,33 @@ function ensure_subscriber_grace_days_column($pdo)
     }
 }
 
+/**
+ * تفعيل تلقائي عند انتهاء الاشتراك (عمود subscribers.auto_activate_on_expire).
+ */
+function ensure_subscriber_auto_activate_column($pdo)
+{
+    static $done = false;
+    if ($done || !$pdo) {
+        return;
+    }
+    $done = true;
+    try {
+        $col = $pdo->query("SHOW COLUMNS FROM subscribers LIKE 'auto_activate_on_expire'")->fetch();
+        if (!$col) {
+            $pdo->exec(
+                'ALTER TABLE subscribers
+                 ADD COLUMN auto_activate_on_expire TINYINT(1) NOT NULL DEFAULT 0 AFTER grace_days'
+            );
+        }
+    } catch (Exception $e) {
+    }
+}
+
+function subscriber_auto_activate_on_expire($row)
+{
+    return is_array($row) && !empty($row['auto_activate_on_expire']);
+}
+
 function subscriber_default_grace_days($config = null)
 {
     if (!is_array($config) && isset($GLOBALS['config']) && is_array($GLOBALS['config'])) {

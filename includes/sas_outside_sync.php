@@ -85,6 +85,13 @@ function sas_outside_refresh_users($pdo, $config, $usernames)
         if (!is_array($row)) {
             continue;
         }
+        // حدّث الصف كامل (اسم/باقة/انتهاء…) مو بس تاريخ الانتهاء
+        if (function_exists('sas_cache_upsert_row')) {
+            if (sas_cache_upsert_row($pdo, $row)) {
+                $n++;
+            }
+            continue;
+        }
         $exp = sas_outside_expire_sql($row);
         if (!$exp) {
             continue;
@@ -102,11 +109,7 @@ function sas_outside_refresh_users($pdo, $config, $usernames)
                 ':t' => $tid,
                 ':u' => $username,
             ));
-            if ($st->rowCount() > 0) {
-                $n++;
-            } else {
-                $n++;
-            }
+            $n++;
         } catch (Exception $e) {
         }
     }

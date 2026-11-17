@@ -180,6 +180,8 @@ function ensure_platform_companies_schema($pdo)
                 id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
                 name VARCHAR(150) NOT NULL,
                 sas_host VARCHAR(255) NOT NULL DEFAULT "",
+                provider_type VARCHAR(32) NOT NULL DEFAULT "sas",
+                logo_path VARCHAR(255) NOT NULL DEFAULT "",
                 is_active TINYINT(1) NOT NULL DEFAULT 1,
                 sort_order INT NOT NULL DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -188,6 +190,20 @@ function ensure_platform_companies_schema($pdo)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4'
         );
     } catch (Exception $e) {
+    }
+    foreach (array(
+        'provider_type VARCHAR(32) NOT NULL DEFAULT "sas"',
+        'logo_path VARCHAR(255) NOT NULL DEFAULT ""',
+        'api_alt_host VARCHAR(255) NOT NULL DEFAULT ""',
+    ) as $colDef) {
+        $col = preg_replace('/\s.*/', '', $colDef);
+        try {
+            $has = $pdo->query("SHOW COLUMNS FROM platform_companies LIKE " . $pdo->quote($col))->fetch();
+            if (!$has) {
+                $pdo->exec('ALTER TABLE platform_companies ADD COLUMN ' . $colDef);
+            }
+        } catch (Exception $e) {
+        }
     }
     // ترحيل من tenants الكتالوج القديم إن الجدول فاضي
     try {
@@ -202,7 +218,7 @@ function ensure_platform_companies_schema($pdo)
             )->fetchAll();
             if (is_array($rows)) {
                 $ins = $pdo->prepare(
-                    'INSERT INTO platform_companies (name, sas_host, is_active) VALUES (:n, :h, 1)'
+                    'INSERT INTO platform_companies (name, sas_host, provider_type, is_active) VALUES (:n, :h, :p, 1)'
                 );
                 $seen = array();
                 foreach ($rows as $r) {
@@ -211,15 +227,95 @@ function ensure_platform_companies_schema($pdo)
                         continue;
                     }
                     $seen[$h] = true;
+                    $name = isset($r['name']) && $r['name'] !== '' ? $r['name'] : $h;
                     $ins->execute(array(
-                        ':n' => isset($r['name']) && $r['name'] !== '' ? $r['name'] : $h,
+                        ':n' => $name,
                         ':h' => $h,
+                        ':p' => platform_company_guess_provider($name, $h),
                     ));
                 }
             }
         }
     } catch (Exception $e) {
     }
+    if (function_exists('platform_companies_seed_logos')) {
+        platform_companies_seed_logos($pdo);
+    }
+}
+
+/** sas | earthlink */
+function platform_company_normalize_provider($type)
+{
+    $type = strtolower(trim((string) $type));
+    return ($type === 'earthlink' || $type === 'el') ? 'earthlink' : 'sas';
+}
+
+function platform_company_guess_provider($name, $host = '')
+{
+    $blob = strtolower(trim((string) $name) . ' ' . trim((string) $host));
+    if (strpos($blob, 'earth') !== false || strpos($blob, 'ايرث') !== false || strpos($blob, 'إيرث') !== false) {
+        return 'earthlink';
+    }
+    return 'sas';
+}
+
+function platform_company_default_logo($provider, $name = '')
+{
+    $provider = platform_company_normalize_provider($provider);
+    $blob = strtolower((string) $name);
+    if ($provider === 'earthlink' || strpos($blob, 'earth') !== false || strpos($blob, 'ايرث') !== false) {
+        return 'uploads/companies/earthlink.png';
+    }
+    // نور البداية / NB-TEL وما شابه
+    return 'uploads/companies/nb-tel.png';
+}
+
+function platform_companies_seed_logos($pdo)
+{
+    try {
+        $rows = $pdo->query('SELECT id, name, sas_host, provider_type, logo_path FROM platform_companies')->fetchAll();
+        if (!is_array($rows)) {
+            return;
+        }
+        $upd = $pdo->prepare(
+            'UPDATE platform_companies SET provider_type = :p, logo_path = :l WHERE id = :id'
+        );
+        foreach ($rows as $r) {
+            $id = (int) $r['id'];
+            $name = isset($r['name']) ? (string) $r['name'] : '';
+            $host = isset($r['sas_host']) ? (string) $r['sas_host'] : '';
+            $prov = platform_company_normalize_provider(
+                isset($r['provider_type']) && $r['provider_type'] !== ''
+                    ? $r['provider_type']
+                    : platform_company_guess_provider($name, $host)
+            );
+            $logo = isset($r['logo_path']) ? trim((string) $r['logo_path']) : '';
+            if ($logo === '') {
+                $logo = platform_company_default_logo($prov, $name);
+            }
+            $upd->execute(array(':p' => $prov, ':l' => $logo, ':id' => $id));
+        }
+    } catch (Exception $e) {
+    }
+}
+
+function platform_company_logo_url($row)
+{
+    if (!is_array($row)) {
+        return '';
+    }
+    $path = isset($row['logo_path']) ? trim((string) $row['logo_path']) : '';
+    if ($path === '') {
+        $path = platform_company_default_logo(
+            isset($row['provider_type']) ? $row['provider_type'] : 'sas',
+            isset($row['name']) ? $row['name'] : ''
+        );
+    }
+    $path = ltrim(str_replace('\\', '/', $path), '/');
+    if ($path === '') {
+        return '';
+    }
+    return $path;
 }
 
 function platform_companies_list($pdo, $activeOnly = false)
@@ -251,7 +347,36 @@ function platform_company_row($pdo, $id)
     }
 }
 
-function platform_company_save($pdo, $id, $name, $host, $isActive = 1)
+/**
+ * هوست قياس البنغ: لإيرث الخاص استخدم الاحتياطي (أو سبايسي الافتراضي) بدل admin.earthlink.iq.
+ */
+function platform_company_ping_target($co)
+{
+    if (!is_array($co)) {
+        return '';
+    }
+    $host = isset($co['sas_host']) ? trim((string) $co['sas_host']) : '';
+    $host = preg_replace('#^https?://#i', '', rtrim($host, '/'));
+    $alt = isset($co['api_alt_host']) ? trim((string) $co['api_alt_host']) : '';
+    $alt = preg_replace('#^https?://#i', '', rtrim($alt, '/'));
+    $prov = platform_company_normalize_provider(
+        isset($co['provider_type']) ? $co['provider_type'] : 'sas'
+    );
+    if ($prov === 'earthlink') {
+        $private = function_exists('earthlink_is_private_host') && $host !== '' && earthlink_is_private_host($host);
+        if ($private || $host === '') {
+            if ($alt !== '') {
+                return $alt;
+            }
+            if (function_exists('earthlink_default_alt_host')) {
+                return earthlink_default_alt_host();
+            }
+        }
+    }
+    return $host;
+}
+
+function platform_company_save($pdo, $id, $name, $host, $isActive = 1, $provider = 'sas', $logoPath = null, $altHost = null)
 {
     ensure_platform_companies_schema($pdo);
     $name = trim((string) $name);
@@ -259,21 +384,119 @@ function platform_company_save($pdo, $id, $name, $host, $isActive = 1)
     if ($name === '' || $host === '') {
         return array(false, 'الاسم والهوست مطلوبين', 0);
     }
+    $provider = platform_company_normalize_provider(
+        $provider !== null && $provider !== '' ? $provider : platform_company_guess_provider($name, $host)
+    );
     $id = (int) $id;
+    $logo = $logoPath !== null ? trim((string) $logoPath) : null;
+    $alt = $altHost !== null
+        ? preg_replace('#^https?://#i', '', rtrim(trim((string) $altHost), '/'))
+        : null;
     try {
         if ($id > 0) {
+            $cur = platform_company_row($pdo, $id);
+            if ($logo === null) {
+                $logo = $cur && !empty($cur['logo_path'])
+                    ? (string) $cur['logo_path']
+                    : platform_company_default_logo($provider, $name);
+            } elseif ($logo === '') {
+                $logo = platform_company_default_logo($provider, $name);
+            }
+            if ($alt === null) {
+                $alt = $cur && isset($cur['api_alt_host']) ? (string) $cur['api_alt_host'] : '';
+            }
             $pdo->prepare(
-                'UPDATE platform_companies SET name = :n, sas_host = :h, is_active = :a WHERE id = :id'
-            )->execute(array(':n' => $name, ':h' => $host, ':a' => $isActive ? 1 : 0, ':id' => $id));
+                'UPDATE platform_companies SET name = :n, sas_host = :h, provider_type = :p, logo_path = :l, is_active = :a, api_alt_host = :alt WHERE id = :id'
+            )->execute(array(
+                ':n' => $name,
+                ':h' => $host,
+                ':p' => $provider,
+                ':l' => $logo,
+                ':a' => $isActive ? 1 : 0,
+                ':alt' => $alt,
+                ':id' => $id,
+            ));
             return array(true, 'تم الحفظ', $id);
         }
+        if ($logo === null || $logo === '') {
+            $logo = platform_company_default_logo($provider, $name);
+        }
+        if ($alt === null) {
+            $alt = '';
+        }
         $pdo->prepare(
-            'INSERT INTO platform_companies (name, sas_host, is_active) VALUES (:n, :h, :a)'
-        )->execute(array(':n' => $name, ':h' => $host, ':a' => $isActive ? 1 : 0));
+            'INSERT INTO platform_companies (name, sas_host, provider_type, logo_path, is_active, api_alt_host) VALUES (:n, :h, :p, :l, :a, :alt)'
+        )->execute(array(
+            ':n' => $name,
+            ':h' => $host,
+            ':p' => $provider,
+            ':l' => $logo,
+            ':a' => $isActive ? 1 : 0,
+            ':alt' => $alt,
+        ));
         return array(true, 'تم الإنشاء', (int) $pdo->lastInsertId());
     } catch (Exception $e) {
         return array(false, 'فشل الحفظ', 0);
     }
+}
+
+/**
+ * حفظ لوكو شركة مرفوع → uploads/companies/co_{id}.ext
+ */
+function platform_company_store_logo_upload($file, $companyId, &$fail = '')
+{
+    $fail = '';
+    $companyId = (int) $companyId;
+    if ($companyId <= 0 || !is_array($file) || empty($file['tmp_name'])) {
+        $fail = 'empty';
+        return false;
+    }
+    if (!empty($file['error']) && (int) $file['error'] !== UPLOAD_ERR_OK) {
+        $fail = 'upload';
+        return false;
+    }
+    if (!empty($file['size']) && (int) $file['size'] > 2 * 1024 * 1024) {
+        $fail = 'size';
+        return false;
+    }
+    $info = @getimagesize($file['tmp_name']);
+    if (!$info || empty($info['mime'])) {
+        $fail = 'type';
+        return false;
+    }
+    $map = array(
+        'image/jpeg' => 'jpg',
+        'image/png' => 'png',
+        'image/gif' => 'gif',
+        'image/webp' => 'webp',
+    );
+    $mime = (string) $info['mime'];
+    if (!isset($map[$mime])) {
+        $fail = 'type';
+        return false;
+    }
+    $dir = dirname(__DIR__) . '/public/uploads/companies';
+    if (!is_dir($dir) && !@mkdir($dir, 0755, true)) {
+        $fail = 'mkdir';
+        return false;
+    }
+    if (!is_writable($dir)) {
+        $fail = 'writable';
+        return false;
+    }
+    $rel = 'uploads/companies/co_' . $companyId . '.' . $map[$mime];
+    $dest = dirname(__DIR__) . '/public/' . $rel;
+    foreach (glob(dirname(__DIR__) . '/public/uploads/companies/co_' . $companyId . '.*') as $old) {
+        @unlink($old);
+    }
+    if (!@move_uploaded_file($file['tmp_name'], $dest)) {
+        if (!@copy($file['tmp_name'], $dest)) {
+            $fail = 'move';
+            return false;
+        }
+    }
+    @chmod($dest, 0644);
+    return $rel;
 }
 
 function platform_company_delete($pdo, $id)

@@ -126,10 +126,171 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'quote') {
     sas_json_out(true, '', is_array($quote) ? $quote : array());
 }
 
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'act_wallet') {
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
+    $username = isset($_GET['username']) ? trim((string) $_GET['username']) : '';
+    $provider = isset($_GET['provider']) ? strtolower(trim((string) $_GET['provider'])) : 'sas';
+    $companyId = isset($_GET['company']) ? (int) $_GET['company'] : 0;
+    $profileId = isset($_GET['profile_id']) ? (int) $_GET['profile_id'] : 0;
+    $profileName = isset($_GET['profile_name']) ? trim((string) $_GET['profile_name']) : '';
+    $out = array(
+        'ok' => true,
+        'provider' => $provider,
+        'currency' => isset($config['currency']) ? $config['currency'] : 'د.ع',
+        'balance_disp' => '',
+        'balance_need_disp' => '',
+        'points_disp' => '',
+        'points_need_disp' => '',
+    );
+    $quote = function_exists('sas_activation_quote')
+        ? sas_activation_quote($pdo, $config, $username, $profileId, $profileName)
+        : array();
+    $charge = isset($quote['charge']) ? (float) $quote['charge'] : 0;
+    if ($charge > 0) {
+        $out['balance_need_disp'] = number_format((int) round($charge));
+        $out['currency'] = isset($quote['currency']) ? $quote['currency'] : $out['currency'];
+    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+    $accRow = null;
+    if ($tid > 0 && function_exists('tenant_sas_accounts_list')) {
+        foreach (tenant_sas_accounts_list($pdo, $tid) as $a) {
+            $acid = !empty($a['company_id']) ? (int) $a['company_id'] : 0;
+            $isEl = function_exists('tenant_sas_account_is_earthlink') && tenant_sas_account_is_earthlink($pdo, $a);
+            if ($provider === 'earthlink' && !$isEl) {
+                continue;
+            }
+            if ($provider !== 'earthlink' && $isEl) {
+                continue;
+            }
+            if ($companyId > 0 && $acid > 0 && $acid !== $companyId) {
+                continue;
+            }
+            $accRow = $a;
+            if ($companyId <= 0 || $acid === $companyId) {
+                break;
+            }
+        }
+    }
+    if ($provider === 'earthlink' && $accRow && function_exists('earthlink_portal_balance_for_account')) {
+        $bal = earthlink_portal_balance_for_account($pdo, $accRow);
+        if (!empty($bal['ok'])) {
+            $out['balance_disp'] = !empty($bal['disp']) ? $bal['disp'] : number_format((int) $bal['iqd']);
+            $out['currency'] = 'IQD';
+        }
+        // تكلفة الباقة من اسم البروفايل إن وُجد رقم
+        if ($profileName !== '' && preg_match('/([\d]{2,}[\d,]*)/', $profileName, $cm)) {
+            $out['balance_need_disp'] = number_format((int) str_replace(',', '', $cm[1]));
+        }
+    } else {
+        if (isset($_SESSION['sas_balance_disp']) && $_SESSION['sas_balance_disp'] !== '') {
+            $out['balance_disp'] = (string) $_SESSION['sas_balance_disp'];
+        }
+        if (isset($_SESSION['sas_rp_val']) && $_SESSION['sas_rp_val'] !== null && $_SESSION['sas_rp_val'] !== '') {
+            $pv = $_SESSION['sas_rp_val'];
+            $out['points_disp'] = ((float) $pv == (int) $pv)
+                ? number_format((int) $pv)
+                : number_format((float) $pv, 2);
+        } elseif (function_exists('sas_manager_reward_points')) {
+            list($pok, $pval) = sas_manager_reward_points($config, $pdo);
+            if ($pok && $pval !== null) {
+                $out['points_disp'] = ((float) $pval == (int) $pval)
+                    ? number_format((int) $pval)
+                    : number_format((float) $pval, 2);
+            }
+        }
+    }
+    sas_json_out(true, '', $out);
+}
+
 if (isset($_GET['ajax']) && ($_GET['ajax'] === 'profiles' || $_GET['ajax'] === 'cards' || $_GET['ajax'] === 'managers')) {
     $ajaxKind = (string) $_GET['ajax'];
     $forceCards = isset($_GET['refresh']) && $_GET['refresh'] === '1';
+    $ajaxProvider = isset($_GET['provider']) ? strtolower(trim((string) $_GET['provider'])) : '';
+    $ajaxCompany = isset($_GET['company']) ? (int) $_GET['company'] : 0;
+    $ajaxAccountId = isset($_GET['account_id']) ? (int) $_GET['account_id'] : 0;
+    $ajaxUser = isset($_GET['u']) ? trim((string) $_GET['u']) : '';
+    $ajaxCache = null;
+    $ajaxAccRow = null;
+    if ($ajaxUser !== '' && function_exists('sas_cache_get')) {
+        $ajaxCache = sas_cache_get($pdo, $ajaxUser);
+        if ($ajaxProvider === '' && $ajaxCache && !empty($ajaxCache['provider'])) {
+            $ajaxProvider = strtolower(trim((string) $ajaxCache['provider']));
+        }
+        if ($ajaxCompany <= 0 && $ajaxCache && !empty($ajaxCache['company_id'])) {
+            $ajaxCompany = (int) $ajaxCache['company_id'];
+        }
+    }
+    $ajaxTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+    if (function_exists('tenant_sas_accounts_list') && $ajaxTid > 0) {
+        foreach (tenant_sas_accounts_list($pdo, $ajaxTid) as $_accPick) {
+            $aid = isset($_accPick['id']) ? (int) $_accPick['id'] : 0;
+            $acid = !empty($_accPick['company_id']) ? (int) $_accPick['company_id'] : 0;
+            if ($ajaxAccountId > 0 && $aid === $ajaxAccountId) {
+                $ajaxAccRow = $_accPick;
+                break;
+            }
+            if ($ajaxAccountId <= 0 && $ajaxCompany > 0 && $acid === $ajaxCompany) {
+                $ajaxAccRow = $_accPick;
+                break;
+            }
+        }
+        if ($ajaxAccRow && $ajaxProvider === '' && function_exists('tenant_sas_account_provider')) {
+            $ajaxProvider = tenant_sas_account_provider($pdo, $ajaxAccRow);
+        }
+        if ($ajaxAccRow && $ajaxCompany <= 0 && !empty($ajaxAccRow['company_id'])) {
+            $ajaxCompany = (int) $ajaxAccRow['company_id'];
+        }
+    }
+    // بروفايلات إيرث لنك — مو بروفايلات ساس شركة ثانية
+    if ($ajaxKind === 'profiles' && $ajaxProvider === 'earthlink' && function_exists('earthlink_packages_for_ui')) {
+        if (function_exists('app_session_close')) {
+            app_session_close();
+        }
+        sas_json_out(true, '', array(
+            'profiles' => earthlink_packages_for_ui($pdo, $config, $ajaxCompany),
+            'provider' => 'earthlink',
+        ));
+    }
+    if ($ajaxKind === 'managers' && $ajaxProvider === 'earthlink') {
+        if (function_exists('app_session_close')) {
+            app_session_close();
+        }
+        $elMgrs = array();
+        $elTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+        try {
+            $mgrSql = 'SELECT parent_name, COUNT(*) AS c FROM sas_users_cache WHERE tenant_id = :t'
+                . ' AND provider = "earthlink"'
+                . ($ajaxCompany > 0 ? ' AND company_id = :c' : '')
+                . ' AND parent_name IS NOT NULL AND TRIM(parent_name) <> ""'
+                . ' GROUP BY parent_name ORDER BY c DESC, parent_name ASC LIMIT 80';
+            $mgrSt = $pdo->prepare($mgrSql);
+            $mgrBind = array(':t' => $elTid);
+            if ($ajaxCompany > 0) {
+                $mgrBind[':c'] = $ajaxCompany;
+            }
+            $mgrSt->execute($mgrBind);
+            $nMgr = 0;
+            foreach ($mgrSt->fetchAll() as $mr) {
+                $nMgr++;
+                $nm = trim((string) $mr['parent_name']);
+                $elMgrs[] = array(
+                    'id' => 'elp:' . rawurlencode($nm),
+                    'name' => $nm,
+                );
+            }
+        } catch (Exception $e) {
+            $elMgrs = array();
+        }
+        if (!$elMgrs && $ajaxCache && !empty($ajaxCache['parent_name'])) {
+            $nm = trim((string) $ajaxCache['parent_name']);
+            $elMgrs[] = array('id' => 'elp:' . rawurlencode($nm), 'name' => $nm);
+        }
+        sas_json_out(true, '', array('managers' => $elMgrs, 'provider' => 'earthlink'));
+    }
     if ($ajaxKind === 'profiles' && !$forceCards
+        && $ajaxProvider !== 'earthlink'
         && isset($_SESSION['sas_profiles_ui']) && is_array($_SESSION['sas_profiles_ui'])
         && !empty($_SESSION['sas_profiles_ui_at'])
         && (time() - (int) $_SESSION['sas_profiles_ui_at']) < 600
@@ -140,21 +301,35 @@ if (isset($_GET['ajax']) && ($_GET['ajax'] === 'profiles' || $_GET['ajax'] === '
         sas_json_out(true, '', array('profiles' => $_SESSION['sas_profiles_ui']));
     }
     if ($ajaxKind === 'managers' && !$forceCards
+        && $ajaxProvider !== 'earthlink'
         && isset($_SESSION['sas_managers_ui']) && is_array($_SESSION['sas_managers_ui'])
         && !empty($_SESSION['sas_managers_ui_at'])
         && (time() - (int) $_SESSION['sas_managers_ui_at']) < 600
         && $_SESSION['sas_managers_ui']) {
         sas_json_out(true, '', array('managers' => $_SESSION['sas_managers_ui']));
     }
-    if ($ajaxKind === 'cards' && function_exists('sas_cards_inventory_load_persisted')) {
-        $cardMaxAge = $forceCards ? 8 : 0;
-        $invHit = sas_cards_inventory_load_persisted($cardMaxAge);
+    $ajaxIsAgentStock = function_exists('sas_viewer_uses_agent_card_stock')
+        ? sas_viewer_uses_agent_card_stock()
+        : (!empty($_SESSION['admin_sas_shadow']) || (function_exists('is_agent_user') && is_agent_user()));
+    // وكيل/دخول بوكيل/وكيل ورقي: كروته من ملكية الساس — مو جرد المستودع
+    if ($ajaxKind === 'cards' && !empty($ajaxIsAgentStock)) {
+        $agentCards = function_exists('sas_agent_unused_cards_for_ui')
+            ? sas_agent_unused_cards_for_ui($pdo, $config, $forceCards)
+            : array();
+        sas_json_out(true, '', array(
+            'cards' => is_array($agentCards) ? $agentCards : array(),
+            'profile_id' => 0,
+        ));
+    }
+    // تحديث إجباري: لا تعتمد على ملف الجرد الناقص (عداد شاغر بدون pins)
+    if ($ajaxKind === 'cards' && !$forceCards && function_exists('sas_cards_inventory_load_persisted')) {
+        $invHit = sas_cards_inventory_load_persisted(0);
         if ($invHit && isset($invHit['groups']) && is_array($invHit['groups']) && function_exists('sas_unused_pins_from_inventory_cache')) {
             $pins = sas_unused_pins_from_inventory_cache();
             $needPins = function_exists('sas_inventory_needs_free_pins') && sas_inventory_needs_free_pins($invHit);
-            if (!$needPins || (is_array($pins) && $pins)) {
+            if (!$needPins && is_array($pins)) {
                 sas_json_out(true, '', array(
-                    'cards' => is_array($pins) ? $pins : array(),
+                    'cards' => $pins,
                     'profile_id' => 0,
                 ));
             }
@@ -163,7 +338,22 @@ if (isset($_GET['ajax']) && ($_GET['ajax'] === 'profiles' || $_GET['ajax'] === '
     if (function_exists('app_session_close')) {
         app_session_close();
     }
-    $api = sas_page_connector($config);
+    $api = null;
+    if ($ajaxAccRow && function_exists('tenant_sas_account_is_earthlink')
+        && !tenant_sas_account_is_earthlink($pdo, $ajaxAccRow)
+        && function_exists('sas_make_connector_from_account')
+    ) {
+        $api = sas_make_connector_from_account($ajaxAccRow);
+        if ($api && method_exists($api, 'setTimeout')) {
+            $api->setTimeout(40);
+        }
+        if ($api && method_exists($api, 'login') && !$api->login()) {
+            $api = null;
+        }
+    }
+    if (!$api) {
+        $api = sas_page_connector($config);
+    }
     if (!$api) {
         sas_json_out(false, 'تعذر الدخول للساس');
     }
@@ -171,13 +361,42 @@ if (isset($_GET['ajax']) && ($_GET['ajax'] === 'profiles' || $_GET['ajax'] === '
         $api->setTimeout(40);
     }
     if ($_GET['ajax'] === 'profiles') {
+        // لا تستخدم كاش جلسة بروفايل شركة ثانية عندما محدد حساب/شركة
+        if ($ajaxAccRow || $ajaxCompany > 0) {
+            $profLive = array();
+            if (method_exists($api, 'listProfiles')) {
+                try {
+                    $rawP = $api->listProfiles();
+                    if (is_array($rawP)) {
+                        foreach ($rawP as $pr) {
+                            if (!is_array($pr)) {
+                                continue;
+                            }
+                            $pid = isset($pr['id']) ? (int) $pr['id'] : 0;
+                            $pnm = isset($pr['name']) ? trim((string) $pr['name']) : '';
+                            if ($pid <= 0 && isset($pr['profile_id'])) {
+                                $pid = (int) $pr['profile_id'];
+                            }
+                            if ($pnm === '' && isset($pr['profile_name'])) {
+                                $pnm = trim((string) $pr['profile_name']);
+                            }
+                            if ($pid > 0 || $pnm !== '') {
+                                $profLive[] = array('id' => $pid, 'name' => $pnm !== '' ? $pnm : ('#' . $pid));
+                            }
+                        }
+                    }
+                } catch (Exception $e) {
+                }
+            }
+            if (!$profLive) {
+                $profLive = sas_profiles_for_ui($api);
+            }
+            sas_json_out(true, '', array('profiles' => $profLive, 'provider' => 'sas'));
+        }
         sas_json_out(true, '', array('profiles' => sas_profiles_for_ui($api)));
     }
     if ($_GET['ajax'] === 'managers') {
         sas_json_out(true, '', array('managers' => sas_managers_for_ui($api)));
-    }
-    if (!empty($_SESSION['admin_sas_shadow']) || (function_exists('is_agent_user') && is_agent_user())) {
-        sas_json_out(true, '', array('cards' => array(), 'profile_id' => 0));
     }
     $username = isset($_GET['username']) ? trim((string) $_GET['username']) : '';
     $profileId = isset($_GET['profile_id']) ? (int) $_GET['profile_id'] : 0;
@@ -338,7 +557,7 @@ if (isset($_GET['prepare']) && (string) $_GET['prepare'] !== '') {
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf(post('csrf'))) {
-        if (in_array(post('action'), array('sas_inline', 'sas_enable', 'sas_disconnect', 'sas_activate_card', 'sas_activate_credit', 'sas_activate_reward', 'sas_change_profile', 'give_test', 'sas_update_rental', 'sas_update_debt', 'sas_update_grace', 'sas_save_cols', 'sas_ping_mode', 'bulk_disconnect', 'sas_add_debt', 'sas_list_debts', 'sas_delete_debt'), true)) {
+        if (in_array(post('action'), array('sas_inline', 'sas_enable', 'sas_disconnect', 'sas_activate_card', 'sas_activate_credit', 'sas_activate_reward', 'sas_change_profile', 'give_test', 'sas_transfer_company', 'sas_update_rental', 'sas_update_debt', 'sas_update_grace', 'sas_save_cols', 'sas_ping_mode', 'bulk_disconnect', 'sas_add_debt', 'sas_list_debts', 'sas_delete_debt'), true)) {
             sas_json_out(false, 'طلب غير صالح');
         }
         flash('error', 'طلب غير صالح');
@@ -375,10 +594,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $mode = function_exists('sas_ping_mode_normalize')
             ? sas_ping_mode_normalize(post('sub_ping_mode', 'off'))
             : 'off';
-        if (function_exists('admin_ui_prefs_save')) {
-            admin_ui_prefs_save($pdo, 'sub_ping_mode', $mode);
+        $pingAccId = (int) post('account_id', 0);
+        $pingTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+        if ($pingAccId <= 0 && $pingTid > 1 && function_exists('tenant_sas_accounts_list')) {
+            $coPick = (int) post('company_id', 0);
+            foreach (tenant_sas_accounts_list($pdo, $pingTid) as $accRow) {
+                if ($coPick > 0 && (int) (isset($accRow['company_id']) ? $accRow['company_id'] : 0) === $coPick) {
+                    $pingAccId = (int) $accRow['id'];
+                    break;
+                }
+            }
+            if ($pingAccId <= 0) {
+                foreach (tenant_sas_accounts_list($pdo, $pingTid) as $accRow) {
+                    if (!empty($accRow['is_default'])) {
+                        $pingAccId = (int) $accRow['id'];
+                        break;
+                    }
+                }
+            }
+            if ($pingAccId <= 0) {
+                $firstAcc = tenant_sas_accounts_list($pdo, $pingTid);
+                if ($firstAcc) {
+                    $pingAccId = (int) $firstAcc[0]['id'];
+                }
+            }
         }
-        sas_json_out(true, 'ok', array('mode' => $mode));
+        if ($pingTid > 1 && $pingAccId > 0 && function_exists('sas_ping_mode_save_account')) {
+            $savedPing = sas_ping_mode_save_account($pdo, $pingTid, $pingAccId, $mode);
+            if (empty($savedPing['ok'])) {
+                sas_json_out(false, isset($savedPing['message']) ? $savedPing['message'] : 'ما انحفظ', array('mode' => 'off'));
+            }
+            sas_json_out(true, 'ok', array('mode' => $savedPing['mode'], 'account_id' => $pingAccId));
+        }
+        sas_json_out(false, $lang === 'en' ? 'Add a reseller first' : 'أضف رسلر أولاً', array('mode' => 'off'));
     }
 
     if ($action === 'sas_inline' || $action === 'sas_enable' || $action === 'sas_disconnect' || $action === 'sas_activate_card'
@@ -440,6 +688,147 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 );
         }
         sas_json_out($ok, $msg, is_array($extra) ? $extra : array());
+    }
+
+    if ($action === 'sas_transfer_company') {
+        $username = trim((string) post('id', ''));
+        $targetAccId = (int) post('target_account_id', '0');
+        $targetCoId = (int) post('target_company_id', '0');
+        $newPass = trim((string) post('password', ''));
+        if ($username === '' || ($targetAccId <= 0 && $targetCoId <= 0)) {
+            sas_json_out(false, $lang === 'en' ? 'Pick a target company' : 'اختر الشركة الهدف');
+        }
+        if (function_exists('user_can_access_sas_username') && !user_can_access_sas_username($pdo, $username)) {
+            sas_json_out(false, $lang === 'en' ? 'No access to this user' : 'ما عندك صلاحية لهذا المشترك');
+        }
+        $cache = function_exists('sas_cache_get') ? sas_cache_get($pdo, $username) : null;
+        if (!$cache) {
+            sas_json_out(false, 'المشترك مو موجود بالكاش');
+        }
+        $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+        $srcCo = !empty($cache['company_id']) ? (int) $cache['company_id'] : 0;
+        $targetAcc = null;
+        if (function_exists('tenant_sas_accounts_list') && $tid > 0) {
+            foreach (tenant_sas_accounts_list($pdo, $tid) as $a) {
+                $aid = isset($a['id']) ? (int) $a['id'] : 0;
+                $acid = !empty($a['company_id']) ? (int) $a['company_id'] : 0;
+                if ($targetAccId > 0 && $aid === $targetAccId) {
+                    $targetAcc = $a;
+                    break;
+                }
+                if ($targetAccId <= 0 && $targetCoId > 0 && $acid === $targetCoId) {
+                    $targetAcc = $a;
+                    break;
+                }
+            }
+        }
+        if (!$targetAcc) {
+            sas_json_out(false, $lang === 'en' ? 'Target company not found' : 'الشركة الهدف غير موجودة');
+        }
+        $dstCo = !empty($targetAcc['company_id']) ? (int) $targetAcc['company_id'] : 0;
+        $dstName = !empty($targetAcc['label']) ? (string) $targetAcc['label'] : '';
+        if ($dstCo > 0 && function_exists('platform_company_row')) {
+            $coRow = platform_company_row($pdo, $dstCo);
+            if ($coRow && !empty($coRow['name'])) {
+                $dstName = (string) $coRow['name'];
+            }
+        }
+        if ($dstName === '') {
+            $dstName = function_exists('tenant_sas_account_is_earthlink') && tenant_sas_account_is_earthlink($pdo, $targetAcc)
+                ? 'Earthlink' : 'SAS';
+        }
+        if ($srcCo > 0 && $dstCo > 0 && $srcCo === $dstCo) {
+            sas_json_out(false, $lang === 'en' ? 'Already on this company' : 'المشترك أصلاً بهالشركة');
+        }
+        $isElTarget = function_exists('tenant_sas_account_is_earthlink') && tenant_sas_account_is_earthlink($pdo, $targetAcc);
+        $host = isset($targetAcc['sas_host']) ? $targetAcc['sas_host'] : '';
+        $lu = isset($targetAcc['sas_username']) ? $targetAcc['sas_username'] : '';
+        $lp = isset($targetAcc['sas_password']) ? $targetAcc['sas_password'] : '';
+        $alt = ($dstCo > 0 && function_exists('earthlink_company_alt_host'))
+            ? earthlink_company_alt_host($pdo, $dstCo) : '';
+
+        if ($isElTarget) {
+            if (!function_exists('earthlink_user_exists') || !function_exists('earthlink_create_user')) {
+                sas_json_out(false, 'دوال إيرث غير مكتملة');
+            }
+            $ex = earthlink_user_exists($host, $lu, $lp, $username, $alt);
+            if (!empty($ex['ok']) && !empty($ex['exists'])) {
+                sas_json_out(false, ($lang === 'en'
+                    ? ('Username already reserved at ' . $dstName)
+                    : ('اليوزر محجوز مسبقاً لدى الشركة ' . $dstName)), array(
+                    'exists' => 1,
+                    'company' => $dstName,
+                ));
+            }
+            if ($newPass === '') {
+                $newPass = substr(preg_replace('/[^a-zA-Z0-9]/', '', $username . 'Aa1'), 0, 10);
+                if (strlen($newPass) < 6) {
+                    $newPass = 'Aa' . substr(md5($username), 0, 6);
+                }
+            }
+            $created = earthlink_create_user($host, $lu, $lp, $username, $newPass, '', $alt);
+            if (!empty($created['exists'])) {
+                sas_json_out(false, ($lang === 'en'
+                    ? ('Username already reserved at ' . $dstName)
+                    : ('اليوزر محجوز مسبقاً لدى الشركة ' . $dstName)), array(
+                    'exists' => 1,
+                    'company' => $dstName,
+                ));
+            }
+            if (empty($created['ok'])) {
+                sas_json_out(false, isset($created['error']) ? $created['error'] : 'فشل الإنشاء على إيرث');
+            }
+            sas_json_out(true, $lang === 'en' ? ('Transferred to ' . $dstName) : ('تم النقل إلى ' . $dstName), array(
+                'company' => $dstName,
+                'provider' => 'earthlink',
+            ));
+        }
+
+        // هدف ساس: أنشئ يوزر على حساب الريسلر الهدف
+        $GLOBALS['sas_force_account'] = $targetAcc;
+        if ($newPass === '') {
+            $newPass = substr(preg_replace('/[^a-zA-Z0-9]/', '', $username . 'Aa1'), 0, 10);
+            if (strlen($newPass) < 6) {
+                $newPass = 'Aa' . substr(md5($username), 0, 6);
+            }
+        }
+        $profileId = !empty($cache['profile_id']) ? (int) $cache['profile_id'] : 0;
+        $api = function_exists('sas_page_connector') ? sas_page_connector($config) : null;
+        if ($api && method_exists($api, 'findUserByUsername')) {
+            $found = $api->findUserByUsername($username);
+            if (is_array($found) && function_exists('sas_extract_user_id') && sas_extract_user_id($found) > 0) {
+                sas_json_out(false, ($lang === 'en'
+                    ? ('Username already reserved at ' . $dstName)
+                    : ('اليوزر محجوز مسبقاً لدى الشركة ' . $dstName)), array(
+                    'exists' => 1,
+                    'company' => $dstName,
+                ));
+            }
+        }
+        list($okC, $msgC) = sas_write_user($pdo, $config, 'sas_create', '', array(
+            'username' => $username,
+            'password' => $newPass,
+            'confirm_password' => $newPass,
+            'profile_id' => $profileId,
+            'profile_name' => !empty($cache['profile_name']) ? $cache['profile_name'] : '',
+            'firstname' => !empty($cache['firstname']) ? $cache['firstname'] : (!empty($cache['display_name']) ? $cache['display_name'] : ''),
+        ));
+        if (!$okC) {
+            $low = strtolower((string) $msgC);
+            if (strpos($low, 'exist') !== false || strpos($msgC, 'موجود') !== false || strpos($msgC, 'محجوز') !== false) {
+                sas_json_out(false, ($lang === 'en'
+                    ? ('Username already reserved at ' . $dstName)
+                    : ('اليوزر محجوز مسبقاً لدى الشركة ' . $dstName)), array(
+                    'exists' => 1,
+                    'company' => $dstName,
+                ));
+            }
+            sas_json_out(false, $msgC !== '' ? $msgC : 'فشل النقل');
+        }
+        sas_json_out(true, $lang === 'en' ? ('Transferred to ' . $dstName) : ('تم النقل إلى ' . $dstName), array(
+            'company' => $dstName,
+            'provider' => 'sas',
+        ));
     }
 
     if ($action === 'bulk_disconnect') {
@@ -972,11 +1361,28 @@ $rentFilter = isset($_GET['rent']) ? (string) $_GET['rent'] : '';
 if ($rentFilter !== '1' && $rentFilter !== '0') {
     $rentFilter = '';
 }
+$companyFilter = isset($_GET['company']) ? (int) $_GET['company'] : 0;
+if ($companyFilter < 0) {
+    $companyFilter = 0;
+}
 $GLOBALS['parentFilter'] = $parentFilter;
 $GLOBALS['sasWithSubs'] = $withSubs;
 $GLOBALS['sasProfFilter'] = $profFilter;
 $GLOBALS['sasConnFilter'] = $connFilter;
 $GLOBALS['sasRentFilter'] = $rentFilter;
+$GLOBALS['sasCompanyFilter'] = $companyFilter;
+// لوكو افتراضي لصفوف الوكالة إن ماكو company_id بالصف
+$GLOBALS['sas_row_company_id'] = 0;
+try {
+    $tidLogo = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tidLogo > 0 && function_exists('tenant_row')) {
+        $tLogo = tenant_row($pdo, $tidLogo);
+        if ($tLogo && !empty($tLogo['sas_company_id'])) {
+            $GLOBALS['sas_row_company_id'] = (int) $tLogo['sas_company_id'];
+        }
+    }
+} catch (Exception $e) {
+}
 
 $cacheCount = 0;
 $sasAjaxEarly = isset($_GET['ajax']) ? (string) $_GET['ajax'] : '';
@@ -1047,6 +1453,57 @@ if ($parentFilter !== '') {
     }
     $params[':parent_name'] = strtolower($parentFilter);
 }
+$companyFilterOptions = array();
+if (function_exists('platform_companies_list')) {
+    try {
+        $companyFilterOptions = platform_companies_list($pdo, true);
+    } catch (Exception $e) {
+        $companyFilterOptions = array();
+    }
+}
+$transferCompanyTargets = array();
+$xferTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+if ($xferTid > 0 && function_exists('tenant_sas_accounts_list')) {
+    foreach (tenant_sas_accounts_list($pdo, $xferTid) as $xferAcc) {
+        $xferAid = isset($xferAcc['id']) ? (int) $xferAcc['id'] : 0;
+        $xferCid = !empty($xferAcc['company_id']) ? (int) $xferAcc['company_id'] : 0;
+        if ($xferAid <= 0) {
+            continue;
+        }
+        $xferName = !empty($xferAcc['label']) ? trim((string) $xferAcc['label']) : '';
+        $xferProv = function_exists('tenant_sas_account_provider')
+            ? tenant_sas_account_provider($pdo, $xferAcc)
+            : 'sas';
+        if ($xferCid > 0 && function_exists('platform_company_row')) {
+            $xferCo = platform_company_row($pdo, $xferCid);
+            if ($xferCo && !empty($xferCo['name'])) {
+                $xferName = (string) $xferCo['name'];
+            }
+        }
+        if ($xferName === '') {
+            $xferName = ($xferProv === 'earthlink') ? 'Earthlink' : 'SAS';
+        }
+        $transferCompanyTargets[] = array(
+            'account_id' => $xferAid,
+            'company_id' => $xferCid,
+            'name' => $xferName,
+            'provider' => $xferProv,
+        );
+    }
+}
+if ($companyFilter > 0) {
+    $hasCoCol = false;
+    try {
+        $hasCoCol = (bool) $pdo->query("SHOW COLUMNS FROM sas_users_cache LIKE 'company_id'")->fetch();
+    } catch (Exception $e) {
+    }
+    if ($hasCoCol) {
+        $where .= ' AND c.company_id = :co_id';
+        $params[':co_id'] = $companyFilter;
+    } elseif (!empty($GLOBALS['sas_row_company_id']) && (int) $GLOBALS['sas_row_company_id'] !== $companyFilter) {
+        $where .= ' AND 1=0';
+    }
+}
 
 $isLiveReq = isset($_GET['live']) && $_GET['live'] === '1';
 if ($sasReady && !$isLiveReq && $q !== '' && strlen($q) >= 2 && function_exists('sas_cache_pull_search')) {
@@ -1084,15 +1541,17 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'refresh_now') {
     if (function_exists('app_session_close')) {
         app_session_close();
     }
+    $quietRefresh = isset($_GET['quiet']) && $_GET['quiet'] === '1';
     if (function_exists('set_time_limit')) {
-        @set_time_limit(40);
+        @set_time_limit($quietRefresh ? 12 : 40);
     }
+    // الرفرش الهادئ: دائماً ok حتى لو الساس طاف — الجدول يتحدث من الكاش
     if (!$sasReady) {
         echo json_encode(array(
-            'ok' => false,
+            'ok' => $quietRefresh ? true : false,
             'count' => 0,
-            'mode' => 'error',
-            'last_error' => ($lang === 'en'
+            'mode' => $quietRefresh ? 'local' : 'error',
+            'last_error' => $quietRefresh ? '' : ($lang === 'en'
                 ? 'SAS not linked — add a reseller account in Settings first'
                 : 'الساس غير مربوط — أضف حساب ريسيلر من الإعدادات أولاً'),
         ));
@@ -1110,23 +1569,27 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'refresh_now') {
         }
     }
     $n = 0;
+    $prevQuiet = isset($GLOBALS['sas_quiet_refresh']) ? $GLOBALS['sas_quiet_refresh'] : null;
+    if ($quietRefresh) {
+        $GLOBALS['sas_quiet_refresh'] = 1;
+    }
     try {
         $outsideFile = __DIR__ . '/../includes/sas_outside_sync.php';
         if (is_file($outsideFile)) {
             require_once $outsideFile;
         }
         if (!$wantUsers && function_exists('sas_refresh_online_flags')) {
-            sas_refresh_online_flags($pdo, $config);
+            @sas_refresh_online_flags($pdo, $config);
         }
         if ($wantUsers && function_exists('sas_outside_refresh_users')) {
-            $n = sas_outside_refresh_users($pdo, $config, $wantUsers);
+            $n = (int) @sas_outside_refresh_users($pdo, $config, $wantUsers);
         } elseif ($qNow !== '' && function_exists('sas_cache_pull_search')) {
-            $n = sas_cache_pull_search($pdo, $config, $qNow);
+            $n = (int) @sas_cache_pull_search($pdo, $config, $qNow);
         } else {
             $apiNow = function_exists('sas_page_connector') ? sas_page_connector($config) : null;
             if ($apiNow && method_exists($apiNow, 'listUsersPage')) {
                 if (method_exists($apiNow, 'setTimeout')) {
-                    $apiNow->setTimeout(18);
+                    $apiNow->setTimeout($quietRefresh ? 6 : 18);
                 }
                 $pageNow = $apiNow->listUsersPage(0, 80, '');
                 if (!empty($pageNow['rows']) && is_array($pageNow['rows'])) {
@@ -1140,9 +1603,26 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'refresh_now') {
         }
         echo json_encode(array('ok' => true, 'count' => $n, 'mode' => 'synced', 'ready' => true));
     } catch (Exception $e) {
-        echo json_encode(array('ok' => false, 'count' => 0, 'mode' => 'error', 'last_error' => $e->getMessage()));
+        echo json_encode(array(
+            'ok' => $quietRefresh ? true : false,
+            'count' => 0,
+            'mode' => $quietRefresh ? 'local' : 'error',
+            'last_error' => $quietRefresh ? '' : $e->getMessage(),
+        ));
     } catch (Error $e) {
-        echo json_encode(array('ok' => false, 'count' => 0, 'mode' => 'error', 'last_error' => $e->getMessage()));
+        echo json_encode(array(
+            'ok' => $quietRefresh ? true : false,
+            'count' => 0,
+            'mode' => $quietRefresh ? 'local' : 'error',
+            'last_error' => $quietRefresh ? '' : $e->getMessage(),
+        ));
+    }
+    if ($quietRefresh) {
+        if ($prevQuiet === null) {
+            unset($GLOBALS['sas_quiet_refresh']);
+        } else {
+            $GLOBALS['sas_quiet_refresh'] = $prevQuiet;
+        }
     }
     exit;
 }
@@ -1231,7 +1711,8 @@ if ($perPageRaw === 'all') {
     $perPage = $perNum;
 }
 
-$sortKey = isset($_GET['sort']) ? (string) $_GET['sort'] : 'name';
+$hasSortParam = isset($_GET['sort']) && (string) $_GET['sort'] !== '';
+$sortKey = $hasSortParam ? (string) $_GET['sort'] : 'active_expire';
 $sortDir = isset($_GET['dir']) && strtolower((string) $_GET['dir']) === 'desc' ? 'desc' : 'asc';
 $sortMap = array(
     'id' => 'c.sas_user_id',
@@ -1252,9 +1733,10 @@ $sortMap = array(
     'traf' => function_exists('sas_daily_traffic_order_sql')
         ? sas_daily_traffic_order_sql('c')
         : 'c.daily_traffic',
+    'active_expire' => 'c.expire_at',
 );
 if (!isset($sortMap[$sortKey])) {
-    $sortKey = 'name';
+    $sortKey = 'active_expire';
 }
 $orderSql = $sortMap[$sortKey] . ' ' . strtoupper($sortDir);
 if ($sortKey === 'name') {
@@ -1262,6 +1744,22 @@ if ($sortKey === 'name') {
 }
 if ($sortKey === 'traf') {
     $orderSql = $sortMap['traf'] . ' ' . strtoupper($sortDir) . ', c.username ASC';
+}
+// افتراضي: الفعّالين أولاً، ثم الأكبر تاريخ انتهاء
+if ($sortKey === 'active_expire' || !$hasSortParam) {
+    $orderSql = '(CASE WHEN c.enabled = 1 AND (c.expire_at IS NULL OR c.expire_at >= NOW()) THEN 0 ELSE 1 END) ASC, '
+        . 'c.expire_at DESC, c.username ASC';
+    $sortKey = 'active_expire';
+    $sortDir = 'desc';
+}
+// المنتهين: الأحدث انتهاءً أولاً (قبل شوي → أمس → أقدم)
+if ($subFilter === 'expired' && (!$hasSortParam || $sortKey === 'active_expire' || $sortKey === 'expire' || $sortKey === 'days')) {
+    $orderSql = '(CASE WHEN c.expire_at IS NOT NULL AND c.expire_at < NOW() THEN 0 ELSE 1 END) ASC, '
+        . 'c.expire_at DESC, c.username ASC';
+    if (!$hasSortParam || $sortKey === 'active_expire') {
+        $sortKey = 'active_expire';
+        $sortDir = 'desc';
+    }
 }
 
 $fromSql = function_exists('sas_cache_list_from_sql')
@@ -1643,6 +2141,9 @@ function sas_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw, 
     if (!empty($GLOBALS['sasRentFilter'])) {
         $qs[] = 'rent=' . urlencode((string) $GLOBALS['sasRentFilter']);
     }
+    if (!empty($GLOBALS['sasCompanyFilter'])) {
+        $qs[] = 'company=' . (int) $GLOBALS['sasCompanyFilter'];
+    }
     $arrow = '';
     if ($currentKey === $key) {
         $arrow = $currentDir === 'asc' ? ' ↑' : ' ↓';
@@ -1784,6 +2285,9 @@ function sas_filter_href($sub, $parent, $q, $perPageRaw)
     }
     if (!empty($GLOBALS['sasRentFilter'])) {
         $qs[] = 'rent=' . urlencode((string) $GLOBALS['sasRentFilter']);
+    }
+    if (!empty($GLOBALS['sasCompanyFilter'])) {
+        $qs[] = 'company=' . (int) $GLOBALS['sasCompanyFilter'];
     }
     return 'sas.php' . (count($qs) ? ('?' . implode('&', $qs)) : '');
 }
@@ -1969,6 +2473,14 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   width: auto;
   max-width: none;
 }
+.sas-co-logo {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  flex: 0 0 auto;
+  vertical-align: middle;
+  background: transparent;
+}
 .sas-user-copywrap a,
 .sas-ip-wrap a,
 .sas-ip-wrap span {
@@ -1989,6 +2501,24 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 .sas-card-list label:hover { background: #eef7fb; }
 .sas-card-empty { padding: 10px; text-align: center; color: #dd4b39; font-weight: 700; font-size: 13px; }
 .sas-table-card { background: #fff; border: 1px solid #d2d6de; }
+.sas-table-card.is-quiet-refresh {
+  position: relative;
+  pointer-events: none;
+}
+.sas-table-card.is-quiet-refresh::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  background: rgba(248, 250, 252, 0.28);
+  -webkit-backdrop-filter: blur(1.5px);
+  backdrop-filter: blur(1.5px);
+  pointer-events: none;
+}
+.sas-table-card.is-quiet-refresh .table-wrap {
+  opacity: 0.72;
+  transition: opacity .15s ease;
+}
 .sas-table-headbar {
   background: #eef2f6; color: #1e293b; padding: 6px 10px;
   display: flex; align-items: center; justify-content: flex-start; gap: 8px 10px;
@@ -2114,7 +2644,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 .pager-n.pager-arrow { font-size: 15px; color: #94a3b8; min-width: 26px; }
 .sas-row-flash td { background: #fff6d6 !important; }
 .sas-act-wa { margin-top: 8px; width: 100%; }
-.sas-radius-page #sasActModal .sas-act-opts {
+#sasActModal .sas-act-opts {
   display: flex;
   flex-direction: column;
   gap: 0;
@@ -2125,7 +2655,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   background: #fff;
   overflow: hidden;
 }
-.sas-radius-page #sasActModal .sas-act-opt {
+#sasActModal .sas-act-opt {
   display: flex;
   width: 100%;
   margin: 0;
@@ -2137,14 +2667,14 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   padding: 8px 12px;
   border-bottom: 1px solid #eef2f7;
 }
-.sas-radius-page #sasActModal .sas-act-opt:last-child { border-bottom: 0; }
-.sas-radius-page #sasActModal .sas-act-opt .toggle-ui {
+#sasActModal .sas-act-opt:last-child { border-bottom: 0; }
+#sasActModal .sas-act-opt .toggle-ui {
   width: 40px; height: 22px; flex: 0 0 40px;
 }
-.sas-radius-page #sasActModal .sas-act-opt .toggle-ui::after {
+#sasActModal .sas-act-opt .toggle-ui::after {
   width: 16px; height: 16px; top: 3px;
 }
-.sas-radius-page #sasActModal .sas-act-opt .toggle-text {
+#sasActModal .sas-act-opt .toggle-text {
   flex: 1 1 auto;
   order: -1;
   font-size: 13px;
@@ -2152,7 +2682,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   color: #1e293b;
   text-align: start;
 }
-.sas-radius-page #sasActModal .sas-act-wa .toggle {
+#sasActModal .sas-act-wa .toggle {
   display: flex;
   width: 100%;
   margin: 0;
@@ -2162,17 +2692,17 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   box-sizing: border-box;
   min-height: 28px;
 }
-.sas-radius-page #sasActModal .sas-act-wa .toggle-ui {
+#sasActModal .sas-act-wa .toggle-ui {
   width: 38px; height: 22px; flex: 0 0 38px;
 }
-.sas-radius-page #sasActModal .sas-act-wa .toggle-ui::after {
+#sasActModal .sas-act-wa .toggle-ui::after {
   width: 16px; height: 16px; top: 3px;
 }
-.sas-radius-page #sasActModal .sas-act-wa .toggle-text { font-size: 12px; }
-.sas-radius-page #sasActModal .quick-nested-toggle {
+#sasActModal .sas-act-wa .toggle-text { font-size: 12px; }
+#sasActModal .quick-nested-toggle {
   display: none !important;
 }
-.sas-radius-page #sasActModal .sas-act-field {
+#sasActModal .sas-act-field {
   display: block;
   margin: 0 0 8px;
   min-height: 0;
@@ -2180,15 +2710,15 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   font-weight: 700;
   color: #64748b;
 }
-.sas-radius-page #sasActModal select,
-.sas-radius-page #sasActModal input[type="number"] {
+#sasActModal select,
+#sasActModal input[type="number"] {
   width: 100%;
   height: 36px;
   margin-top: 4px;
   border-radius: 8px;
   font-size: 13px;
 }
-.sas-radius-page #sasActModal .sas-seg {
+#sasActModal .sas-seg {
   display: flex;
   flex-direction: column;
   flex-wrap: nowrap;
@@ -2201,7 +2731,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   background: transparent;
   border-radius: 0;
 }
-.sas-radius-page #sasActModal .sas-seg-opt {
+#sasActModal .sas-seg-opt {
   flex: 0 0 auto;
   display: flex !important;
   align-items: center;
@@ -2214,7 +2744,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   color: inherit;
   cursor: pointer;
 }
-.sas-radius-page #sasActModal .sas-seg-opt input {
+#sasActModal .sas-seg-opt input {
   position: static;
   opacity: 1;
   pointer-events: auto;
@@ -2224,7 +2754,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   margin: 0;
   accent-color: #2563eb;
 }
-.sas-radius-page #sasActModal .sas-seg-opt span {
+#sasActModal .sas-seg-opt span {
   display: inline-flex;
   align-items: center;
   justify-content: flex-start;
@@ -2240,138 +2770,161 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   background: transparent;
   box-shadow: none;
 }
-.sas-radius-page #sasActModal .sas-seg-opt input:checked + span {
+#sasActModal .sas-seg-opt input:checked + span {
   background: transparent;
   color: #0f172a;
   box-shadow: none;
 }
-.sas-radius-page #sasActModal .pay-mode-box {
+#sasActModal .pay-mode-box {
   margin: 8px 0 10px;
 }
-.sas-radius-page #sasActModal .pay-mode-row {
+#sasActModal .pay-mode-row {
   margin-top: 6px;
 }
-.sas-radius-page #sasActModal #sasActCardBox { margin: 0 0 6px; }
-.sas-radius-page #sasActModal #sasActCardBox select { margin-top: 0; }
-.sas-radius-page #sasActModal .sas-act-below {
+#sasActModal #sasActCardBox { margin: 0 0 6px; }
+#sasActModal #sasActCardBox select { margin-top: 0; }
+#sasActModal .sas-act-below {
   display: flex;
   flex-direction: column;
   gap: 8px;
   margin: 0 0 6px;
   min-width: 0;
 }
-.sas-radius-page #sasActModal .sas-act-debts {
+#sasActModal .sas-act-debts {
   margin: 0;
   padding: 0;
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  background: #f8fafc;
-  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
   flex: 1 1 auto;
   min-width: 0;
-}
-.sas-radius-page #sasActModal .sas-act-debts .d-block {
-  padding: 10px 12px 8px;
-}
-.sas-radius-page #sasActModal .sas-act-debts .d-head {
   display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+#sasActModal .sas-act-ledger {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  padding: 0;
+  margin: 0;
+}
+#sasActModal .sas-act-metric {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
   justify-content: space-between;
-  align-items: baseline;
-  gap: 10px;
+  gap: 6px;
+  min-height: 64px;
+  padding: 10px 10px 9px;
+  border-radius: 14px;
+  background:
+    linear-gradient(165deg, rgba(255,255,255,0.95) 0%, rgba(248,250,252,0.9) 100%);
+  border: 1px solid rgba(226, 232, 240, 0.95);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.8) inset;
+  overflow: hidden;
+}
+#sasActModal .sas-act-metric::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 999px;
+  background: #cbd5e1;
+}
+#sasActModal .sas-act-metric .m-lab {
+  font-size: 10px;
   font-weight: 800;
-  color: #0f172a;
-  margin-bottom: 6px;
+  letter-spacing: 0.02em;
+  color: #64748b;
+  line-height: 1.2;
+  max-width: 100%;
+}
+#sasActModal .sas-act-metric .m-val {
   font-size: 13px;
-}
-.sas-radius-page #sasActModal .sas-act-debts .d-head strong {
-  color: #b45309;
+  font-weight: 900;
+  color: #0f172a;
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
+  line-height: 1.15;
+  word-break: break-word;
 }
-.sas-radius-page #sasActModal .sas-act-debts .d-empty {
+#sasActModal .sas-act-metric.is-old::before { background: #f59e0b; }
+#sasActModal .sas-act-metric.is-old .m-val { color: #b45309; }
+#sasActModal .sas-act-metric.is-old.is-zero {
+  opacity: 0.55;
+}
+#sasActModal .sas-act-metric.is-old.is-zero .m-val { color: #94a3b8; }
+#sasActModal .sas-act-metric.is-act::before { background: #22c55e; }
+#sasActModal .sas-act-metric.is-act .m-val { color: #15803d; }
+#sasActModal .sas-act-metric.is-act.is-debt::before { background: #38bdf8; }
+#sasActModal .sas-act-metric.is-act.is-debt .m-val { color: #0369a1; }
+#sasActModal .sas-act-metric.is-total {
+  background:
+    linear-gradient(155deg, #0f172a 0%, #1e293b 55%, #0f766e 140%);
+  border-color: transparent;
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.18);
+}
+#sasActModal .sas-act-metric.is-total::before { background: #5eead4; }
+#sasActModal .sas-act-metric.is-total .m-lab { color: rgba(226,232,240,0.78); }
+#sasActModal .sas-act-metric.is-total .m-val { color: #f8fafc; font-size: 14px; }
+#sasActModal .sas-act-debt-detail {
+  display: none;
+  margin: 0;
+  padding: 0;
+}
+#sasActModal .sas-act-debt-detail.has-lines {
+  display: block;
+}
+#sasActModal .sas-act-debts .d-empty {
   color: #64748b;
   font-size: 12px;
   margin: 0;
 }
-.sas-radius-page #sasActModal .sas-act-debts ul {
+#sasActModal .sas-act-debts ul {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  max-height: none;
+  overflow: visible;
 }
-.sas-radius-page #sasActModal .sas-act-debts li {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 10px;
-  font-size: 12px;
-  padding: 6px 8px;
-  color: #475569;
-  background: #fff;
-  border: 1px solid #e8eef5;
-  border-radius: 7px;
-}
-.sas-radius-page #sasActModal .sas-act-debts li span {
-  flex: 1 1 auto;
-  min-width: 0;
-  line-height: 1.35;
-}
-.sas-radius-page #sasActModal .sas-act-debts li strong {
-  flex: 0 0 auto;
-  color: #0f172a;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-.sas-radius-page #sasActModal .sas-act-debts .d-row {
+#sasActModal .sas-act-debts li {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 10px;
-  font-size: 13px;
-  padding: 10px 12px;
-  color: #334155;
-  border-top: 1px solid #e2e8f0;
+  font-size: 11px;
+  padding: 7px 10px;
+  color: #475569;
   background: #fff;
+  border: 1px solid #e8eef5;
+  border-radius: 999px;
 }
-.sas-radius-page #sasActModal .sas-act-debts .d-row span {
+#sasActModal .sas-act-debts li span {
   flex: 1 1 auto;
   min-width: 0;
-  font-weight: 600;
-  line-height: 1.3;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.sas-radius-page #sasActModal .sas-act-debts .d-row strong {
+#sasActModal .sas-act-debts li strong {
   flex: 0 0 auto;
+  color: #0f172a;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-.sas-radius-page #sasActModal .sas-act-debts .d-act {
-  color: #1e293b;
-}
-.sas-radius-page #sasActModal .sas-act-debts .d-act strong {
-  color: #0f172a;
-}
-.sas-radius-page #sasActModal .sas-act-debts .d-total {
-  margin: 0;
-  padding: 11px 12px;
-  border-top: 1px solid #dbe4ee;
-  background: #eef6ff;
-  font-weight: 800;
-  color: #0f172a;
-}
-.sas-radius-page #sasActModal .sas-act-debts .d-total strong {
-  color: #1d4ed8;
-  font-size: 14px;
-}
-.sas-radius-page #sasActModal .sas-act-debts.is-empty .d-block,
-.sas-radius-page #sasActModal .sas-act-debts.is-empty .d-empty,
-.sas-radius-page #sasActModal .sas-act-debts.is-empty #sasActGrandRow,
-.sas-radius-page #sasActModal .sas-act-debts.is-empty #sasActNewRow {
+#sasActModal .sas-act-debts.is-empty {
   display: none !important;
 }
-.sas-radius-page #sasActModal #sasActCardHint { font-size: 11px; margin: 4px 0 8px; color: #64748b; }
-.sas-radius-page #sasActModal #sasActCardHint.is-ok { display: block; }
+#sasActModal #sasActCardHint { font-size: 11px; margin: 4px 0 8px; color: #64748b; }
+#sasActModal #sasActCardHint.is-ok { display: block; }
 .sas-act-who { margin: 0; }
 .sas-act-name { font-weight: 800; font-size: 14px; color: #1e293b; line-height: 1.25; }
 .sas-act-user {
@@ -2390,7 +2943,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   border-radius: 6px; font-weight: 800; min-width: 8.5rem;
   letter-spacing: 0.01em;
 }
-.sas-radius-page #sasActModal:not(.hidden) {
+#sasActModal:not(.hidden) {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2398,7 +2951,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   overflow: hidden;
 }
 #sasActModal .ops-modal-card.sas-act-card,
-.sas-radius-page #sasActModal .ops-modal-card.sas-act-card {
+#sasActModal .ops-modal-card.sas-act-card {
   position: relative;
   display: flex;
   flex-direction: column;
@@ -2410,7 +2963,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   box-sizing: border-box;
   border-radius: 14px;
 }
-.sas-radius-page #sasActModal .ops-modal-head {
+#sasActModal .ops-modal-head {
   margin-bottom: 6px;
   align-items: flex-start;
   gap: 8px;
@@ -2418,31 +2971,70 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 .sas-act-head-actions {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  flex-direction: row;
+  gap: 8px;
   flex: 0 0 auto;
 }
-.sas-act-head-actions .btn {
-  min-width: 36px;
-  height: 34px;
+.sas-act-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  min-width: 38px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  color: #334155;
   font-size: 18px;
   font-weight: 800;
   line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 1px 0 rgba(255,255,255,0.85) inset;
+  transition: background .15s ease, transform .12s ease, border-color .15s ease, color .15s ease;
 }
-.sas-radius-page #sasActModal .ops-modal-head h3 { display: none; }
+.sas-act-ico:hover {
+  background: #eef2f7;
+  border-color: #cbd5e1;
+}
+.sas-act-ico:active {
+  transform: scale(0.96);
+}
+.sas-act-ico.is-refresh {
+  font-size: 17px;
+}
+.sas-act-ico.is-close {
+  background: #0f172a;
+  border-color: #0f172a;
+  color: #fff;
+  font-size: 22px;
+  font-weight: 700;
+}
+.sas-act-ico.is-close:hover {
+  background: #1e293b;
+  border-color: #1e293b;
+  color: #fff;
+}
+.sas-act-ico:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+#sasActModal .ops-modal-head h3 { display: none; }
 .sas-act-name { font-weight: 800; font-size: 15px; color: #1e293b; line-height: 1.25; }
-.sas-radius-page #sasActModal .sas-act-body {
+#sasActModal .sas-act-body {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   padding-bottom: 4px;
 }
-.sas-radius-page #sasActModal .sas-act-field { margin: 0 0 6px; }
-.sas-radius-page #sasActModal .sas-seg { margin: 0 0 6px; }
-.sas-radius-page #sasActModal .pay-mode-box { margin: 0 0 10px; }
-.sas-radius-page #sasActModal .sas-act-below { margin: 0 0 4px; }
-.sas-radius-page #sasActModal .sas-act-debts { margin: 0; }
-.sas-radius-page #sasActModal .sas-act-wa {
+#sasActModal .sas-act-field { margin: 0 0 6px; }
+#sasActModal .sas-seg { margin: 0 0 6px; }
+#sasActModal .pay-mode-box { margin: 0 0 10px; }
+#sasActModal .sas-act-below { margin: 0 0 4px; }
+#sasActModal .sas-act-debts { margin: 0; }
+#sasActModal .sas-act-wa {
   margin: 0;
   display: flex;
   flex-direction: column;
@@ -2454,7 +3046,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   background: #fff;
   box-sizing: border-box;
 }
-.sas-radius-page #sasActModal .sas-act-wa .toggle {
+#sasActModal .sas-act-wa .toggle {
   display: flex;
   width: 100%;
   margin: 0;
@@ -2465,7 +3057,7 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   min-height: 28px;
 }
 #sasActModal .sas-act-foot,
-.sas-radius-page #sasActModal .sas-act-foot {
+#sasActModal .sas-act-foot {
   flex: 0 0 auto;
   position: sticky;
   bottom: 0;
@@ -2487,9 +3079,11 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 #sasActModal .sas-act-foot .btn,
 #sasActModal #sasActSubmit,
 #sasActModal .sas-act-main-btn,
-.sas-radius-page #sasActModal .sas-act-foot .btn,
-.sas-radius-page #sasActModal #sasActSubmit,
-.sas-radius-page #sasActModal .sas-act-main-btn {
+#sasActModal .sas-act-foot .btn,
+#sasActModal #sasActSubmit,
+#sasActModal .sas-act-main-btn {
+  position: relative !important;
+  overflow: hidden !important;
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
@@ -2503,26 +3097,46 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   padding: 0 16px !important;
   height: 68px !important;
   min-height: 68px !important;
-  border-radius: 14px !important;
+  border-radius: 18px !important;
   font-weight: 800 !important;
-  font-size: 20px !important;
+  font-size: 21px !important;
+  letter-spacing: 0.02em !important;
   line-height: 1.2 !important;
-  background: #0f172a !important;
+  background: linear-gradient(135deg, #16a34a 0%, #22c55e 55%, #4ade80 100%) !important;
   color: #fff !important;
   border: 0 !important;
-  box-shadow: 0 8px 0 rgba(15, 23, 42, 0.18);
+  box-shadow: 0 14px 32px rgba(22, 163, 74, 0.35), 0 0 0 0 rgba(74, 222, 128, 0.4) !important;
   text-align: center !important;
   box-sizing: border-box !important;
+  animation: sasFabPulse 1.9s ease-in-out infinite !important;
+  cursor: pointer !important;
+  transform-origin: center;
+}
+#sasActModal #sasActSubmit::before,
+#sasActModal .sas-act-main-btn::before,
+#sasActModal #sasActSubmit::before,
+#sasActModal .sas-act-main-btn::before {
+  content: '';
+  position: absolute;
+  inset: -40% auto auto -30%;
+  width: 48%;
+  height: 180%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.38), transparent);
+  transform: rotate(18deg);
+  animation: sasFabShine 2.2s ease-in-out infinite;
+  pointer-events: none;
 }
 .sas-act-confirm-layer {
   position: fixed;
   inset: 0;
-  z-index: 200;
+  z-index: 100020;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 20px;
-  background: rgba(15, 23, 42, 0.45);
+  background: rgba(15, 23, 42, 0.55);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
   box-sizing: border-box;
 }
 .sas-act-confirm-layer.hidden,
@@ -2530,20 +3144,77 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   display: none !important;
 }
 .sas-act-confirm-layer .sas-act-fab-confirm {
+  position: relative;
+  overflow: hidden;
   min-width: min(280px, 86vw);
-  height: 64px;
+  height: 68px;
   padding: 0 28px;
   border: 0;
-  border-radius: 18px;
-  background: #16a34a;
+  border-radius: 20px;
+  background: linear-gradient(135deg, #16a34a 0%, #22c55e 55%, #4ade80 100%);
   color: #fff;
   font-weight: 800;
-  font-size: 20px;
+  font-size: 21px;
+  letter-spacing: 0.02em;
   cursor: pointer;
-  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.35);
+  box-shadow: 0 16px 40px rgba(22, 163, 74, 0.38), 0 0 0 0 rgba(74, 222, 128, 0.45);
+  transform-origin: center;
 }
-.sas-act-confirm,
-.sas-act-fab { display: none !important; }
+.sas-act-confirm-layer .sas-act-fab-confirm.is-emo {
+  animation: sasFabPop .38s cubic-bezier(.2,1.2,.3,1), sasFabPulse 1.8s ease-in-out .4s infinite;
+}
+.sas-act-confirm-layer .sas-act-fab-confirm::before {
+  content: '';
+  position: absolute;
+  inset: -40% auto auto -30%;
+  width: 50%;
+  height: 180%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.38), transparent);
+  transform: rotate(18deg);
+  animation: sasFabShine 2.2s ease-in-out infinite;
+  pointer-events: none;
+}
+.sas-act-confirm-layer .sas-act-fab-confirm:hover {
+  filter: brightness(1.05);
+}
+.sas-act-confirm-layer .sas-act-fab-confirm:active {
+  transform: scale(0.97);
+}
+@keyframes sasFabPop {
+  0% { transform: scale(0.72); opacity: 0; }
+  70% { transform: scale(1.06); opacity: 1; }
+  100% { transform: scale(1); }
+}
+@keyframes sasFabPulse {
+  0%, 100% { box-shadow: 0 16px 40px rgba(22, 163, 74, 0.38), 0 0 0 0 rgba(74, 222, 128, 0.4); }
+  50% { box-shadow: 0 18px 44px rgba(22, 163, 74, 0.45), 0 0 0 12px rgba(74, 222, 128, 0); }
+}
+@keyframes sasFabShine {
+  0% { left: -40%; opacity: 0; }
+  30% { opacity: 1; }
+  100% { left: 120%; opacity: 0; }
+}
+#sasAskModal.is-emotion #sasAskYes {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(135deg, #16a34a 0%, #22c55e 55%, #4ade80 100%) !important;
+  border: 0 !important;
+  box-shadow: 0 12px 28px rgba(22, 163, 74, 0.35);
+  animation: sasFabPop .34s cubic-bezier(.2,1.2,.3,1), sasFabPulse 1.8s ease-in-out .35s infinite;
+}
+#sasAskModal.is-emotion #sasAskYes::before {
+  content: '';
+  position: absolute;
+  inset: -40% auto auto -30%;
+  width: 45%;
+  height: 180%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent);
+  transform: rotate(18deg);
+  animation: sasFabShine 2.2s ease-in-out infinite;
+  pointer-events: none;
+}
+/* قديم: لا تخفي طبقة التأكيد الحالية (.sas-act-confirm-layer) */
+.sas-act-confirm:not(.sas-act-confirm-layer) { display: none !important; }
 .sas-act-pts {
   display: inline-block;
   margin-inline-start: 4px;
@@ -2551,6 +3222,32 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   font-weight: 700;
   color: #0369a1;
   opacity: .95;
+}
+.sas-act-bal-box {
+  margin: 8px 0 2px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #f8fafc, #eef2ff);
+  border: 1px solid #dbe3f0;
+}
+.sas-act-bal-box.is-reward {
+  background: linear-gradient(180deg, #f7fee7, #ecfccb);
+  border-color: #d9f99d;
+}
+.sas-act-bal-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+  color: #334155;
+}
+.sas-act-bal-row + .sas-act-bal-row { margin-top: 6px; }
+.sas-act-bal-row strong {
+  font-size: 15px;
+  font-weight: 800;
+  color: #0f172a;
+  direction: ltr;
 }
 #sasActCardsLoad {
   display: none;
@@ -2626,20 +3323,22 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 @keyframes sasActSpin {
   to { transform: rotate(360deg); }
 }
-.sas-radius-page #sasActModal #sasActSubmit:hover:not(:disabled):not(.is-busy) {
-  background: #0f172a;
+#sasActModal #sasActSubmit:hover:not(:disabled):not(.is-busy) {
+  filter: brightness(1.06);
+  background: linear-gradient(135deg, #16a34a 0%, #22c55e 55%, #4ade80 100%) !important;
 }
-.sas-radius-page #sasActModal #sasActSubmit:active,
-.sas-radius-page #sasActModal #sasActSubmit.is-pressed,
-.sas-radius-page #sasActModal #sasActSubmit.is-busy,
-.sas-radius-page #sasActModal #sasActSubmit:disabled {
-  background: #15803d !important;
+#sasActModal #sasActSubmit:active,
+#sasActModal #sasActSubmit.is-pressed,
+#sasActModal #sasActSubmit.is-busy,
+#sasActModal #sasActSubmit:disabled {
+  background: linear-gradient(135deg, #15803d 0%, #16a34a 60%, #22c55e 100%) !important;
   color: #fff !important;
   opacity: 1;
   transform: scale(0.985);
-  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.18);
+  box-shadow: 0 8px 20px rgba(22, 163, 74, 0.3) !important;
+  filter: none;
 }
-.sas-radius-page #sasActModal .sas-modal-err:empty { display: none; margin: 0; }
+#sasActModal .sas-modal-err:empty { display: none; margin: 0; }
 .sas-radius-page #sasActResultModal {
   z-index: 120;
 }
@@ -2695,58 +3394,165 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   overflow: auto;
   box-sizing: border-box;
 }
-.sas-radius-page .modal-backdrop {
+#sasActModal.modal-backdrop, .sas-radius-page .modal-backdrop {
   z-index: 100010;
 }
-body:has(#sasActModal:not(.hidden)) .main-top {
-  visibility: hidden;
-  pointer-events: none;
+body:has(#sasActModal:not(.hidden)) .main-top,
+body:has(#sasActModal:not(.hidden)) .fab-menu,
+body:has(#sasActModal:not(.hidden)) .sidebar-toggle,
+body:has(#sasActModal:not(.hidden)) .sidebar-toggle-bar {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+#sasActModal.modal-backdrop {
+  position: fixed !important;
+  inset: 0 !important;
+  z-index: 100010 !important;
 }
 @media (max-width: 560px) {
-  .sas-radius-page #sasActModal:not(.hidden) {
-    padding: 0;
-    align-items: flex-end;
+  #sasActModal:not(.hidden) {
+    padding: 0 !important;
+    align-items: stretch !important;
+    justify-content: stretch !important;
+    inset: 0 !important;
+    top: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    overflow: hidden !important;
+    background: #0b1220 !important;
+    margin: 0 !important;
+  }
+  body:has(#sasActModal:not(.hidden)) {
+    overflow: hidden !important;
+    overscroll-behavior: none;
   }
   .sas-radius-page #sasProfModal {
     padding: 8px;
     align-items: flex-end;
   }
-  .sas-radius-page #sasActModal .sas-seg {
+  #sasActModal .sas-seg {
     flex-direction: column !important;
     flex-wrap: nowrap !important;
+    gap: 2px !important;
+    margin: 0 0 4px !important;
   }
-  .sas-radius-page #sasActModal .sas-seg-opt span {
-    font-size: 13px;
+  #sasActModal .sas-seg-opt {
+    min-height: 24px !important;
+  }
+  #sasActModal .sas-seg-opt span {
+    font-size: 12.5px;
     height: auto;
     min-height: 0;
   }
-  .sas-radius-page #sasActModal .ops-modal-card.sas-act-card {
-    max-width: 100%;
-    width: 100%;
-    height: auto;
-    max-height: 100vh;
-    max-height: 100dvh;
-    padding: 10px 12px 0;
-    border-radius: 16px 16px 0 0;
+  #sasActModal .ops-modal-card.sas-act-card {
+    max-width: 100% !important;
+    width: 100% !important;
+    height: 100% !important;
+    height: 100dvh !important;
+    max-height: 100% !important;
+    max-height: 100dvh !important;
+    margin: 0 !important;
+    padding: calc(6px + env(safe-area-inset-top, 0px)) 12px 0 !important;
+    border-radius: 0 !important;
+    border: 0 !important;
+    box-shadow: none !important;
+  }
+  #sasActModal .ops-modal-head {
+    margin-bottom: 4px !important;
+  }
+  #sasActModal .sas-act-body {
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+  #sasActModal .sas-act-field {
+    margin: 0 0 4px !important;
+  }
+  #sasActModal select,
+  #sasActModal input[type="number"] {
+    height: 34px !important;
+    margin-top: 2px !important;
+  }
+  #sasActModal .pay-mode-box {
+    margin: 4px 0 6px !important;
+  }
+  #sasActModal .pay-mode-row {
+    margin-top: 4px !important;
+    gap: 6px !important;
+  }
+  #sasActModal .pay-mode-card {
+    padding: 8px 8px !important;
+    min-height: 0 !important;
+  }
+  #sasActModal .pay-mode-card small {
+    font-size: 10px !important;
+    line-height: 1.25 !important;
+  }
+  #sasActModal .sas-act-below {
+    gap: 6px !important;
+    margin: 0 !important;
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+  #sasActModal .sas-act-opts {
+    border-radius: 12px !important;
+  }
+  #sasActModal .sas-act-opt {
+    min-height: 34px !important;
+    padding: 6px 10px !important;
+  }
+  #sasActModal .sas-act-ledger {
+    gap: 5px !important;
+  }
+  #sasActModal .sas-act-metric {
+    min-height: 58px !important;
+    padding: 8px 8px 7px !important;
+    border-radius: 12px !important;
+  }
+  #sasActModal .sas-act-metric .m-lab {
+    font-size: 9.5px !important;
+  }
+  #sasActModal .sas-act-metric .m-val {
+    font-size: 12px !important;
+  }
+  #sasActModal .sas-act-metric.is-total .m-val {
+    font-size: 13px !important;
+  }
+  #sasActModal .sas-act-debts ul {
+    max-height: none !important;
+    overflow: visible !important;
+  }
+  #sasActModal #sasActCardHint {
+    margin: 2px 0 4px !important;
+    font-size: 10.5px !important;
   }
   #sasActModal .sas-act-foot,
-  .sas-radius-page #sasActModal .sas-act-foot {
+  #sasActModal .sas-act-foot {
     margin: 0 !important;
     width: 100% !important;
     align-items: stretch !important;
-    padding: 12px 0 calc(14px + env(safe-area-inset-bottom, 0px));
+    padding: 8px 0 calc(10px + env(safe-area-inset-bottom, 0px)) !important;
   }
   #sasActModal #sasActSubmit,
   #sasActModal .sas-act-main-btn,
-  .sas-radius-page #sasActModal #sasActSubmit,
-  .sas-radius-page #sasActModal .sas-act-main-btn {
+  #sasActModal #sasActSubmit,
+  #sasActModal .sas-act-main-btn {
     width: 100% !important;
     min-width: 100% !important;
     max-width: none !important;
     border-radius: 14px !important;
-    height: 66px !important;
-    min-height: 66px !important;
-    font-size: 19px !important;
+    height: 56px !important;
+    min-height: 56px !important;
+    font-size: 18px !important;
   }
   .sas-radius-page #sasProfModal .ops-modal-card {
     max-width: 100%;
@@ -3119,7 +3925,18 @@ html.sas-ln-off .sas-radius-page #subsTable .sas-fn-rest,
   font-weight: 900;
   flex: 0 0 auto;
 }
-@keyframes subActSpin { to { transform: rotate(360deg); } }
+.sas-radius-page #subsTable tr.is-act-bye td {
+  background: #dcfce7 !important;
+  transition: background .25s ease;
+}
+.sas-radius-page #subsTable tr.is-act-out {
+  animation: sasActRowBye .52s ease forwards;
+  pointer-events: none;
+}
+@keyframes sasActRowBye {
+  0% { opacity: 1; transform: translateX(0) scale(1); }
+  100% { opacity: 0; transform: translateX(28px) scale(.98); }
+}
 @keyframes subPingSpin { to { transform: rotate(360deg); } }
 .sas-radius-page #subsTable .sas-rent-mini .rent-badge {
   width: 22px;
@@ -3172,30 +3989,34 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
   position: fixed !important;
   top: 8px !important;
   bottom: auto !important;
-  left: auto !important;
+  left: 50% !important;
+  right: auto !important;
   inset-inline-start: auto !important;
   inset-inline-end: auto !important;
-  right: calc(250px + 16px) !important;
-  z-index: 100003;
+  z-index: 100050 !important;
   cursor: pointer;
   max-height: 140px;
   overflow: hidden;
-  width: min(320px, 42vw);
+  width: min(420px, calc(100vw - 24px)) !important;
+  max-width: min(420px, calc(100vw - 24px)) !important;
+  text-align: center !important;
   opacity: 1;
-  transform: translateY(0);
+  transform: translateX(-50%);
   transition: opacity .7s ease, transform .7s ease;
 }
 #sasSyncOkBanner.is-out {
   opacity: 0 !important;
-  transform: translateY(-56px) !important;
+  transform: translateX(-50%) translateY(-56px) !important;
 }
 @media (max-width: 640px) {
   #sasSyncOkBanner {
     top: 10px !important;
     bottom: auto !important;
-    left: 12px !important;
-    right: 12px !important;
-    width: auto !important;
+    left: 50% !important;
+    right: auto !important;
+    width: calc(100vw - 24px) !important;
+    max-width: calc(100vw - 24px) !important;
+    transform: translateX(-50%) !important;
   }
 }
 #sasSyncOkBanner.is-ok { background: #146c43; color: #fff; }
@@ -3485,7 +4306,39 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
   } catch (e) {}
 })();
 </script>
-<?php $pingModeNow = function_exists('sas_ping_mode') ? sas_ping_mode($pdo) : 'off'; ?>
+<?php
+$pingAccountIdNow = 0;
+$pingHasReseller = false;
+$pingTidUi = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+if ($pingTidUi > 1 && function_exists('tenant_sas_accounts_list')) {
+    $pingAccList = tenant_sas_accounts_list($pdo, $pingTidUi);
+    $pingHasReseller = !empty($pingAccList);
+    if ($pingHasReseller) {
+        if ($companyFilter > 0) {
+            foreach ($pingAccList as $accRow) {
+                if ((int) (isset($accRow['company_id']) ? $accRow['company_id'] : 0) === $companyFilter) {
+                    $pingAccountIdNow = (int) $accRow['id'];
+                    break;
+                }
+            }
+        }
+        if ($pingAccountIdNow <= 0) {
+            foreach ($pingAccList as $accRow) {
+                if (!empty($accRow['is_default'])) {
+                    $pingAccountIdNow = (int) $accRow['id'];
+                    break;
+                }
+            }
+        }
+        if ($pingAccountIdNow <= 0) {
+            $pingAccountIdNow = (int) $pingAccList[0]['id'];
+        }
+    }
+}
+$pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account'))
+    ? sas_ping_mode_for_account($pdo, $pingAccountIdNow)
+    : 'off';
+?>
 <?php if ($pingModeNow === 'off'): ?>
 <script>try{document.body.classList.add('sub-ping-off');}catch(e){}</script>
 <?php endif; ?>
@@ -3685,6 +4538,9 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
             if ($rentFilter !== '') {
                 $keepQs[] = 'rent=' . urlencode($rentFilter);
             }
+            if ($companyFilter > 0) {
+                $keepQs[] = 'company=' . (int) $companyFilter;
+            }
             $keepStr = count($keepQs) ? '&' . implode('&', $keepQs) : '';
             $baseQs = $keepQs;
             if ($perPageRaw !== '10') {
@@ -3762,6 +4618,7 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
     <button type="button" class="ops-item" data-ops="remind_debt" id="opsItemRemind" hidden><?php echo e($lang === 'en' ? 'Send debt notice' : 'إرسال رسالة بالدين'); ?></button>
     <button type="button" class="ops-item" data-ops="remind_days" id="opsItemDays" hidden><?php echo e($lang === 'en' ? 'Send days left' : 'إرسال رسالة بالأيام المتبقية'); ?></button>
     <button type="button" class="ops-item" data-ops="add_debt" id="opsItemAddDebt" hidden><?php echo e($lang === 'en' ? 'Add debt' : 'إضافة دين'); ?></button>
+    <button type="button" class="ops-item" data-ops="transfer_co" id="opsItemTransferCo" hidden><?php echo e($lang === 'en' ? 'Transfer to another company' : 'نقل إلى شركة أخرى'); ?></button>
     <button type="button" class="ops-item" data-ops="bulk_activate" id="opsItemBulkActivate" hidden><?php echo e(t('bulk_activate')); ?></button>
     <button type="button" class="ops-item" data-ops="bulk_disconnect" id="opsItemBulkDisconnect" hidden><?php echo e($lang === 'en' ? 'Disconnect selected' : 'قطع اتصال المحددين'); ?></button>
 </div>
@@ -3921,6 +4778,18 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
                 <option value="0"<?php echo $rentFilter === '0' ? ' selected' : ''; ?>><?php echo e($lang === 'en' ? 'No rental' : 'بدون إيجار'); ?></option>
             </select>
         </label>
+        <?php if (count($companyFilterOptions) > 1): ?>
+        <label><?php echo e($lang === 'en' ? 'Company' : 'الشركة'); ?>
+            <select name="company">
+                <option value=""><?php echo e($lang === 'en' ? 'All' : 'الكل'); ?></option>
+                <?php foreach ($companyFilterOptions as $coOpt): ?>
+                    <option value="<?php echo (int) $coOpt['id']; ?>"<?php echo $companyFilter === (int) $coOpt['id'] ? ' selected' : ''; ?>>
+                        <?php echo e($coOpt['name']); ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+        </label>
+        <?php endif; ?>
         <div class="sas-adv-row">
             <span><?php echo e($lang === 'en' ? 'Include agency subscribers' : 'تابعين الوكالات'); ?></span>
             <input type="hidden" name="subs" value="0">
@@ -3933,10 +4802,13 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
     </form>
 </div>
 <div class="ops-dropdown hidden" id="pingModeDropdown">
-    <div id="subPingMode" data-mode="<?php echo e($pingModeNow); ?>">
-        <button type="button" class="ops-item<?php echo $pingModeNow === 'portal' ? ' is-on' : ''; ?>" data-ping-mode="portal"><?php echo e($lang === 'en' ? 'Ping via portal' : 'البنك من خلال البوابة'); ?></button>
-        <button type="button" class="ops-item<?php echo $pingModeNow === 'off' ? ' is-on' : ''; ?>" data-ping-mode="off"><?php echo e($lang === 'en' ? 'Off' : 'طافي'); ?></button>
-        <button type="button" class="ops-item<?php echo $pingModeNow === 'sas' ? ' is-on' : ''; ?>" data-ping-mode="sas"><?php echo e($lang === 'en' ? 'Ping via SAS' : 'البنك من خلال الساس'); ?></button>
+    <div id="subPingMode" data-mode="<?php echo e($pingModeNow); ?>" data-account-id="<?php echo (int) $pingAccountIdNow; ?>"<?php echo !$pingHasReseller ? ' data-locked="1"' : ''; ?>>
+        <?php if (!$pingHasReseller): ?>
+        <div class="ops-item" style="opacity:.65;pointer-events:none"><?php echo e($lang === 'en' ? 'Add a reseller first' : 'أضف رسلر أولاً'); ?></div>
+        <?php endif; ?>
+        <button type="button" class="ops-item<?php echo $pingModeNow === 'portal' ? ' is-on' : ''; ?>" data-ping-mode="portal"<?php echo !$pingHasReseller ? ' disabled' : ''; ?>><?php echo e($lang === 'en' ? 'Ping via portal' : 'البنك من خلال البوابة'); ?></button>
+        <button type="button" class="ops-item<?php echo $pingModeNow === 'off' ? ' is-on' : ''; ?>" data-ping-mode="off"<?php echo !$pingHasReseller ? ' disabled' : ''; ?>><?php echo e($lang === 'en' ? 'Off' : 'طافي'); ?></button>
+        <button type="button" class="ops-item<?php echo $pingModeNow === 'sas' ? ' is-on' : ''; ?>" data-ping-mode="sas"<?php echo !$pingHasReseller ? ' disabled' : ''; ?>><?php echo e($lang === 'en' ? 'Ping via SAS' : 'البنك من خلال الساس'); ?></button>
     </div>
 </div>
 <div class="ops-dropdown hidden" id="autoRefreshDropdown">
@@ -4026,8 +4898,8 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
                 </div>
             </div>
             <div class="sas-act-head-actions">
-                <button type="button" class="btn ghost sm" id="sasActRefresh" title="<?php echo e($lang === 'en' ? 'Refresh cards' : 'تحديث الكروت'); ?>">↻</button>
-                <button type="button" class="btn ghost sm" id="sasActClose">×</button>
+                <button type="button" class="sas-act-ico is-refresh" id="sasActRefresh" title="<?php echo e($lang === 'en' ? 'Refresh cards' : 'تحديث الكروت'); ?>" aria-label="<?php echo e($lang === 'en' ? 'Refresh cards' : 'تحديث الكروت'); ?>">↻</button>
+                <button type="button" class="sas-act-ico is-close" id="sasActClose" title="<?php echo e($lang === 'en' ? 'Close' : 'إغلاق'); ?>" aria-label="<?php echo e($lang === 'en' ? 'Close' : 'إغلاق'); ?>">×</button>
             </div>
         </div>
         <div class="sas-act-body">
@@ -4054,6 +4926,28 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
         </div>
         <div id="sasActCreditBox" class="hidden">
             <input type="hidden" id="sasActUnits" value="1">
+            <div class="sas-act-bal-box" id="sasActBalBox">
+                <div class="sas-act-bal-row">
+                    <span><?php echo e($lang === 'en' ? 'Available balance' : 'الرصيد المتوفر'); ?></span>
+                    <strong id="sasActBalAvail">—</strong>
+                </div>
+                <div class="sas-act-bal-row">
+                    <span><?php echo e($lang === 'en' ? 'Required for activation' : 'الرصيد المطلوب للتفعيل'); ?></span>
+                    <strong id="sasActBalNeed">—</strong>
+                </div>
+            </div>
+        </div>
+        <div id="sasActRewardBox" class="hidden">
+            <div class="sas-act-bal-box is-reward" id="sasActRewardBalBox">
+                <div class="sas-act-bal-row">
+                    <span><?php echo e($lang === 'en' ? 'Available points' : 'النقاط المتوفرة'); ?></span>
+                    <strong id="sasActPtsAvail">—</strong>
+                </div>
+                <div class="sas-act-bal-row">
+                    <span><?php echo e($lang === 'en' ? 'Points required' : 'النقاط المطلوبة'); ?></span>
+                    <strong id="sasActPtsNeed">—</strong>
+                </div>
+            </div>
         </div>
         <div class="pay-mode-box">
             <div class="pay-mode-label"><?php echo e(t('pay_mode')); ?></div>
@@ -4088,25 +4982,30 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
                 </label>
             </div>
             <div class="sas-act-debts is-empty" id="sasActDebtsBox">
-                <div class="d-block d-old">
-                    <div class="d-head"><span><?php echo e(t('old_debts')); ?></span><strong id="sasActOldSum"></strong></div>
+                <div class="sas-act-ledger" aria-label="<?php echo e($lang === 'en' ? 'Activation summary' : 'ملخص التفعيل'); ?>">
+                    <div class="sas-act-metric is-old" id="sasActOldMetric">
+                        <span class="m-lab"><?php echo e(t('old_debts')); ?></span>
+                        <strong class="m-val" id="sasActOldSum">—</strong>
+                    </div>
+                    <div class="sas-act-metric is-act" id="sasActNewRow">
+                        <span class="m-lab" id="sasActNewLab"><?php echo e(t('this_activation')); ?></span>
+                        <strong class="m-val" id="sasActNewAmt">—</strong>
+                    </div>
+                    <div class="sas-act-metric is-total" id="sasActGrandRow">
+                        <span class="m-lab" id="sasActGrandLab"><?php echo e(t('after_activate')); ?></span>
+                        <strong class="m-val" id="sasActGrandAmt">—</strong>
+                    </div>
+                </div>
+                <div class="sas-act-debt-detail" id="sasActDebtDetail">
                     <p class="d-empty" id="sasActNoDebt"><?php echo e(t('no_old_debts')); ?></p>
                     <ul id="sasActDebtList"></ul>
-                </div>
-                <div class="d-row d-act" id="sasActNewRow">
-                    <span><?php echo e(t('this_activation')); ?></span>
-                    <strong id="sasActNewAmt"></strong>
-                </div>
-                <div class="d-row d-total" id="sasActGrandRow">
-                    <span><?php echo e(t('after_activate')); ?></span>
-                    <strong id="sasActGrandAmt"></strong>
                 </div>
             </div>
         </div>
         <p class="sas-modal-err" id="sasActErr"></p>
         </div>
         <div class="sas-act-foot" style="display:flex;flex-direction:column;align-items:stretch;width:100%;margin:0;padding:10px 0 12px;box-sizing:border-box;border-top:0;background:transparent">
-            <button type="button" class="btn sas-act-main-btn" id="sasActSubmit" style="display:flex;align-items:center;justify-content:center;width:100%;min-width:100%;max-width:none;height:68px;min-height:68px;margin:0;padding:0 16px;border:0;border-radius:14px;background:#0f172a;color:#fff;font-weight:800;font-size:20px;box-sizing:border-box"><?php echo e($lang === 'en' ? 'Activate' : 'تفعيل'); ?></button>
+            <button type="button" class="btn sas-act-main-btn is-emo" id="sasActSubmit"><?php echo e($lang === 'en' ? 'Activate' : 'تفعيل'); ?></button>
         </div>
         <div class="sas-act-cards-load" id="sasActCardsLoad" hidden aria-hidden="true">
             <div class="sas-act-cards-spin"></div>
@@ -4118,6 +5017,47 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
         </div>
     </div>
 </div>
+<script>
+(function () {
+  try {
+    var raw = window.location.search || '';
+    if (raw.indexOf('act=') < 0) return;
+    var sp = {};
+    raw.replace(/^\?/, '').split('&').forEach(function (part) {
+      if (!part) return;
+      var i = part.indexOf('=');
+      var k = decodeURIComponent((i < 0 ? part : part.slice(0, i)).replace(/\+/g, ' '));
+      var v = i < 0 ? '' : decodeURIComponent(part.slice(i + 1).replace(/\+/g, ' '));
+      sp[k] = v;
+    });
+    var act = sp.act || '';
+    var want = (act === '1') ? (sp.q || '') : act;
+    want = String(want || '').replace(/^\s+|\s+$/g, '');
+    if (!want) return;
+    var m = document.getElementById('sasActModal');
+    if (!m) return;
+    if (m.parentNode !== document.body) document.body.appendChild(m);
+    m.classList.remove('hidden');
+    var nameEl = document.getElementById('sasActName');
+    var userEl = document.getElementById('sasActUser');
+    if (nameEl) nameEl.textContent = sp.fn || sp.nm || want;
+    if (userEl) userEl.textContent = want;
+    window.__sasActFromIdentity = want;
+    window.__sasActBoot = {
+      id: want,
+      username: want,
+      sasId: sp.sid || '0',
+      profileId: sp.pid || '0',
+      profileName: sp.pn || '',
+      provider: sp.prov || 'sas',
+      companyId: sp.co || '0',
+      enabled: true,
+      firstname: sp.fn || sp.nm || '',
+      name: sp.nm || sp.fn || want
+    };
+  } catch (eBoot) {}
+})();
+</script>
 <div class="sas-act-confirm-layer hidden" id="sasActFab" aria-hidden="true" hidden>
     <button type="button" class="sas-act-fab-confirm" id="sasActFabConfirm"><?php echo e($lang === 'en' ? 'Confirm' : 'تأكيد'); ?></button>
 </div>
@@ -4192,6 +5132,23 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
     </div>
 </div>
 
+<div class="modal-backdrop hidden" id="sasTransferModal">
+    <div class="modal-card ops-modal-card">
+        <div class="ops-modal-head">
+            <h3><?php echo e($lang === 'en' ? 'Transfer to another company' : 'نقل إلى شركة أخرى'); ?></h3>
+            <button type="button" class="btn ghost sm" id="sasTransferClose">×</button>
+        </div>
+        <p class="sas-sync-note" id="sasTransferWho"></p>
+        <label><?php echo e($lang === 'en' ? 'Target company' : 'الشركة الهدف'); ?>
+            <select id="sasTransferTarget" style="width:100%;margin-top:4px"></select>
+        </label>
+        <p class="sas-modal-err" id="sasTransferErr"></p>
+        <div style="display:flex;gap:8px;margin-top:12px">
+            <button type="button" class="btn sas-act-fab-confirm" id="sasTransferSubmit" style="flex:1;height:52px;border-radius:14px"><?php echo e($lang === 'en' ? 'Transfer' : 'نقل'); ?></button>
+            <button type="button" class="btn ghost" id="sasTransferCancel" style="flex:1"><?php echo e($lang === 'en' ? 'Cancel' : 'إلغاء'); ?></button>
+        </div>
+    </div>
+</div>
 <div class="modal-backdrop hidden" id="sasAskModal" role="dialog" aria-modal="true" style="z-index:100070">
     <div class="modal-card">
         <h3 id="sasAskTitle"></h3>
@@ -4309,6 +5266,10 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
       'q' => $q,
       'sub' => $subFilter,
       'parent' => $parentFilter,
+      'prof' => $profFilter,
+      'conn' => $connFilter,
+      'rent' => $rentFilter,
+      'company' => $companyFilter > 0 ? (string) $companyFilter : '',
       'sort' => $sortKey,
       'dir' => $sortDir,
       'page' => (string) $page,
@@ -4327,9 +5288,20 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
   var profilesCache = null;
   var cardsCacheAll = <?php
     $seedActCards = array();
-    $hideWarehouseCards = !empty($_SESSION['admin_sas_shadow'])
-        || (function_exists('is_agent_user') && is_agent_user());
-    if (!$hideWarehouseCards && function_exists('sas_unused_pins_from_inventory_cache')) {
+    $hideWarehouseCards = function_exists('sas_viewer_uses_agent_card_stock')
+        ? sas_viewer_uses_agent_card_stock()
+        : (!empty($_SESSION['admin_sas_shadow']) || (function_exists('is_agent_user') && is_agent_user()));
+    if ($hideWarehouseCards) {
+        // بذرة من كاش كروت الوكيل فقط — الجلب الحي يصير بـ ajax=cards
+        $seedMe = function_exists('current_admin') ? current_admin() : null;
+        $seedAid = $seedMe ? (int) $seedMe['id'] : 0;
+        if ($seedAid > 0 && function_exists('sas_agent_pins_session_keys')) {
+            list($seedK, $seedAtK) = sas_agent_pins_session_keys($seedAid);
+            if (!empty($_SESSION[$seedK]) && is_array($_SESSION[$seedK])) {
+                $seedActCards = $_SESSION[$seedK];
+            }
+        }
+    } elseif (function_exists('sas_unused_pins_from_inventory_cache')) {
         $tmpSeed = sas_unused_pins_from_inventory_cache();
         if (is_array($tmpSeed)) {
             $seedActCards = $tmpSeed;
@@ -4340,6 +5312,7 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
     }
     echo json_encode($seedActCards);
   ?>;
+  var actUsesAgentStock = <?php echo !empty($hideWarehouseCards) ? 'true' : 'false'; ?>;
   var cardsPrefetch = null;
   var rewardPtsDisp = <?php
     $rpShow = '';
@@ -4350,6 +5323,8 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
     }
     echo json_encode($rpShow);
   ?>;
+  var transferTargets = <?php echo json_encode($transferCompanyTargets); ?>;
+  var canTransferCo = Array.isArray(transferTargets) && transferTargets.length > 1;
 
   function paintRewardPts(val) {
     var el = document.getElementById('sasActPtsHint');
@@ -4388,6 +5363,8 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
         sasId: tr.getAttribute('data-sas-id') || '0',
         profileId: tr.getAttribute('data-profile-id') || '0',
         profileName: tr.getAttribute('data-profile-name') || '',
+        provider: tr.getAttribute('data-provider') || 'sas',
+        companyId: tr.getAttribute('data-company-id') || '0',
         enabled: tr.getAttribute('data-enabled') === '1',
         localId: tr.getAttribute('data-local-id') || '0',
         name: tr.getAttribute('data-name') || '',
@@ -4705,15 +5682,19 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
     showEl(document.getElementById('opsItemRemind'), !!one);
     showEl(document.getElementById('opsItemDays'), !!(one && one.hasDays));
     showEl(document.getElementById('opsItemRetry'), !!(one && one.msgFail));
+    showEl(document.getElementById('opsItemTransferCo'), !!(one && canTransferCo));
   }
   var askRun = null;
   function closeAsk() {
     var m = document.getElementById('sasAskModal');
-    if (m) m.classList.add('hidden');
+    if (m) {
+      m.classList.add('hidden');
+      m.classList.remove('is-emotion');
+    }
     askRun = null;
   }
   var askYesDefault = <?php echo json_encode($lang === 'en' ? 'Disconnect' : 'فصل'); ?>;
-  function openAsk(title, text, onYes, yesLabel) {
+  function openAsk(title, text, onYes, yesLabel, emotion) {
     var m = document.getElementById('sasAskModal');
     var h = document.getElementById('sasAskTitle');
     var p = document.getElementById('sasAskText');
@@ -4726,6 +5707,16 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
     h.textContent = title || '';
     p.textContent = text || '';
     if (yes) yes.textContent = yesLabel || askYesDefault;
+    m.classList.remove('is-emotion');
+    if (emotion) {
+      void m.offsetWidth;
+      m.classList.add('is-emotion');
+      if (yes) {
+        yes.classList.remove('is-emo');
+        void yes.offsetWidth;
+        yes.classList.add('is-emo');
+      }
+    }
     askRun = onYes || null;
     m.classList.remove('hidden');
   }
@@ -4837,8 +5828,13 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
             showAppToast(<?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>, 'error');
           });
         },
-        <?php echo json_encode($lang === 'en' ? 'Add the day' : 'إضافة اليوم'); ?>
+        <?php echo json_encode($lang === 'en' ? 'Add the day' : 'إضافة اليوم'); ?>,
+        true
       );
+      return;
+    }
+    if (action === 'transfer_co' && one) {
+      openTransferModal(one);
       return;
     }
     if (action === 'bulk_activate') {
@@ -5046,21 +6042,33 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
       sel.appendChild(o);
     });
   }
-  function loadProfiles() {
-    if (profilesCache) return Promise.resolve(profilesCache);
-    if (loadProfiles._p) return loadProfiles._p;
-    loadProfiles._p = fetch('sas.php?ajax=profiles', { credentials: 'same-origin' })
+  function loadProfiles(provider, companyId) {
+    provider = provider || 'sas';
+    companyId = companyId || 0;
+    var key = provider + ':' + String(companyId || 0);
+    if (!loadProfiles._map) loadProfiles._map = {};
+    if (loadProfiles._map[key]) return Promise.resolve(loadProfiles._map[key]);
+    if (!loadProfiles._inflight) loadProfiles._inflight = {};
+    if (loadProfiles._inflight[key]) return loadProfiles._inflight[key];
+    var url = 'sas.php?ajax=profiles';
+    if (provider === 'earthlink') {
+      url += '&provider=earthlink&company=' + encodeURIComponent(companyId || 0);
+    }
+    loadProfiles._inflight[key] = fetch(url, { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
       .then(function (d) {
-        profilesCache = (d && d.profiles) ? d.profiles : [];
-        return profilesCache;
+        var rows = (d && d.profiles) ? d.profiles : [];
+        loadProfiles._map[key] = rows;
+        if (provider !== 'earthlink') profilesCache = rows;
+        delete loadProfiles._inflight[key];
+        return rows;
       })
       .catch(function () {
-        loadProfiles._p = null;
-        profilesCache = profilesCache || [];
-        return profilesCache;
+        delete loadProfiles._inflight[key];
+        loadProfiles._map[key] = loadProfiles._map[key] || [];
+        return loadProfiles._map[key];
       });
-    return loadProfiles._p;
+    return loadProfiles._inflight[key];
   }
   function applyQuote(d) {
     actBill = {
@@ -5069,6 +6077,11 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
       charge: d && d.charge ? Number(d.charge) : 0,
       currency: (d && d.currency) ? d.currency : actBill.currency
     };
+    if (actBill.charge > 0) {
+      actWallet.balance_need = String(Math.round(actBill.charge)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+      actWallet.currency = actBill.currency || actWallet.currency || '';
+      paintActWalletHints();
+    }
     renderActDebts();
   }
   function loadQuote(username, profileId, profileName) {
@@ -5165,18 +6178,26 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
   function renderActDebts() {
     var empty = document.getElementById('sasActNoDebt');
     var list = document.getElementById('sasActDebtList');
+    var detail = document.getElementById('sasActDebtDetail');
     var oldSumEl = document.getElementById('sasActOldSum');
+    var oldMetric = document.getElementById('sasActOldMetric');
     var newAmt = document.getElementById('sasActNewAmt');
     var grandAmt = document.getElementById('sasActGrandAmt');
     var newRow = document.getElementById('sasActNewRow');
     var grandRow = document.getElementById('sasActGrandRow');
+    var newLab = document.getElementById('sasActNewLab');
+    var gLab = document.getElementById('sasActGrandLab');
     var oldSum = actBill.old_sum || 0;
     var charge = actBill.charge || 0;
     var lines = actBill.old_lines || [];
     var isCredit = currentPayMode() === 'credit';
     // نقد = المبلغ ما ينضاف دين ولا يدخل بتوتل الديون بعد التفعيل
     var debtFromThis = isCredit ? charge : 0;
-    if (oldSumEl) oldSumEl.textContent = oldSum > 0 ? moneyAct(oldSum) : '';
+    if (oldSumEl) oldSumEl.textContent = oldSum > 0 ? moneyAct(oldSum) : '—';
+    if (oldMetric) {
+      if (oldSum > 0) oldMetric.classList.remove('is-zero');
+      else oldMetric.classList.add('is-zero');
+    }
     if (list) {
       list.innerHTML = '';
       lines.forEach(function (od) {
@@ -5190,25 +6211,29 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
     }
     if (empty) empty.style.display = oldSum > 0 ? 'none' : 'block';
     if (list) list.style.display = oldSum > 0 ? 'block' : 'none';
+    if (detail) {
+      if (oldSum > 0 && lines.length) detail.classList.add('has-lines');
+      else detail.classList.remove('has-lines');
+    }
     if (newAmt) newAmt.textContent = moneyAct(charge);
+    if (newRow) newRow.style.display = '';
+    if (newLab) {
+      newLab.textContent = isCredit
+        ? <?php echo json_encode(t('this_activation')); ?>
+        : <?php echo json_encode(($lang === 'en') ? 'This activation' : 'هذا التفعيل'); ?>;
+    }
     if (newRow) {
-      newRow.style.display = '';
-      var newLab = newRow.querySelector('span');
-      if (newLab) {
-        newLab.textContent = isCredit
-          ? <?php echo json_encode(t('this_activation')); ?>
-          : <?php echo json_encode(($lang === 'en') ? 'This activation (cash — not debt)' : 'هذا التفعيل (نقد — بدون دين)'); ?>;
-      }
+      if (isCredit) newRow.classList.add('is-debt');
+      else newRow.classList.remove('is-debt');
     }
     if (grandAmt) grandAmt.textContent = moneyAct(oldSum + debtFromThis);
     if (grandRow) {
       grandRow.style.display = (oldSum > 0 || isCredit) ? '' : 'none';
-      var gLab = grandRow.querySelector('span');
-      if (gLab) {
-        gLab.textContent = isCredit
-          ? <?php echo json_encode(t('after_activate')); ?>
-          : <?php echo json_encode(($lang === 'en') ? 'Remaining debts' : 'الديون المتبقية'); ?>;
-      }
+    }
+    if (gLab) {
+      gLab.textContent = isCredit
+        ? <?php echo json_encode(t('after_activate')); ?>
+        : <?php echo json_encode(($lang === 'en') ? 'Remaining' : 'المتبقي'); ?>;
     }
     var debtsBox = document.getElementById('sasActDebtsBox');
     if (debtsBox) {
@@ -5295,9 +6320,53 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
     toggleActMode();
   }
   function toggleActMode() {
-    var card = currentActMode() === 'card';
+    var mode = currentActMode();
     var boxC = document.getElementById('sasActCardBox');
-    if (boxC) boxC.classList.toggle('hidden', !card);
+    var boxCredit = document.getElementById('sasActCreditBox');
+    var boxReward = document.getElementById('sasActRewardBox');
+    if (boxC) boxC.classList.toggle('hidden', mode !== 'card');
+    if (boxCredit) boxCredit.classList.toggle('hidden', mode !== 'credit');
+    if (boxReward) boxReward.classList.toggle('hidden', mode !== 'reward');
+    paintActWalletHints();
+  }
+  var actWallet = { balance: '', balance_need: '', points: '', points_need: '', currency: '' };
+  function paintActWalletHints() {
+    var avail = document.getElementById('sasActBalAvail');
+    var need = document.getElementById('sasActBalNeed');
+    var ptsA = document.getElementById('sasActPtsAvail');
+    var ptsN = document.getElementById('sasActPtsNeed');
+    var cur = actWallet.currency || '';
+    if (avail) avail.textContent = actWallet.balance !== '' && actWallet.balance != null
+      ? (String(actWallet.balance) + (cur ? (' ' + cur) : ''))
+      : '—';
+    if (need) need.textContent = actWallet.balance_need !== '' && actWallet.balance_need != null
+      ? (String(actWallet.balance_need) + (cur ? (' ' + cur) : ''))
+      : '—';
+    if (ptsA) ptsA.textContent = actWallet.points !== '' && actWallet.points != null ? String(actWallet.points) : (rewardPtsDisp || '—');
+    if (ptsN) ptsN.textContent = actWallet.points_need !== '' && actWallet.points_need != null ? String(actWallet.points_need) : '—';
+    paintRewardPts(actWallet.points !== '' && actWallet.points != null ? actWallet.points : rewardPtsDisp);
+  }
+  function loadActWallet(row) {
+    if (!row) return Promise.resolve(null);
+    var url = 'sas.php?ajax=act_wallet&username=' + encodeURIComponent(row.id || '')
+      + '&provider=' + encodeURIComponent(row.provider || 'sas')
+      + '&company=' + encodeURIComponent(row.companyId || '0')
+      + '&profile_id=' + encodeURIComponent(row.profileId || '0')
+      + '&profile_name=' + encodeURIComponent(row.profileName || '');
+    return fetch(url, { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d || !d.ok) return d;
+        actWallet.balance = d.balance_disp != null ? d.balance_disp : '';
+        actWallet.balance_need = d.balance_need_disp != null ? d.balance_need_disp : '';
+        actWallet.points = d.points_disp != null ? d.points_disp : '';
+        actWallet.points_need = d.points_need_disp != null ? d.points_need_disp : '';
+        actWallet.currency = d.currency || '';
+        if (d.points_disp) rewardPtsDisp = String(d.points_disp);
+        paintActWalletHints();
+        return d;
+      })
+      .catch(function () { return null; });
   }
   function openActModal(row) {
     actUser = row;
@@ -5311,6 +6380,8 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
     if (userEl) userEl.textContent = row.username || row.id || '';
     if (err) err.textContent = '';
     if (modal) {
+      // خارج .main حتى position:fixed يغطي الشاشة كاملة (مو فراغ فوق بسبب transform/filter)
+      if (modal.parentNode !== document.body) document.body.appendChild(modal);
       modal.classList.remove('hidden', 'is-locking');
     }
     var lockEl = document.getElementById('sasActLock');
@@ -5318,9 +6389,27 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
       lockEl.classList.add('hidden');
       lockEl.setAttribute('aria-hidden', 'true');
     }
-    setActMode('card');
+    setActMode((row.provider === 'earthlink') ? 'credit' : 'card');
     paintRewardPts(rewardPtsDisp);
+    actWallet = { balance: '', balance_need: '', points: '', points_need: '', currency: '' };
+    paintActWalletHints();
+    loadActWallet(row);
     loadQuote(row.id, row.profileId, row.profileName);
+    // إيرث: تفعيل بالرصيد أو بالنقاط (+ كرت إن وجد)
+    try {
+      var rewardOpt = document.querySelector('#sasActModal input[name="sas_act_mode"][value="reward"]');
+      var cardOpt = document.querySelector('#sasActModal input[name="sas_act_mode"][value="card"]');
+      var creditOpt = document.querySelector('#sasActModal input[name="sas_act_mode"][value="credit"]');
+      var rewardLab = rewardOpt ? rewardOpt.closest('label') : null;
+      var cardLab = cardOpt ? cardOpt.closest('label') : null;
+      var creditLab = creditOpt ? creditOpt.closest('label') : null;
+      if (rewardLab) rewardLab.classList.remove('hidden');
+      if (creditLab) creditLab.classList.remove('hidden');
+      if (cardLab) {
+        if (row.provider === 'earthlink') cardLab.classList.add('hidden');
+        else cardLab.classList.remove('hidden');
+      }
+    } catch (eElMode) {}
     // اعرض كروت الجرد فوراً (نفس صفحة الكروت) — بدون تفريغ القائمة
     var cardsReady = Array.isArray(cardsCacheAll) && cardsCacheAll.length;
     window.sasCardsLoading = !cardsReady;
@@ -5332,7 +6421,8 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
     }).catch(function () {
       renderCards(cardsForProfile(row.profileId, row.profileName));
     });
-    softRefreshCards(false).then(function () {
+    // كل فتح: اجلب الكروت الحية حتى لو الكاش ناقص (كرت واحد والجرد أكثر)
+    softRefreshCards(true).then(function () {
       window.sasCardsLoading = false;
       refreshActCardsIfOpen();
     }).catch(function () {
@@ -5390,6 +6480,84 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
       paintRowStatus(row.tr, d);
     }).catch(function () { showAppToast(<?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>, 'error'); });
   }
+  function openTransferModal(row) {
+    actUser = row;
+    var modal = document.getElementById('sasTransferModal');
+    var who = document.getElementById('sasTransferWho');
+    var sel = document.getElementById('sasTransferTarget');
+    var err = document.getElementById('sasTransferErr');
+    if (who) who.textContent = (row.firstname || row.name || row.id || '') + ' · ' + (row.username || row.id || '');
+    if (err) err.textContent = '';
+    if (sel) {
+      sel.innerHTML = '';
+      var srcCo = String(row.companyId || '0');
+      (transferTargets || []).forEach(function (t) {
+        if (String(t.company_id || '0') === srcCo && srcCo !== '0') return;
+        var o = document.createElement('option');
+        o.value = String(t.account_id || 0);
+        o.setAttribute('data-company-id', String(t.company_id || 0));
+        o.setAttribute('data-provider', String(t.provider || 'sas'));
+        o.textContent = (t.name || '') + (t.provider === 'earthlink' ? ' (Earthlink)' : ' (SAS)');
+        sel.appendChild(o);
+      });
+      if (!sel.options.length) {
+        var empty = document.createElement('option');
+        empty.value = '';
+        empty.textContent = <?php echo json_encode($lang === 'en' ? 'No other company' : 'ماكو شركة ثانية'); ?>;
+        sel.appendChild(empty);
+      }
+    }
+    if (modal) modal.classList.remove('hidden');
+  }
+  function closeTransferModal() {
+    var modal = document.getElementById('sasTransferModal');
+    if (modal) modal.classList.add('hidden');
+  }
+  (function bindTransferModal() {
+    var closeBtn = document.getElementById('sasTransferClose');
+    var cancelBtn = document.getElementById('sasTransferCancel');
+    var submitBtn = document.getElementById('sasTransferSubmit');
+    var modal = document.getElementById('sasTransferModal');
+    if (closeBtn) closeBtn.addEventListener('click', closeTransferModal);
+    if (cancelBtn) cancelBtn.addEventListener('click', closeTransferModal);
+    if (modal) modal.addEventListener('click', function (e) {
+      if (e.target === modal) closeTransferModal();
+    });
+    if (submitBtn) submitBtn.addEventListener('click', function () {
+      if (!actUser) return;
+      var sel = document.getElementById('sasTransferTarget');
+      var err = document.getElementById('sasTransferErr');
+      if (!sel || !sel.value) {
+        if (err) err.textContent = <?php echo json_encode($lang === 'en' ? 'Pick a company' : 'اختر شركة'); ?>;
+        return;
+      }
+      var opt = sel.options[sel.selectedIndex];
+      var body = {
+        id: actUser.id,
+        target_account_id: sel.value,
+        target_company_id: opt ? (opt.getAttribute('data-company-id') || '0') : '0'
+      };
+      if (err) err.textContent = '';
+      if (window.appBusySet) window.appBusySet({ force: true });
+      postSas('sas_transfer_company', body, 60000).then(function (d) {
+        if (window.appBusyDone) window.appBusyDone();
+        if (!d || !d.ok) {
+          var msg = (d && d.message) || <?php echo json_encode($lang === 'en' ? 'Transfer failed' : 'فشل النقل'); ?>;
+          if (err) err.textContent = msg;
+          showAppToast(msg, 'error');
+          return;
+        }
+        closeTransferModal();
+        showAppToast((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Transferred' : 'تم النقل'); ?>, 'ok');
+        refreshTableLive();
+      }).catch(function () {
+        if (window.appBusyDone) window.appBusyDone();
+        var net = <?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>;
+        if (err) err.textContent = net;
+        showAppToast(net, 'error');
+      });
+    });
+  })();
   function openProfModal(row) {
     actUser = row;
     var modal = document.getElementById('sasProfModal');
@@ -5400,8 +6568,23 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
     if (current) current.textContent = <?php echo json_encode($lang === 'en' ? 'Current: ' : 'الاشتراك الحالي: '); ?> + (row.profileName || '-');
     if (err) err.textContent = '';
     if (modal) modal.classList.remove('hidden');
-    loadProfiles().then(function (ps) {
-      fillSelect(document.getElementById('sasProfSelect'), ps, row.profileId);
+    loadProfiles(row.provider || 'sas', row.companyId || 0).then(function (ps) {
+      var sel = document.getElementById('sasProfSelect');
+      fillSelect(sel, ps, row.profileId);
+      if (sel && row.profileName) {
+        var matched = false;
+        Array.prototype.forEach.call(sel.options, function (o) {
+          if (String(o.value) === String(row.profileId) || o.textContent === row.profileName) {
+            o.selected = true;
+            matched = true;
+          }
+        });
+        if (!matched) {
+          Array.prototype.forEach.call(sel.options, function (o) {
+            if (o.textContent === row.profileName) o.selected = true;
+          });
+        }
+      }
     });
   }
   function paintRowDebtTotal(tr, debt, debtText, localId) {
@@ -5696,10 +6879,20 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
     var actFabConfirm = document.getElementById('sasActFabConfirm');
     function showActFab() {
       if (!actFab) return;
+      // فوق نافذة التفعيل (النافذة على body بـ z-index أعلى من الطبقة القديمة)
+      if (actFab.parentNode !== document.body) document.body.appendChild(actFab);
       actFab.hidden = false;
+      actFab.removeAttribute('hidden');
       actFab.classList.remove('hidden');
       actFab.classList.add('is-on');
       actFab.setAttribute('aria-hidden', 'false');
+      actFab.style.zIndex = '100020';
+      // أعد تشغيل الأنيميشن كل مرة (إيموشن)
+      if (actFabConfirm) {
+        actFabConfirm.classList.remove('is-emo');
+        void actFabConfirm.offsetWidth;
+        actFabConfirm.classList.add('is-emo');
+      }
     }
     function hideActFab() {
       if (!actFab) return;
@@ -5805,8 +6998,16 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
           showAppToast(failMsg, 'error');
           return;
         }
-        paintActMark(actName, 'ok');
-        refreshTableLive();
+        var fromIdentity = String(window.__sasActFromIdentity || '');
+        if (fromIdentity && fromIdentity.toLowerCase() === String(actName || '').toLowerCase()) {
+          window.__sasActFromIdentity = '';
+          window.location.href = 'sas_user.php?u=' + encodeURIComponent(fromIdentity);
+          return;
+        }
+        releaseActivatedRow(actName);
+        if (window.showCornerToast) {
+          window.showCornerToast(<?php echo json_encode($lang === 'en' ? 'Activated' : 'تم التفعيل'); ?>, 'ok');
+        }
       }).catch(function () {
         paintActMark(actName, '');
         var netMsg = <?php echo json_encode($lang === 'en' ? 'Activation timed out or network error — check SAS, money was NOT recorded if activate failed' : 'انتهت مهلة التفعيل أو فشل الاتصال — تحقق من الساس؛ المبلغ ما ينسجل إذا التفعيل فشل'); ?>;
@@ -6054,14 +7255,19 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
   }
   function liveTableUrl() {
     var p = liveQs || {};
-    return 'sas.php?ajax=live_table'
+    var url = 'sas.php?ajax=live_table'
       + '&q=' + encodeURIComponent(p.q || '')
       + '&sub=' + encodeURIComponent(p.sub || '')
       + '&parent=' + encodeURIComponent(p.parent || '')
+      + '&prof=' + encodeURIComponent(p.prof || '')
+      + '&conn=' + encodeURIComponent(p.conn || '')
+      + '&rent=' + encodeURIComponent(p.rent || '')
       + '&sort=' + encodeURIComponent(p.sort || 'name')
       + '&dir=' + encodeURIComponent(p.dir || 'asc')
       + '&page=' + encodeURIComponent(p.page || '1')
       + '&per_page=' + encodeURIComponent(p.per_page || '10');
+    if (p.company) url += '&company=' + encodeURIComponent(p.company);
+    return url;
   }
   function replaceTableHtml(html) {
     if (!tbody || !html) return;
@@ -6070,7 +7276,19 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
     var wrapTop = wrap ? wrap.scrollTop : 0;
     var wrapLeft = wrap ? wrap.scrollLeft : 0;
     var kept = {};
-    visibleChecks().forEach(function (c) { if (c.checked) kept[c.value] = 1; });
+    var focusId = '';
+    visibleChecks().forEach(function (c) {
+      if (c.checked) kept[c.value] = 1;
+    });
+    var selRow = tbody.querySelector('tr.is-selected[data-id], tr[data-id] .sub-check:checked');
+    if (selRow) {
+      var trSel = selRow.closest ? selRow.closest('tr') : selRow;
+      if (trSel && trSel.getAttribute) focusId = trSel.getAttribute('data-id') || '';
+    }
+    if (!focusId) {
+      var firstChecked = tbody.querySelector('.sub-check:checked');
+      if (firstChecked) focusId = firstChecked.value || '';
+    }
     tbody.innerHTML = html;
     originalHtml = html;
     visibleChecks().forEach(function (c) { if (kept[c.value]) c.checked = true; });
@@ -6081,7 +7299,21 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
       wrap.scrollLeft = wrapLeft;
     }
     if (window.scrollTo) window.scrollTo(0, y);
+    if (focusId) {
+      var keepTr = null;
+      var allTr = tbody.querySelectorAll('tr[data-id]');
+      for (var ki = 0; ki < allTr.length; ki++) {
+        if (allTr[ki].getAttribute('data-id') === focusId) { keepTr = allTr[ki]; break; }
+      }
+      if (keepTr) keepTr.classList.add('is-selected');
+    }
     repaintActMarks();
+  }
+  function setTableQuietBusy(on) {
+    var card = document.querySelector('.sas-table-card');
+    if (!card) return;
+    if (on) card.classList.add('is-quiet-refresh');
+    else card.classList.remove('is-quiet-refresh');
   }
   function setPingColumnByMode(mode) {
     var off = mode === 'off';
@@ -6113,6 +7345,12 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
       e.preventDefault();
       e.stopPropagation();
       closeMenus();
+      if (pingModeBox.getAttribute('data-locked') === '1' || btn.disabled) {
+        if (window.showCornerToast) {
+          window.showCornerToast(<?php echo json_encode($lang === 'en' ? 'Add a reseller first' : 'أضف رسلر أولاً'); ?>, 'error');
+        }
+        return;
+      }
       if (pingModeBox.getAttribute('data-mode') === mode) {
         // حتى لو نفس الخيار: أعد الإظهار لأن لايف/الأعمدة قد تخفيه
         setPingColumnByMode(mode);
@@ -6134,6 +7372,8 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
       body.append('csrf', csrf);
       body.append('action', 'sas_ping_mode');
       body.append('sub_ping_mode', mode);
+      body.append('account_id', pingModeBox.getAttribute('data-account-id') || '0');
+      body.append('company_id', <?php echo (int) $companyFilter; ?>);
       fetch('sas.php', { method: 'POST', credentials: 'same-origin', body: body })
         .then(function (r) { return r.json().catch(function () { return { ok: true }; }); })
         .then(function (d) {
@@ -6428,9 +7668,12 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
   var actWaitLabel = <?php echo json_encode($lang === 'en' ? 'Activating…' : 'جاري التفعيل'); ?>;
   function rowByUser(username) {
     if (!tbody || !username) return null;
+    var want = String(username || '').toLowerCase();
     var rows = tbody.querySelectorAll('tr[data-id]');
     for (var i = 0; i < rows.length; i++) {
-      if (rows[i].getAttribute('data-id') === username) return rows[i];
+      var id = String(rows[i].getAttribute('data-id') || '').toLowerCase();
+      var un = String(rows[i].getAttribute('data-username') || '').toLowerCase();
+      if (id === want || un === want) return rows[i];
     }
     return null;
   }
@@ -6441,8 +7684,9 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
     else delete actMarks[username];
     var tr = rowByUser(username);
     if (!tr) return;
-    var host = tr.querySelector('.sas-fn-wrap') || tr.querySelector('.col-fn') || tr.querySelector('.col-user');
+    var host = tr.querySelector('.status-cell') || tr.querySelector('.sas-fn-wrap') || tr.querySelector('.col-user');
     if (!host) return;
+    try { tr.scrollIntoView({ block: 'center' }); } catch (eScroll) {}
     var mark = host.querySelector('.sub-act-mark');
     if (!state) {
       if (mark && mark.parentNode) mark.parentNode.removeChild(mark);
@@ -6458,9 +7702,25 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
       return;
     }
     mark.className = 'sub-act-mark is-wait';
-    mark.innerHTML = '<span class="sub-act-spin"></span><span class="sub-act-txt"></span>';
-    var txt = mark.querySelector('.sub-act-txt');
-    if (txt) txt.textContent = actWaitLabel;
+    mark.innerHTML = '<span class="sub-act-spin"></span>';
+  }
+  function releaseActivatedRow(username) {
+    var tr = rowByUser(username);
+    var onExpired = String((liveQs && liveQs.sub) || '') === 'expired';
+    paintActMark(username, 'ok');
+    if (onExpired && tr) {
+      tr.classList.add('is-act-bye');
+      setTimeout(function () {
+        tr.classList.add('is-act-out');
+        setTimeout(function () {
+          if (tr.parentNode) tr.parentNode.removeChild(tr);
+          delete actMarks[username];
+          refreshTableLive();
+        }, 540);
+      }, 380);
+      return;
+    }
+    setTimeout(function () { refreshTableLive(); }, 500);
   }
   function repaintActMarks() {
     Object.keys(actMarks).forEach(function (username) {
@@ -6514,6 +7774,9 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
       + '&prof=' + encodeURIComponent(<?php echo json_encode($profFilter); ?>)
       + '&conn=' + encodeURIComponent(<?php echo json_encode($connFilter); ?>)
       + '&rent=' + encodeURIComponent(<?php echo json_encode($rentFilter); ?>);
+    <?php if ($companyFilter > 0): ?>
+    url += '&company=' + encodeURIComponent(<?php echo json_encode((string) $companyFilter); ?>);
+    <?php endif; ?>
     fetch(url, {
       credentials: 'same-origin',
       signal: ctrl ? ctrl.signal : undefined,
@@ -6540,7 +7803,7 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
 
   function scheduleLiveSearch() {
     clearTimeout(liveTimer);
-    liveTimer = setTimeout(function () { liveSearch(false); }, 220);
+    liveTimer = setTimeout(function () { liveSearch(false); }, 70);
   }
 
   if (filter) {
@@ -6571,15 +7834,10 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
       : 'ماكو اتصال بالساس — البيانات مخزّنة أوف لاين (لقطة محلية). عند رجوع الساس تبدأ المزامنة تلقائياً.'); ?>;
   var sasKnownOnline = <?php echo !empty($sasKnownOnline) ? 'true' : 'false'; ?>;
   function setOfflineBanner(on) {
+    // بانر الصفحة مكرر مع توست الساس اللاصق — لا نظهره من الرفرش
     var b = document.getElementById('sasOfflineBanner');
     if (!b) return;
-    if (sasKnownOnline) on = false;
-    if (on) {
-      b.hidden = false;
-      b.textContent = offlineBannerText;
-    } else {
-      b.hidden = true;
-    }
+    b.hidden = true;
   }
   function showSyncOkBanner() {
     if (!sasReadyJs) return;
@@ -6610,7 +7868,13 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
   } catch (e) {}
   function markSyncOkAndReload() {
     showSyncOkBanner();
-    refreshTableLive();
+    liveBusy = false;
+    liveSearchBusy = false;
+    refreshTableLive().then(function (d) {
+      if (!d || !d.html) {
+        try { window.location.reload(); } catch (eR) {}
+      }
+    });
   }
   function parseSyncRes(r) {
     return r.text().then(function (t) {
@@ -6657,31 +7921,26 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
   setInterval(pullOutsideExpire, 120000);
   setTimeout(pullOutsideExpire, 20000);
   function runQuickRefresh() {
-    if (!sasReadyJs) {
-      showAppToast(<?php echo json_encode($lang === 'en' ? 'SAS not linked yet' : 'الساس غير مربوط بعد'); ?>, 'error');
-      return Promise.resolve({ ok: false });
-    }
     var q = filter ? filter.value.trim() : '';
     var names = visibleUserNames(true);
-    showSyncNote(<?php echo json_encode($lang === 'en' ? 'Refreshing from SAS…' : 'جاري التحديث من الساس…'); ?>);
-    return fetch('sas.php?ajax=refresh_now&q=' + encodeURIComponent(q) + '&users=' + encodeURIComponent(names), { credentials: 'same-origin' })
-      .then(parseSyncRes)
-      .then(function (d) {
-        if (d && d.ok) {
-          showSyncNote(<?php echo json_encode($lang === 'en' ? 'Updated' : 'تم التحديث'); ?>);
-          return refreshTableLive().then(function () {
-            showSyncOkBanner();
-            return d;
-          });
-        }
-        setOfflineBanner(true);
-        showSyncNote((d && (d.last_error || d.message)) || <?php echo json_encode($lang === 'en' ? 'Refresh failed' : 'فشل التحديث'); ?>);
-        return d;
-      }).catch(function (err) {
-        setOfflineBanner(true);
-        showSyncNote(err && err.message ? err.message : <?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>);
+    setTableQuietBusy(true);
+    liveBusy = false;
+    liveSearchBusy = false;
+    // سحب هادئ: حتى لو الساس فشل نحدّث الجدول من الكاش المحلي بدون بنرات/توست
+    var pull = sasReadyJs
+      ? fetch('sas.php?ajax=refresh_now&quiet=1&q=' + encodeURIComponent(q) + '&users=' + encodeURIComponent(names), { credentials: 'same-origin' })
+          .then(parseSyncRes)
+          .catch(function () { return { ok: true, mode: 'local' }; })
+      : Promise.resolve({ ok: true, mode: 'local' });
+    return pull.then(function () {
+      return refreshTableLive().then(function (live) {
+        setTableQuietBusy(false);
+        return live;
+      }).catch(function () {
+        setTableQuietBusy(false);
         return null;
       });
+    });
   }
   function runSync(reset) {
     var url = 'sas.php?ajax=pull&force=1' + (reset ? '&reset=1' : '');
@@ -7221,6 +8480,93 @@ body.sub-ping-off #colsDropdown [data-col-row="ping"] { display: none !important
       setTimeout(function () { rowEl.classList.remove('sas-row-flash'); }, 2600);
     }
   }
+  // من هوية المشترك: sas.php?q=USER&act=1 → افتح نفس نافذة التفعيل
+  (function autoOpenActFromIdentity() {
+    try {
+      var sp = new URLSearchParams(window.location.search || '');
+      var actRaw = sp.get('act') || '';
+      if (!actRaw) return;
+      var want = (actRaw === '1') ? (sp.get('q') || '') : actRaw;
+      want = String(want || '').trim();
+      if (!want) return;
+      var wantLc = want.toLowerCase();
+      function findTr() {
+        var tbody = document.querySelector('#subsTable tbody');
+        if (!tbody) return null;
+        var rows = tbody.querySelectorAll('tr[data-id]');
+        var i, tr, id, un;
+        for (i = 0; i < rows.length; i++) {
+          tr = rows[i];
+          id = String(tr.getAttribute('data-id') || '').toLowerCase();
+          un = String(tr.getAttribute('data-username') || '').toLowerCase();
+          if (id === wantLc || un === wantLc) return tr;
+        }
+        return null;
+      }
+      function rowOf(tr) {
+        return {
+          id: tr.getAttribute('data-id'),
+          sasId: tr.getAttribute('data-sas-id') || '0',
+          profileId: tr.getAttribute('data-profile-id') || '0',
+          profileName: tr.getAttribute('data-profile-name') || '',
+          provider: tr.getAttribute('data-provider') || 'sas',
+          companyId: tr.getAttribute('data-company-id') || '0',
+          enabled: tr.getAttribute('data-enabled') === '1',
+          localId: tr.getAttribute('data-local-id') || '0',
+          name: tr.getAttribute('data-name') || '',
+          firstname: tr.getAttribute('data-firstname') || '',
+          username: tr.getAttribute('data-username') || tr.getAttribute('data-id') || '',
+          debt: tr.getAttribute('data-debt') === '1',
+          hasDays: tr.getAttribute('data-has-days') === '1',
+          msgFail: tr.getAttribute('data-msg-fail') === '1',
+          online: tr.getAttribute('data-online') === '1',
+          logId: tr.getAttribute('data-log-id') || '0',
+          tr: tr
+        };
+      }
+      function rowFromQuery() {
+        return {
+          id: want,
+          sasId: sp.get('sid') || '0',
+          profileId: sp.get('pid') || '0',
+          profileName: sp.get('pn') || '',
+          provider: sp.get('prov') || 'sas',
+          companyId: sp.get('co') || '0',
+          enabled: true,
+          localId: '0',
+          name: sp.get('nm') || '',
+          firstname: sp.get('fn') || sp.get('nm') || '',
+          username: want,
+          debt: false,
+          hasDays: false,
+          msgFail: false,
+          online: false,
+          logId: '0',
+          tr: null
+        };
+      }
+      function cleanUrl() {
+        try {
+          ['act', 'pid', 'pn', 'sid', 'prov', 'co', 'fn', 'nm'].forEach(function (k) { sp.delete(k); });
+          var qs = sp.toString();
+          var next = window.location.pathname + (qs ? ('?' + qs) : '') + (window.location.hash || '');
+          history.replaceState(null, '', next);
+        } catch (eClean) {}
+      }
+      function tryOpen() {
+        var boot = window.__sasActBoot;
+        var tr = findTr();
+        var row = tr ? rowOf(tr) : (boot || rowFromQuery());
+        openActModal(row);
+        if (tr && typeof selectOnlyRow === 'function') {
+          try { selectOnlyRow(tr); } catch (eSel) {}
+        }
+        cleanUrl();
+        window.__sasActBoot = null;
+      }
+      tryOpen();
+    } catch (eAct) {}
+  })();
 })();
 </script>
 <?php

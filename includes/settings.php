@@ -41,6 +41,10 @@ function settings_defaults()
         'expiry_auto_remind_once_days' => 1,
         'tpl_expiry_soon' => "السلام عليكم {name}\nتبقى لديك {days} يوم على اشتراك ({package})\nينتهي بتاريخ {to}\nيرجى التجديد لتجنب انقطاع الخدمة",
         'tpl_schedule_cut' => "السلام عليكم {name}\nتم قطع الإنترنت بسبب عدم تسديد الديون غير المسددة والبالغة {debt}\nبعد تجاوز أيام السماح ({grace} يوم).\nيرجى التسديد لإعادة الخدمة.",
+        'tpl_account_created' => "تم إنشاء الحساب\nالاسم: {name}\nاليوزرنيم: {username}\nالباقة: {package}",
+        'tpl_auto_activate_on' => "مرحباً {name}\nتم تفعيل خدمة التفعيل التلقائي لخطك\nنتمنى لك تجربة مميزة",
+        'wa_case_account_created' => 'account_created',
+        'wa_case_auto_activate_on' => 'auto_activate_on',
         'wa_case_activation_cash' => 'activation',
         'wa_case_activation_credit' => 'activation_credit',
         'wa_case_activation_debts' => 'activation_debts',
@@ -454,6 +458,8 @@ function wa_legacy_tpl_field_map()
         'unpaid_overdue' => 'tpl_unpaid_overdue',
         'expiry_soon' => 'tpl_expiry_soon',
         'schedule_cut' => 'tpl_schedule_cut',
+        'account_created' => 'tpl_account_created',
+        'auto_activate_on' => 'tpl_auto_activate_on',
     );
 }
 
@@ -472,6 +478,8 @@ function wa_default_template_labels($lang = 'ar')
         'expiry_soon' => $en ? 'Expiry soon (auto)' : 'قرب الانتهاء (تلقائي)',
         'unpaid_overdue' => $en ? 'Late after activation' : 'تأخير الدفع بعد التفعيل',
         'schedule_cut' => $en ? 'Cut after grace' : 'قطع بعد انتهاء السماح',
+        'account_created' => $en ? 'Account created' : 'إنشاء حساب',
+        'auto_activate_on' => $en ? 'Auto-activate enabled' : 'تفعيل التجديد التلقائي',
     );
 }
 
@@ -511,6 +519,15 @@ function wa_build_templates_catalog($settings, $lang = 'ar')
                 'label' => $label,
                 'body' => $body,
                 'builtin' => isset($legacy[$key]),
+            );
+        }
+        // بذرة ناعمة لقالب التفعيل التلقائي إذا ناقص من كatalog قديم
+        if (!isset($out['auto_activate_on'])) {
+            $defaults = settings_defaults();
+            $out['auto_activate_on'] = array(
+                'label' => isset($labels['auto_activate_on']) ? $labels['auto_activate_on'] : 'تفعيل التجديد التلقائي',
+                'body' => isset($defaults['tpl_auto_activate_on']) ? (string) $defaults['tpl_auto_activate_on'] : '',
+                'builtin' => true,
             );
         }
         return $out;
@@ -588,6 +605,17 @@ function apply_settings_to_config($config, $settings)
                 : 'تفعيل آجل + ديون قديمة';
         }
     }
+    if (!isset($config['templates']['account_created'])
+        || trim((string) $config['templates']['account_created']) === '') {
+        $config['templates']['account_created'] =
+            "تم إنشاء الحساب\nالاسم: {name}\nاليوزرنيم: {username}\nالباقة: {package}";
+        if (empty($config['template_labels']['account_created'])) {
+            $labs = wa_default_template_labels($langTpl);
+            $config['template_labels']['account_created'] = isset($labs['account_created'])
+                ? $labs['account_created']
+                : 'إنشاء حساب';
+        }
+    }
     $tplKeys = array_keys($config['templates']);
     $legacyAct = isset($settings['wa_case_activation']) ? trim((string) $settings['wa_case_activation']) : 'activation';
     if ($legacyAct === '' || !in_array($legacyAct, $tplKeys, true)) {
@@ -606,6 +634,7 @@ function apply_settings_to_config($config, $settings)
         'unpaid_overdue' => 'unpaid_overdue',
         'reminder_auto' => 'debt_remind',
         'schedule_cut' => 'schedule_cut',
+        'account_created' => 'account_created',
         'card_transfer' => '',
         'card_pull' => '',
     );

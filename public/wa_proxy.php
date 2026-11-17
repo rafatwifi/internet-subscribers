@@ -204,10 +204,13 @@ if (!empty($decoded['ready'])) {
         'status' => 'connected',
         'registered' => true,
         'qr_age_ms' => 0,
+        'qr_left_ms' => 0,
+        'qr_ttl_ms' => 20000,
         'qr_data_url' => null,
     ), 200);
 }
-if ($registered) {
+/* status فقط: جلسة محفوظة بدون اتصال = إعادة ربط. طلب qr يكمل لجلب الصورة إن وجدت */
+if ($registered && $action !== 'qr') {
     wa_proxy_emit(array(
         'success' => true,
         'ready' => false,
@@ -217,6 +220,8 @@ if ($registered) {
         'status' => 'reconnecting',
         'registered' => true,
         'qr_age_ms' => 0,
+        'qr_left_ms' => 0,
+        'qr_ttl_ms' => 20000,
         'qr_data_url' => null,
     ), 200);
 }
@@ -224,6 +229,8 @@ if ($registered) {
 $gwStatus = wa_proxy_status_name(isset($decoded['status']) ? $decoded['status'] : '');
 $qrImage = null;
 $hasQr = !empty($decoded['has_qr']);
+$qrLeftMs = isset($decoded['qr_left_ms']) ? (int) $decoded['qr_left_ms'] : null;
+$qrTtlMs = isset($decoded['qr_ttl_ms']) ? (int) $decoded['qr_ttl_ms'] : 20000;
 
 if ($action === 'qr') {
     list($qraw, $qcode) = wa_proxy_request(
@@ -268,11 +275,18 @@ if ($action === 'qr') {
                     'qr_data_url' => null,
                 ), 200);
             }
+            if (isset($qr['qr_left_ms'])) {
+                $qrLeftMs = (int) $qr['qr_left_ms'];
+            }
+            if (isset($qr['qr_ttl_ms'])) {
+                $qrTtlMs = (int) $qr['qr_ttl_ms'];
+            }
             $qrFresh = !empty($qr['qr_data_url']) && ($qrAge <= 0 || $qrAge <= 45000);
             if ($qrFresh) {
                 $qrImage = $qr['qr_data_url'];
                 $hasQr = true;
                 $gwStatus = 'qr_ready';
+                $registered = false;
             } elseif (isset($qr['status'])) {
                 $gwStatus = wa_proxy_status_name($qr['status']);
                 if ($gwStatus === 'qr_ready') {
@@ -283,7 +297,7 @@ if ($action === 'qr') {
     }
 }
 
-wa_proxy_emit(array(
+$out = array(
     'success' => true,
     'ready' => false,
     'has_qr' => $hasQr,
@@ -292,5 +306,13 @@ wa_proxy_emit(array(
     'status' => $gwStatus,
     'registered' => $registered ? true : false,
     'qr_age_ms' => $qrAge,
+    'qr_ttl_ms' => $qrTtlMs > 0 ? $qrTtlMs : 20000,
     'qr_data_url' => $qrImage,
-), 200);
+);
+if ($qrLeftMs !== null) {
+    $out['qr_left_ms'] = max(0, (int) $qrLeftMs);
+} elseif ($qrImage) {
+    $ttl = $out['qr_ttl_ms'];
+    $out['qr_left_ms'] = max(0, $ttl - max(0, $qrAge));
+}
+wa_proxy_emit($out, 200);

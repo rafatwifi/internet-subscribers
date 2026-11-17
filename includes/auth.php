@@ -819,6 +819,7 @@ function accountant_widget_catalog()
         'activations' => array('ar' => 'التفعيلات', 'en' => 'Activations', 'tone' => 'tone-yellow', 'perm' => 'subscriptions', 'nav' => 'subscriptions'),
         'rentals' => array('ar' => 'الإيجار', 'en' => 'Rentals', 'tone' => 'tone-teal', 'perm' => 'rentals', 'nav' => 'rentals'),
         'points' => array('ar' => 'نقاط تشجيعية', 'en' => 'Reward points', 'tone' => 'tone-lime', 'perm' => '', 'nav' => ''),
+        'balance' => array('ar' => 'رصيد الريسلر', 'en' => 'Reseller balance', 'tone' => 'tone-teal', 'perm' => '', 'nav' => ''),
         'latency' => array('ar' => 'بنك الريسلر', 'en' => 'Reseller ping', 'tone' => 'tone-navy', 'perm' => '', 'nav' => ''),
         'reports' => array('ar' => 'التقارير', 'en' => 'Reports', 'tone' => 'tone-green', 'perm' => 'reports', 'nav' => 'reports'),
         'messages' => array('ar' => 'الرسائل', 'en' => 'Messages', 'tone' => 'tone-aqua', 'perm' => 'messages', 'nav' => 'messages'),
@@ -1480,6 +1481,55 @@ function admin_ui_prefs_save($pdo, $key, $value)
         return true;
     } catch (Exception $e) {
         return false;
+    }
+}
+
+/**
+ * لغة / عملة / أيام سماح / مدة اشتراك — لكل مستخدم من ui_prefs (ما تأثر على مستخدم ثاني).
+ */
+function apply_admin_work_prefs_to_config(&$config, &$settings, $pdo)
+{
+    if (empty($_SESSION['admin_logged_in']) || !is_array($config)) {
+        return;
+    }
+    $prefs = admin_ui_prefs_load($pdo);
+    if (!is_array($prefs) || !$prefs) {
+        return;
+    }
+    if (isset($prefs['currency'])) {
+        $cur = trim((string) $prefs['currency']);
+        if ($cur !== '') {
+            $config['currency'] = $cur;
+            if (is_array($settings)) {
+                $settings['currency'] = $cur;
+            }
+        }
+    }
+    if (array_key_exists('grace_days', $prefs)) {
+        $g = max(0, (int) $prefs['grace_days']);
+        $config['grace_days'] = $g;
+        if (is_array($settings)) {
+            $settings['grace_days'] = $g;
+        }
+    }
+    if (isset($prefs['subscription_period_mode'])) {
+        $mode = ((string) $prefs['subscription_period_mode'] === 'calendar_month')
+            ? 'calendar_month'
+            : 'days_30';
+        $config['subscription_period_mode'] = $mode;
+        if (is_array($settings)) {
+            $settings['subscription_period_mode'] = $mode;
+        }
+    }
+    if (isset($prefs['language']) && ($prefs['language'] === 'en' || $prefs['language'] === 'ar')) {
+        if (is_array($settings)) {
+            $settings['language'] = $prefs['language'];
+        }
+        // إن ماكو اختيار جلسة/كوكيز بعد، طبّق لغة الحساب
+        if (empty($_SESSION['lang']) && empty($_COOKIE['lang']) && function_exists('set_lang_preference')) {
+            set_lang_preference($prefs['language']);
+            $GLOBALS['lang'] = $prefs['language'];
+        }
     }
 }
 

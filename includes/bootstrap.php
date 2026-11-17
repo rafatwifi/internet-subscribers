@@ -221,6 +221,10 @@ require_once __DIR__ . '/helpers.php';
 require_once __DIR__ . '/system_status.php';
 require_once __DIR__ . '/auth.php';
 require_once __DIR__ . '/whatsapp.php';
+$earthlinkFile = __DIR__ . '/earthlink.php';
+if (is_file($earthlinkFile)) {
+    require_once $earthlinkFile;
+}
 $cardAccountingFile = __DIR__ . '/card_accounting.php';
 if (is_file($cardAccountingFile)) {
     require_once $cardAccountingFile;
@@ -264,6 +268,20 @@ if (function_exists('app_remember_try_restore')) {
 }
 if (!empty($_SESSION['admin_logged_in']) && function_exists('app_session_refresh_cookie')) {
     app_session_refresh_cookie();
+}
+if (!empty($_SESSION['admin_logged_in']) && isset($pdo) && function_exists('apply_admin_work_prefs_to_config')) {
+    try {
+        if (isset($_GET['lang']) && ($_GET['lang'] === 'ar' || $_GET['lang'] === 'en')
+            && function_exists('admin_ui_prefs_save')) {
+            admin_ui_prefs_save($pdo, 'language', $_GET['lang'] === 'en' ? 'en' : 'ar');
+        }
+        apply_admin_work_prefs_to_config($config, $settings, $pdo);
+        if (isset($GLOBALS['lang']) && function_exists('current_lang')) {
+            $lang = current_lang($settings);
+            $GLOBALS['lang'] = $lang;
+        }
+    } catch (Exception $e) {
+    }
 }
 
 require_once __DIR__ . '/invoices.php';
@@ -384,6 +402,9 @@ try {
         }
         if (function_exists('ensure_subscriber_grace_days_column')) {
             ensure_subscriber_grace_days_column($pdo);
+        }
+        if (function_exists('ensure_subscriber_auto_activate_column')) {
+            ensure_subscriber_auto_activate_column($pdo);
         }
         if (function_exists('ensure_preferred_plan_column')) {
             ensure_preferred_plan_column($pdo);

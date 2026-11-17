@@ -919,17 +919,160 @@ function sas_ping_mode_normalize($mode)
     return 'off';
 }
 
-function sas_ping_mode($pdo)
+function sas_ping_mode_ensure_column($pdo)
 {
-    // اقرأ من الجلسة/القاعدة كل مرة — الكاش الثابت كان يخلي الاختيار القديم يضل بعد التشغيل
-    $mode = 'off';
-    if ($pdo && function_exists('admin_ui_prefs_load')) {
-        $prefs = admin_ui_prefs_load($pdo);
-        if (is_array($prefs) && isset($prefs['sub_ping_mode'])) {
-            $mode = sas_ping_mode_normalize($prefs['sub_ping_mode']);
+    static $done = false;
+    if ($done || !$pdo) {
+        return;
+    }
+    $done = true;
+    if (function_exists('ensure_tenant_sas_accounts_schema')) {
+        ensure_tenant_sas_accounts_schema($pdo);
+    }
+    if (function_exists('tenants_ensure_column')) {
+        try {
+            tenants_ensure_column(
+                $pdo,
+                'tenant_sas_accounts',
+                'ping_mode',
+                "VARCHAR(16) NOT NULL DEFAULT 'off'"
+            );
+        } catch (Exception $e) {
         }
     }
-    return $mode;
+    // ترحيل اختيار قديم عام → كل الرسلرات الحالية مرة واحدة
+    try {
+        $legacy = 'off';
+        if (function_exists('admin_ui_prefs_load')) {
+            $prefs = admin_ui_prefs_load($pdo);
+            if (is_array($prefs) && isset($prefs['sub_ping_mode'])) {
+                $legacy = sas_ping_mode_normalize($prefs['sub_ping_mode']);
+            }
+        }
+        if ($legacy !== 'off') {
+            $pdo->exec(
+                "UPDATE tenant_sas_accounts SET ping_mode = " . $pdo->quote($legacy)
+                . " WHERE ping_mode = 'off' OR ping_mode = '' OR ping_mode IS NULL"
+            );
+        }
+    } catch (Exception $e) {
+    }
+}
+
+/**
+ * وضع البنك لرسلر واحد. بدون رسلر = طافي دائماً.
+ */
+function sas_ping_mode_for_account($pdo, $accountId)
+{
+    $accountId = (int) $accountId;
+    if (!$pdo || $accountId <= 0) {
+        return 'off';
+    }
+    sas_ping_mode_ensure_column($pdo);
+    try {
+        $st = $pdo->prepare('SELECT ping_mode FROM tenant_sas_accounts WHERE id = :id LIMIT 1');
+        $st->execute(array(':id' => $accountId));
+        $row = $st->fetch();
+        if ($row && isset($row['ping_mode'])) {
+            return sas_ping_mode_normalize($row['ping_mode']);
+        }
+    } catch (Exception $e) {
+    }
+    return 'off';
+}
+
+/**
+ * حفظ وضع البنك لرسلر معيّن (يتبع الوكالة).
+ * @return array{ok:bool,mode:string,message?:string}
+ */
+function sas_ping_mode_save_account($pdo, $tenantId, $accountId, $mode)
+{
+    $tenantId = (int) $tenantId;
+    $accountId = (int) $accountId;
+    $mode = sas_ping_mode_normalize($mode);
+    if (!$pdo || $tenantId <= 1 || $accountId <= 0) {
+        return array(
+            'ok' => false,
+            'mode' => 'off',
+            'message' => 'أضف رسلر أولاً قبل تفعيل البنك',
+        );
+    }
+    sas_ping_mode_ensure_column($pdo);
+    try {
+        $st = $pdo->prepare(
+            'UPDATE tenant_sas_accounts SET ping_mode = :m, updated_at = NOW()
+             WHERE id = :id AND tenant_id = :t'
+        );
+        $st->execute(array(':m' => $mode, ':id' => $accountId, ':t' => $tenantId));
+        if ($st->rowCount() < 1) {
+            $chk = $pdo->prepare('SELECT id FROM tenant_sas_accounts WHERE id = :id AND tenant_id = :t LIMIT 1');
+            $chk->execute(array(':id' => $accountId, ':t' => $tenantId));
+            if (!$chk->fetch()) {
+                return array('ok' => false, 'mode' => 'off', 'message' => 'الرسلر غير موجود');
+            }
+        }
+        return array('ok' => true, 'mode' => $mode);
+    } catch (Exception $e) {
+        return array('ok' => false, 'mode' => 'off', 'message' => 'فشل الحفظ');
+    }
+}
+
+/**
+ * وضع البنك للرسلر الافتراضي / الحالي (توافق مع الاستدعاءات القديمة).
+ * بدون أي رسلر → off.
+ */
+function sas_ping_mode($pdo, $accountId = 0)
+{
+    if (!$pdo) {
+        return 'off';
+    }
+    sas_ping_mode_ensure_column($pdo);
+    $accountId = (int) $accountId;
+    if ($accountId > 0) {
+        return sas_ping_mode_for_account($pdo, $accountId);
+    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+    if ($tid > 1 && function_exists('tenant_sas_accounts_list')) {
+        $list = tenant_sas_accounts_list($pdo, $tid);
+        if (!$list) {
+            return 'off';
+        }
+        foreach ($list as $acc) {
+            if (!empty($acc['is_default'])) {
+                return sas_ping_mode_normalize(isset($acc['ping_mode']) ? $acc['ping_mode'] : 'off');
+            }
+        }
+        $first = $list[0];
+        return sas_ping_mode_normalize(isset($first['ping_mode']) ? $first['ping_mode'] : 'off');
+    }
+    // منصة / بدون حسابات: طافي (ما نرجع تفضيل عام)
+    return 'off';
+}
+
+/** هل أي رسلر عند الوكالة فعّل البنك؟ */
+function sas_ping_mode_any_enabled($pdo, $tenantId = 0)
+{
+    if (!$pdo) {
+        return false;
+    }
+    sas_ping_mode_ensure_column($pdo);
+    $tenantId = (int) $tenantId;
+    if ($tenantId <= 0 && function_exists('current_tenant_id')) {
+        $tenantId = (int) current_tenant_id();
+    }
+    if ($tenantId <= 1) {
+        return sas_ping_mode($pdo) !== 'off';
+    }
+    try {
+        $st = $pdo->prepare(
+            "SELECT 1 FROM tenant_sas_accounts
+             WHERE tenant_id = :t AND ping_mode IN ('portal','sas') LIMIT 1"
+        );
+        $st->execute(array(':t' => $tenantId));
+        return (bool) $st->fetchColumn();
+    } catch (Exception $e) {
+        return false;
+    }
 }
 
 function sas_ping_mode_style()
@@ -940,34 +1083,55 @@ function sas_ping_mode_style()
     }
     $done = true;
     return '<style>
-.ping-mode{display:inline-flex;direction:ltr;align-items:stretch;border:1px solid #dbe3ee;border-radius:999px;overflow:hidden;background:#f8fafc;max-width:100%}
-.ping-mode-btn{border:0;background:transparent;color:#64748b;font-weight:600;font-size:12px;line-height:1.2;padding:7px 10px;cursor:pointer;font-family:inherit}
-.ping-mode-btn + .ping-mode-btn{border-inline-start:1px solid #e2e8f0}
+.ping-mode{
+  display:inline-flex;direction:ltr;align-items:center;gap:3px;padding:3px;
+  border:0;border-radius:14px;background:linear-gradient(180deg,#f1f5f9,#e8eef5);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.8), 0 1px 2px rgba(15,23,42,.06);
+  max-width:100%
+}
+.ping-mode-btn{
+  border:0;background:transparent;color:#64748b;font-weight:700;font-size:12px;
+  line-height:1.2;padding:8px 12px;cursor:pointer;font-family:inherit;
+  border-radius:11px;transition:background .15s ease,color .15s ease,box-shadow .15s ease
+}
+.ping-mode-btn + .ping-mode-btn{border-inline-start:0}
 .ping-mode-btn .ping-short{display:none}
-.ping-mode-btn.is-on[data-ping-mode="portal"]{background:#0f766e;color:#fff}
-.ping-mode-btn.is-on[data-ping-mode="off"]{background:#e2e8f0;color:#334155}
-.ping-mode-btn.is-on[data-ping-mode="sas"]{background:#0284c7;color:#fff}
+.ping-mode-btn.is-on{
+  color:#fff;box-shadow:0 4px 12px rgba(15,23,42,.14)
+}
+.ping-mode-btn.is-on[data-ping-mode="portal"]{background:#0f766e}
+.ping-mode-btn.is-on[data-ping-mode="off"]{background:#475569}
+.ping-mode-btn.is-on[data-ping-mode="sas"]{background:#0369a1}
+.ping-mode.is-disabled{opacity:.45;pointer-events:none}
+.sas-acc-ping{margin-top:10px}
 @media(max-width:760px){
   .ping-mode{display:inline-flex;width:auto;margin-inline:auto}
-  .ping-mode-btn{flex:0 0 auto;font-size:12px;font-weight:500;padding:6px 12px}
+  .ping-mode-btn{flex:0 0 auto;font-size:12px;padding:7px 11px}
   .ping-mode-btn .ping-long{display:none}
   .ping-mode-btn .ping-short{display:inline}
 }
 </style>';
 }
 
-function sas_ping_mode_buttons($en, $mode)
+function sas_ping_mode_buttons($en, $mode, $domId = 'subPingMode', $accountId = 0, $disabled = false)
 {
     $mode = sas_ping_mode_normalize($mode);
+    if ($disabled) {
+        $mode = 'off';
+    }
     $opts = array(
         array('portal', $en ? 'Portal ping' : 'البنك من خلال البوابة', $en ? 'Portal' : 'البوابة'),
         array('off', $en ? 'Off' : 'طافي', $en ? 'Off' : 'طافي'),
         array('sas', $en ? 'SAS ping' : 'البنك من خلال الساس', $en ? 'SAS' : 'الساس'),
     );
-    $html = '<div class="ping-mode" id="subPingMode" dir="ltr" role="radiogroup" data-mode="' . e($mode) . '">';
+    $cls = 'ping-mode' . ($disabled ? ' is-disabled' : '');
+    $html = '<div class="' . $cls . '" id="' . e($domId) . '" dir="ltr" role="radiogroup" data-mode="' . e($mode) . '"'
+        . ($accountId > 0 ? ' data-account-id="' . (int) $accountId . '"' : '')
+        . ($disabled ? ' aria-disabled="true"' : '') . '>';
     foreach ($opts as $opt) {
         $on = ($mode === $opt[0]) ? ' is-on' : '';
-        $html .= '<button type="button" class="ping-mode-btn' . $on . '" data-ping-mode="' . e($opt[0]) . '" title="' . e($opt[1]) . '">'
+        $html .= '<button type="button" class="ping-mode-btn' . $on . '" data-ping-mode="' . e($opt[0]) . '" title="' . e($opt[1]) . '"'
+            . ($disabled ? ' disabled' : '') . '>'
             . '<span class="ping-long">' . e($opt[1]) . '</span>'
             . '<span class="ping-short">' . e($opt[2]) . '</span>'
             . '</button>';
@@ -1220,12 +1384,19 @@ function sas_ping_user_is_na($username)
 
 function sas_ping_warm($pdo)
 {
-    if (!$pdo || !function_exists('sas_ping_mode') || sas_ping_mode($pdo) === 'off') {
+    if (!$pdo) {
         return;
     }
     $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
     if ($tid <= 0) {
         $tid = 1;
+    }
+    if (function_exists('sas_ping_mode_any_enabled')) {
+        if (!sas_ping_mode_any_enabled($pdo, $tid)) {
+            return;
+        }
+    } elseif (!function_exists('sas_ping_mode') || sas_ping_mode($pdo) === 'off') {
+        return;
     }
     $dir = dirname(__DIR__) . '/storage/cache';
     if (!is_dir($dir)) {
@@ -1281,8 +1452,37 @@ function sas_fill_online_pings($pdo, $rows, $maxAge = 30)
         return is_array($rows) ? $rows : array();
     }
     $maxAge = (int) $maxAge;
-    $mode = function_exists('sas_ping_mode') ? sas_ping_mode($pdo) : 'off';
-    if ($mode === 'off') {
+    sas_ping_mode_ensure_column($pdo);
+
+    // وضع البنك لكل رسلر — جمّع الصفوف حسب الوضع
+    $modeByAcc = array();
+    $defaultMode = function_exists('sas_ping_mode') ? sas_ping_mode($pdo) : 'off';
+    $groups = array('off' => array(), 'portal' => array(), 'sas' => array());
+    $indexMap = array();
+    foreach ($rows as $i => $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $aid = 0;
+        if (isset($row['sas_account_id'])) {
+            $aid = (int) $row['sas_account_id'];
+        } elseif (isset($row['_sas_account_id'])) {
+            $aid = (int) $row['_sas_account_id'];
+        }
+        if ($aid > 0) {
+            if (!isset($modeByAcc[$aid])) {
+                $modeByAcc[$aid] = sas_ping_mode_for_account($pdo, $aid);
+            }
+            $mode = $modeByAcc[$aid];
+        } else {
+            $mode = $defaultMode;
+        }
+        $mode = sas_ping_mode_normalize($mode);
+        $groups[$mode][] = $i;
+        $indexMap[$i] = $mode;
+    }
+
+    if (empty($groups['portal']) && empty($groups['sas'])) {
         foreach ($rows as $i => $row) {
             if (is_array($row)) {
                 $rows[$i]['online_ping'] = null;
@@ -1292,12 +1492,46 @@ function sas_fill_online_pings($pdo, $rows, $maxAge = 30)
         }
         return $rows;
     }
-    if ($mode === 'sas') {
-        $rows = sas_fill_sas_pings($pdo, $rows, $maxAge);
-        $rows = sas_ping_icmp_missing($pdo, $rows);
-    } else {
-        $rows = sas_fill_portal_pings($pdo, $rows, $maxAge);
+
+    if (!empty($groups['off'])) {
+        foreach ($groups['off'] as $i) {
+            $rows[$i]['online_ping'] = null;
+            $rows[$i]['_ping_fresh'] = 0;
+            $rows[$i]['_ping_checked'] = 1;
+        }
     }
+
+    if (!empty($groups['sas'])) {
+        $subset = array();
+        foreach ($groups['sas'] as $i) {
+            $subset[$i] = $rows[$i];
+        }
+        $filled = sas_fill_sas_pings($pdo, array_values($subset), $maxAge);
+        $filled = sas_ping_icmp_missing($pdo, $filled);
+        $k = 0;
+        foreach ($groups['sas'] as $i) {
+            if (isset($filled[$k]) && is_array($filled[$k])) {
+                $rows[$i] = $filled[$k];
+            }
+            $k++;
+        }
+    }
+
+    if (!empty($groups['portal'])) {
+        $subset = array();
+        foreach ($groups['portal'] as $i) {
+            $subset[$i] = $rows[$i];
+        }
+        $filled = sas_fill_portal_pings($pdo, array_values($subset), $maxAge);
+        $k = 0;
+        foreach ($groups['portal'] as $i) {
+            if (isset($filled[$k]) && is_array($filled[$k])) {
+                $rows[$i] = $filled[$k];
+            }
+            $k++;
+        }
+    }
+
     if (!is_array($rows)) {
         return array();
     }
@@ -3731,7 +3965,11 @@ function sas_inventory_needs_free_pins($inv)
                 }
             }
         }
-        if ($freePins < 1) {
+        $want = $unused;
+        if ($want > 80) {
+            $want = 80;
+        }
+        if ($freePins < $want) {
             return true;
         }
     }
@@ -3879,6 +4117,218 @@ function sas_unused_pins_from_inventory_cache()
     return $out;
 }
 
+function sas_viewer_uses_agent_card_stock()
+{
+    if (!empty($_SESSION['admin_sas_shadow'])) {
+        return true;
+    }
+    if (function_exists('is_agent_user') && is_agent_user()) {
+        return true;
+    }
+    // وكيل ورقي (أدمن بدون شبكة تحته، يستلم كروت من الأعلى): نفس مسار كروت الوكيل
+    global $pdo;
+    if ($pdo && function_exists('account_viewer_is_leaf_child') && account_viewer_is_leaf_child($pdo)) {
+        return true;
+    }
+    return false;
+}
+
+function sas_agent_pins_session_keys($agentId)
+{
+    $agentId = (int) $agentId;
+    return array(
+        'sas_agent_pins_v1_' . $agentId,
+        'sas_agent_pins_v1_at_' . $agentId,
+    );
+}
+
+function sas_agent_pins_cache_clear($agentId = 0)
+{
+    $agentId = (int) $agentId;
+    if ($agentId > 0) {
+        list($k, $at) = sas_agent_pins_session_keys($agentId);
+        unset($_SESSION[$k], $_SESSION[$at]);
+        return;
+    }
+    if (!isset($_SESSION) || !is_array($_SESSION)) {
+        return;
+    }
+    foreach (array_keys($_SESSION) as $key) {
+        if (strpos((string) $key, 'sas_agent_pins_v1_') === 0) {
+            unset($_SESSION[$key]);
+        }
+    }
+}
+
+/**
+ * كروت تفعيل الوكيل: من ملكية ساس تبعه بعد التحويل (مو مستودع الوكالة).
+ */
+function sas_agent_unused_cards_for_ui($pdo, $config, $force = false)
+{
+    // الجلسة قد تكون مغلقة بعد ajax — لازم نفتحها قبل current_admin
+    if (session_status() !== PHP_SESSION_ACTIVE) {
+        if (function_exists('app_session_reopen')) {
+            app_session_reopen();
+        } else {
+            @session_start();
+        }
+    }
+    $me = function_exists('current_admin') ? current_admin() : null;
+    $agentId = $me ? (int) $me['id'] : 0;
+    if ($agentId <= 0) {
+        return array();
+    }
+    list($sessKey, $sessAt) = sas_agent_pins_session_keys($agentId);
+    $at = isset($_SESSION[$sessAt]) ? (int) $_SESSION[$sessAt] : 0;
+    if (!$force && $at > 0 && isset($_SESSION[$sessKey]) && is_array($_SESSION[$sessKey])) {
+        $age = time() - $at;
+        $empty = !$_SESSION[$sessKey];
+        // فارغ: كاش قصير فقط. بعد تحويل كروت لازم ينعاد الجلب بسرعة.
+        if ((!$empty && $age < 90) || ($empty && $age < 8)) {
+            return $_SESSION[$sessKey];
+        }
+    }
+
+    $homeId = function_exists('default_admin_user_id') ? (int) default_admin_user_id($pdo) : 0;
+    if ($homeId <= 0) {
+        $homeId = $agentId;
+    }
+    $wasOpen = (session_status() === PHP_SESSION_ACTIVE);
+    if ($wasOpen && function_exists('app_session_close')) {
+        app_session_close();
+    } elseif ($wasOpen) {
+        session_write_close();
+    }
+
+    $api = null;
+    if (function_exists('sas_page_connector')) {
+        $api = sas_page_connector($config);
+    }
+    if (!$api && function_exists('sas_make_connector')) {
+        $api = sas_make_connector($config);
+        if ($api && method_exists($api, 'setTimeout')) {
+            $api->setTimeout(35);
+        }
+        if ($api && method_exists($api, 'login') && !$api->login()) {
+            $api = null;
+        }
+    }
+
+    $out = array();
+    $mid = 0;
+    $logged = 0;
+    if ($api && method_exists($api, 'loggedManagerId')) {
+        $logged = (int) $api->loggedManagerId();
+    }
+    if ($api && function_exists('card_user_sas_manager_id')) {
+        $mid = (int) card_user_sas_manager_id($pdo, $agentId, $homeId, $api);
+    }
+    if ($mid <= 0) {
+        $mid = $logged;
+    }
+    if ($mid > 0 && $api) {
+        $raw = array();
+        if (method_exists($api, 'listOwnedFreePinsForOwner')) {
+            $raw = $api->listOwnedFreePinsForOwner($mid, 80);
+        } elseif ($mid === $logged && method_exists($api, 'listOwnedFreePins')) {
+            $raw = $api->listOwnedFreePins(80);
+        }
+        $out = function_exists('sas_cards_rows_to_ui') ? sas_cards_rows_to_ui($raw) : array();
+    }
+    if (!is_array($out)) {
+        $out = array();
+    }
+    if ($out && function_exists('sas_filter_recently_used_cards')) {
+        $out = sas_filter_recently_used_cards($out);
+    }
+
+    // لا تعرض أكثر من رصيد مخزون الوكيل المسجّل بالبوابة
+    if ($out && function_exists('card_agent_stock_summary')) {
+        $stock = card_agent_stock_summary($pdo, $agentId);
+        $rows = (is_array($stock) && !empty($stock['rows']) && is_array($stock['rows'])) ? $stock['rows'] : array();
+        $capById = array();
+        $capByName = array();
+        $totalCap = 0;
+        foreach ($rows as $sr) {
+            if (!is_array($sr)) {
+                continue;
+            }
+            $q = isset($sr['qty']) ? (int) $sr['qty'] : 0;
+            if ($q <= 0) {
+                continue;
+            }
+            $totalCap += $q;
+            $spid = isset($sr['profile_id']) ? (int) $sr['profile_id'] : 0;
+            $sn = function_exists('sas_profile_norm')
+                ? sas_profile_norm(isset($sr['profile_name']) ? $sr['profile_name'] : '')
+                : strtolower(trim((string) (isset($sr['profile_name']) ? $sr['profile_name'] : '')));
+            if ($spid > 0) {
+                if (!isset($capById[$spid])) {
+                    $capById[$spid] = 0;
+                }
+                $capById[$spid] += $q;
+            }
+            if ($sn !== '') {
+                if (!isset($capByName[$sn])) {
+                    $capByName[$sn] = 0;
+                }
+                $capByName[$sn] += $q;
+            }
+        }
+        if ($totalCap > 0) {
+            $usedId = array();
+            $usedName = array();
+            $capped = array();
+            foreach ($out as $c) {
+                if (!is_array($c)) {
+                    continue;
+                }
+                $pid = isset($c['profile_id']) ? (int) $c['profile_id'] : 0;
+                $pn = function_exists('sas_profile_norm')
+                    ? sas_profile_norm(isset($c['profile_name']) ? $c['profile_name'] : '')
+                    : strtolower(trim((string) (isset($c['profile_name']) ? $c['profile_name'] : '')));
+                $ok = false;
+                if ($pid > 0 && isset($capById[$pid])) {
+                    if (!isset($usedId[$pid])) {
+                        $usedId[$pid] = 0;
+                    }
+                    if ($usedId[$pid] < $capById[$pid]) {
+                        $usedId[$pid]++;
+                        $ok = true;
+                    }
+                } elseif ($pn !== '' && isset($capByName[$pn])) {
+                    if (!isset($usedName[$pn])) {
+                        $usedName[$pn] = 0;
+                    }
+                    if ($usedName[$pn] < $capByName[$pn]) {
+                        $usedName[$pn]++;
+                        $ok = true;
+                    }
+                }
+                if ($ok) {
+                    $capped[] = $c;
+                }
+            }
+            $out = $capped;
+        } elseif ($rows) {
+            // مخزون البوابة صفر → لا كروت تفعيل من ملكية قديمة
+            $out = array();
+        }
+    }
+
+    if (session_status() !== PHP_SESSION_ACTIVE && function_exists('app_session_reopen')) {
+        app_session_reopen();
+    } elseif (session_status() !== PHP_SESSION_ACTIVE) {
+        @session_start();
+    }
+    $_SESSION[$sessKey] = $out;
+    $_SESSION[$sessAt] = time();
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
+    return $out;
+}
+
 function sas_unused_cards_cached($api, $force = false)
 {
     $ttl = 120;
@@ -3911,13 +4361,14 @@ function sas_unused_cards_cached($api, $force = false)
         if ($invFile && isset($invFile['groups']) && is_array($invFile['groups'])) {
             $fromInv = sas_unused_pins_from_inventory_cache();
             $out = is_array($fromInv) ? $fromInv : array();
-            if (!$out && function_exists('sas_inventory_needs_free_pins') && sas_inventory_needs_free_pins($invFile)
+            $gapInv = $invFile;
+            if (function_exists('sas_inventory_needs_free_pins') && sas_inventory_needs_free_pins($gapInv)
                 && $api && method_exists($api, 'listOwnedFreePins')) {
-                $livePins = sas_cards_rows_to_ui($api->listOwnedFreePins(20));
+                $livePins = sas_cards_rows_to_ui($api->listOwnedFreePins(80));
                 if (function_exists('sas_pins_capped_by_inventory')) {
-                    $livePins = sas_pins_capped_by_inventory($livePins, $invFile);
+                    $livePins = sas_pins_capped_by_inventory($livePins, $gapInv);
                 }
-                if (is_array($livePins) && $livePins) {
+                if (is_array($livePins) && count($livePins) > count($out)) {
                     $out = $livePins;
                     if (function_exists('sas_inventory_store_free_pins')) {
                         sas_inventory_store_free_pins($out);
@@ -3965,14 +4416,14 @@ function sas_unused_cards_cached($api, $force = false)
     if ($fromInventory) {
         $fromInv = sas_unused_pins_from_inventory_cache();
         $out = is_array($fromInv) ? $fromInv : array();
-        if (!$out && $api && method_exists($api, 'listOwnedFreePins') && function_exists('sas_inventory_needs_free_pins')) {
+        if ($api && method_exists($api, 'listOwnedFreePins') && function_exists('sas_inventory_needs_free_pins')) {
             $gapInv = function_exists('sas_cards_inventory_load_persisted') ? sas_cards_inventory_load_persisted(0) : null;
             if (sas_inventory_needs_free_pins($gapInv)) {
-                $livePins = sas_cards_rows_to_ui($api->listOwnedFreePins(20));
+                $livePins = sas_cards_rows_to_ui($api->listOwnedFreePins(80));
                 if (function_exists('sas_pins_capped_by_inventory')) {
                     $livePins = sas_pins_capped_by_inventory($livePins, $gapInv);
                 }
-                if (is_array($livePins) && $livePins) {
+                if (is_array($livePins) && count($livePins) > count($out)) {
                     $out = $livePins;
                     if (function_exists('sas_inventory_store_free_pins')) {
                         sas_inventory_store_free_pins($out);
@@ -4473,12 +4924,54 @@ function sas_dash_live_add($tenantId, $key, $delta)
     @file_put_contents(sas_dash_live_file($tenantId), json_encode($data));
 }
 
+/**
+ * عدّادات الداشبورد من كاش المحلي (ساس + إيرث) — مصدر الحقيقة للوجدز.
+ */
+function sas_dash_counts_from_cache($pdo, $scope = '')
+{
+    $out = array(
+        'total' => 0,
+        'active' => 0,
+        'online' => 0,
+        'expired' => 0,
+        'soon' => 0,
+        'today' => 0,
+        'disabled' => 0,
+    );
+    if (!$pdo) {
+        return $out;
+    }
+    $countExpr = (strpos($scope, ' IN (') !== false) ? 'COUNT(DISTINCT c.username)' : 'COUNT(*)';
+    try {
+        $out['total'] = (int) $pdo->query('SELECT ' . $countExpr . ' FROM sas_users_cache c WHERE 1=1' . $scope)->fetchColumn();
+        $out['disabled'] = (int) $pdo->query('SELECT ' . $countExpr . ' FROM sas_users_cache c WHERE c.enabled = 0' . $scope)->fetchColumn();
+        $out['online'] = (int) $pdo->query('SELECT ' . $countExpr . ' FROM sas_users_cache c WHERE c.is_online = 1' . $scope)->fetchColumn();
+        // فعّال: مفعّل وما منتهي (NULL = فعّال، مهم لإيرث)
+        $out['active'] = (int) $pdo->query(
+            'SELECT ' . $countExpr . ' FROM sas_users_cache c
+             WHERE c.enabled = 1 AND (c.expire_at IS NULL OR c.expire_at >= NOW())' . $scope
+        )->fetchColumn();
+        $out['expired'] = (int) $pdo->query(
+            'SELECT ' . $countExpr . ' FROM sas_users_cache c
+             WHERE (c.enabled = 0 OR (c.expire_at IS NOT NULL AND c.expire_at < NOW()))' . $scope
+        )->fetchColumn();
+        $out['soon'] = (int) $pdo->query(
+            'SELECT ' . $countExpr . ' FROM sas_users_cache c
+             WHERE c.enabled = 1 AND c.expire_at IS NOT NULL AND DATE(c.expire_at) > CURDATE()
+               AND DATE(c.expire_at) <= DATE_ADD(CURDATE(), INTERVAL 3 DAY)' . $scope
+        )->fetchColumn();
+        $out['today'] = (int) $pdo->query(
+            'SELECT ' . $countExpr . ' FROM sas_users_cache c
+             WHERE c.enabled = 1 AND c.expire_at IS NOT NULL AND DATE(c.expire_at) = CURDATE()' . $scope
+        )->fetchColumn();
+    } catch (Exception $e) {
+    }
+    return $out;
+}
+
 function sas_dash_live_refresh($pdo, $config, $force = false, $withSoon = null)
 {
     if (!sas_dash_live_allowed()) {
-        return null;
-    }
-    if (!function_exists('sas_is_ready') || !sas_is_ready($config)) {
         return null;
     }
     $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
@@ -4497,47 +4990,56 @@ function sas_dash_live_refresh($pdo, $config, $force = false, $withSoon = null)
         @fclose($lockFh);
         return sas_dash_live_read($tid, 0);
     }
-    $api = function_exists('sas_make_connector') ? sas_make_connector($config) : null;
-    if (!$api || !method_exists($api, 'dashboardCounts')) {
-        if ($lockFh) {
-            @flock($lockFh, LOCK_UN);
-            @fclose($lockFh);
-        }
-        return sas_dash_live_read($tid, 0);
+
+    // الأساس دائماً من الكاش المحلي (يشمل إيرث) — مو من dashboardCounts الساس وحده
+    $scope = function_exists('sas_agent_scope_sql') ? sas_agent_scope_sql('c') : '';
+    if ($scope === '' || strpos($scope, 'tenant_id') === false) {
+        $scope = ' AND c.tenant_id = ' . (int) $tid . $scope;
     }
-    try {
-        if (method_exists($api, 'setTimeout')) {
-            $api->setTimeout(8);
+    $db = sas_dash_counts_from_cache($pdo, $scope);
+    $out = array(
+        'total' => (int) $db['total'],
+        'active' => (int) $db['active'],
+        'expired' => (int) $db['expired'],
+        'online' => (int) $db['online'],
+        'today' => (int) $db['today'],
+        'soon' => (int) $db['soon'],
+        'at' => time(),
+        'source' => 'cache',
+    );
+
+    // اختياري: حدّث online من الساس إن رجّع رقم أكبر (لا تنقص الإجمالي)
+    if (function_exists('sas_is_ready') && sas_is_ready($config)) {
+        $api = function_exists('sas_make_connector') ? sas_make_connector($config) : null;
+        if ($api && method_exists($api, 'dashboardCounts')) {
+            try {
+                if (method_exists($api, 'setTimeout')) {
+                    $api->setTimeout(8);
+                }
+                if ($withSoon === null) {
+                    $withSoon = !$force;
+                }
+                $live = $api->dashboardCounts($withSoon ? true : false);
+                if (is_array($live) && isset($live['online']) && (int) $live['online'] > $out['online']) {
+                    // لا نستبدل total/active بأرقام الساس فقط — online من الساس قد يكون أدق لحظياً لساس
+                    // لكن مع إيرث نأخذ الأكبر من الكاش
+                    $out['online'] = max($out['online'], (int) $live['online']);
+                    $out['source'] = 'cache+sas_online';
+                }
+            } catch (Exception $e) {
+            }
         }
-        if ($withSoon === null) {
-            $withSoon = !$force;
-        }
-        $live = $api->dashboardCounts($withSoon ? true : false);
-    } catch (Exception $e) {
-        $live = null;
     }
+
     if ($lockFh) {
         @flock($lockFh, LOCK_UN);
         @fclose($lockFh);
     }
-    if (!is_array($live) || empty($live['total'])) {
-        return sas_dash_live_read($tid, 0);
-    }
-    if ($live['soon'] === null) {
-        $prevSoon = sas_dash_live_read($tid, 0);
-        $live['soon'] = is_array($prevSoon) && isset($prevSoon['soon']) ? (int) $prevSoon['soon'] : 0;
-    }
-    $out = array(
-        'total' => (int) $live['total'],
-        'active' => (int) $live['active'],
-        'expired' => (int) $live['expired'],
-        'online' => (int) $live['online'],
-        'today' => (int) $live['today'],
-        'soon' => (int) $live['soon'],
-        'at' => time(),
-    );
-    if ($out['active'] <= 0 || $out['expired'] <= 0) {
-        return sas_dash_live_read($tid, 0);
+    if ($out['total'] <= 0) {
+        $prev = sas_dash_live_read($tid, 0);
+        if (is_array($prev) && !empty($prev['total'])) {
+            return $prev;
+        }
     }
     @file_put_contents(sas_dash_live_file($tid), json_encode($out));
     return $out;
@@ -4546,15 +5048,6 @@ function sas_dash_live_refresh($pdo, $config, $force = false, $withSoon = null)
 function sas_dash_user_counts($pdo)
 {
     ensure_sas_users_cache_table($pdo);
-    $out = array(
-        'total' => 0,
-        'active' => 0,
-        'online' => 0,
-        'expired' => 0,
-        'soon' => 0,
-        'today' => 0,
-        'disabled' => 0,
-    );
     $scope = function_exists('sas_agent_scope_sql') ? sas_agent_scope_sql('c') : '';
     if (sas_dash_live_allowed() && function_exists('sas_ownership_search_tenant_ids')) {
         $wide = sas_ownership_search_tenant_ids($pdo);
@@ -4569,36 +5062,20 @@ function sas_dash_user_counts($pdo)
             $scope = ' AND c.tenant_id IN (' . implode(',', $in) . ')';
         }
     }
-    $countExpr = (strpos($scope, ' IN (') !== false) ? 'COUNT(DISTINCT c.username)' : 'COUNT(*)';
-    try {
-        $out['total'] = (int) $pdo->query('SELECT ' . $countExpr . ' FROM sas_users_cache c WHERE 1=1' . $scope)->fetchColumn();
-        $out['disabled'] = (int) $pdo->query('SELECT ' . $countExpr . ' FROM sas_users_cache c WHERE c.enabled = 0' . $scope)->fetchColumn();
-        $out['online'] = (int) $pdo->query('SELECT ' . $countExpr . ' FROM sas_users_cache c WHERE c.is_online = 1' . $scope)->fetchColumn();
-        $out['active'] = (int) $pdo->query(
-            'SELECT ' . $countExpr . ' FROM sas_users_cache c
-             WHERE c.enabled = 1 AND c.expire_at IS NOT NULL AND c.expire_at >= NOW()' . $scope
-        )->fetchColumn();
-        $out['expired'] = (int) $pdo->query(
-            'SELECT ' . $countExpr . ' FROM sas_users_cache c
-             WHERE NOT (c.enabled = 1 AND c.expire_at IS NOT NULL AND c.expire_at >= NOW())' . $scope
-        )->fetchColumn();
-        $out['soon'] = (int) $pdo->query(
-            'SELECT ' . $countExpr . ' FROM sas_users_cache c
-             WHERE c.expire_at IS NOT NULL AND DATE(c.expire_at) > CURDATE()
-               AND DATE(c.expire_at) <= DATE_ADD(CURDATE(), INTERVAL 3 DAY)' . $scope
-        )->fetchColumn();
-        $out['today'] = (int) $pdo->query(
-            'SELECT ' . $countExpr . ' FROM sas_users_cache c
-             WHERE c.expire_at IS NOT NULL AND DATE(c.expire_at) = CURDATE()' . $scope
-        )->fetchColumn();
-    } catch (Exception $e) {
-    }
     $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
-    $live = sas_dash_live_allowed() ? sas_dash_live_read($tid, 8) : null;
-    if (is_array($live)) {
-        foreach (array('total', 'active', 'online', 'expired', 'soon', 'today') as $key) {
-            if (isset($live[$key])) {
-                $out[$key] = (int) $live[$key];
+    if ($scope === '' && $tid > 0) {
+        $scope = ' AND c.tenant_id = ' . (int) $tid;
+    }
+    $out = sas_dash_counts_from_cache($pdo, $scope);
+    // كاش الوجدز الحي يُحدَّث من نفس مصدر DB — لا تغطية بأرقام ساس-فقط القديمة
+    if (sas_dash_live_allowed()) {
+        $live = sas_dash_live_read($tid, 30);
+        if (is_array($live) && isset($live['source']) && strpos((string) $live['source'], 'cache') === 0) {
+            foreach (array('total', 'active', 'online', 'expired', 'soon', 'today') as $key) {
+                if (isset($live[$key]) && (int) $live[$key] > 0) {
+                    // لا تنقص عن عدّ DB الحالي
+                    $out[$key] = max((int) $out[$key], (int) $live[$key]);
+                }
             }
         }
     }
@@ -4681,6 +5158,77 @@ function sas_read_username_from_api($api, $sasUserId)
         }
     }
     return sas_cache_username($found);
+}
+
+/**
+ * رسالة واتساب عند إنشاء مشترك جديد بالساس.
+ * @return string ملاحظة قصيرة للفلاش (فارغ إذا ما انرسل)
+ */
+function sas_notify_account_created_whatsapp($pdo, $config, $username, $payload = array())
+{
+    $username = trim((string) $username);
+    if ($username === '' || !function_exists('whatsapp_send')) {
+        return '';
+    }
+    $payload = is_array($payload) ? $payload : array();
+    $phone = isset($payload['phone']) ? trim((string) $payload['phone']) : '';
+    $cache = function_exists('sas_cache_get') ? sas_cache_get($pdo, $username) : null;
+    if ($phone === '' && $cache && !empty($cache['phone'])) {
+        $phone = trim((string) $cache['phone']);
+    }
+    if ($phone === '') {
+        return '';
+    }
+    $name = '';
+    if (!empty($payload['firstname']) || !empty($payload['lastname'])) {
+        $name = trim(
+            (isset($payload['firstname']) ? (string) $payload['firstname'] : '')
+            . ' '
+            . (isset($payload['lastname']) ? (string) $payload['lastname'] : '')
+        );
+    }
+    if ($name === '' && $cache) {
+        $name = !empty($cache['display_name'])
+            ? (string) $cache['display_name']
+            : trim((isset($cache['firstname']) ? $cache['firstname'] : '') . ' ' . (isset($cache['lastname']) ? $cache['lastname'] : ''));
+    }
+    if ($name === '') {
+        $name = $username;
+    }
+    $package = isset($payload['profile_name']) ? trim((string) $payload['profile_name']) : '';
+    if ($package === '' && $cache && !empty($cache['profile_name'])) {
+        $package = (string) $cache['profile_name'];
+    }
+    $sub = array(
+        'name' => $name,
+        'service_name' => $package,
+        'username' => $username,
+        'phone' => $phone,
+    );
+    $msg = '';
+    if (function_exists('account_created_message')) {
+        $msg = account_created_message($sub, $config);
+    }
+    if ($msg === '') {
+        $msg = "تم إنشاء الحساب\n"
+            . 'الاسم: ' . $name . "\n"
+            . 'اليوزرنيم: ' . $username
+            . ($package !== '' ? ("\nالباقة: " . $package) : '');
+    }
+    $result = whatsapp_send($config, $phone, $msg, 'account_created');
+    $localId = 0;
+    if ($cache && function_exists('sas_cache_ensure_local')) {
+        list($localId) = sas_cache_ensure_local($pdo, $config, $cache);
+    }
+    if ($localId > 0 && function_exists('log_message')) {
+        log_message($pdo, $localId, $result);
+    }
+    if (!empty($result['success'])) {
+        return 'واتساب: تم إرسال رسالة إنشاء الحساب';
+    }
+    return 'واتساب: ' . (function_exists('whatsapp_fail_user_message')
+        ? whatsapp_fail_user_message($result)
+        : 'فشل إرسال رسالة الإنشاء');
 }
 
 function sas_notify_activation_whatsapp($pdo, $config, $username, $sendOldDebts, $payMode = 'cash')
@@ -5229,6 +5777,87 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
             return array(false, $priceBlock, array());
         }
     }
+    $cache = $username !== '' ? sas_cache_get($pdo, $username) : null;
+    $isEarthlink = $cache && !empty($cache['provider'])
+        && strtolower((string) $cache['provider']) === 'earthlink';
+
+    // إيرث: تفعيل عبر RefillUser (رصيد أونلاين / كرت)
+    if ($isEarthlink && in_array($action, array('sas_activate_credit', 'sas_activate_reward', 'sas_activate_card'), true)) {
+        if (!function_exists('earthlink_refill_user_for_cache')) {
+            return array(false, 'دالة تفعيل إيرث غير موجودة', array());
+        }
+        // إيرث: رصيد أونلاين (deposit) أو نقاط/تحفيز (points) أو كرت مسبق
+        if ($action === 'sas_activate_card') {
+            $mode = 'card';
+        } elseif ($action === 'sas_activate_reward') {
+            $mode = 'points';
+        } else {
+            $mode = 'deposit';
+        }
+        $opts = array(
+            'profile_name' => isset($fields['profile_name']) ? trim((string) $fields['profile_name']) : '',
+            'pin' => isset($fields['pin']) ? trim((string) $fields['pin']) : '',
+            'card_password' => isset($fields['card_password']) ? (string) $fields['card_password'] : '',
+            'notes' => isset($fields['notes']) ? (string) $fields['notes'] : '',
+            'pay_with' => ($mode === 'points') ? 'points' : 'deposit',
+        );
+        if ($opts['profile_name'] === '' && !empty($cache['profile_name'])) {
+            $opts['profile_name'] = (string) $cache['profile_name'];
+        }
+        $remote = earthlink_refill_user_for_cache($pdo, $cache, $mode === 'points' ? 'deposit' : $mode, $opts);
+        if (empty($remote['ok'])) {
+            return array(false, isset($remote['error']) ? $remote['error'] : 'فشل تفعيل إيرث', array());
+        }
+        // حدّث الكاش محلياً كفعال
+        $patch = array(
+            'enabled' => 1,
+            'is_active' => 1,
+        );
+        if (!empty($remote['account_type'])) {
+            $patch['profile_name'] = (string) $remote['account_type'];
+        }
+        // مدّد الانتهاء تقريباً شهراً إن ما قدرنا نجيب تاريخ حي
+        $patch['expire_at'] = date('Y-m-d H:i:s', time() + 30 * 86400);
+        sas_cache_patch($pdo, $username, $patch);
+        $okMsg = function_exists('sas_finish_local_activation')
+            ? sas_finish_local_activation($pdo, $config, $username, $fields, isset($remote['message']) ? $remote['message'] : 'تم تفعيل المشترك على إيرث')
+            : (isset($remote['message']) ? $remote['message'] : 'تم تفعيل المشترك على إيرث');
+        return array(true, $okMsg, array(
+            'cost' => isset($remote['cost']) ? $remote['cost'] : null,
+            'provider' => 'earthlink',
+        ));
+    }
+
+    // إيرث: تغيير نوع الاشتراك عبر ChangeAccount.aspx (مو API ساس)
+    if ($isEarthlink && $action === 'sas_change_profile') {
+        $want = isset($fields['profile_name']) ? trim((string) $fields['profile_name']) : '';
+        if ($want === '' && isset($fields['profile_id']) && function_exists('earthlink_package_name_from_ui_id')) {
+            $want = earthlink_package_name_from_ui_id((string) $fields['profile_id']);
+        }
+        if ($want === '' && isset($fields['profile_id'])) {
+            $want = trim((string) $fields['profile_id']);
+        }
+        if ($want === '') {
+            return array(false, 'اختر نوع الاشتراك', array());
+        }
+        if (!function_exists('earthlink_change_account_type_for_cache')) {
+            return array(false, 'دالة تغيير اشتراك إيرث غير موجودة', array());
+        }
+        $remote = earthlink_change_account_type_for_cache($pdo, $cache, $want);
+        if (empty($remote['ok'])) {
+            return array(false, isset($remote['error']) ? $remote['error'] : 'فشل تغيير نوع الاشتراك على إيرث', array());
+        }
+        $pname = !empty($remote['account_name']) ? (string) $remote['account_name'] : $want;
+        sas_cache_patch($pdo, $username, array(
+            'profile_id' => null,
+            'profile_name' => $pname,
+        ));
+        return array(true, 'تم تغيير نوع الاشتراك على إيرث', array(
+            'profile_id' => isset($fields['profile_id']) ? $fields['profile_id'] : 0,
+            'profile_name' => $pname,
+        ));
+    }
+
     if (function_exists('sas_writes_allowed') && !sas_writes_allowed($pdo, $config)) {
         return array(false, 'الساس غير متصل — الكتابة موقوفة مؤقتاً (البيانات المحلية محفوظة)', array());
     }
@@ -5239,7 +5868,6 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
         }
         return array(false, 'تعذر الدخول للساس', array());
     }
-    $cache = $username !== '' ? sas_cache_get($pdo, $username) : null;
     $sasUserId = ($cache && !empty($cache['sas_user_id'])) ? (int) $cache['sas_user_id'] : 0;
 
     if ($action !== 'sas_create') {
@@ -5291,6 +5919,7 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
             'password' => $pass,
             'confirm_password' => $confirm,
             'profile_id' => $profileId,
+            'profile_name' => isset($fields['profile_name']) ? trim((string) $fields['profile_name']) : '',
             'parent_id' => $parentId,
             'firstname' => isset($fields['firstname']) ? trim((string) $fields['firstname']) : '',
             'lastname' => isset($fields['lastname']) ? trim((string) $fields['lastname']) : '',
@@ -5309,7 +5938,15 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
         if (is_array($found)) {
             sas_cache_upsert_row($pdo, $found);
         }
-        return array(true, 'تم إنشاء المشترك بالساس', array('username' => $newUser));
+        $createMsg = '';
+        if ($createPhone !== '' && function_exists('sas_notify_account_created_whatsapp')) {
+            $createMsg = sas_notify_account_created_whatsapp($pdo, $config, $newUser, $payload);
+        }
+        $okCreate = 'تم إنشاء المشترك بالساس';
+        if ($createMsg !== '') {
+            $okCreate .= ' — ' . $createMsg;
+        }
+        return array(true, $okCreate, array('username' => $newUser));
     }
 
     if ($action === 'sas_inline' || $action === 'sas_update_info') {
@@ -5507,7 +6144,7 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
         $en = $fresh && isset($fresh['enabled']) ? (int) $fresh['enabled'] : $on;
         $expire = ($fresh && !empty($fresh['expire_at'])) ? (string) $fresh['expire_at'] : '';
         $online = $fresh && !empty($fresh['is_online']);
-        $isActive = $en && $expire !== '' && strtotime($expire) >= time();
+        $isActive = $en && ($expire === '' || strtotime($expire) >= time());
         return array(true, $on ? 'تم تشغيل المشترك بالساس' : 'تم إيقاف المشترك بالساس', array(
             'enabled' => $en,
             'expire_at' => $expire,
@@ -5543,16 +6180,69 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
         if ($profileId <= 0) {
             return array(false, 'اختر نوع الاشتراك', array());
         }
+        if ($sasUserId <= 0) {
+            return array(false, 'ماكو رقم مستخدم بالساس لهذا المشترك', array());
+        }
         $res = $api->changeUserProfile($sasUserId, $profileId);
+        $blocked = is_array($res) && !empty($res['_profile_blocked']);
+        $msgLow = is_array($res) && isset($res['message']) ? strtolower((string) $res['message']) : '';
+        if ($blocked || strpos($msgLow, 'still_active') !== false) {
+            return array(false, 'الساس ما يغيّر نوع الاشتراك والمشترك لسه مدته شغّالة — انتظر انتهاء الاشتراك ثم غيّر الباقة', array());
+        }
         if (function_exists('sas_response_success') && !sas_response_success($res)) {
             return array(false, 'SAS: ' . (function_exists('sas_response_message') ? sas_response_message($res) : 'فشل تغيير الباقة'), array());
         }
+        // تأكيد حي: لازم profile_id يتغير فعلاً على الساس
+        $confirmed = false;
+        $livePid = 0;
+        if (method_exists($api, 'getUserById')) {
+            $live = $api->getUserById($sasUserId);
+            if (is_array($live)) {
+                if (isset($live['data']) && is_array($live['data']) && !isset($live['profile_id'])) {
+                    $live = $live['data'];
+                }
+                if (isset($live['profile_id']) && is_numeric($live['profile_id'])) {
+                    $livePid = (int) $live['profile_id'];
+                } elseif (function_exists('sas_cache_profile_id')) {
+                    $livePid = (int) sas_cache_profile_id($live);
+                }
+            }
+            if ($livePid === $profileId) {
+                $confirmed = true;
+                if (is_array($live)) {
+                    sas_cache_upsert_row($pdo, $live);
+                }
+            }
+        }
         $pname = isset($fields['profile_name']) ? trim((string) $fields['profile_name']) : '';
-        sas_cache_patch($pdo, $username, array(
-            'profile_id' => $profileId,
-            'profile_name' => $pname !== '' ? $pname : null,
-        ));
-        sas_cache_refresh_one($pdo, $config, $username, $sasUserId);
+        if (!$confirmed) {
+            // بعض الردود rsp_profile_changed تعني «مجدول عند الانتهاء»
+            if ($msgLow !== '' && strpos($msgLow, 'profile_changed') !== false) {
+                sas_cache_patch($pdo, $username, array(
+                    'profile_id' => $profileId,
+                    'profile_name' => $pname !== '' ? $pname : null,
+                ));
+                return array(true, 'تم طلب تغيير نوع الاشتراك (قد يطبَّق عند انتهاء الاشتراك الحالي)', array(
+                    'profile_id' => $profileId,
+                    'profile_name' => $pname,
+                    'pending' => 1,
+                ));
+            }
+            sas_cache_refresh_one($pdo, $config, $username, $sasUserId);
+            return array(false, 'الساس ما ثبّت نوع الاشتراك الجديد — جرّب قطع الاتصال أولاً', array());
+        }
+        if ($pname === '' && method_exists($api, 'getUserById')) {
+            // الاسم من الكاش بعد التحديث
+            $after = sas_cache_get($pdo, $username);
+            if ($after && !empty($after['profile_name'])) {
+                $pname = (string) $after['profile_name'];
+            }
+        } elseif ($pname !== '') {
+            sas_cache_patch($pdo, $username, array(
+                'profile_id' => $profileId,
+                'profile_name' => $pname,
+            ));
+        }
         return array(true, 'تم تغيير نوع الاشتراك بالساس', array('profile_id' => $profileId, 'profile_name' => $pname));
     }
 
@@ -5784,6 +6474,10 @@ function sas_cache_touch_owner_row($pdo, $viewerTenant, $username, $parentName, 
             $pdo->prepare(
                 'UPDATE sas_users_cache SET
                     sas_user_id = :sas_user_id,
+                    firstname = :firstname,
+                    lastname = :lastname,
+                    display_name = :display_name,
+                    phone = :phone,
                     enabled = :enabled,
                     expire_at = :expire_at,
                     profile_id = :profile_id,
@@ -5795,6 +6489,10 @@ function sas_cache_touch_owner_row($pdo, $viewerTenant, $username, $parentName, 
                  WHERE tenant_id = :tenant_id AND username = :username'
             )->execute(array(
                 ':sas_user_id' => $params[':sas_user_id'],
+                ':firstname' => $params[':firstname'],
+                ':lastname' => $params[':lastname'],
+                ':display_name' => $params[':display_name'],
+                ':phone' => $params[':phone'],
                 ':enabled' => $params[':enabled'],
                 ':expire_at' => $params[':expire_at'],
                 ':profile_id' => $params[':profile_id'],
@@ -6010,11 +6708,26 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
             $existTid = (int) $chk->fetchColumn();
             if ($existTid === $tenantId) {
                 $pdo->prepare(
-                    'UPDATE sas_users_cache SET synced_at = :s, display_name = :d, enabled = :e, expire_at = :x, parent_id = :p
+                    'UPDATE sas_users_cache SET
+                        synced_at = :s,
+                        firstname = :fn,
+                        lastname = :ln,
+                        display_name = :d,
+                        phone = :ph,
+                        profile_id = :pid,
+                        profile_name = :pn,
+                        enabled = :e,
+                        expire_at = :x,
+                        parent_id = :p
                      WHERE username = :u AND tenant_id = :t'
                 )->execute(array(
                     ':s' => $nowSql,
+                    ':fn' => $params[':firstname'],
+                    ':ln' => $params[':lastname'],
                     ':d' => $params[':display_name'],
+                    ':ph' => $params[':phone'],
+                    ':pid' => $params[':profile_id'],
+                    ':pn' => $params[':profile_name'],
                     ':e' => $params[':enabled'],
                     ':x' => $params[':expire_at'],
                     ':p' => $params[':parent_id'],
@@ -6100,6 +6813,13 @@ function sas_cache_patch($pdo, $username, $fields)
     $tidPatch = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
     if ($tidPatch <= 0) {
         $tidPatch = 1;
+    }
+    // إن الصف الظاهر من وكيل/شركة ثانية (ownership) — حدّث نفس الـ tenant مو صف فاضي عند المشاهد
+    if (function_exists('sas_cache_get')) {
+        $own = sas_cache_get($pdo, $username);
+        if (is_array($own) && !empty($own['tenant_id'])) {
+            $tidPatch = (int) $own['tenant_id'];
+        }
     }
     $params[':t'] = $tidPatch;
     $pdo->prepare('UPDATE sas_users_cache SET ' . implode(', ', $cols) . ' WHERE username = :u AND tenant_id = :t')
@@ -6247,7 +6967,17 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
         && $tenantIdEarly > 0
     ) {
         $readyAcc = tenant_sas_accounts_ready($pdo, $tenantIdEarly);
-        if (count($readyAcc) > 1) {
+        $hasEarthlinkAcc = false;
+        if (function_exists('tenant_sas_account_is_earthlink')) {
+            foreach ($readyAcc as $_ra) {
+                if (tenant_sas_account_is_earthlink($pdo, $_ra)) {
+                    $hasEarthlinkAcc = true;
+                    break;
+                }
+            }
+        }
+        // أكثر من حساب، أو حساب إيرث واحد: وزّع المزامنة حسب نوع المزود
+        if (count($readyAcc) > 1 || ($hasEarthlinkAcc && count($readyAcc) >= 1)) {
             $GLOBALS['sas_sync_multi_lock'] = true;
             $GLOBALS['sas_sync_skip_purge'] = true;
             $anyOk = false;
@@ -6256,23 +6986,46 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
             $lastMeta = sas_sync_meta($pdo);
             $first = true;
             foreach ($readyAcc as $acc) {
-                $GLOBALS['sas_force_account'] = $acc;
-                $resetThis = $first ? $reset : true;
-                $first = false;
                 $accOk = false;
                 $accN = 0;
-                $guard = 0;
-                do {
-                    list($ok, $n, $mode, $meta) = sas_sync_users_from_api($pdo, $config, true, $resetThis);
-                    $resetThis = false;
-                    $lastMeta = $meta;
-                    $lastMode = $mode;
-                    if ($ok) {
-                        $accOk = true;
-                        $accN = max($accN, (int) $n);
-                    }
-                    $guard++;
-                } while ($ok && $mode === 'progress' && $guard < 500);
+                $accErr = '';
+                // Earthlink: مزامنة خاصة — لا تمرّر على SASConnector (يرجع 404 ويوقف بانر الساس)
+                if (function_exists('tenant_sas_account_is_earthlink')
+                    && tenant_sas_account_is_earthlink($pdo, $acc)
+                    && function_exists('earthlink_sync_to_cache')
+                ) {
+                    $el = earthlink_sync_to_cache(
+                        $pdo,
+                        $tenantIdEarly,
+                        isset($acc['sas_host']) ? $acc['sas_host'] : '',
+                        isset($acc['sas_username']) ? $acc['sas_username'] : '',
+                        isset($acc['sas_password']) ? $acc['sas_password'] : '',
+                        !empty($acc['company_id']) ? (int) $acc['company_id'] : 0
+                    );
+                    $accOk = !empty($el['ok']);
+                    $accN = isset($el['count']) ? (int) $el['count'] : 0;
+                    $accErr = $accOk ? '' : (isset($el['message']) ? (string) $el['message'] : 'earthlink sync fail');
+                    $lastMode = $accOk ? 'synced' : 'error';
+                    $lastMeta = array_merge($lastMeta, array('last_error' => $accErr !== '' ? $accErr : null));
+                } else {
+                    $GLOBALS['sas_force_account'] = $acc;
+                    $resetThis = $first ? $reset : true;
+                    $first = false;
+                    $guard = 0;
+                    do {
+                        list($ok, $n, $mode, $meta) = sas_sync_users_from_api($pdo, $config, true, $resetThis);
+                        $resetThis = false;
+                        $lastMeta = $meta;
+                        $lastMode = $mode;
+                        if ($ok) {
+                            $accOk = true;
+                            $accN = max($accN, (int) $n);
+                        } else {
+                            $accErr = isset($meta['last_error']) ? (string) $meta['last_error'] : 'fail';
+                        }
+                        $guard++;
+                    } while ($ok && $mode === 'progress' && $guard < 500);
+                }
                 if ($accOk) {
                     $anyOk = true;
                     $sum += $accN;
@@ -6282,7 +7035,7 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
                         'UPDATE tenant_sas_accounts SET last_ok_at = IF(:ok = 1, NOW(), last_ok_at), last_error = :e WHERE id = :id'
                     )->execute(array(
                         ':ok' => $accOk ? 1 : 0,
-                        ':e' => $accOk ? null : (isset($lastMeta['last_error']) ? $lastMeta['last_error'] : 'fail'),
+                        ':e' => $accOk ? null : ($accErr !== '' ? $accErr : (isset($lastMeta['last_error']) ? $lastMeta['last_error'] : 'fail')),
                         ':id' => (int) $acc['id'],
                     ));
                 } catch (Exception $e) {
@@ -6290,14 +7043,36 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
             }
             unset($GLOBALS['sas_force_account'], $GLOBALS['sas_sync_multi_lock'], $GLOBALS['sas_sync_skip_purge']);
             if ($anyOk) {
+                $totalNow = 0;
+                try {
+                    $totalNow = (int) $pdo->query(
+                        'SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = ' . (int) $tenantIdEarly
+                    )->fetchColumn();
+                } catch (Exception $eTot) {
+                    $totalNow = $sum;
+                }
                 sas_sync_meta_save($pdo, array(
                     'last_ok_at' => date('Y-m-d H:i:s'),
-                    'last_count' => $sum,
+                    'last_count' => $totalNow > 0 ? $totalNow : $sum,
                     'syncing_at' => null,
                     'sync_offset' => 0,
                     'last_error' => null,
                 ));
-                return array(true, $sum, 'synced', sas_sync_meta($pdo));
+                // حدّث وجدز الداشبورد فوراً من الكاش الكامل
+                if (function_exists('sas_dash_live_refresh')) {
+                    try {
+                        $prevTid = isset($GLOBALS['portal_warm_tenant_id']) ? $GLOBALS['portal_warm_tenant_id'] : null;
+                        $GLOBALS['portal_warm_tenant_id'] = $tenantIdEarly;
+                        sas_dash_live_refresh($pdo, $config, true, true);
+                        if ($prevTid !== null) {
+                            $GLOBALS['portal_warm_tenant_id'] = $prevTid;
+                        } else {
+                            unset($GLOBALS['portal_warm_tenant_id']);
+                        }
+                    } catch (Exception $eDash) {
+                    }
+                }
+                return array(true, $totalNow > 0 ? $totalNow : $sum, 'synced', sas_sync_meta($pdo));
             }
             return array(false, $sum, $lastMode, $lastMeta);
         }
@@ -6343,6 +7118,16 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
         if ($okTs && ($now - $okTs) < 180) {
             return array(true, (int) $meta['last_count'], 'cache', $meta);
         }
+    }
+
+    if (!empty($GLOBALS['sas_force_account'])
+        && function_exists('tenant_sas_account_is_earthlink')
+        && tenant_sas_account_is_earthlink($pdo, $GLOBALS['sas_force_account'])
+    ) {
+        // حماية: حساب إيرث لا يمر عبر SASConnector
+        return array(false, 0, 'error', array_merge($meta, array(
+            'last_error' => 'حساب Earthlink — استخدم مزامنة Earthlink',
+        )));
     }
 
     if (!empty($GLOBALS['sas_force_account']) && function_exists('sas_make_connector_from_account')) {
@@ -6488,10 +7273,23 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
                     $freshCnt = (int) $freshSt->fetchColumn();
                     $need = ($expected > 0) ? max(1, (int) ceil($expected * 0.5)) : 1;
                     if ($freshCnt >= $need && empty($GLOBALS['sas_sync_skip_purge'])) {
-                        // امسح فقط كاش هذه الشركة — لا تلمس شركات أخرى ولا المشتركين/الديون
-                        $del = $pdo->prepare(
-                            'DELETE FROM sas_users_cache WHERE tenant_id = :tid AND synced_at < :t'
-                        );
+                        // امسح كاش الساس القديم فقط — لا تمسح مشتركي Earthlink
+                        $hasProv = false;
+                        try {
+                            $hasProv = (bool) $pdo->query("SHOW COLUMNS FROM sas_users_cache LIKE 'provider'")->fetch();
+                        } catch (Exception $eProv) {
+                        }
+                        if ($hasProv) {
+                            $del = $pdo->prepare(
+                                "DELETE FROM sas_users_cache
+                                 WHERE tenant_id = :tid AND synced_at < :t
+                                   AND (provider IS NULL OR provider = '' OR provider = 'sas')"
+                            );
+                        } else {
+                            $del = $pdo->prepare(
+                                'DELETE FROM sas_users_cache WHERE tenant_id = :tid AND synced_at < :t'
+                            );
+                        }
                         $del->execute(array(':tid' => $tenantId, ':t' => $started));
                     }
                 } catch (Exception $e) {
@@ -6621,7 +7419,7 @@ function sas_cache_search_sql($q, &$params)
 function sas_cache_filter_sql($subFilter)
 {
     if ($subFilter === 'active') {
-        return ' AND c.enabled = 1 AND c.expire_at IS NOT NULL AND c.expire_at >= NOW()';
+        return ' AND c.enabled = 1 AND (c.expire_at IS NULL OR c.expire_at >= NOW())';
     }
     if ($subFilter === 'online') {
         return ' AND c.is_online = 1';
@@ -6630,7 +7428,7 @@ function sas_cache_filter_sql($subFilter)
         return ' AND c.enabled = 0';
     }
     if ($subFilter === 'expired') {
-        return ' AND NOT (c.enabled = 1 AND c.expire_at IS NOT NULL AND c.expire_at >= NOW())';
+        return ' AND (c.enabled = 0 OR (c.expire_at IS NOT NULL AND c.expire_at < NOW()))';
     }
     if ($subFilter === 'today') {
         return ' AND c.expire_at IS NOT NULL AND DATE(c.expire_at) = CURDATE()';
@@ -6806,8 +7604,17 @@ function sas_render_table_row($row, $n, $config, $lang)
     $enabled = isset($row['enabled']) ? (int) $row['enabled'] : 1;
     $expireAt = !empty($row['expire_at']) ? $row['expire_at'] : '';
     $hasExpire = $expireAt !== '';
-    $isActive = $enabled && $hasExpire && strtotime($expireAt) >= time();
+    // بدون تاريخ انتهاء + مفعّل = فعال (إيرث غالباً يرجع expire فاضي ومو معناه منتهي)
+    $isActive = $enabled && (!$hasExpire || strtotime($expireAt) >= time());
     $isOnline = !empty($row['is_online']);
+    // إيرث: أحياناً الـ IP موجود والحالة Online بالتطبيق بس العلم بالكاش طافي
+    if (!$isOnline && $enabled && $isActive) {
+        $provTmp = !empty($row['provider']) ? strtolower(trim((string) $row['provider'])) : '';
+        $ipTmp = isset($row['framed_ip']) ? trim((string) $row['framed_ip']) : '';
+        if ($provTmp === 'earthlink' && $ipTmp !== '' && filter_var($ipTmp, FILTER_VALIDATE_IP)) {
+            $isOnline = true;
+        }
+    }
     $currency = isset($config['currency']) ? $config['currency'] : 'IQD';
 
     if (!$enabled) {
@@ -6885,16 +7692,40 @@ function sas_render_table_row($row, $n, $config, $lang)
     $msgFail = ($hasMsg && !$msgOk) ? '1' : '0';
     $logId = (!empty($row['last_msg_id'])) ? (int) $row['last_msg_id'] : 0;
 
+    $rowProvider = !empty($row['provider']) ? strtolower(trim((string) $row['provider'])) : 'sas';
+    if ($rowProvider === '') {
+        $rowProvider = 'sas';
+    }
+    $rowCompanyId = !empty($row['company_id']) ? (int) $row['company_id'] : 0;
+    $profileIdAttr = (string) $profileId;
+    if ($rowProvider === 'earthlink' && $pkgLabel !== '' && function_exists('earthlink_package_ui_id')) {
+        $elPid = earthlink_package_ui_id($pkgLabel);
+        if ($elPid !== '') {
+            $profileIdAttr = $elPid;
+        }
+    }
+    // نفس منطق صفحة الهوية: إيرث تعرض display_name (ArabicName)، غير هيك firstname ثم display_name
+    $dispRow = isset($row['display_name']) ? trim((string) $row['display_name']) : '';
+    $fnText = '';
+    if ($rowProvider === 'earthlink' && $dispRow !== '' && strcasecmp($dispRow, $username) !== 0) {
+        $fnText = $dispRow;
+    } elseif ($fn !== '') {
+        $fnText = $fn;
+    } elseif ($dispRow !== '' && strcasecmp($dispRow, $username) !== 0) {
+        $fnText = $dispRow;
+    }
     $html = '<tr class="' . e($rowClass) . '"'
         . ' data-search="' . e($searchText) . '"'
         . ' data-id="' . e($username) . '"'
         . ' data-sas-id="' . $sasId . '"'
-        . ' data-profile-id="' . $profileId . '"'
+        . ' data-profile-id="' . e($profileIdAttr) . '"'
         . ' data-profile-name="' . e($pkgLabel) . '"'
+        . ' data-provider="' . e($rowProvider) . '"'
+        . ' data-company-id="' . $rowCompanyId . '"'
         . ' data-enabled="' . ($enabled ? '1' : '0') . '"'
         . ' data-local-id="' . $localId . '"'
         . ' data-name="' . e($name) . '"'
-        . ' data-firstname="' . e($fn) . '"'
+        . ' data-firstname="' . e($fnText !== '' ? $fnText : $fn) . '"'
         . ' data-username="' . e($username) . '"'
         . ' data-debt="' . ($debt > 0 ? '1' : '0') . '"'
         . ' data-active="' . ($isActive ? '1' : '0') . '"'
@@ -6931,7 +7762,26 @@ function sas_render_table_row($row, $n, $config, $lang)
     }
     $html .= '<td class="col-ping">' . $pingHtml . '</td>';
     $copyTip = $lang === 'en' ? 'Copy username' : 'نسخ اسم الدخول';
+    $coLogoHtml = '';
+    $coIdRow = isset($row['company_id']) ? (int) $row['company_id'] : 0;
+    if ($coIdRow <= 0 && !empty($GLOBALS['sas_row_company_id'])) {
+        $coIdRow = (int) $GLOBALS['sas_row_company_id'];
+    }
+    if ($coIdRow > 0 && function_exists('platform_company_row') && function_exists('platform_company_logo_url')
+        && isset($GLOBALS['pdo']) && $GLOBALS['pdo']) {
+        static $coLogoCache = array();
+        if (!array_key_exists($coIdRow, $coLogoCache)) {
+            $coLogoCache[$coIdRow] = platform_company_row($GLOBALS['pdo'], $coIdRow);
+        }
+        $coRow = $coLogoCache[$coIdRow];
+        $coUrl = $coRow ? platform_company_logo_url($coRow) : '';
+        $coName = $coRow && isset($coRow['name']) ? (string) $coRow['name'] : '';
+        if ($coUrl !== '') {
+            $coLogoHtml = '<img class="sas-co-logo" src="' . e($coUrl) . '" alt="" title="' . e($coName) . '">';
+        }
+    }
     $html .= '<td class="col-user"><span class="sas-user-copywrap">'
+        . $coLogoHtml
         . '<button type="button" class="sas-user-copy" data-copy="' . e($username) . '" title="' . e($copyTip) . '" aria-label="' . e($copyTip) . '">⧉</button>'
         . '<a class="sas-link" href="' . e($detailUrl) . '" title="' . e($lang === 'en' ? 'Edit' : 'تعديل') . '">' . e($username) . '</a>'
         . '</span></td>';
@@ -6968,14 +7818,12 @@ function sas_render_table_row($row, $n, $config, $lang)
     if (function_exists('subscriber_has_rental') && subscriber_has_rental($rentSub) && function_exists('rental_badge_html')) {
         $rentBadge = rental_badge_html($rentSub);
     }
-    // الشعار يسار الاسم (في RTL: الاسم أولاً ثم الشعار)
-    $fnText = ($fn !== '') ? $fn : '';
     $lnExtra = '';
     if ($ln !== '' && ($fnText === '' || (function_exists('mb_strpos') ? mb_strpos($fnText, $ln, 0, 'UTF-8') === false : strpos($fnText, $ln) === false))) {
         $lnExtra = $ln;
     }
     if ($fnText === '' && $lnExtra === '') {
-        $fnText = '-';
+        $fnText = ($dispRow !== '') ? $dispRow : '-';
     }
     $fullName = trim($fnText . ' ' . $lnExtra);
     $html .= '<td class="col-fn"><span class="sas-fn-wrap' . ($rentBadge !== '' ? ' has-rent' : '') . '">'
@@ -7509,66 +8357,172 @@ function sas_sessions_public($pdo, $username)
     return $out;
 }
 
-function sas_sessions_pull($pdo, $config, $username, $userId = 0)
+/**
+ * جلسة حية من صف الكاش إن المشترك أونلاين وماكو جلسات محفوظة.
+ */
+function sas_sessions_live_from_cache($cache)
+{
+    if (!is_array($cache) || empty($cache['is_online'])) {
+        return array();
+    }
+    $mac = isset($cache['mac_address']) ? trim((string) $cache['mac_address']) : '';
+    $ip = isset($cache['framed_ip']) ? trim((string) $cache['framed_ip']) : '';
+    $start = isset($cache['last_online']) ? trim((string) $cache['last_online']) : '';
+    return array(array(
+        'mac' => $mac,
+        'ip' => $ip,
+        'nas' => '',
+        'start' => $start,
+        'stop' => '',
+        'open' => 1,
+        'duration' => '',
+        'up' => '',
+        'down' => '',
+        'used' => '',
+    ));
+}
+
+function sas_sessions_pull($pdo, $config, $username, $userId = 0, $cacheRow = null)
 {
     $username = sas_clip(trim((string) $username), 80);
     $userId = (int) $userId;
     ensure_sas_users_cache_table($pdo);
+    if (!is_array($cacheRow) && $username !== '' && function_exists('sas_cache_get')) {
+        $cacheRow = sas_cache_get($pdo, $username);
+    }
+    $isEarthlink = is_array($cacheRow)
+        && !empty($cacheRow['provider'])
+        && strtolower((string) $cacheRow['provider']) === 'earthlink';
     $fresh = false;
-    $api = function_exists('sas_page_connector') ? sas_page_connector($config) : null;
-    if ($api && method_exists($api, 'listUserSessions')) {
-        if (function_exists('app_session_close')) {
-            app_session_close();
-        } elseif (session_status() === PHP_SESSION_ACTIVE) {
-            @session_write_close();
-        }
-        try {
-            if (method_exists($api, 'setTimeout')) {
-                $api->setTimeout(8);
+
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    } elseif (session_status() === PHP_SESSION_ACTIVE) {
+        @session_write_close();
+    }
+
+    if ($isEarthlink) {
+        // لا تضرب ساس شركة ثانية — جلب من بوابة إيرث إن أمكن
+        if (function_exists('earthlink_fetch_user_sessions_for_cache')) {
+            try {
+                $el = earthlink_fetch_user_sessions_for_cache($pdo, $cacheRow, 30);
+                if (!empty($el['ok']) && !empty($el['rows']) && is_array($el['rows'])) {
+                    $packs = array();
+                    $keys = array();
+                    foreach ($el['rows'] as $row) {
+                        $mac = isset($row['mac']) ? (string) $row['mac'] : (isset($row['mac_address']) ? (string) $row['mac_address'] : '');
+                        $ip = isset($row['ip']) ? (string) $row['ip'] : (isset($row['framed_ip']) ? (string) $row['framed_ip'] : '');
+                        $start = isset($row['started_at']) ? (string) $row['started_at'] : (isset($row['start']) ? (string) $row['start'] : '');
+                        $stop = isset($row['stopped_at']) ? (string) $row['stopped_at'] : (isset($row['stop']) ? (string) $row['stop'] : '');
+                        if ($start === '' || !preg_match('/^\d{4}-\d{2}-\d{2}/', $start)) {
+                            $start = '';
+                        }
+                        if ($stop !== '' && !preg_match('/^\d{4}-\d{2}-\d{2}/', $stop)) {
+                            $stop = '';
+                        }
+                        $open = !empty($row['open']) || !empty($row['is_open']) || $stop === '';
+                        $key = isset($row['acctsessionid']) ? (string) $row['acctsessionid'] : ('el:' . md5($username . '|' . $start . '|' . $mac . '|' . $ip . '|' . $stop));
+                        $p = array(
+                            'key' => sas_clip($key !== '' ? $key : ('el:' . substr(md5($username . '|' . $mac . '|' . $ip), 0, 24)), 80),
+                            'mac' => $mac !== '' ? sas_clip($mac, 32) : null,
+                            'ip' => $ip !== '' ? sas_clip($ip, 45) : null,
+                            'nas' => null,
+                            'start' => $start !== '' ? $start : null,
+                            'stop' => ($open || $stop === '') ? null : $stop,
+                            'seconds' => null,
+                            'bytes_in' => null,
+                            'bytes_out' => null,
+                            'open' => $open ? 1 : 0,
+                        );
+                        $packs[] = $p;
+                        $keys[] = $p['key'];
+                    }
+                    if ($packs) {
+                        sas_sessions_upsert($pdo, $username, $packs);
+                        sas_sessions_replace_missing($pdo, $username, $keys);
+                        $fresh = true;
+                    }
+                }
+            } catch (Exception $e) {
             }
-            $rows = $api->listUserSessions($username, $userId);
-            $fresh = !empty($api->lastSessionListOk);
-        } catch (Exception $e) {
-            $rows = array();
         }
-        if (is_array($rows) && $rows) {
-            $packs = array();
-            $keys = array();
-            $stopped = 0;
-            foreach ($rows as $row) {
-                $p = sas_session_pack($row);
-                if (!$p) {
-                    continue;
+    } else {
+        $api = function_exists('sas_page_connector') ? sas_page_connector($config) : null;
+        if ($api && method_exists($api, 'listUserSessions')) {
+            try {
+                if (method_exists($api, 'setTimeout')) {
+                    $api->setTimeout(8);
                 }
-                if ($p['key'] === '' || $p['key'] === 'live') {
-                    $p['key'] = sas_clip('live:' . substr(md5($username . '|' . $p['mac'] . '|' . $p['ip'] . '|' . $p['start']), 0, 24), 80);
+                $rows = $api->listUserSessions($username, $userId);
+                $fresh = !empty($api->lastSessionListOk);
+            } catch (Exception $e) {
+                $rows = array();
+            }
+            if (is_array($rows) && $rows) {
+                $packs = array();
+                $keys = array();
+                $stopped = 0;
+                foreach ($rows as $row) {
+                    $p = sas_session_pack($row);
+                    if (!$p) {
+                        continue;
+                    }
+                    if ($p['key'] === '' || $p['key'] === 'live') {
+                        $p['key'] = sas_clip('live:' . substr(md5($username . '|' . $p['mac'] . '|' . $p['ip'] . '|' . $p['start']), 0, 24), 80);
+                    }
+                    $packs[] = $p;
+                    $keys[] = $p['key'];
+                    if (!empty($p['stop'])) {
+                        $stopped++;
+                    }
                 }
-                $packs[] = $p;
-                $keys[] = $p['key'];
-                if (!empty($p['stop'])) {
-                    $stopped++;
+                if ($packs) {
+                    sas_sessions_upsert($pdo, $username, $packs);
+                    if ($stopped > 0 || count($packs) > 1) {
+                        sas_sessions_replace_missing($pdo, $username, $keys);
+                    } else {
+                        $pdo->prepare('UPDATE sas_user_sessions SET is_open = 0 WHERE tenant_id = :t AND username = :u AND is_open = 1 AND session_key <> :k')
+                            ->execute(array(
+                                ':t' => sas_session_tenant_id(),
+                                ':u' => $username,
+                                ':k' => $packs[0]['key'],
+                            ));
+                    }
                 }
             }
-            if ($packs) {
-                sas_sessions_upsert($pdo, $username, $packs);
-                if ($stopped > 0 || count($packs) > 1) {
-                    sas_sessions_replace_missing($pdo, $username, $keys);
-                } else {
-                    $pdo->prepare('UPDATE sas_user_sessions SET is_open = 0 WHERE tenant_id = :t AND username = :u AND is_open = 1 AND session_key <> :k')
-                        ->execute(array(
-                            ':t' => sas_session_tenant_id(),
-                            ':u' => $username,
-                            ':k' => $packs[0]['key'],
-                        ));
-                }
-            }
         }
+    }
+
+    $public = sas_sessions_public($pdo, $username);
+    if (!$public && is_array($cacheRow)) {
+        $public = sas_sessions_live_from_cache($cacheRow);
     }
     $month = sas_sessions_month($pdo, $username);
     return array(
         'ok' => true,
         'fresh' => $fresh ? 1 : 0,
-        'rows' => sas_sessions_public($pdo, $username),
+        'rows' => $public,
+        'month_used' => $month['month_used'],
+        'month_up' => $month['month_up'],
+        'month_down' => $month['month_down'],
+    );
+}
+
+/** قراءة محلية سريعة بدون ضرب المزود — للعرض الفوري. */
+function sas_sessions_local_pack($pdo, $username, $cacheRow = null)
+{
+    $username = sas_clip(trim((string) $username), 80);
+    ensure_sas_users_cache_table($pdo);
+    $rows = sas_sessions_public($pdo, $username);
+    if (!$rows && is_array($cacheRow)) {
+        $rows = sas_sessions_live_from_cache($cacheRow);
+    }
+    $month = sas_sessions_month($pdo, $username);
+    return array(
+        'ok' => true,
+        'fresh' => 0,
+        'from_cache' => 1,
+        'rows' => $rows,
         'month_used' => $month['month_used'],
         'month_up' => $month['month_up'],
         'month_down' => $month['month_down'],

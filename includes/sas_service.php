@@ -264,6 +264,16 @@ function sas_response_success($res)
             return false;
         }
     }
+    $msg = isset($res['message']) ? strtolower((string) $res['message']) : '';
+    if ($msg !== '' && (
+        strpos($msg, 'still_active') !== false
+        || strpos($msg, 'rsp_user_still_active') !== false
+    )) {
+        return false;
+    }
+    if (!empty($res['_profile_blocked'])) {
+        return false;
+    }
     return true;
 }
 
@@ -1176,6 +1186,44 @@ function sas_find_manager_balance($node, $depth = 0)
         }
     }
     return null;
+}
+
+/**
+ * كاش وجدز النقاط/الرصيد للداشبورد — يظهر فوراً ويتحدّث بالخلفية.
+ */
+function dash_wallet_cache_path($tenantId = 0)
+{
+    $tid = $tenantId > 0 ? (int) $tenantId : (function_exists('current_tenant_id') ? (int) current_tenant_id() : 1);
+    return dirname(__DIR__) . '/storage/cache/dash_wallets_t' . max(1, $tid) . '.json';
+}
+
+function dash_wallet_cache_load($tenantId = 0, $maxAge = 0)
+{
+    $file = dash_wallet_cache_path($tenantId);
+    if (!is_file($file)) {
+        return null;
+    }
+    $data = json_decode((string) @file_get_contents($file), true);
+    if (!is_array($data) || empty($data['at'])) {
+        return null;
+    }
+    if ($maxAge > 0 && (time() - (int) $data['at']) > $maxAge) {
+        return null;
+    }
+    return $data;
+}
+
+function dash_wallet_cache_save($payload, $tenantId = 0)
+{
+    $file = dash_wallet_cache_path($tenantId);
+    $dir = dirname($file);
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0775, true);
+    }
+    $payload = is_array($payload) ? $payload : array();
+    $payload['at'] = time();
+    @file_put_contents($file, json_encode($payload));
+    return $payload;
 }
 
 /**

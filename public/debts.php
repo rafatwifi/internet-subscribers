@@ -68,42 +68,67 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     $returnSid = isset($_POST['return_subscriber']) ? (int) $_POST['return_subscriber'] : 0;
 
-    if ($action === 'pay') {
+    if ($action === 'pay' || $action === 'pay_all') {
+        $wantAjax = post('ajax') === '1'
+            || (isset($_SERVER['HTTP_X_REQUESTED_WITH'])
+                && strtolower((string) $_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest');
         $sendWa = post('send_whatsapp') === '1';
         $payAmount = (float) post('pay_amount', '0');
-        if ($payAmount <= 0) {
-            $st = $pdo->prepare('SELECT amount FROM invoices WHERE id = :id AND status = "unpaid"');
-            $st->execute(array(':id' => $id));
-            $payAmount = (float) $st->fetchColumn();
+        $ok = false;
+        $msg = '';
+        $details = array();
+        if ($action === 'pay') {
+            if ($payAmount <= 0) {
+                $st = $pdo->prepare('SELECT amount FROM invoices WHERE id = :id AND status = "unpaid"');
+                $st->execute(array(':id' => $id));
+                $payAmount = (float) $st->fetchColumn();
+            }
+            list($ok, $msg, $details) = apply_invoice_payment($pdo, $config, $id, $payAmount, $sendWa);
+            if ($returnSid <= 0 && !empty($details['row']['subscriber_id'])) {
+                $returnSid = (int) $details['row']['subscriber_id'];
+            }
+        } else {
+            $sid = (int) post('subscriber_id', '0');
+            if ($sid <= 0) {
+                $stSid = $pdo->prepare('SELECT subscriber_id FROM invoices WHERE id = :id');
+                $stSid->execute(array(':id' => $id));
+                $sid = (int) $stSid->fetchColumn();
+            }
+            if ($payAmount <= 0) {
+                $payAmount = subscriber_unpaid_total($pdo, $sid);
+            }
+            list($ok, $msg, $details) = apply_subscriber_payment($pdo, $config, $sid, $payAmount, $sendWa, 0);
+            if ($returnSid <= 0) {
+                $returnSid = $sid;
+            }
         }
-        list($ok, $msg, $details) = apply_invoice_payment($pdo, $config, $id, $payAmount, $sendWa);
+        if ($wantAjax) {
+            header('Content-Type: application/json; charset=utf-8');
+            $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
+            $toast = $msg;
+            if ($ok) {
+                $paid = money_format_iqd(isset($details['paid_amount']) ? $details['paid_amount'] : $payAmount, $currency);
+                $remain = money_format_iqd(isset($details['remaining_total']) ? $details['remaining_total'] : 0, $currency);
+                $toast = 'تم استلام ' . $paid . ' — المتبقي: ' . $remain;
+                if ($sendWa && isset($details['whatsapp_ok']) && $details['whatsapp_ok'] === true) {
+                    $toast .= ' (واتساب تم)';
+                } elseif ($sendWa && isset($details['whatsapp_ok']) && $details['whatsapp_ok'] === false) {
+                    $toast .= ' (' . (!empty($details['whatsapp_msg']) ? $details['whatsapp_msg'] : 'واتساب فشل') . ')';
+                }
+            }
+            echo json_encode(array(
+                'ok' => (bool) $ok,
+                'message' => $toast,
+                'remaining' => isset($details['remaining_total']) ? (float) $details['remaining_total'] : null,
+                'invoice_id' => $id,
+                'mode' => $action,
+                'subscriber_id' => (int) $returnSid,
+            ));
+            exit;
+        }
         flash_payment_result($ok, $msg, $details, $sendWa);
-        if ($returnSid <= 0 && !empty($details['row']['subscriber_id'])) {
-            $returnSid = (int) $details['row']['subscriber_id'];
-        }
         if ($returnSid > 0) {
             redirect('debts.php?status=unpaid&subscriber_id=' . $returnSid);
-        }
-        redirect('debts.php?status=unpaid');
-    }
-
-    if ($action === 'pay_all') {
-        $sid = (int) post('subscriber_id', '0');
-        $sendWa = post('send_whatsapp') === '1';
-        $payAmount = (float) post('pay_amount', '0');
-        if ($sid <= 0) {
-            $stSid = $pdo->prepare('SELECT subscriber_id FROM invoices WHERE id = :id');
-            $stSid->execute(array(':id' => $id));
-            $sid = (int) $stSid->fetchColumn();
-        }
-        if ($payAmount <= 0) {
-            $payAmount = subscriber_unpaid_total($pdo, $sid);
-        }
-        list($ok, $msg, $details) = apply_subscriber_payment($pdo, $config, $sid, $payAmount, $sendWa, 0);
-        flash_payment_result($ok, $msg, $details, $sendWa);
-        $back = $returnSid > 0 ? $returnSid : $sid;
-        if ($back > 0) {
-            redirect('debts.php?status=unpaid&subscriber_id=' . $back);
         }
         redirect('debts.php?status=unpaid');
     }
@@ -550,17 +575,6 @@ render_header(t('debts'), 'debts');
   .debts-hero { padding: 14px; }
   .debts-hero-stat, .debts-hero-side { min-width: 100%; }
 }
-.pay-spin {
-  display: inline-block;
-  width: 16px;
-  height: 16px;
-  border: 2px solid rgba(255,255,255,.35);
-  border-top-color: #fff;
-  border-radius: 50%;
-  vertical-align: -3px;
-  animation: pay-spin .7s linear infinite;
-}
-@keyframes pay-spin { to { transform: rotate(360deg); } }
 </style>
 <div class="debts-page">
 <div class="debts-hero">
@@ -1119,14 +1133,49 @@ render_header(t('debts'), 'debts');
   if (okBtn) {
     okBtn.addEventListener('click', function () {
       if (!pending || !form || okBtn.getAttribute('data-busy') === '1') return;
-      act.value = pending.mode === 'all' ? 'pay_all' : 'pay';
-      idEl.value = pending.invoice;
-      subEl.value = pending.sub;
+      var mode = pending.mode === 'all' ? 'pay_all' : 'pay';
+      var inv = pending.invoice || '';
+      var sub = pending.sub || '';
+      act.value = mode;
+      idEl.value = inv;
+      subEl.value = sub;
       amtIn.value = String(pending.amount);
       waEl.value = (tog && tog.checked) ? '1' : '0';
       okBtn.setAttribute('data-busy', '1');
-      okBtn.innerHTML = '<span class="pay-spin" aria-hidden="true"></span>';
-      form.submit();
+      // أغلق فوراً — بدون سبنر/انتظار؛ التسديد يمشي بالخلفية
+      closePay();
+      var body = new FormData(form);
+      body.set('ajax', '1');
+      fetch('debts.php', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        body: body
+      }).then(function (r) {
+        return r.json().catch(function () { return { ok: false, message: 'فشل التسديد' }; });
+      }).then(function (d) {
+        okBtn.removeAttribute('data-busy');
+        var msg = (d && d.message) ? d.message : (d && d.ok ? 'تم التسديد' : 'فشل التسديد');
+        if (window.showCornerToast) {
+          window.showCornerToast(msg, (d && d.ok) ? 'ok' : 'error');
+        } else if (window.showAppToast) {
+          window.showAppToast(msg, (d && d.ok) ? 'ok' : 'error');
+        }
+        if (d && d.ok) {
+          try {
+            if (mode === 'pay' && inv) {
+              var row = document.querySelector('tbody tr[data-invoice="' + inv + '"]');
+              if (row && row.parentNode) row.parentNode.removeChild(row);
+            }
+          } catch (eRm) {}
+          setTimeout(function () { window.location.reload(); }, 450);
+        }
+      }).catch(function () {
+        okBtn.removeAttribute('data-busy');
+        if (window.showCornerToast) {
+          window.showCornerToast(<?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>, 'error');
+        }
+      });
     });
   }
   if (cancelBtn) cancelBtn.addEventListener('click', closePay);

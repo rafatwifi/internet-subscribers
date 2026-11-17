@@ -79,7 +79,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     <link rel="icon" href="assets/favicon.png?v=2" type="image/png" sizes="32x32">
     <?php endif; ?>
     <link rel="apple-touch-icon" href="<?php echo e($brandIcon !== '' ? $brandIcon : 'assets/apple-touch-icon.png?v=2'); ?>">
-    <link rel="stylesheet" href="assets/style.css?v=ui24">
+    <link rel="stylesheet" href="assets/style.css?v=ui25">
     <?php
     // خلفية صورة حتى يشتغل blur — شخصي ثم نظام ثم الافتراضي
     $glassBgSrc = 'assets/glass-bg.jpg?v=1';
@@ -1028,8 +1028,15 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <?php if ($can('logs')): ?>
             <a class="<?php echo $active === 'logs' ? 'active' : ''; ?>" href="logs.php"><?php echo nav_side_ico('logs'); ?><?php echo e($isEn ? 'Log' : 'اللوك'); ?></a>
             <?php endif; ?>
-            <?php if ($can('settings') || $can('users') || $can('plans') || $can('backup')): ?>
-            <a class="<?php echo $settingsActive && $active !== 'schedule' ? 'active' : ''; ?>" href="settings.php?tab=sas"><?php echo nav_side_ico('settings'); ?><?php echo e(t('settings')); ?></a>
+            <?php if ($can('settings') || $can('users') || $can('plans') || $can('backup')):
+                $navSettingsHref = 'settings.php?tab=theme';
+                if (function_exists('current_tenant_id') && (int) current_tenant_id() > 1) {
+                    $navSettingsHref = 'settings.php?tab=sas';
+                } elseif (function_exists('is_super_admin_user') && is_super_admin_user()) {
+                    $navSettingsHref = 'settings.php?tab=general';
+                }
+            ?>
+            <a class="<?php echo $settingsActive && $active !== 'schedule' ? 'active' : ''; ?>" href="<?php echo e($navSettingsHref); ?>"><?php echo nav_side_ico('settings'); ?><?php echo e(t('settings')); ?></a>
             <?php endif; ?>
             <a class="<?php echo $active === 'company' ? 'active' : ''; ?>" href="company.php"><?php echo nav_side_ico('company'); ?><?php echo e($isEn ? 'Company' : 'عن الشركة'); ?></a>
             <?php
@@ -1193,15 +1200,30 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
         }
         if ($sasBanner):
             $banDetail = isset($sasBanner['detail']) ? (string) $sasBanner['detail'] : '';
+            $banMsg = $isEn
+                ? 'SAS offline — local data stays available. Writes blocked until reconnect.'
+                : 'الساس غير متصل — البيانات المحلية تبقى. الكتابة موقوفة حتى يعود الاتصال.';
+            if ($banDetail !== '' && stripos($banMsg, $banDetail) === false) {
+                $banMsg .= ' — ' . $banDetail;
+            }
             ?>
-        <div class="alert alert-error" style="margin:10px 14px 0;border-radius:10px" role="status">
-            <?php echo e($isEn
-                ? 'SAS offline — local data (subscribers, debts, cards) stays available. Writes to SAS are blocked until reconnect.'
-                : 'الساس غير متصل — البيانات المحلية (مشتركين، ديون، كروت) تبقى. الكتابة للساس موقوفة حتى يعود الاتصال.'); ?>
-            <?php if ($banDetail !== ''): ?>
-                <span class="meta"> — <?php echo e($banDetail); ?></span>
-            <?php endif; ?>
+        <div class="sas-toast sas-toast-error sas-toast-stay" id="sasOfflineStickyToast" role="status" data-sas-offline="1">
+            <span class="sas-toast-text"><?php echo e($banMsg); ?></span>
+            <button type="button" class="sas-toast-x" aria-label="<?php echo e($isEn ? 'Close' : 'إغلاق'); ?>">×</button>
         </div>
+        <script>
+        (function () {
+          var t = document.getElementById('sasOfflineStickyToast');
+          if (!t) return;
+          if (t.parentNode !== document.body) document.body.appendChild(t);
+          if (window.placeCornerToast) window.placeCornerToast(t);
+          var x = t.querySelector('.sas-toast-x');
+          if (x) x.addEventListener('click', function () {
+            t.classList.add('is-out');
+            setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 500);
+          });
+        })();
+        </script>
         <?php endif; ?>
         <main class="container">
             <?php if ($flash): ?>
@@ -1232,6 +1254,15 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
                                 $cardToastText .= !empty($isEn)
                                     ? (' +' . ($cardToastN - 1) . ' more')
                                     : (' و ' . ($cardToastN - 1) . ' غيرها');
+                            }
+                            // بعد وصول كروت: امسح كاش تفعيل الوكيل حتى الجلب الجاي يشوف الملكية الجديدة
+                            if (function_exists('sas_agent_pins_cache_clear')) {
+                                sas_agent_pins_cache_clear($cardToastId);
+                            } else {
+                                unset(
+                                    $_SESSION['sas_agent_pins_v1_' . $cardToastId],
+                                    $_SESSION['sas_agent_pins_v1_at_' . $cardToastId]
+                                );
                             }
                         }
                     }
@@ -1289,12 +1320,11 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
                 stroke-dashoffset: 0;
                 transition: stroke-dashoffset .22s ease;
             }
-            .sas-toast,
-            .sas-toast.sas-toast-mid {
+            .sas-toast {
                 position: fixed !important;
                 top: 8px !important;
                 bottom: auto !important;
-                z-index: 100003 !important;
+                z-index: 100050 !important;
                 margin: 0 !important;
                 inset-inline-start: auto !important;
                 inset-inline-end: auto !important;
@@ -1311,44 +1341,60 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
                 transform: translateY(0);
                 transition: opacity .7s ease, transform .7s ease;
             }
-            body.ltr .sas-toast,
-            body.ltr .sas-toast.sas-toast-mid {
+            /* كل الإشعارات المؤقتة: أعلى الوسط، تطلع لفوق وتتلاشى */
+            .sas-toast.sas-toast-mid {
+                left: 50% !important;
+                right: auto !important;
+                width: min(420px, calc(100vw - 24px));
+                max-width: min(420px, calc(100vw - 24px));
+                text-align: center !important;
+                justify-content: center !important;
+                transform: translateX(-50%) !important;
+                cursor: pointer;
+            }
+            body.ltr .sas-toast:not(.sas-toast-mid) {
                 left: 16px !important;
                 right: auto !important;
             }
-            .app.sidebar-collapsed .sas-toast,
-            .app.sidebar-collapsed .sas-toast.sas-toast-mid {
+            .app.sidebar-collapsed .sas-toast:not(.sas-toast-mid) {
                 right: 16px !important;
             }
-            body.ltr .app.sidebar-collapsed .sas-toast,
-            body.ltr .app.sidebar-collapsed .sas-toast.sas-toast-mid {
+            body.ltr .app.sidebar-collapsed .sas-toast:not(.sas-toast-mid) {
                 left: 16px !important;
                 right: auto !important;
             }
             .sas-toast[hidden] { display: none !important; }
-            .sas-toast.is-out,
-            .sas-toast.sas-toast-mid.is-out {
+            .sas-toast.is-out {
                 opacity: 0 !important;
                 transform: translateY(-56px) !important;
             }
-            .sas-toast-text { flex: 1; line-height: 1.45; }
+            .sas-toast.sas-toast-mid.is-out {
+                opacity: 0 !important;
+                transform: translateX(-50%) translateY(-56px) !important;
+            }
+            .sas-toast-text { flex: 1; line-height: 1.45; word-break: break-word; }
+            .sas-toast.sas-toast-mid .sas-toast-text { flex: 0 1 auto; }
             .sas-toast-x {
                 border: 0; background: transparent; color: inherit; font-size: 20px;
                 line-height: 1; cursor: pointer; padding: 0 2px;
             }
             @media (max-width: 640px) {
-                .sas-toast,
-                .sas-toast.sas-toast-mid,
-                body.ltr .sas-toast,
-                body.ltr .sas-toast.sas-toast-mid,
-                .app.sidebar-collapsed .sas-toast,
-                .app.sidebar-collapsed .sas-toast.sas-toast-mid {
+                .sas-toast:not(.sas-toast-mid),
+                body.ltr .sas-toast:not(.sas-toast-mid),
+                .app.sidebar-collapsed .sas-toast:not(.sas-toast-mid),
+                .sas-toast.sas-toast-mid {
                     top: 10px !important;
                     bottom: auto !important;
-                    left: 12px !important;
-                    right: 12px !important;
-                    width: auto !important;
-                    max-width: none !important;
+                    left: 50% !important;
+                    right: auto !important;
+                    width: calc(100vw - 24px) !important;
+                    max-width: calc(100vw - 24px) !important;
+                    transform: translateX(-50%) !important;
+                }
+                .sas-toast.is-out,
+                .sas-toast.sas-toast-mid.is-out {
+                    opacity: 0 !important;
+                    transform: translateX(-50%) translateY(-56px) !important;
                 }
             }
             .sas-toast-success { background: #146c43; color: #fff; }
@@ -1508,7 +1554,7 @@ body.nav-pending .nav-progress { display: block; }
   var msgs = {
     offline: isEn ? 'WhatsApp is not linked. Open settings and scan once.' : 'واتساب غير مربوط. افتح الإعدادات وامسح الرمز مرة واحدة.',
     needQr: isEn ? 'Scan the WhatsApp picture once from settings.' : 'امسح صورة واتساب مرة واحدة من الإعدادات.',
-    restoring: isEn ? 'Opening the saved WhatsApp link…' : 'جاري فتح ربط واتساب المحفوظ…',
+    restoring: isEn ? 'Please wait until the QR code appears' : 'يرجى الانتظار لحين ظهور رمز QR',
     unreachable: isEn ? 'WhatsApp gateway is off. The saved link stays — start it on the Windows PC.' : 'بوابة واتساب متوقفة. الربط محفوظ — شغّلها على حاسبة الويندوز.'
   };
   var failStreak = 0;
@@ -1624,12 +1670,11 @@ window.placeCornerToast = function (el) {
   if (el.parentNode && el.parentNode !== document.body) document.body.appendChild(el);
   function set(prop, val) { el.style.setProperty(prop, val, 'important'); }
   set('position', 'fixed');
-  set('z-index', '100003');
+  set('z-index', '100050');
   var fading = !el.classList.contains('sas-toast-stay');
   if (fading && el.classList.contains('is-out')) return;
-  if (el.id === 'sasSyncOkBanner') {
-    el.classList.remove('sas-toast-mid', 'is-in');
-  } else if (fading) {
+  /* كل إشعار مؤقت = أعلى الوسط (موبايل ودسكتوب). الثابت يبقى فوق أيضاً */
+  if (fading) {
     el.classList.add('sas-toast-mid');
     el.classList.remove('is-in');
   }
@@ -1639,11 +1684,15 @@ window.placeCornerToast = function (el) {
   var phone = window.matchMedia && window.matchMedia('(max-width: 640px)').matches;
   set('bottom', 'auto');
   set('top', phone ? '10px' : '8px');
-  if (phone) {
-    set('left', '12px');
-    set('right', '12px');
-    set('width', 'auto');
-    set('max-width', 'none');
+  if (fading || el.classList.contains('sas-toast-mid') || phone) {
+    set('left', '50%');
+    set('right', 'auto');
+    set('width', phone ? 'calc(100vw - 24px)' : 'min(420px, calc(100vw - 24px))');
+    set('max-width', phone ? 'calc(100vw - 24px)' : '420px');
+    set('cursor', fading ? 'pointer' : 'default');
+    set('text-align', 'center');
+    set('justify-content', 'center');
+    set('transform', 'translateX(-50%)');
     return;
   }
   var main = document.querySelector('.main');
@@ -1678,12 +1727,17 @@ window.showCornerToast = function (msg, kind) {
   el.appendChild(span);
   document.body.appendChild(el);
   if (window.placeCornerToast) window.placeCornerToast(el);
-  setTimeout(function () {
+  var closed = false;
+  var closeEl = function () {
+    if (closed) return;
+    closed = true;
     el.classList.add('is-out');
     setTimeout(function () {
       if (el.parentNode) el.parentNode.removeChild(el);
     }, 820);
-  }, 3000);
+  };
+  el.addEventListener('click', closeEl);
+  setTimeout(closeEl, 3000);
 };
 (function () {
   var wait = <?php echo !empty($_SESSION['wa_resend_wait']) ? 'true' : 'false'; ?>;
@@ -2014,20 +2068,25 @@ window.showCornerToast = function (msg, kind) {
   }
   var toast = document.querySelector('.sas-toast:not(#sasSyncOkBanner)');
   if (toast) {
+    var toastClosed = false;
     var closeToast = function () {
+      if (toastClosed) return;
+      toastClosed = true;
       toast.classList.add('is-out');
       setTimeout(function () {
         if (toast.parentNode) toast.parentNode.removeChild(toast);
       }, 820);
     };
     var xbtn = toast.querySelector('.sas-toast-x');
-    if (xbtn) xbtn.addEventListener('click', function () {
+    if (xbtn) xbtn.addEventListener('click', function (ev) {
+      if (ev && ev.stopPropagation) ev.stopPropagation();
       if (toast.getAttribute('data-card-seen') === '1') {
         try { fetch('cards.php?ajax=xfer_seen', { credentials: 'same-origin' }); } catch (e) {}
       }
       closeToast();
     });
     if (!toast.classList.contains('sas-toast-stay')) {
+      toast.addEventListener('click', closeToast);
       setTimeout(closeToast, 3000);
     }
   }

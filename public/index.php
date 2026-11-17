@@ -179,8 +179,151 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_company_pings') {
 
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_points') {
     header('Content-Type: application/json; charset=utf-8');
-    $ptsOut = array('ok' => false, 'points' => '');
-    if (function_exists('sas_manager_reward_points')) {
+    // حرّر الجلسة أولاً حتى ما يتوقف التنقّل أثناء جلب النقاط
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
+    $wTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+    $forceWallet = isset($_GET['refresh']) && $_GET['refresh'] === '1';
+
+    // بدون refresh: أرجع أي كاش فوراً — لا ضرب API (الواجهة ما تنتظر)
+    if (!$forceWallet && function_exists('dash_wallet_cache_load')) {
+        $cachedW = dash_wallet_cache_load($wTid, 0);
+        if (is_array($cachedW) && (!empty($cachedW['points']) || !empty($cachedW['balance']) || !empty($cachedW['wallets']))) {
+            $cachedW['ok'] = true;
+            $cachedW['from_cache'] = true;
+            echo json_encode($cachedW);
+            exit;
+        }
+        // كاش نقاط قديم كاحتياط
+        $ptsFileQuick = dirname(__DIR__) . '/storage/cache/sas_points_t' . max(1, $wTid) . '.json';
+        $quickOut = array('ok' => false, 'points' => '', 'balance' => '', 'wallets' => array(), 'from_cache' => true);
+        if (is_file($ptsFileQuick)) {
+            $ptsQuick = json_decode((string) @file_get_contents($ptsFileQuick), true);
+            if (is_array($ptsQuick) && isset($ptsQuick['points']) && $ptsQuick['points'] !== null && $ptsQuick['points'] !== '') {
+                $pv = $ptsQuick['points'];
+                $quickOut['points'] = ((float) $pv == (int) $pv)
+                    ? number_format((int) $pv)
+                    : number_format((float) $pv, 2);
+                $quickOut['ok'] = true;
+            }
+        }
+        if (isset($_SESSION['sas_balance_disp']) && $_SESSION['sas_balance_disp'] !== '') {
+            $quickOut['balance'] = (string) $_SESSION['sas_balance_disp'];
+            $quickOut['ok'] = true;
+        }
+        echo json_encode($quickOut);
+        exit;
+    }
+
+    $ptsOut = array('ok' => false, 'points' => '', 'balance' => '', 'wallets' => array(), 'from_cache' => false);
+    // بذرة من كاش قديم حتى لو منتهي — ما نرجّع فراغ بعد التحديث
+    $oldByAid = array();
+    if (function_exists('dash_wallet_cache_load')) {
+        $seedW = dash_wallet_cache_load($wTid, 0);
+        if (is_array($seedW)) {
+            if (!empty($seedW['points'])) {
+                $ptsOut['points'] = (string) $seedW['points'];
+                $ptsOut['ok'] = true;
+            }
+            if (!empty($seedW['balance'])) {
+                $ptsOut['balance'] = (string) $seedW['balance'];
+                $ptsOut['ok'] = true;
+            }
+            if (!empty($seedW['wallets']) && is_array($seedW['wallets'])) {
+                $ptsOut['wallets'] = $seedW['wallets'];
+                foreach ($seedW['wallets'] as $oldW) {
+                    $oa = isset($oldW['account_id']) ? (int) $oldW['account_id'] : 0;
+                    if ($oa > 0) {
+                        $oldByAid[$oa] = $oldW;
+                    }
+                }
+            }
+        }
+    }
+    $freshWallets = array();
+    if ($wTid > 0 && function_exists('tenant_sas_accounts_list')) {
+        foreach (tenant_sas_accounts_list($pdo, $wTid) as $wAcc) {
+            $wAid = isset($wAcc['id']) ? (int) $wAcc['id'] : 0;
+            $wCid = !empty($wAcc['company_id']) ? (int) $wAcc['company_id'] : 0;
+            $wProv = function_exists('tenant_sas_account_provider')
+                ? tenant_sas_account_provider($pdo, $wAcc) : 'sas';
+            $wName = !empty($wAcc['label']) ? trim((string) $wAcc['label']) : '';
+            if ($wCid > 0 && function_exists('platform_company_row')) {
+                $wCo = platform_company_row($pdo, $wCid);
+                if ($wCo && !empty($wCo['name'])) {
+                    $wName = (string) $wCo['name'];
+                }
+            }
+            if ($wName === '') {
+                $wName = ($wProv === 'earthlink') ? 'Earthlink' : 'SAS';
+            }
+            $cachedRow = isset($oldByAid[$wAid]) && is_array($oldByAid[$wAid]) ? $oldByAid[$wAid] : array();
+            $rowOut = array(
+                'account_id' => $wAid,
+                'company_id' => $wCid,
+                'name' => $wName,
+                'provider' => $wProv,
+                'points' => !empty($cachedRow['points']) ? (string) $cachedRow['points'] : '',
+                'balance' => !empty($cachedRow['balance']) ? (string) $cachedRow['balance'] : '',
+            );
+            if ($wProv === 'earthlink' && function_exists('earthlink_portal_balance_for_account')) {
+                $bal = @earthlink_portal_balance_for_account($pdo, $wAcc);
+                if (!empty($bal['ok'])) {
+                    $rowOut['balance'] = !empty($bal['disp']) ? $bal['disp'] : number_format((int) $bal['iqd']);
+                    $ptsOut['ok'] = true;
+                }
+            } elseif ($wProv !== 'earthlink') {
+                $prevForce = isset($GLOBALS['sas_force_account']) ? $GLOBALS['sas_force_account'] : null;
+                $prevPtsForce = isset($GLOBALS['sas_points_force']) ? $GLOBALS['sas_points_force'] : null;
+                $GLOBALS['sas_force_account'] = $wAcc;
+                $GLOBALS['sas_points_force'] = true;
+                // امسح رصيد الجلسة حتى ما يلتصق رصيد ريسلر سابق
+                $prevBal = isset($_SESSION['sas_balance_disp']) ? $_SESSION['sas_balance_disp'] : null;
+                unset($_SESSION['sas_balance_disp']);
+                if (function_exists('sas_manager_reward_points')) {
+                    list($pok, $pval) = sas_manager_reward_points($config, $pdo);
+                    if ($pok && $pval !== null) {
+                        $rowOut['points'] = ((float) $pval == (int) $pval)
+                            ? number_format((int) $pval)
+                            : number_format((float) $pval, 2);
+                        $ptsOut['ok'] = true;
+                    }
+                }
+                if (isset($_SESSION['sas_balance_disp']) && $_SESSION['sas_balance_disp'] !== '') {
+                    $rowOut['balance'] = (string) $_SESSION['sas_balance_disp'];
+                    $ptsOut['ok'] = true;
+                } elseif ($prevBal !== null && $rowOut['balance'] === '') {
+                    // احتفظ بالكاش القديم إن فشل الجلب
+                }
+                if ($prevForce !== null) {
+                    $GLOBALS['sas_force_account'] = $prevForce;
+                } else {
+                    unset($GLOBALS['sas_force_account']);
+                }
+                if ($prevPtsForce !== null) {
+                    $GLOBALS['sas_points_force'] = $prevPtsForce;
+                } else {
+                    unset($GLOBALS['sas_points_force']);
+                }
+            }
+            $freshWallets[] = $rowOut;
+        }
+    }
+    if ($freshWallets) {
+        $ptsOut['wallets'] = $freshWallets;
+        foreach ($freshWallets as $fw) {
+            if ($ptsOut['points'] === '' && !empty($fw['points'])) {
+                $ptsOut['points'] = $fw['points'];
+                $ptsOut['ok'] = true;
+            }
+            if ($ptsOut['balance'] === '' && !empty($fw['balance'])) {
+                $ptsOut['balance'] = $fw['balance'];
+                $ptsOut['ok'] = true;
+            }
+        }
+    } elseif (function_exists('sas_manager_reward_points')) {
+        // لا حسابات متعددة — مسار واحد
         list($ptsOk, $ptsVal) = sas_manager_reward_points($config, $pdo);
         if ($ptsOk && $ptsVal !== null) {
             $ptsOut['ok'] = true;
@@ -188,9 +331,13 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_points') {
                 ? number_format((int) $ptsVal)
                 : number_format((float) $ptsVal, 2);
         }
+        if (isset($_SESSION['sas_balance_disp']) && $_SESSION['sas_balance_disp'] !== '') {
+            $ptsOut['balance'] = (string) $_SESSION['sas_balance_disp'];
+            $ptsOut['ok'] = true;
+        }
     }
-    if (function_exists('app_session_close')) {
-        app_session_close();
+    if (function_exists('dash_wallet_cache_save') && ($ptsOut['points'] !== '' || $ptsOut['balance'] !== '' || !empty($ptsOut['wallets']))) {
+        dash_wallet_cache_save($ptsOut, $wTid);
     }
     echo json_encode($ptsOut);
     exit;
@@ -360,12 +507,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_stats') {
         'soon' => 0,
         'today' => 0,
     );
-    if (function_exists('sas_dash_live_refresh')) {
-        try {
-            sas_dash_live_refresh($pdo, $config);
-        } catch (Exception $e) {
-        }
-    }
+    // أرقام الوجدز من الكاش المحلي فقط — بدون ضرب API الساس حتى ما يجمّد التنقّل
     if (function_exists('sas_dash_user_counts')) {
         $counts = sas_dash_user_counts($pdo);
         if (is_array($counts)) {
@@ -611,6 +753,97 @@ $expireSoonCount = (int) $pdo->query(
 $sasPointsOk = false;
 $sasPointsVal = null;
 $sasPointsDisp = '—';
+$dashBalSeedDisp = '—';
+$dashWalletsSeed = array();
+// بذرة فورية: أسماء الريسلرات من الحسابات + قيم من الكاش (بدون انتظار API)
+$dashTidSeed = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+$seedByAid = array();
+if (function_exists('dash_wallet_cache_load')) {
+    $seedDash = dash_wallet_cache_load($dashTidSeed, 0);
+    if (is_array($seedDash)) {
+        if (!empty($seedDash['points'])) {
+            $sasPointsDisp = (string) $seedDash['points'];
+            $sasPointsOk = true;
+        }
+        if (!empty($seedDash['balance'])) {
+            $dashBalSeedDisp = (string) $seedDash['balance'];
+        }
+        if (!empty($seedDash['wallets']) && is_array($seedDash['wallets'])) {
+            foreach ($seedDash['wallets'] as $sw) {
+                $aid = isset($sw['account_id']) ? (int) $sw['account_id'] : 0;
+                if ($aid > 0) {
+                    $seedByAid[$aid] = $sw;
+                }
+            }
+        }
+    }
+}
+if ($dashTidSeed > 0 && function_exists('tenant_sas_accounts_list')) {
+    foreach (tenant_sas_accounts_list($pdo, $dashTidSeed) as $wAcc) {
+        $wAid = isset($wAcc['id']) ? (int) $wAcc['id'] : 0;
+        if ($wAid <= 0) {
+            continue;
+        }
+        $wCid = !empty($wAcc['company_id']) ? (int) $wAcc['company_id'] : 0;
+        $wProv = function_exists('tenant_sas_account_provider')
+            ? tenant_sas_account_provider($pdo, $wAcc) : 'sas';
+        $wName = !empty($wAcc['label']) ? trim((string) $wAcc['label']) : '';
+        if ($wCid > 0 && function_exists('platform_company_row')) {
+            $wCo = platform_company_row($pdo, $wCid);
+            if ($wCo && !empty($wCo['name'])) {
+                $wName = (string) $wCo['name'];
+            }
+        }
+        if ($wName === '') {
+            $wName = ($wProv === 'earthlink') ? 'Earthlink' : 'SAS';
+        }
+        $cached = isset($seedByAid[$wAid]) && is_array($seedByAid[$wAid]) ? $seedByAid[$wAid] : array();
+        $row = array(
+            'account_id' => $wAid,
+            'company_id' => $wCid,
+            'name' => $wName,
+            'provider' => $wProv,
+            'points' => !empty($cached['points']) ? (string) $cached['points'] : '',
+            'balance' => !empty($cached['balance']) ? (string) $cached['balance'] : '',
+        );
+        $dashWalletsSeed[] = $row;
+        if ($row['points'] !== '' && ($sasPointsDisp === '—' || $sasPointsDisp === '')) {
+            $sasPointsDisp = $row['points'];
+            $sasPointsOk = true;
+        }
+        if ($row['balance'] !== '' && ($dashBalSeedDisp === '—' || $dashBalSeedDisp === '')) {
+            $dashBalSeedDisp = $row['balance'];
+        }
+    }
+}
+if (!$dashWalletsSeed && $seedByAid) {
+    $dashWalletsSeed = array_values($seedByAid);
+}
+if ($sasPointsDisp === '—' || $sasPointsDisp === '') {
+    $ptsTidSeed = $dashTidSeed > 0 ? $dashTidSeed : 1;
+    $ptsFileSeed = dirname(__DIR__) . '/storage/cache/sas_points_t' . $ptsTidSeed . '.json';
+    if (is_file($ptsFileSeed)) {
+        $ptsSeed = json_decode((string) @file_get_contents($ptsFileSeed), true);
+        if (is_array($ptsSeed) && isset($ptsSeed['points']) && $ptsSeed['points'] !== null && $ptsSeed['points'] !== '') {
+            $pv = $ptsSeed['points'];
+            $sasPointsDisp = ((float) $pv == (int) $pv)
+                ? number_format((int) $pv)
+                : number_format((float) $pv, 2);
+            $sasPointsOk = true;
+            if (count($dashWalletsSeed) === 1 && $dashWalletsSeed[0]['points'] === '') {
+                $dashWalletsSeed[0]['points'] = $sasPointsDisp;
+            }
+        }
+    }
+}
+if (($dashBalSeedDisp === '—' || $dashBalSeedDisp === '')
+    && isset($_SESSION['sas_balance_disp']) && $_SESSION['sas_balance_disp'] !== ''
+) {
+    $dashBalSeedDisp = (string) $_SESSION['sas_balance_disp'];
+    if (count($dashWalletsSeed) === 1 && $dashWalletsSeed[0]['balance'] === '') {
+        $dashWalletsSeed[0]['balance'] = $dashBalSeedDisp;
+    }
+}
 
 $chartMonths = array();
 $chartProfit = array();
@@ -720,6 +953,11 @@ if ($sasReadyDash) {
             ? number_format((int) $sasPointsVal)
             : number_format((float) $sasPointsVal, 2);
     }
+    if (isset($_SESSION['sas_balance_disp']) && $_SESSION['sas_balance_disp'] !== ''
+        && ($dashBalSeedDisp === '—' || $dashBalSeedDisp === '')
+    ) {
+        $dashBalSeedDisp = (string) $_SESSION['sas_balance_disp'];
+    }
     $dashBankInfo = function_exists('system_reseller_bank')
         ? system_reseller_bank($config)
         : array('host' => '', 'name' => '');
@@ -737,8 +975,15 @@ if ($sasReadyDash) {
     try {
         $sasCounts['total'] = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = ' . $offTid)->fetchColumn();
         $sasCounts['online'] = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = ' . $offTid . ' AND is_online = 1')->fetchColumn();
-        $sasCounts['active'] = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = ' . $offTid . ' AND enabled = 1 AND expire_at IS NOT NULL AND expire_at >= NOW()')->fetchColumn();
-        $sasCounts['expired'] = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = ' . $offTid . ' AND enabled = 1 AND expire_at IS NOT NULL AND expire_at < NOW()')->fetchColumn();
+        // فعّال: مفعّل وما منتهي (NULL يُحسب فعّال — إيرث أحياناً بدون تاريخ)
+        $sasCounts['active'] = (int) $pdo->query(
+            'SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = ' . $offTid
+            . ' AND enabled = 1 AND (expire_at IS NULL OR expire_at >= NOW())'
+        )->fetchColumn();
+        $sasCounts['expired'] = (int) $pdo->query(
+            'SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = ' . $offTid
+            . ' AND (enabled = 0 OR (expire_at IS NOT NULL AND expire_at < NOW()))'
+        )->fetchColumn(); // أقواس OR مقصودة مع AND tenant
         $sasCounts['soon'] = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = ' . $offTid . ' AND enabled = 1 AND expire_at > NOW() AND expire_at <= DATE_ADD(NOW(), INTERVAL 3 DAY)')->fetchColumn();
         $sasCounts['today'] = (int) $pdo->query('SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = ' . $offTid . ' AND enabled = 1 AND DATE(expire_at) = CURDATE()')->fetchColumn();
     } catch (Exception $e) {
@@ -810,6 +1055,61 @@ if (!function_exists('dash_ping_box')) {
                 echo '<div class="ping-more">+' . (int) ($n - 4) . '</div>';
             }
             echo '</div>';
+        }
+        echo '</a>';
+    }
+}
+
+if (!function_exists('dash_wallet_box')) {
+    /**
+     * وجدز ذكي للنقاط/الرصيد:
+     * ريسلر واحد → رقم كبير، أكثر من واحد → قائمة اسم + قيمة بنفس الوجز.
+     */
+    function dash_wallet_box($kind, $wallets, $en, $fallback = '—')
+    {
+        $kind = ($kind === 'balance') ? 'balance' : 'points';
+        $isPts = ($kind === 'points');
+        $title = $isPts
+            ? ($en ? 'Reward points' : 'نقاط تشجيعية')
+            : ($en ? 'Balance' : 'الرصيد');
+        $tone = $isPts ? 'tone-lime' : 'tone-teal';
+        $boxId = $isPts ? 'dashPoints' : 'dashBalance';
+        $ico = $isPts ? 'points' : 'balance';
+        $dashKey = $kind;
+        $field = $isPts ? 'points' : 'balance';
+        $attrs = '';
+        if (function_exists('dash_layout_apply') && !dash_layout_apply($tone, $attrs, $dashKey)) {
+            return;
+        }
+        $rows = is_array($wallets) ? array_values($wallets) : array();
+        $n = count($rows);
+        $multi = $n > 1 ? ' is-multi' : '';
+        $fb = ($fallback !== '' && $fallback !== null) ? (string) $fallback : '—';
+        echo '<a class="sas-box ' . e($tone) . ' dash-wallet' . $multi . '" href="sas.php"'
+            . ' id="' . e($boxId) . '"'
+            . ($attrs !== '' ? (' ' . $attrs) : '')
+            . ' data-kind="' . e($kind) . '"'
+            . ' data-count="' . (int) $n . '">';
+        echo '<span class="sas-box-ico" aria-hidden="true">'
+            . (function_exists('dash_widget_icon') ? dash_widget_icon($ico) : e($ico))
+            . '</span>';
+        echo '<div class="sas-box-title">' . e($title) . '</div>';
+        if ($n <= 1) {
+            $one = $n === 1 ? $rows[0] : null;
+            $val = ($one && isset($one[$field]) && $one[$field] !== '') ? (string) $one[$field] : $fb;
+            $nm = ($one && !empty($one['name'])) ? (string) $one['name'] : '';
+            echo '<div class="sas-box-sub" id="' . e($boxId) . 'Sub">' . e($nm) . '</div>';
+            echo '<div class="sas-box-val" id="' . e($boxId) . 'Val">' . e($val) . '</div>';
+        } else {
+            echo '<div class="sas-box-sub" id="' . e($boxId) . 'Sub"></div>';
+            echo '<div class="sas-box-val is-list" id="' . e($boxId) . 'Val"><div class="wallet-list">';
+            foreach ($rows as $rw) {
+                $nm = isset($rw['name']) ? (string) $rw['name'] : '';
+                $val = (isset($rw[$field]) && $rw[$field] !== '') ? (string) $rw[$field] : '…';
+                echo '<div class="wallet-line"><b class="wallet-name">' . e($nm) . '</b>'
+                    . '<span class="wallet-amt">' . e($val) . '</span></div>';
+            }
+            echo '</div></div>';
         }
         echo '</a>';
     }
@@ -1048,10 +1348,18 @@ body:has(.sas-dash) .container {
 .dash-ping .ping-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dash-ping .ping-ms { direction: ltr; unicode-bidi: isolate; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .dash-ping .ping-more { font-size: 12px; font-weight: 800; opacity: .75; margin-top: 4px; }
+.dash-wallet .sas-box-val.is-list { margin-top: 8px; font-size: inherit; font-weight: inherit; letter-spacing: 0; line-height: 1.2; }
+.dash-wallet .wallet-list { position: relative; z-index: 1; display: flex; flex-direction: column; gap: 0; width: 100%; }
+.dash-wallet.is-multi .wallet-line { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,.16); }
+.dash-wallet.is-multi .wallet-line:last-of-type { border-bottom: 0; padding-bottom: 0; }
+.dash-wallet.is-multi .wallet-name { font-size: 13px; font-weight: 800; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dash-wallet.is-multi .wallet-amt { font-size: 15px; font-weight: 800; direction: ltr; unicode-bidi: isolate; font-variant-numeric: tabular-nums; white-space: nowrap; }
 @media (max-width: 640px) {
   .dash-ping[data-count="1"] .ping-ms { font-size: 30px; }
   .dash-ping.is-multi .ping-name { font-size: 12px; }
   .dash-ping.is-multi .ping-ms { font-size: 14px; }
+  .dash-wallet.is-multi .wallet-name { font-size: 12px; }
+  .dash-wallet.is-multi .wallet-amt { font-size: 14px; }
 }
 @media (max-width: 760px) {
   .sas-dash .sas-boxes { display: flex; flex-direction: column; }
@@ -1310,7 +1618,12 @@ if ($isAccDash) {
         } elseif ($wid === 'rentals') {
             dash_sas_box('rentals.php', 'tone-navy', $en ? 'Rental towers' : 'أبراج الإيجار', $en ? 'Active of total' : 'فعال من أصل الكل', ((int) $rentalActiveCount) . '\\' . (int) $rentalTotalCount, 'rentals');
         } elseif ($wid === 'points' && $sasReadyDash) {
-            dash_sas_box('sas.php', 'tone-lime', $en ? 'Reward points' : 'نقاط تشجيعية', '', (string) $sasPointsDisp, 'points', 'dashPoints');
+            dash_wallet_box('points', $dashWalletsSeed, $en, (string) $sasPointsDisp);
+        } elseif ($wid === 'balance' && $sasReadyDash) {
+            $balSeedLayout = ($dashBalSeedDisp !== '' && $dashBalSeedDisp !== '—')
+                ? $dashBalSeedDisp
+                : (isset($_SESSION['sas_balance_disp']) ? (string) $_SESSION['sas_balance_disp'] : '—');
+            dash_wallet_box('balance', $dashWalletsSeed, $en, $balSeedLayout);
         } elseif ($wid === 'latency' && $sasReadyDash) {
             dash_ping_box($dashPingRows, $en, $dashPingSeed);
         }
@@ -1339,7 +1652,12 @@ if ($isAccDash && $showWid('agents') && $accLocked) {
     dash_sas_box('agents.php', 'tone-purple', $en ? 'Agents' : 'الوكلاء', '', (string) (int) $agentN, 'agents', '', '', 'agents');
 }
 if ($sasReadyDash && !$accLocked) {
-    dash_sas_box('sas.php', 'tone-lime', $en ? 'Reward points' : 'نقاط تشجيعية', $en ? 'Balance' : 'الرصيد', (string) $sasPointsDisp, 'points', 'dashPoints', '', 'points');
+    // وجدز ذكي: ريسلر واحد = رقم، أكثر من واحد = قائمة بنفس الوجز
+    $balSeed = ($dashBalSeedDisp !== '' && $dashBalSeedDisp !== '—')
+        ? $dashBalSeedDisp
+        : (isset($_SESSION['sas_balance_disp']) ? (string) $_SESSION['sas_balance_disp'] : '—');
+    dash_wallet_box('points', $dashWalletsSeed, $en, (string) $sasPointsDisp);
+    dash_wallet_box('balance', $dashWalletsSeed, $en, $balSeed);
 }
 if (!$accLocked) {
     dash_ping_box($dashPingRows, $en, $dashPingSeed);
@@ -1427,22 +1745,50 @@ if (!$accLocked) {
 </style>
 <script>
 (function () {
+  var dashAbort = null;
+  var dashLeaving = false;
+  function dashSignal() {
+    if (typeof AbortController === 'undefined') return undefined;
+    if (!dashAbort) dashAbort = new AbortController();
+    return dashAbort.signal;
+  }
+  function stopDashPolls() {
+    dashLeaving = true;
+    if (dashAbort) {
+      try { dashAbort.abort(); } catch (e) {}
+      dashAbort = null;
+    }
+  }
+  document.addEventListener('click', function (e) {
+    var a = e.target && e.target.closest ? e.target.closest('a') : null;
+    if (!a) return;
+    var href = a.getAttribute('href') || '';
+    if (!href || href.charAt(0) === '#' || href.indexOf('javascript:') === 0) return;
+    if (a.target && a.target !== '_self') return;
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button === 1) return;
+    try {
+      var u = new URL(href, window.location.href);
+      if (u.origin !== window.location.origin) return;
+      if (u.pathname === window.location.pathname && u.search === window.location.search) return;
+    } catch (err) { return; }
+    stopDashPolls();
+  }, true);
+  window.addEventListener('pagehide', stopDashPolls);
+
   function applyDash(d) {
     if (!d || !d.ok) return;
-    var p = document.getElementById('dashPointsVal');
-    if (p && d.points !== undefined && d.points !== null && d.points !== '' && d.points !== '—') p.textContent = d.points;
-    var b = document.getElementById('dashBankVal');
-    if (b && d.balance && d.balance !== '—') b.textContent = d.balance;
+    // النقاط/الرصيد من paintWallet فقط (ذكي لكل ريسلر) — لا تكتب فوق القائمة هنا
     var c = document.getElementById('dashCardsVal');
     if (c && typeof d.card_total === 'number') c.textContent = String(d.card_total);
     var cs = document.getElementById('dashCardsSub');
     if (cs && d.card_sub) cs.textContent = d.card_sub;
   }
   function loadDash(force, quiet) {
+    if (dashLeaving) return Promise.resolve();
     var box = document.getElementById('dashCards');
     if (force && !quiet && box) box.classList.add('is-loading');
     var url = 'index.php?ajax=dash_sas' + (force ? '&refresh=1' : '');
-    return fetch(url, { credentials: 'same-origin' })
+    return fetch(url, { credentials: 'same-origin', signal: dashSignal(), cache: 'no-store' })
       .then(function (r) { return r.json(); })
       .then(applyDash)
       .catch(function () {})
@@ -1493,11 +1839,12 @@ if (!$accLocked) {
     ping.innerHTML = html;
   }
   function loadBank() {
+    if (dashLeaving) return Promise.resolve();
     var ping = document.getElementById('dashPing');
     var had = ping && ping.querySelector && ping.querySelector('.ping-ms')
       && String(ping.querySelector('.ping-ms').textContent || '').indexOf('ms') >= 0;
     if (ping && ping.getAttribute('data-has') === '1' && !had) ping.classList.add('is-loading');
-    return fetch('index.php?ajax=dash_ping', { credentials: 'same-origin' })
+    return fetch('index.php?ajax=dash_ping', { credentials: 'same-origin', signal: dashSignal(), cache: 'no-store' })
       .then(function (r) { return r.json(); })
       .then(paintPing)
       .catch(function () {})
@@ -1506,12 +1853,10 @@ if (!$accLocked) {
       });
   }
   function loadPoints() {
-    return fetch('index.php?ajax=dash_points', { credentials: 'same-origin', cache: 'no-store' })
+    if (dashLeaving) return Promise.resolve();
+    return fetch('index.php?ajax=dash_points', { credentials: 'same-origin', signal: dashSignal(), cache: 'no-store' })
       .then(function (r) { return r.json(); })
-      .then(function (d) {
-        var p = document.getElementById('dashPointsVal');
-        if (p && d && d.ok && d.points !== undefined && d.points !== null && d.points !== '') p.textContent = d.points;
-      })
+      .then(paintWallet)
       .catch(function () {});
   }
   function paintStats(d) {
@@ -1537,18 +1882,77 @@ if (!$accLocked) {
     if (d.card_sub) setVal('dashCardsSub', d.card_sub);
   }
   function loadStats() {
-    return fetch('index.php?ajax=dash_stats', { credentials: 'same-origin', cache: 'no-store' })
+    if (dashLeaving) return Promise.resolve();
+    return fetch('index.php?ajax=dash_stats', { credentials: 'same-origin', signal: dashSignal(), cache: 'no-store' })
       .then(function (r) { return r.json(); })
       .then(paintStats)
       .catch(function () {});
   }
+  function walletEsc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+  function paintWalletKind(boxId, field, wallets, fallback) {
+    var box = document.getElementById(boxId);
+    var valEl = document.getElementById(boxId + 'Val');
+    var subEl = document.getElementById(boxId + 'Sub');
+    if (!box || !valEl) return;
+    var rows = Array.isArray(wallets) ? wallets : [];
+    var n = rows.length;
+    if (n > 1) {
+      box.classList.add('is-multi');
+      box.setAttribute('data-count', String(n));
+      if (subEl) subEl.textContent = '';
+      var html = '<div class="wallet-list">';
+      for (var i = 0; i < n; i++) {
+        var nm = rows[i].name || '';
+        var v = rows[i][field] ? String(rows[i][field]) : '…';
+        html += '<div class="wallet-line"><b class="wallet-name">' + walletEsc(nm) + '</b>'
+          + '<span class="wallet-amt">' + walletEsc(v) + '</span></div>';
+      }
+      html += '</div>';
+      valEl.className = 'sas-box-val is-list';
+      valEl.innerHTML = html;
+      return;
+    }
+    box.classList.remove('is-multi');
+    box.setAttribute('data-count', String(n));
+    var one = n === 1 ? rows[0] : null;
+    var oneVal = (one && one[field]) ? String(one[field]) : (fallback ? String(fallback) : '');
+    var oneName = (one && one.name) ? String(one.name) : '';
+    if (subEl) subEl.textContent = oneName;
+    valEl.className = 'sas-box-val';
+    if (oneVal) valEl.textContent = oneVal;
+  }
+  function paintWallet(d) {
+    if (!d) return;
+    var wallets = Array.isArray(d.wallets) ? d.wallets : [];
+    paintWalletKind('dashPoints', 'points', wallets, d.points || '');
+    paintWalletKind('dashBalance', 'balance', wallets, d.balance || '');
+  }
+  function refreshWalletsLive() {
+    if (dashLeaving) return Promise.resolve();
+    return fetch('index.php?ajax=dash_points&refresh=1', { credentials: 'same-origin', signal: dashSignal(), cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(paintWallet)
+      .catch(function () {});
+  }
   loadDash(false, true);
   loadStats();
-  loadPoints();
+  // فوري من الكاش ثم تحديث حي بالخلفية — بدون ما يوقف الصفحة
+  setTimeout(function () { loadPoints(); }, 40);
+  setTimeout(function () { refreshWalletsLive(); }, 600);
   loadBank();
-  setInterval(loadPoints, 2000);
-  setInterval(loadStats, 2000);
-  setInterval(function () { loadDash(false, true); loadBank(); }, 2000);
+  // محلي: حدّث الوجدز كل 20ث — البنغ/كاش النقاط كل 30ث — تحديث حي للمحافظ كل 90ث
+  setInterval(function () { if (!dashLeaving) loadStats(); }, 20000);
+  setInterval(function () {
+    if (dashLeaving) return;
+    loadPoints();
+    loadDash(false, true);
+    loadBank();
+  }, 30000);
+  setInterval(function () { if (!dashLeaving) refreshWalletsLive(); }, 90000);
 })();
 </script>
 <?php endif; ?>

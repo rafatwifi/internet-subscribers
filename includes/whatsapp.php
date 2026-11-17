@@ -3674,8 +3674,10 @@ function wa_case_labels($lang = 'ar')
         'unpaid_overdue' => $en ? 'Late payers warning' : 'تحذير المتأخرين بالدفع',
         'expiry_soon' => $en ? 'Expiry soon (auto cron)' : 'قرب الانتهاء (تلقائي)',
         'schedule_cut' => $en ? 'Auto-cut after grace' : 'القطع التلقائي بعد السماح',
+        'account_created' => $en ? 'New account created' : 'إنشاء حساب جديد',
         'card_transfer' => $en ? 'Card transfer to an agent' : 'تحويل كروت لوكيل',
         'card_pull' => $en ? 'Pull cards from an agent' : 'سحب كروت من وكيل',
+        'auto_activate_on' => $en ? 'Auto-activate enabled' : 'تفعيل التجديد التلقائي',
     );
 }
 
@@ -3795,6 +3797,34 @@ function wa_system_cases($lang = 'ar')
             ),
         ),
         array(
+            'group' => $en ? 'New subscriber' : 'مشترك جديد',
+            'cases' => array(
+                array(
+                    'key' => 'account_created',
+                    'label' => isset($labels['account_created']) ? $labels['account_created'] : ($en ? 'Account created' : 'إنشاء حساب'),
+                    'vars' => '{name} {username} {package} {password}',
+                    'hint' => $en
+                        ? 'Sent automatically when a new SAS subscriber is created (phone required).'
+                        : 'تُرسل تلقائياً عند إنشاء مشترك ساس جديد (يلزم رقم هاتف).',
+                    'required' => false,
+                ),
+            ),
+        ),
+        array(
+            'group' => $en ? 'Auto-renew' : 'التجديد التلقائي',
+            'cases' => array(
+                array(
+                    'key' => 'auto_activate_on',
+                    'label' => isset($labels['auto_activate_on']) ? $labels['auto_activate_on'] : ($en ? 'Auto-activate enabled' : 'تفعيل التجديد التلقائي'),
+                    'vars' => '{name} {username} {package}',
+                    'hint' => $en
+                        ? 'Sent when staff enable auto-activate on a subscriber and tick “notify”.'
+                        : 'تُرسل عند تشغيل التفعيل التلقائي للمشترك مع خيار إشعار المشترك.',
+                    'required' => false,
+                ),
+            ),
+        ),
+        array(
             'group' => $en ? 'Card transfer' : 'تحويل الكروت',
             'cases' => array(
                 array(
@@ -3822,7 +3852,8 @@ function wa_system_cases($lang = 'ar')
 
 function wa_case_optional($case)
 {
-    return $case === 'card_transfer' || $case === 'card_pull';
+    return $case === 'card_transfer' || $case === 'card_pull'
+        || $case === 'account_created' || $case === 'auto_activate_on';
 }
 
 function wa_case_issue_message($issue, $caseLabel, $lang = 'ar')
@@ -3896,6 +3927,8 @@ function wa_case_template_key($config, $case)
         'unpaid_overdue' => 'unpaid_overdue',
         'expiry_soon' => 'expiry_soon',
         'schedule_cut' => 'schedule_cut',
+        'account_created' => 'account_created',
+        'auto_activate_on' => 'auto_activate_on',
     );
     return isset($fallback[$case]) ? $fallback[$case] : $case;
 }
@@ -4169,6 +4202,40 @@ function debt_added_customer_message($name, $newLines, $oldLines, $currency)
     return $msg;
 }
 
+function account_created_message($sub, $config)
+{
+    $key = function_exists('wa_case_template_key') ? wa_case_template_key($config, 'account_created') : 'account_created';
+    if ($key === '') {
+        $key = 'account_created';
+    }
+    if (!wa_template_is_on($config, $key)) {
+        return '';
+    }
+    $name = isset($sub['name']) ? (string) $sub['name'] : '';
+    $username = isset($sub['username']) ? (string) $sub['username'] : '';
+    $package = isset($sub['service_name']) ? (string) $sub['service_name'] : '';
+    $password = isset($sub['password']) ? (string) $sub['password'] : '';
+    $tpl = '';
+    if (isset($config['templates'][$key]) && trim((string) $config['templates'][$key]) !== '') {
+        $tpl = $config['templates'][$key];
+    } elseif (isset($config['templates']['account_created']) && trim((string) $config['templates']['account_created']) !== '') {
+        $tpl = $config['templates']['account_created'];
+    }
+    if ($tpl !== '') {
+        return tpl_fill($tpl, array(
+            'name' => $name,
+            'username' => $username,
+            'package' => $package,
+            'password' => $password,
+        ));
+    }
+    $msg = "تم إنشاء الحساب\nالاسم: " . $name . "\nاليوزرنيم: " . $username;
+    if ($package !== '') {
+        $msg .= "\nالباقة: " . $package;
+    }
+    return $msg;
+}
+
 function debt_created_message($row, $config)
 {
     $currency = isset($config['currency']) ? $config['currency'] : 'د.ع';
@@ -4350,6 +4417,44 @@ function payment_message($row, $config)
     } else {
         $msg .= "\nشكراً لتسديدك.";
     }
+    return $msg;
+}
+
+/**
+ * إشعار تشغيل خدمة التفعيل التلقائي للمشترك.
+ * $row: name, username?, package?/service_name?
+ */
+function auto_activate_on_message($row, $config)
+{
+    $row = is_array($row) ? $row : array();
+    $name = isset($row['name']) ? (string) $row['name'] : '';
+    $username = isset($row['username']) ? (string) $row['username'] : '';
+    $package = '';
+    if (!empty($row['package'])) {
+        $package = (string) $row['package'];
+    } elseif (!empty($row['service_name'])) {
+        $package = (string) $row['service_name'];
+    }
+    $key = function_exists('wa_case_template_key') ? wa_case_template_key($config, 'auto_activate_on') : 'auto_activate_on';
+    if ($key === '' || (function_exists('wa_template_is_on') && !wa_template_is_on($config, $key))) {
+        return '';
+    }
+    $tpl = '';
+    if ($key !== '' && isset($config['templates'][$key]) && trim((string) $config['templates'][$key]) !== '') {
+        $tpl = (string) $config['templates'][$key];
+    } elseif (isset($config['templates']['auto_activate_on']) && trim((string) $config['templates']['auto_activate_on']) !== '') {
+        $tpl = (string) $config['templates']['auto_activate_on'];
+    }
+    if ($tpl !== '') {
+        return function_exists('tpl_fill')
+            ? tpl_fill($tpl, array(
+                'name' => $name,
+                'username' => $username,
+                'package' => $package,
+            ))
+            : $tpl;
+    }
+    $msg = 'مرحباً ' . $name . "\nتم تفعيل خدمة التفعيل التلقائي لخطك\nنتمنى لك تجربة مميزة";
     return $msg;
 }
 

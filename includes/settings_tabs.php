@@ -23,21 +23,17 @@ function render_settings_tabs($current = 'general')
     <?php if ($platformTabs && $can('users')): ?>
     <a class="<?php echo $current === 'users' ? 'on' : ''; ?>" href="settings.php?tab=users"><?php echo e($isEn ? 'Roles' : 'الأدوار'); ?></a>
     <?php endif; ?>
-    <?php if ($can('plans')): ?>
-    <a class="<?php echo $current === 'plans' ? 'on' : ''; ?>" href="plans.php"><?php echo e(t('plans')); ?></a>
-    <?php endif; ?>
     <?php if (!$platformTabs && ($can('cards') || $can('agents') || (function_exists('is_agent_user') && is_agent_user()) || (function_exists('is_group_manager_user') && is_group_manager_user()))): ?>
     <a class="<?php echo $current === 'prices' ? 'on' : ''; ?>" href="agent_prices.php"><?php echo e($isEn ? 'Package prices' : 'تسعير الباقات'); ?></a>
     <?php endif; ?>
     <?php if ($can('settings')): ?>
-    <a class="<?php echo $current === 'rental' ? 'on' : ''; ?>" href="settings.php?tab=rental"><?php echo e($isEn ? 'Rental system' : 'نظام الإيجار'); ?></a>
     <a class="<?php echo $current === 'whatsapp' ? 'on' : ''; ?>" href="settings.php?tab=whatsapp"><?php echo e(t('settings_whatsapp')); ?></a>
     <?php if (function_exists('is_super_admin_user') && is_super_admin_user()): ?>
     <a class="<?php echo $current === 'maintenance' ? 'on' : ''; ?>" href="settings.php?tab=maintenance"><?php echo e($isEn ? 'Maintenance' : 'صيانة النظام'); ?></a>
     <?php endif; ?>
-    <a class="<?php echo $current === 'sas' ? 'on' : ''; ?>" href="settings.php?tab=sas"><?php
-        echo e($agencySas ? ($isEn ? 'Reseller link' : 'ربط رسلر') : t('settings_sas'));
-    ?></a>
+    <?php if ($agencySas): ?>
+    <a class="<?php echo $current === 'sas' ? 'on' : ''; ?>" href="settings.php?tab=sas"><?php echo e($isEn ? 'Reseller link' : 'ربط رسلر'); ?></a>
+    <?php endif; ?>
     <?php if (function_exists('is_super_admin_user') && is_super_admin_user()): ?>
     <a class="<?php echo $current === 'saas' ? 'on' : ''; ?>" href="settings.php?tab=saas"><?php echo e($isEn ? 'SaaS / ZainCash' : 'الاستضافة / زين كاش'); ?></a>
     <?php endif; ?>
