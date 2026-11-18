@@ -654,7 +654,7 @@ function tenant_sas_account_retry_login($pdo, $tenantId, $accountId, $config = n
             ':id' => $accountId,
             ':t' => $tenantId,
         ));
-        if (!$isEl && function_exists('sas_mark_connection') && is_array($config)) {
+        if (!$isEl && $msg !== 'OTP_REQUIRED' && $msg !== 'OTP_INVALID' && function_exists('sas_mark_connection') && is_array($config)) {
             sas_mark_connection($pdo, $config, false, (string) $msg, $tenantId);
         }
         return array(false, $msg !== '' ? $msg : 'فشل الدخول', array(

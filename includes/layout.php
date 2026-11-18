@@ -24,6 +24,7 @@ function nav_side_ico($key)
         'settings' => '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
         'company' => '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
         'billing' => '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/><circle cx="16" cy="15" r="1.5"/>',
+        'invoices' => '<path d="M6 2h9l5 5v15a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/>',
         'companies' => '<path d="M3 21h18"/><path d="M5 21V7l7-4 7 4v14"/><path d="M9 21v-6h6v6"/><path d="M9 9h.01"/><path d="M15 9h.01"/><path d="M9 13h.01"/><path d="M15 13h.01"/>',
         'logout' => '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>',
     );
@@ -79,7 +80,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     <link rel="icon" href="assets/favicon.png?v=2" type="image/png" sizes="32x32">
     <?php endif; ?>
     <link rel="apple-touch-icon" href="<?php echo e($brandIcon !== '' ? $brandIcon : 'assets/apple-touch-icon.png?v=2'); ?>">
-    <link rel="stylesheet" href="assets/style.css?v=ui25">
+    <link rel="stylesheet" href="assets/style.css?v=ui26">
     <?php
     // خلفية صورة حتى يشتغل blur — شخصي ثم نظام ثم الافتراضي
     $glassBgSrc = 'assets/glass-bg.jpg?v=1';
@@ -1038,6 +1039,9 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             ?>
             <a class="<?php echo $settingsActive && $active !== 'schedule' ? 'active' : ''; ?>" href="<?php echo e($navSettingsHref); ?>"><?php echo nav_side_ico('settings'); ?><?php echo e(t('settings')); ?></a>
             <?php endif; ?>
+            <?php if (function_exists('current_tenant_id') && (int) current_tenant_id() > 1): ?>
+            <a class="<?php echo $active === 'invoices' ? 'active' : ''; ?>" href="settings.php?tab=invoices"><?php echo nav_side_ico('invoices'); ?><?php echo e($isEn ? 'Invoices' : 'الفواتير'); ?></a>
+            <?php endif; ?>
             <a class="<?php echo $active === 'company' ? 'active' : ''; ?>" href="company.php"><?php echo nav_side_ico('company'); ?><?php echo e($isEn ? 'Company' : 'عن الشركة'); ?></a>
             <?php
             $navTid = $navTidEarly;
@@ -1200,10 +1204,16 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
         }
         if ($sasBanner):
             $banDetail = isset($sasBanner['detail']) ? (string) $sasBanner['detail'] : '';
+            if (stripos($banDetail, 'OTP_REQUIRED') !== false || stripos($banDetail, 'OTP_INVALID') !== false) {
+                $sasBanner = null;
+            }
+        endif;
+        if ($sasBanner):
+            $banDetail = isset($sasBanner['detail']) ? (string) $sasBanner['detail'] : '';
             $banMsg = $isEn
                 ? 'SAS offline — local data stays available. Writes blocked until reconnect.'
                 : 'الساس غير متصل — البيانات المحلية تبقى. الكتابة موقوفة حتى يعود الاتصال.';
-            if ($banDetail !== '' && stripos($banMsg, $banDetail) === false) {
+            if ($banDetail !== '' && stripos($banDetail, 'OTP_REQUIRED') === false && stripos($banDetail, 'OTP_INVALID') === false && stripos($banMsg, $banDetail) === false) {
                 $banMsg .= ' — ' . $banDetail;
             }
             ?>
@@ -1982,8 +1992,9 @@ window.showCornerToast = function (msg, kind) {
   document.addEventListener('click', function (e) {
     var a = e.target && e.target.closest ? e.target.closest('a') : null;
     if (!a) return;
+    if (a.hasAttribute('download') || a.getAttribute('data-no-wait') === '1') return;
     var href = a.getAttribute('href') || '';
-    if (!href || href.charAt(0) === '#' || href.indexOf('javascript:') === 0) return;
+    if (!href || href.charAt(0) === '#' || href.indexOf('javascript:') === 0 || href.indexOf('blob:') === 0) return;
     if (a.target && a.target !== '_self') return;
     if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button === 1) return;
     if (href.indexOf('logout.php') >= 0) return;

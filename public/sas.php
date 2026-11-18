@@ -3022,6 +3022,30 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 }
 #sasActModal .ops-modal-head h3 { display: none; }
 .sas-act-name { font-weight: 800; font-size: 15px; color: #1e293b; line-height: 1.25; }
+#sasActModal.is-ftth .sas-act-field,
+#sasActModal.is-ftth .sas-seg,
+#sasActModal.is-ftth #sasActCreditBox,
+#sasActModal.is-ftth #sasActRewardBox,
+#sasActModal.is-ftth .sas-act-debts.is-empty { display: none !important; }
+#sasActModal.is-ftth .ops-modal-head { justify-content: center; text-align: center; }
+#sasActModal.is-ftth .sas-act-who { width: 100%; text-align: center; }
+#sasActModal.is-ftth .sas-act-name {
+  font-size: 26px; text-align: center; width: 100%;
+  background: linear-gradient(120deg, #0f172a, #0f766e 55%, #22c55e);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: ftthName 2.8s ease-in-out infinite;
+}
+#sasActModal.is-ftth .sas-act-user { justify-content: center; }
+#sasActModal.is-ftth #sasActCardBox select {
+  height: 52px; border-radius: 16px; font-weight: 800; font-size: 15px;
+  border: 1px solid #99f6e4; background: #f0fdfa;
+}
+#sasActModal.is-ftth .sas-act-print { display: flex !important; }
+.sas-act-print { display: none; }
+@keyframes ftthName {
+  0%, 100% { filter: drop-shadow(0 0 0 rgba(34,197,94,0)); }
+  50% { filter: drop-shadow(0 6px 12px rgba(15,118,110,.25)); }
+}
 #sasActModal .sas-act-body {
   flex: 1 1 auto;
   min-height: 0;
@@ -4970,6 +4994,11 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
         </div>
         <div class="sas-act-below">
             <div class="sas-act-opts">
+                <label class="toggle sas-act-opt sas-act-print">
+                    <input type="checkbox" id="sasActPrint" value="1" checked>
+                    <span class="toggle-ui"></span>
+                    <span class="toggle-text"><?php echo e($lang === 'en' ? 'Print invoice' : 'طباعة الفاتورة'); ?></span>
+                </label>
                 <label class="toggle sas-act-opt">
                     <input type="checkbox" id="sasActSendWa" value="1" checked>
                     <span class="toggle-ui"></span>
@@ -5312,7 +5341,26 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
     }
     echo json_encode($seedActCards);
   ?>;
-  var actUsesAgentStock = <?php echo !empty($hideWarehouseCards) ? 'true' : 'false'; ?>;
+  var actWaDefaultOn = <?php echo (function_exists('whatsapp_notifications_enabled') && isset($pdo) && whatsapp_notifications_enabled($pdo)) ? 'true' : 'false'; ?>;
+  var actTenantFtth = <?php echo (function_exists('tenant_is_ftth') && tenant_is_ftth($pdo, $config)) ? 'true' : 'false'; ?>;
+  var ftthCompanyIds = <?php
+    $ftthIds = array();
+    try {
+        if (isset($pdo)) {
+            $ftthRows = $pdo->query('SELECT id, name, sas_host FROM platform_companies')->fetchAll();
+            if (is_array($ftthRows)) {
+                foreach ($ftthRows as $fr) {
+                    $blob = strtolower((isset($fr['name']) ? $fr['name'] : '') . ' ' . (isset($fr['sas_host']) ? $fr['sas_host'] : ''));
+                    if (strpos($blob, 'ftth') !== false) {
+                        $ftthIds[] = (int) $fr['id'];
+                    }
+                }
+            }
+        }
+    } catch (Exception $eFtth) {
+    }
+    echo json_encode($ftthIds);
+  ?>;
   var cardsPrefetch = null;
   var rewardPtsDisp = <?php
     $rpShow = '';
@@ -6237,8 +6285,9 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
     }
     var debtsBox = document.getElementById('sasActDebtsBox');
     if (debtsBox) {
-      // أظهر الصندوق إذا في ديون قديمة أو آجل (حتى يبان مبلغ التفعيل كدين)
-      if (oldSum > 0 || isCredit) debtsBox.classList.remove('is-empty');
+      var ftth = document.getElementById('sasActModal');
+      var ftthOn = ftth && ftth.classList.contains('is-ftth');
+      if (oldSum > 0 || (isCredit && !ftthOn)) debtsBox.classList.remove('is-empty');
       else debtsBox.classList.add('is-empty');
     }
     syncActWa();
@@ -6383,6 +6432,9 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
       // خارج .main حتى position:fixed يغطي الشاشة كاملة (مو فراغ فوق بسبب transform/filter)
       if (modal.parentNode !== document.body) document.body.appendChild(modal);
       modal.classList.remove('hidden', 'is-locking');
+      var coId = parseInt(row.companyId || '0', 10) || 0;
+      var isFtth = !!actTenantFtth || (ftthCompanyIds.indexOf(coId) >= 0);
+      modal.classList.toggle('is-ftth', isFtth);
     }
     var lockEl = document.getElementById('sasActLock');
     if (lockEl) {
@@ -6390,6 +6442,13 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
       lockEl.setAttribute('aria-hidden', 'true');
     }
     setActMode((row.provider === 'earthlink') ? 'credit' : 'card');
+    if (modal && modal.classList.contains('is-ftth')) {
+      setActMode('card');
+      var waEl = document.getElementById('sasActSendWa');
+      if (waEl && !waEl.dataset.userTouched) waEl.checked = !!actWaDefaultOn;
+      var prEl = document.getElementById('sasActPrint');
+      if (prEl && !prEl.dataset.userTouched) prEl.checked = true;
+    }
     paintRewardPts(rewardPtsDisp);
     actWallet = { balance: '', balance_need: '', points: '', points_need: '', currency: '' };
     paintActWalletHints();
@@ -6717,7 +6776,14 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
     });
   }
   var actWa = document.getElementById('sasActSendWa');
-  if (actWa) actWa.addEventListener('change', syncActWa);
+  if (actWa) {
+    actWa.addEventListener('change', function () {
+      actWa.dataset.userTouched = '1';
+      syncActWa();
+    });
+  }
+  var actPrint = document.getElementById('sasActPrint');
+  if (actPrint) actPrint.addEventListener('change', function () { actPrint.dataset.userTouched = '1'; });
   var actOld = document.getElementById('sasActOldDebts');
   if (actOld) {
     actOld.addEventListener('change', function () { actOld.dataset.userTouched = '1'; });

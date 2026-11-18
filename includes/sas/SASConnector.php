@@ -210,7 +210,7 @@ class SASConnector
         );
     }
 
-    public function login()
+    public function login($otp = '')
     {
         $this->lastError = '';
         $this->lastDebug = array(
@@ -223,11 +223,33 @@ class SASConnector
             'username' => $this->username,
             'password' => $this->password,
         );
+        $otp = trim((string) $otp);
+        if ($otp === '') {
+            $cached = $this->readTokenCache();
+            if ($cached !== '') {
+                $this->token = $cached;
+                return true;
+            }
+        }
+        if ($otp !== '') {
+            $payload['code'] = $otp;
+            $payload['otp'] = $otp;
+            $payload['one_time_password'] = $otp;
+            $payload['google2fa'] = $otp;
+            $payload['google2fa_code'] = $otp;
+        }
 
         $route = ($this->portal === 'ucp') ? 'auth/login' : 'login';
         $res = $this->post($route, $payload, false);
 
         if (is_array($res)) {
+            $rawBody = isset($res['body']) ? (string) $res['body'] : '';
+            $parsed = $this->decodeLoginBody($rawBody);
+            if ($this->loginBodyNeedsOtp($parsed, $rawBody)) {
+                $this->lastError = ($otp !== '') ? 'OTP_INVALID' : 'OTP_REQUIRED';
+                $this->lastDebug['response_type'] = 'otp';
+                return false;
+            }
             $this->lastError = $this->describeErrorArray($res);
             $this->lastDebug['response_type'] = 'error_array';
             $this->lastDebug['http_status'] = isset($res['status']) ? $res['status'] : null;
@@ -269,8 +291,14 @@ class SASConnector
         }
 
         $token = $this->extractToken($t);
+        if ($this->loginBodyNeedsOtp($t, '') && $token === '') {
+            $this->lastError = ($otp !== '') ? 'OTP_INVALID' : 'OTP_REQUIRED';
+            $this->lastDebug['response_type'] = 'otp';
+            return false;
+        }
         if ($token !== '') {
             $this->token = $token;
+            $this->writeTokenCache($token);
             if (isset($t['user']) && is_array($t['user'])) {
                 $this->loginUser = $t['user'];
             } elseif (isset($t['manager']) && is_array($t['manager'])) {
@@ -295,6 +323,100 @@ class SASConnector
             ? ('SAS رفض الدخول: ' . $msg)
             : 'SAS رد بدون token — غالباً يوزر/باسورد غلط';
         return false;
+    }
+
+    private function decodeLoginBody($raw)
+    {
+        $raw = (string) $raw;
+        if ($raw === '') {
+            return null;
+        }
+        $t = json_decode($raw, true);
+        if (!is_array($t)) {
+            return null;
+        }
+        if (!empty($t['payload']) && is_string($t['payload'])) {
+            try {
+                $decrypted = $this->aes->decrypt($t['payload'], $this->secretKey);
+                $decoded = json_decode($decrypted, true);
+                if (is_array($decoded)) {
+                    return $decoded;
+                }
+            } catch (Exception $e) {
+            }
+        }
+        return $t;
+    }
+
+    private function loginBodyNeedsOtp($t, $rawText)
+    {
+        $blob = strtolower(trim((string) $rawText));
+        if (is_array($t)) {
+            $flags = array('requires_2fa', 'require_2fa', 'two_factor', 'otp_required', 'google2fa', 'google2fa_enabled');
+            foreach ($flags as $k) {
+                if (!empty($t[$k]) && $t[$k] !== '0' && $t[$k] !== 0 && $t[$k] !== false) {
+                    return true;
+                }
+            }
+            if (isset($t['status']) && in_array((int) $t['status'], array(202, 428), true) && $this->extractToken($t) === '') {
+                $msg = '';
+                if (!empty($t['message']) && is_string($t['message'])) {
+                    $msg = strtolower($t['message']);
+                }
+                if ($msg === '' || strpos($msg, 'otp') !== false || strpos($msg, '2fa') !== false || strpos($msg, 'code') !== false) {
+                    return true;
+                }
+            }
+            $blob .= ' ' . strtolower(json_encode($t));
+        }
+        if ($blob === '') {
+            return false;
+        }
+        $needles = array(
+            '2fa', 'two factor', 'two_factor', 'twofactor', 'otp', 'totp',
+            'authenticator', 'google auth', 'google2fa', 'one_time',
+            'verification code', 'enter the code', 'مصادقة', 'رمز التحقق',
+        );
+        foreach ($needles as $n) {
+            if (strpos($blob, $n) !== false) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private function tokenCachePath()
+    {
+        $dir = dirname(__DIR__, 2) . '/storage/cache';
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0775, true);
+        }
+        return $dir . '/sas_jwt_' . md5(strtolower($this->host . '|' . $this->username)) . '.json';
+    }
+
+    private function readTokenCache()
+    {
+        $path = $this->tokenCachePath();
+        if (!is_file($path)) {
+            return '';
+        }
+        if ((time() - (int) @filemtime($path)) > 21600) {
+            return '';
+        }
+        $j = json_decode((string) @file_get_contents($path), true);
+        if (!is_array($j) || empty($j['token']) || !is_string($j['token'])) {
+            return '';
+        }
+        return $j['token'];
+    }
+
+    private function writeTokenCache($token)
+    {
+        $token = (string) $token;
+        if ($token === '') {
+            return;
+        }
+        @file_put_contents($this->tokenCachePath(), json_encode(array('token' => $token, 'at' => time())), LOCK_EX);
     }
 
     private function extractToken($t)

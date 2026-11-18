@@ -50,7 +50,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'sas') {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && (post('section') === 'ui_theme' || post('section') === 'user_prefs')) {
     $tab = 'theme';
 }
-if (!in_array($tab, array('general', 'whatsapp', 'rental', 'users', 'plans', 'sas', 'saas', 'schedule', 'sensitive', 'update', 'maintenance', 'widgets', 'theme'), true)) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'invoice_design') {
+    $tab = 'invoices';
+}
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'invoice_printer') {
+    $tab = 'invoices';
+}
+if (!in_array($tab, array('general', 'whatsapp', 'rental', 'users', 'plans', 'sas', 'saas', 'schedule', 'sensitive', 'update', 'maintenance', 'widgets', 'theme', 'invoices', 'printers'), true)) {
     $tab = 'general';
 }
 // تبويبات محذوفة من إعدادات أدمن البوابة
@@ -66,6 +72,7 @@ $isAgentWaOnly = ($tab === 'whatsapp' && function_exists('is_agent_user') && is_
 $agencyTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
 $isPlatformAdmin = function_exists('is_super_admin_user') && is_super_admin_user();
 // وكالة: تبويب ربط الساس مسموح بدون صلاحية settings كاملة
+$isInvoiceTab = ($tab === 'invoices' || $tab === 'printers');
 $isAgencySasOnly = ($tab === 'sas' && $agencyTid > 1);
 
 if ($tab === 'users') {
@@ -86,7 +93,7 @@ if ($tab === 'users') {
         flash('error', $lang === 'en' ? 'Super admin only' : 'للمدير العام فقط');
         redirect('settings.php');
     }
-} elseif ($tab === 'widgets' || $tab === 'theme' || $isAgentWaOnly || $isAgencySasOnly) {
+} elseif ($tab === 'widgets' || $tab === 'theme' || $isAgentWaOnly || $isAgencySasOnly || $isInvoiceTab) {
     // وجدز وثيم لكل حساب، وواتساب للوكيل، وربط ساس للوكالة
 } else {
     // وكالة بدون صلاحية settings: وجّه مباشرة لربط الساس
@@ -150,9 +157,125 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'sys_status') {
     exit;
 }
 
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'sas_otp' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    header('Content-Type: application/json; charset=utf-8');
+    if (!verify_csrf(post('csrf'))) {
+        echo json_encode(array('ok' => false, 'error' => 'bad'));
+        exit;
+    }
+    $tidAjax = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    $pending = (isset($_SESSION['sas_link_otp']) && is_array($_SESSION['sas_link_otp'])) ? $_SESSION['sas_link_otp'] : null;
+    if (!$pending || empty($pending['fields']) || !is_array($pending['fields'])) {
+        $reId = (int) post('account_id', '0');
+        $reRow = ($reId > 0 && function_exists('tenant_sas_account_row'))
+            ? tenant_sas_account_row($pdo, $reId, $tidAjax) : null;
+        if (!$reRow) {
+            echo json_encode(array('ok' => false, 'error' => 'bad'));
+            exit;
+        }
+        $pending = array(
+            'fields' => array(
+                'label' => isset($reRow['label']) ? (string) $reRow['label'] : '',
+                'company_id' => !empty($reRow['company_id']) ? (int) $reRow['company_id'] : null,
+                'sas_enabled' => 1,
+                'sas_host' => (string) $reRow['sas_host'],
+                'sas_username' => (string) $reRow['sas_username'],
+                'sas_password' => (string) $reRow['sas_password'],
+                'sas_parent_id' => isset($reRow['sas_parent_id']) ? (int) $reRow['sas_parent_id'] : 1,
+                'sas_default_password' => isset($reRow['sas_default_password']) ? (string) $reRow['sas_default_password'] : '1234',
+                'sas_activate_units' => isset($reRow['sas_activate_units']) ? (int) $reRow['sas_activate_units'] : 1,
+                'sas_extend_method' => isset($reRow['sas_extend_method']) ? (string) $reRow['sas_extend_method'] : 'reward_points',
+                'sas_extend_profile_id' => isset($reRow['sas_extend_profile_id']) ? (int) $reRow['sas_extend_profile_id'] : 0,
+                'sas_on_failure' => isset($reRow['sas_on_failure']) ? (string) $reRow['sas_on_failure'] : 'warn',
+                'is_default' => !empty($reRow['is_default']),
+            ),
+            'edit_id' => $reId,
+            'provider' => 'sas',
+            'company_id' => !empty($reRow['company_id']) ? (int) $reRow['company_id'] : 0,
+        );
+    }
+    $code = preg_replace('/\D+/', '', (string) post('sas_otp', ''));
+    if (strlen($code) < 6) {
+        echo json_encode(array('ok' => false, 'error' => 'short'));
+        exit;
+    }
+    $fieldsAcc = $pending['fields'];
+    list($okT, $msgT) = tenant_test_sas_connection(
+        $fieldsAcc['sas_host'],
+        $fieldsAcc['sas_username'],
+        $fieldsAcc['sas_password'],
+        $code
+    );
+    if (!$okT) {
+        echo json_encode(array('ok' => false, 'error' => 'bad'));
+        exit;
+    }
+    $editId = isset($pending['edit_id']) ? (int) $pending['edit_id'] : 0;
+    unset($_SESSION['sas_link_otp'], $_SESSION['sas_otp_dismissed']);
+    list($okS, $msgS, $newId) = tenant_sas_account_save($pdo, $tidAjax, $fieldsAcc, $editId);
+    if (!$okS) {
+        echo json_encode(array('ok' => false, 'error' => 'bad'));
+        exit;
+    }
+    $accIdMark = (int) $newId > 0 ? (int) $newId : $editId;
+    if ($accIdMark > 0) {
+        try {
+            $pdo->prepare(
+                'UPDATE tenant_sas_accounts
+                 SET last_ok_at = NOW(), last_error = NULL,
+                     login_fail_count = 0, login_next_retry_at = NULL
+                 WHERE id = :id AND tenant_id = :t'
+            )->execute(array(':id' => $accIdMark, ':t' => $tidAjax));
+        } catch (Exception $eOtp) {
+        }
+    }
+    if (function_exists('sas_mark_connection')) {
+        sas_mark_connection($pdo, $config, true, $msgT, $tidAjax);
+    }
+    echo json_encode(array('ok' => true));
+    if (function_exists('fastcgi_finish_request')) {
+        fastcgi_finish_request();
+    }
+    if (function_exists('app_session_close')) {
+        app_session_close();
+    }
+    if (function_exists('set_time_limit')) {
+        @set_time_limit(90);
+    }
+    if (!function_exists('sas_sync_request_now')) {
+        $warmFile = dirname(__DIR__) . '/includes/portal_warm.php';
+        if (is_file($warmFile)) {
+            require_once $warmFile;
+        }
+    }
+    if (function_exists('sas_sync_request_now')) {
+        sas_sync_request_now($tidAjax);
+    }
+    if (function_exists('sas_sync_users_from_api')) {
+        $GLOBALS['sas_warm_pages'] = 12;
+        try {
+            sas_sync_users_from_api($pdo, $config, true, false);
+        } catch (Exception $eSync) {
+        }
+        unset($GLOBALS['sas_warm_pages']);
+    }
+    exit;
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf(post('csrf'))) {
         flash('error', t('saved') === 'Saved' ? 'Invalid request' : 'طلب غير صالح');
+        redirect('settings.php?tab=' . $tab);
+    }
+    if (in_array((string) post('section'), array('invoice_design', 'invoice_printer'), true)) {
+        require_once __DIR__ . '/../includes/invoice_studio.php';
+        $invTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        $invRes = invoice_apply_post($invTid);
+        if ($invRes === 'added_off') {
+            flash('error', $lang === 'en' ? 'Saved, printer did not answer' : 'انحفظت، الطابعة ما ردت');
+        } else {
+            flash('success', $lang === 'en' ? 'Saved' : 'تم الحفظ');
+        }
         redirect('settings.php?tab=' . $tab);
     }
 
@@ -574,6 +697,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($section === 'general') {
         $data = array(
             'site_name' => (string) post('site_name', 'WiFi-Net-SALES'),
+            'invoice_footer_name' => trim((string) post('invoice_footer_name', '')),
             'login_session_days' => max(1, min(30, (int) post('login_session_days', '3'))),
         );
         $tab = 'general';
@@ -819,6 +943,135 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $tidSas = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
         if ($tidSas > 1 && function_exists('tenant_sas_account_save')) {
             $accAction = post('action');
+            if ($accAction === 'sas_otp_cancel') {
+                $dismissId = 0;
+                if (!empty($_SESSION['sas_link_otp']['edit_id'])) {
+                    $dismissId = (int) $_SESSION['sas_link_otp']['edit_id'];
+                }
+                unset($_SESSION['sas_link_otp']);
+                $_SESSION['sas_otp_dismissed'] = $dismissId;
+                flash('info', $lang === 'en' ? 'Two-factor authentication is required' : 'يستوجب مصادقة ثنائية');
+                redirect('settings.php?tab=sas');
+            }
+            if ($accAction === 'sas_otp_open') {
+                $openId = (int) post('account_id', '0');
+                $otpRow = ($openId > 0 && function_exists('tenant_sas_account_row'))
+                    ? tenant_sas_account_row($pdo, $openId, $tidSas) : null;
+                if ($otpRow) {
+                    $_SESSION['sas_otp_dismissed'] = 0;
+                    $_SESSION['sas_link_otp'] = array(
+                        'fields' => array(
+                            'label' => isset($otpRow['label']) ? (string) $otpRow['label'] : '',
+                            'company_id' => !empty($otpRow['company_id']) ? (int) $otpRow['company_id'] : null,
+                            'sas_enabled' => 1,
+                            'sas_host' => (string) $otpRow['sas_host'],
+                            'sas_username' => (string) $otpRow['sas_username'],
+                            'sas_password' => (string) $otpRow['sas_password'],
+                            'sas_parent_id' => isset($otpRow['sas_parent_id']) ? (int) $otpRow['sas_parent_id'] : 1,
+                            'sas_default_password' => isset($otpRow['sas_default_password']) ? (string) $otpRow['sas_default_password'] : '1234',
+                            'sas_activate_units' => isset($otpRow['sas_activate_units']) ? (int) $otpRow['sas_activate_units'] : 1,
+                            'sas_extend_method' => isset($otpRow['sas_extend_method']) ? (string) $otpRow['sas_extend_method'] : 'reward_points',
+                            'sas_extend_profile_id' => isset($otpRow['sas_extend_profile_id']) ? (int) $otpRow['sas_extend_profile_id'] : 0,
+                            'sas_on_failure' => isset($otpRow['sas_on_failure']) ? (string) $otpRow['sas_on_failure'] : 'warn',
+                            'is_default' => !empty($otpRow['is_default']),
+                        ),
+                        'edit_id' => $openId,
+                        'provider' => 'sas',
+                        'company_id' => !empty($otpRow['company_id']) ? (int) $otpRow['company_id'] : 0,
+                        'error' => '',
+                        'at' => time(),
+                    );
+                }
+                redirect('settings.php?tab=sas&otp=1');
+            }
+            if ($accAction === 'sas_otp_confirm') {
+                $pending = (isset($_SESSION['sas_link_otp']) && is_array($_SESSION['sas_link_otp']))
+                    ? $_SESSION['sas_link_otp'] : null;
+                $age = ($pending && !empty($pending['at'])) ? (time() - (int) $pending['at']) : 0;
+                if ($pending && $age > 900) {
+                    $pending['at'] = time();
+                }
+                if (!$pending || empty($pending['fields']) || !is_array($pending['fields'])) {
+                    $reId = (int) post('account_id', '0');
+                    $reRow = ($reId > 0 && function_exists('tenant_sas_account_row'))
+                        ? tenant_sas_account_row($pdo, $reId, $tidSas) : null;
+                    if (!$reRow) {
+                        unset($_SESSION['sas_link_otp']);
+                        flash('info', $lang === 'en' ? 'Two-factor authentication is required' : 'يستوجب مصادقة ثنائية');
+                        redirect('settings.php?tab=sas');
+                    }
+                    $pending = array(
+                        'fields' => array(
+                            'sas_host' => (string) $reRow['sas_host'],
+                            'sas_username' => (string) $reRow['sas_username'],
+                            'sas_password' => (string) $reRow['sas_password'],
+                            'label' => isset($reRow['label']) ? (string) $reRow['label'] : '',
+                            'company_id' => !empty($reRow['company_id']) ? (int) $reRow['company_id'] : null,
+                            'sas_enabled' => 1,
+                            'sas_parent_id' => isset($reRow['sas_parent_id']) ? (int) $reRow['sas_parent_id'] : 1,
+                            'sas_default_password' => isset($reRow['sas_default_password']) ? (string) $reRow['sas_default_password'] : '1234',
+                            'sas_activate_units' => isset($reRow['sas_activate_units']) ? (int) $reRow['sas_activate_units'] : 1,
+                            'sas_extend_method' => isset($reRow['sas_extend_method']) ? (string) $reRow['sas_extend_method'] : 'reward_points',
+                            'sas_extend_profile_id' => isset($reRow['sas_extend_profile_id']) ? (int) $reRow['sas_extend_profile_id'] : 0,
+                            'sas_on_failure' => isset($reRow['sas_on_failure']) ? (string) $reRow['sas_on_failure'] : 'warn',
+                            'is_default' => !empty($reRow['is_default']),
+                        ),
+                        'edit_id' => $reId,
+                        'provider' => 'sas',
+                        'company_id' => !empty($reRow['company_id']) ? (int) $reRow['company_id'] : 0,
+                    );
+                }
+                $code = preg_replace('/\D+/', '', (string) post('sas_otp', ''));
+                if (strlen($code) < 4) {
+                    $pending['error'] = 'short';
+                    $_SESSION['sas_link_otp'] = $pending;
+                    redirect('settings.php?tab=sas&otp=1');
+                }
+                $fieldsAcc = $pending['fields'];
+                list($okT, $msgT) = tenant_test_sas_connection(
+                    $fieldsAcc['sas_host'],
+                    $fieldsAcc['sas_username'],
+                    $fieldsAcc['sas_password'],
+                    $code
+                );
+                if (!$okT) {
+                    $pending['error'] = ($msgT === 'OTP_INVALID' || $msgT === 'OTP_REQUIRED') ? 'bad' : (string) $msgT;
+                    $pending['at'] = time();
+                    $_SESSION['sas_link_otp'] = $pending;
+                    redirect('settings.php?tab=sas&otp=1');
+                }
+                $editId = isset($pending['edit_id']) ? (int) $pending['edit_id'] : 0;
+                $coProvider = isset($pending['provider']) ? (string) $pending['provider'] : 'sas';
+                $companyId = isset($pending['company_id']) ? (int) $pending['company_id'] : 0;
+                unset($_SESSION['sas_link_otp']);
+                list($okS, $msgS, $newId) = tenant_sas_account_save($pdo, $tidSas, $fieldsAcc, $editId);
+                if ($okS) {
+                    if ($coProvider !== 'earthlink' && function_exists('sas_mark_connection')) {
+                        sas_mark_connection($pdo, $config, true, $msgT, $tidSas);
+                    }
+                    $accIdMark = (int) $newId > 0 ? (int) $newId : $editId;
+                    if ($accIdMark > 0) {
+                        try {
+                            $pdo->prepare(
+                                'UPDATE tenant_sas_accounts
+                                 SET last_ok_at = NOW(), last_error = NULL,
+                                     login_fail_count = 0, login_next_retry_at = NULL
+                                 WHERE id = :id AND tenant_id = :t'
+                            )->execute(array(':id' => $accIdMark, ':t' => $tidSas));
+                        } catch (Exception $eMark) {
+                        }
+                    }
+                    if ($coProvider !== 'earthlink' && function_exists('sas_sync_request_now')) {
+                        sas_sync_request_now($tidSas);
+                    }
+                    flash('success', $lang === 'en'
+                        ? 'Saved — connected. Subscribers are downloading'
+                        : 'تم الحفظ — متصل. المشتركين يبدون ينزلون');
+                } else {
+                    flash('error', $msgS);
+                }
+                redirect('settings.php?tab=sas');
+            }
             if ($accAction === 'delete_account') {
                 $delId = (int) post('account_id', '0');
                 list($okD, $msgD) = tenant_sas_account_delete($pdo, $tidSas, $delId);
@@ -843,6 +1096,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 );
                 if ($okR) {
                     flash('success', ($lang === 'en' ? 'Connected: ' : 'تم الدخول: ') . $msgR);
+                } elseif ($msgR === 'OTP_REQUIRED' || $msgR === 'OTP_INVALID') {
+                    $otpRow = function_exists('tenant_sas_account_row')
+                        ? tenant_sas_account_row($pdo, $retryId, $tidSas) : null;
+                    if ($otpRow) {
+                        $_SESSION['sas_link_otp'] = array(
+                            'fields' => array(
+                                'label' => isset($otpRow['label']) ? (string) $otpRow['label'] : '',
+                                'company_id' => !empty($otpRow['company_id']) ? (int) $otpRow['company_id'] : null,
+                                'sas_enabled' => 1,
+                                'sas_host' => (string) $otpRow['sas_host'],
+                                'sas_username' => (string) $otpRow['sas_username'],
+                                'sas_password' => (string) $otpRow['sas_password'],
+                                'sas_parent_id' => isset($otpRow['sas_parent_id']) ? (int) $otpRow['sas_parent_id'] : 1,
+                                'sas_default_password' => isset($otpRow['sas_default_password']) ? (string) $otpRow['sas_default_password'] : '1234',
+                                'sas_activate_units' => isset($otpRow['sas_activate_units']) ? (int) $otpRow['sas_activate_units'] : 1,
+                                'sas_extend_method' => isset($otpRow['sas_extend_method']) ? (string) $otpRow['sas_extend_method'] : 'reward_points',
+                                'sas_extend_profile_id' => isset($otpRow['sas_extend_profile_id']) ? (int) $otpRow['sas_extend_profile_id'] : 0,
+                                'sas_on_failure' => isset($otpRow['sas_on_failure']) ? (string) $otpRow['sas_on_failure'] : 'warn',
+                                'is_default' => !empty($otpRow['is_default']),
+                            ),
+                            'edit_id' => $retryId,
+                            'provider' => 'sas',
+                            'company_id' => !empty($otpRow['company_id']) ? (int) $otpRow['company_id'] : 0,
+                            'error' => '',
+                            'at' => time(),
+                        );
+                    }
+                    redirect('settings.php?tab=sas&otp=1');
                 } else {
                     $extra = '';
                     if (is_array($metaR) && !empty($metaR['next_retry_sec'])) {
@@ -956,6 +1237,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 );
             }
             if (!$okT) {
+                if ($msgT === 'OTP_REQUIRED' || $msgT === 'OTP_INVALID') {
+                    $_SESSION['sas_link_otp'] = array(
+                        'fields' => $fieldsAcc,
+                        'edit_id' => $editId,
+                        'provider' => $coProvider,
+                        'company_id' => $companyId,
+                        'error' => '',
+                        'at' => time(),
+                    );
+                    redirect('settings.php?tab=sas&otp=1');
+                }
                 flash('error', ($lang === 'en' ? 'Not added. Login failed: ' : 'ما انضاف. فشل الدخول: ') . $msgT);
                 redirect('settings.php?tab=sas');
             }
@@ -1223,6 +1515,8 @@ if ($tab === 'whatsapp') {
     $activeNav = 'whatsapp';
 } elseif ($tab === 'users') {
     $activeNav = 'users';
+} elseif ($tab === 'invoices' || $tab === 'printers') {
+    $activeNav = 'invoices';
 }
 
 $sasCfgUi = function_exists('sas_config') ? sas_config($config) : array();
@@ -1296,8 +1590,21 @@ $adminUsers = list_admin_users($pdo);
 $settingsAgents = list_agent_users($pdo, false);
 $me = current_admin();
 
-render_header(t('settings'), $activeNav);
-render_settings_tabs($tab);
+if (($tab === 'invoices' || $tab === 'printers') && isset($_GET['tpl'])) {
+    require_once __DIR__ . '/../includes/invoice_studio.php';
+    $invTidPick = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    invoice_library_active($invTidPick, (string) $_GET['tpl']);
+    redirect('settings.php?tab=invoices');
+}
+render_header(($tab === 'invoices' || $tab === 'printers') ? ($lang === 'en' ? 'Invoices' : 'الفواتير') : t('settings'), $activeNav);
+if ($tab !== 'invoices' && $tab !== 'printers') {
+    render_settings_tabs($tab);
+}
+if ($tab === 'invoices' || $tab === 'printers') {
+    require_once __DIR__ . '/../includes/invoice_studio.php';
+    $invTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    invoice_render_tab($tab, $invTid, isset($lang) && $lang === 'en');
+}
 
 $uiThemeNow = function_exists('ui_theme_current') ? ui_theme_current($pdo) : 'classic';
 $uiThemeNow = ($uiThemeNow === 'glass') ? 'glass' : 'classic';
@@ -2103,6 +2410,10 @@ $gLatTone = ($gMs === null || !$gOk) ? 'bad' : (($gMs >= 200) ? 'bad' : (($gMs >
             <div>
                 <label><?php echo e(t('site_name')); ?></label>
                 <input name="site_name" value="<?php echo e($s['site_name']); ?>" required>
+            </div>
+            <div>
+                <label><?php echo e($lang === 'en' ? 'Invoice footer' : 'فوتر الفاتورة'); ?></label>
+                <input name="invoice_footer_name" value="<?php echo e(isset($s['invoice_footer_name']) ? $s['invoice_footer_name'] : ''); ?>" placeholder="<?php echo e($s['site_name']); ?>">
             </div>
             <div>
                 <label><?php echo e($lang === 'en' ? 'Keep me logged in (days)' : 'مدة حفظ الدخول (أيام)'); ?></label>
@@ -3225,7 +3536,22 @@ if ($sasTenantIdUi > 1) {
                     $nextRetryUi = isset($acc['login_next_retry_at']) ? trim((string) $acc['login_next_retry_at']) : '';
                     if ($loginFail && $failBlobEarly !== ''):
                     ?>
-                    <div class="sas-acc-err"><?php echo e($failBlobEarly); ?></div>
+                    <div class="sas-acc-err"><?php
+                        $failShow = $failBlobEarly;
+                        if ($failShow === 'OTP_REQUIRED' || $failShow === 'OTP_INVALID' || strpos($failShow, 'OTP_REQUIRED') !== false) {
+                            $failShow = $isEn ? 'Authenticator code required' : 'يلزم رمز المصادقة';
+                        }
+                        echo e($failShow);
+                    ?></div>
+                    <?php if ($failBlobEarly === 'OTP_REQUIRED' || $failBlobEarly === 'OTP_INVALID' || strpos($failBlobEarly, 'OTP_REQUIRED') !== false): ?>
+                    <form method="post" style="margin-top:8px">
+                        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                        <input type="hidden" name="section" value="sas">
+                        <input type="hidden" name="action" value="sas_otp_open">
+                        <input type="hidden" name="account_id" value="<?php echo (int) $acc['id']; ?>">
+                        <button class="btn sm" type="submit"><?php echo e($isEn ? 'Enter code' : 'إدخال الرمز'); ?></button>
+                    </form>
+                    <?php endif; ?>
                     <?php
                     if ($nextRetryUi !== '') {
                         $nextTs = strtotime($nextRetryUi);
@@ -3443,6 +3769,205 @@ if ($sasTenantIdUi > 1) {
             var h = opt && opt.getAttribute('data-host') ? opt.getAttribute('data-host') : '';
             if (h) host.value = h;
             if (lab && opt) lab.value = opt.getAttribute('data-name') || '';
+          });
+        })();
+        </script>
+        <?php
+        if (empty($_SESSION['sas_link_otp']) && !empty($sasAccountsList) && empty($_SESSION['sas_otp_dismissed'])) {
+            foreach ($sasAccountsList as $otpAcc) {
+                $otpErr = isset($otpAcc['last_error']) ? (string) $otpAcc['last_error'] : '';
+                if (strpos($otpErr, 'OTP_REQUIRED') === false && strpos($otpErr, 'OTP_INVALID') === false) {
+                    continue;
+                }
+                $_SESSION['sas_link_otp'] = array(
+                    'fields' => array(
+                        'label' => isset($otpAcc['label']) ? (string) $otpAcc['label'] : '',
+                        'company_id' => !empty($otpAcc['company_id']) ? (int) $otpAcc['company_id'] : null,
+                        'sas_enabled' => 1,
+                        'sas_host' => (string) $otpAcc['sas_host'],
+                        'sas_username' => (string) $otpAcc['sas_username'],
+                        'sas_password' => (string) $otpAcc['sas_password'],
+                        'sas_parent_id' => isset($otpAcc['sas_parent_id']) ? (int) $otpAcc['sas_parent_id'] : 1,
+                        'sas_default_password' => isset($otpAcc['sas_default_password']) ? (string) $otpAcc['sas_default_password'] : '1234',
+                        'sas_activate_units' => isset($otpAcc['sas_activate_units']) ? (int) $otpAcc['sas_activate_units'] : 1,
+                        'sas_extend_method' => isset($otpAcc['sas_extend_method']) ? (string) $otpAcc['sas_extend_method'] : 'reward_points',
+                        'sas_extend_profile_id' => isset($otpAcc['sas_extend_profile_id']) ? (int) $otpAcc['sas_extend_profile_id'] : 0,
+                        'sas_on_failure' => isset($otpAcc['sas_on_failure']) ? (string) $otpAcc['sas_on_failure'] : 'warn',
+                        'is_default' => !empty($otpAcc['is_default']),
+                    ),
+                    'edit_id' => (int) $otpAcc['id'],
+                    'provider' => 'sas',
+                    'company_id' => !empty($otpAcc['company_id']) ? (int) $otpAcc['company_id'] : 0,
+                    'error' => '',
+                    'at' => time(),
+                );
+                break;
+            }
+        }
+        $sasOtpPending = (isset($_SESSION['sas_link_otp']) && is_array($_SESSION['sas_link_otp'])) ? $_SESSION['sas_link_otp'] : null;
+        $sasOtpShow = $sasOtpPending && !empty($sasOtpPending['fields']) && (time() - (int) (isset($sasOtpPending['at']) ? $sasOtpPending['at'] : 0) < 900);
+        if (!$sasOtpShow) {
+            $sasOtpPending = null;
+        }
+        $sasOtpUser = ($sasOtpPending && !empty($sasOtpPending['fields']['sas_username'])) ? (string) $sasOtpPending['fields']['sas_username'] : '';
+        $sasOtpErr = ($sasOtpPending && !empty($sasOtpPending['error'])) ? (string) $sasOtpPending['error'] : '';
+        ?>
+        <div class="sas-otp-back<?php echo $sasOtpShow ? '' : ' hidden'; ?>" id="sasOtpModal">
+            <form method="post" class="sas-otp-card" id="sasOtpForm" data-no-wait="1">
+                <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                <input type="hidden" name="section" value="sas">
+                <input type="hidden" name="action" value="sas_otp_confirm">
+                <input type="hidden" name="account_id" value="<?php echo (int) (isset($sasOtpPending['edit_id']) ? $sasOtpPending['edit_id'] : 0); ?>">
+                <div class="sas-otp-badge">2FA</div>
+                <h3><?php echo e($isEn ? 'Second step' : 'مصادقة ثانية'); ?></h3>
+                <p><?php echo e($isEn
+                    ? 'Enter the authenticator code before it expires.'
+                    : 'أدخل رمز المصادقة قبل ما ينتهي.'); ?></p>
+                <?php if ($sasOtpUser !== ''): ?>
+                <div class="sas-otp-user ltr"><?php echo e($sasOtpUser); ?></div>
+                <?php endif; ?>
+                <div class="sas-otp-clock" id="sasOtpClock" dir="ltr">30</div>
+                <input class="sas-otp-input ltr" name="sas_otp" id="sasOtpInput" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="••••••" autofocus>
+                <div class="sas-otp-stage" id="sasOtpStage" aria-hidden="true">
+                    <span class="sas-otp-spin"></span>
+                    <span class="sas-otp-mark is-ok">✓</span>
+                    <span class="sas-otp-mark is-bad">×</span>
+                </div>
+                <?php if ($sasOtpErr === 'bad' || $sasOtpErr === 'short'): ?>
+                <div class="sas-otp-err"><?php echo e($sasOtpErr === 'short'
+                    ? ($isEn ? 'Enter the code from the app.' : 'اكتب الرمز من التطبيق.')
+                    : ($isEn ? 'That code was not accepted. Try the new one.' : 'الرمز ما انقبل. جرّب الرمز الجديد.')); ?></div>
+                <?php elseif ($sasOtpErr !== ''): ?>
+                <div class="sas-otp-err"><?php echo e($sasOtpErr); ?></div>
+                <?php endif; ?>
+                <div class="sas-otp-actions">
+                    <button class="btn" type="submit"><?php echo e($isEn ? 'Continue' : 'متابعة'); ?></button>
+                </div>
+            </form>
+            <form method="post" class="sas-otp-cancel" data-no-wait="1">
+                <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                <input type="hidden" name="section" value="sas">
+                <input type="hidden" name="action" value="sas_otp_cancel">
+                <button class="btn ghost" type="submit"><?php echo e($isEn ? 'Cancel' : 'إلغاء'); ?></button>
+            </form>
+        </div>
+        <style>
+        .sas-otp-back.hidden { display:none !important; }
+        .sas-otp-back {
+          position:fixed; inset:0; z-index:100080;
+          display:flex; flex-direction:column; align-items:center; justify-content:center;
+          padding:22px; background:rgba(8,15,28,.55);
+          backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+        }
+        .sas-otp-card {
+          width:min(420px, 100%); background:#fff; border-radius:24px;
+          padding:26px 24px 20px; text-align:center;
+          box-shadow:0 24px 60px rgba(8,15,28,.28);
+        }
+        .sas-otp-cancel { margin-top:8px; width:min(420px, 100%); }
+        .sas-otp-cancel .btn { width:100%; height:44px; border-radius:14px; font-weight:800; }
+        .sas-otp-badge {
+          display:inline-flex; align-items:center; justify-content:center;
+          min-width:64px; height:28px; padding:0 12px; border-radius:999px;
+          background:#ecfeff; color:#0f766e; font-weight:900; letter-spacing:.08em; font-size:12px;
+        }
+        .sas-otp-card h3 { margin:12px 0 6px; font-size:22px; }
+        .sas-otp-card p { margin:0 0 12px; color:#64748b; font-weight:650; line-height:1.55; }
+        .sas-otp-user {
+          display:inline-block; margin-bottom:12px; padding:4px 10px; border-radius:999px;
+          background:#f8fafc; color:#0f172a; font-weight:800; font-size:13px;
+        }
+        .sas-otp-input {
+          display:block;
+          width:100%; height:64px; border-radius:16px; border:1px solid #dbe4ee;
+          direction:ltr; text-align:center; font-size:28px; font-weight:900;
+          letter-spacing:14px; padding:0 0 0 14px; color:#0f172a;
+        }
+        .sas-otp-input::placeholder { text-align:center; letter-spacing:14px; }
+        .sas-otp-input:focus { outline:none; border-color:#0f766e; box-shadow:0 0 0 4px rgba(15,118,110,.15); }
+        .sas-otp-clock { font-weight:900; font-size:13px; color:#0f766e; margin-bottom:8px; }
+        .sas-otp-stage { display:none; align-items:center; justify-content:center; height:72px; }
+        .sas-otp-card.is-busy .sas-otp-input,
+        .sas-otp-card.is-busy .sas-otp-actions,
+        .sas-otp-card.is-busy .sas-otp-err,
+        .sas-otp-card.is-busy .sas-otp-clock { display:none !important; }
+        .sas-otp-card.is-busy .sas-otp-stage { display:flex; }
+        .sas-otp-spin {
+          width:46px; height:46px; border-radius:50%;
+          border:4px solid #d1fae5; border-top-color:#16a34a;
+          animation:sasOtpSpin .7s linear infinite;
+        }
+        .sas-otp-mark { display:none; width:52px; height:52px; border-radius:50%; align-items:center; justify-content:center; font-size:28px; font-weight:900; color:#fff; }
+        .sas-otp-card.is-ok .sas-otp-spin { display:none; }
+        .sas-otp-card.is-ok .sas-otp-mark.is-ok { display:flex; background:#16a34a; }
+        .sas-otp-card.is-bad .sas-otp-spin { display:none; }
+        .sas-otp-card.is-bad .sas-otp-mark.is-bad { display:flex; background:#dc2626; }
+        @keyframes sasOtpSpin { to { transform:rotate(360deg); } }
+        .sas-otp-err { margin-top:10px; color:#b91c1c; font-weight:800; font-size:13px; }
+        .sas-otp-actions { display:flex; gap:8px; margin-top:16px; }
+        .sas-otp-actions .btn { flex:1; height:46px; border-radius:14px; font-weight:800; }
+        </style>
+        <script>
+        (function () {
+          var box = document.getElementById('sasOtpModal');
+          var card = document.getElementById('sasOtpForm');
+          var inp = document.getElementById('sasOtpInput');
+          var clock = document.getElementById('sasOtpClock');
+          if (!box || box.classList.contains('hidden') || !inp || !card) return;
+          var skew = <?php echo (int) time(); ?> - Math.floor(Date.now() / 1000);
+          function remain() {
+            var t = Math.floor(Date.now() / 1000) + skew;
+            var left = 30 - (t % 30);
+            return left === 0 ? 30 : left;
+          }
+          function paintClock() {
+            if (!clock || card.classList.contains('is-busy')) return;
+            var n = remain();
+            clock.textContent = n + ' <?php echo $isEn ? 's' : 'ث'; ?>';
+            clock.style.color = n <= 5 ? '#b91c1c' : '#0f766e';
+          }
+          paintClock();
+          setInterval(paintClock, 250);
+          setTimeout(function () { try { inp.focus(); } catch (e) {} }, 40);
+          var sent = false;
+          function verify() {
+            if (sent) return;
+            var code = String(inp.value || '').replace(/\D/g, '');
+            if (code.length < 6) return;
+            sent = true;
+            card.classList.add('is-busy');
+            var body = new FormData(card);
+            fetch('settings.php?ajax=sas_otp', { method: 'POST', credentials: 'same-origin', body: body })
+              .then(function (r) { return r.json(); })
+              .then(function (d) {
+                card.classList.add(d && d.ok ? 'is-ok' : 'is-bad');
+                setTimeout(function () {
+                  if (d && d.ok) {
+                    window.location.href = 'settings.php?tab=sas';
+                    return;
+                  }
+                  sent = false;
+                  card.classList.remove('is-busy', 'is-bad');
+                  inp.value = '';
+                  try { inp.focus(); } catch (e2) {}
+                }, 900);
+              })
+              .catch(function () {
+                card.classList.add('is-bad');
+                setTimeout(function () {
+                  sent = false;
+                  card.classList.remove('is-busy', 'is-bad');
+                  inp.value = '';
+                }, 900);
+              });
+          }
+          inp.addEventListener('input', function () {
+            inp.value = String(inp.value || '').replace(/\D/g, '').slice(0, 6);
+            if (inp.value.length === 6) verify();
+          });
+          card.addEventListener('submit', function (e) {
+            e.preventDefault();
+            verify();
           });
         })();
         </script>

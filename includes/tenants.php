@@ -664,11 +664,12 @@ function is_super_admin_user($user = null)
 /**
  * فحص اتصال ساس بدون حفظ — يرجع [ok, message]
  */
-function tenant_test_sas_connection($host, $username, $password)
+function tenant_test_sas_connection($host, $username, $password, $otp = '')
 {
     $host = preg_replace('#^https?://#i', '', rtrim(trim((string) $host), '/'));
     $username = trim((string) $username);
     $password = (string) $password;
+    $otp = trim((string) $otp);
     if ($host === '' || $username === '' || $password === '') {
         return array(false, 'أكمل الرابط واسم المستخدم وكلمة المرور');
     }
@@ -680,8 +681,11 @@ function tenant_test_sas_connection($host, $username, $password)
         if (method_exists($api, 'setTimeout')) {
             $api->setTimeout(20);
         }
-        if (!$api->login()) {
+        if (!$api->login($otp)) {
             $err = method_exists($api, 'getLastError') ? (string) $api->getLastError() : '';
+            if ($err === 'OTP_REQUIRED' || $err === 'OTP_INVALID') {
+                return array(false, $err);
+            }
             $errLow = strtolower($err);
             if ($err === '' || strpos($errLow, 'pass') !== false || strpos($errLow, 'user') !== false
                 || strpos($errLow, 'auth') !== false || strpos($errLow, 'login') !== false
