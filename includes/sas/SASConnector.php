@@ -106,6 +106,11 @@ class SASConnector
             return $res;
         }
 
+        if ($withAuth && isset($res['status']) && (int) $res['status'] === 401) {
+            $this->token = '';
+            $this->clearTokenCache();
+        }
+
         if ($res['status'] >= 200 && $res['status'] < 400) {
             return $res['body'];
         }
@@ -144,6 +149,11 @@ class SASConnector
 
         if (isset($res['__curl_error'])) {
             return $res;
+        }
+
+        if ($withAuth && isset($res['status']) && (int) $res['status'] === 401) {
+            $this->token = '';
+            $this->clearTokenCache();
         }
 
         if ($res['status'] >= 200 && $res['status'] < 400) {
@@ -400,14 +410,50 @@ class SASConnector
         if (!is_file($path)) {
             return '';
         }
-        if ((time() - (int) @filemtime($path)) > 21600) {
-            return '';
-        }
         $j = json_decode((string) @file_get_contents($path), true);
         if (!is_array($j) || empty($j['token']) || !is_string($j['token'])) {
             return '';
         }
-        return $j['token'];
+        if ($this->jwtStillValid($j['token'])) {
+            return $j['token'];
+        }
+        $exp = $this->jwtExpiry($j['token']);
+        if ($exp <= 0 && (time() - (int) @filemtime($path)) <= 21600) {
+            return $j['token'];
+        }
+        return '';
+    }
+
+    private function jwtExpiry($token)
+    {
+        $parts = explode('.', (string) $token);
+        if (count($parts) < 2) {
+            return 0;
+        }
+        $pad = strtr($parts[1], '-_', '+/');
+        $mod = strlen($pad) % 4;
+        if ($mod) {
+            $pad .= str_repeat('=', 4 - $mod);
+        }
+        $p = json_decode((string) base64_decode($pad), true);
+        if (!is_array($p) || empty($p['exp'])) {
+            return 0;
+        }
+        return (int) $p['exp'];
+    }
+
+    private function jwtStillValid($token)
+    {
+        $exp = $this->jwtExpiry($token);
+        return $exp > (time() + 45);
+    }
+
+    private function clearTokenCache()
+    {
+        $path = $this->tokenCachePath();
+        if (is_file($path)) {
+            @unlink($path);
+        }
     }
 
     private function writeTokenCache($token)

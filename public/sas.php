@@ -1428,7 +1428,7 @@ if (function_exists('sas_cache_filter_sql')) {
     $where .= sas_cache_filter_sql($subFilter);
 }
 if (function_exists('sas_agent_scope_sql')) {
-    $where .= sas_agent_scope_sql('c', $withSubs || $q !== '');
+    $where .= sas_agent_scope_sql('c', $q !== '');
 }
 if ($profFilter !== '') {
     $where .= ' AND c.profile_name = :prof';
@@ -2179,9 +2179,7 @@ if ($savedRefreshSec < 0) {
 $parentNames = array();
 $profileNames = array();
 try {
-    $wideIds = function_exists('sas_ownership_search_tenant_ids')
-        ? sas_ownership_search_tenant_ids($pdo)
-        : array(function_exists('current_tenant_id') ? (int) current_tenant_id() : 1);
+    $wideIds = array(function_exists('current_tenant_id') ? (int) current_tenant_id() : 1);
     $wideIn = array();
     foreach ($wideIds as $wid) {
         $wid = (int) $wid;
@@ -7065,15 +7063,34 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
           return;
         }
         var fromIdentity = String(window.__sasActFromIdentity || '');
-        if (fromIdentity && fromIdentity.toLowerCase() === String(actName || '').toLowerCase()) {
-          window.__sasActFromIdentity = '';
-          window.location.href = 'sas_user.php?u=' + encodeURIComponent(fromIdentity);
+        var printBox = document.getElementById('sasActPrint');
+        function finishAct() {
+          if (fromIdentity && fromIdentity.toLowerCase() === String(actName || '').toLowerCase()) {
+            window.__sasActFromIdentity = '';
+            window.location.href = 'sas_user.php?u=' + encodeURIComponent(fromIdentity);
+            return;
+          }
+          releaseActivatedRow(actName);
+          if (window.showCornerToast) {
+            window.showCornerToast(<?php echo json_encode($lang === 'en' ? 'Activated' : 'تم التفعيل'); ?>, 'ok');
+          }
+        }
+        if (printBox && printBox.checked) {
+          var fd = new FormData();
+          fd.append('csrf', csrf);
+          fd.append('action', 'issue');
+          fd.append('username', (actUser && (actUser.username || actUser.id)) || actName);
+          fd.append('name', (actUser && (actUser.name || actUser.display_name || actUser.fn)) || '');
+          fd.append('phone', (actUser && actUser.phone) || '');
+          fd.append('package', profileName || '');
+          fd.append('title', 'تفعيل');
+          fetch('slip.php', { method: 'POST', credentials: 'same-origin', body: fd }).then(function (r) { return r.json(); }).then(function (j) {
+            if (j && j.url) window.open(j.url + '&print=1', 'slip');
+            finishAct();
+          }).catch(function () { finishAct(); });
           return;
         }
-        releaseActivatedRow(actName);
-        if (window.showCornerToast) {
-          window.showCornerToast(<?php echo json_encode($lang === 'en' ? 'Activated' : 'تم التفعيل'); ?>, 'ok');
-        }
+        finishAct();
       }).catch(function () {
         paintActMark(actName, '');
         var netMsg = <?php echo json_encode($lang === 'en' ? 'Activation timed out or network error — check SAS, money was NOT recorded if activate failed' : 'انتهت مهلة التفعيل أو فشل الاتصال — تحقق من الساس؛ المبلغ ما ينسجل إذا التفعيل فشل'); ?>;

@@ -25,6 +25,8 @@ function invoice_default_design()
         'paper' => 'strip80',
         'orient' => 'portrait',
         'margin_top' => 3,
+        'sheet_h' => 0,
+        'sheet_w' => 0,
         'company_name' => '',
         'phone' => '',
         'address' => '',
@@ -46,14 +48,105 @@ function invoice_design_path($tenantId)
     return invoice_studio_dir() . '/design_t' . (int) $tenantId . '.json';
 }
 
+function invoice_frame_styles()
+{
+    return array('none', 'line', 'double', 'dashed', 'round');
+}
+
+function invoice_frame_normalize($j)
+{
+    $styles = invoice_frame_styles();
+    $style = 'none';
+    if (is_array($j) && !empty($j['frame']) && in_array($j['frame'], $styles, true)) {
+        $style = $j['frame'];
+    }
+    $box = array(
+        'style' => $style,
+        'color' => '#0f172a',
+        'thick' => 0.45,
+        'radius' => 0,
+        'x' => 0,
+        'y' => 0,
+        'w' => 0,
+        'h' => 0,
+    );
+    $f = (is_array($j) && isset($j['frame_box']) && is_array($j['frame_box'])) ? $j['frame_box'] : array();
+    if (!empty($f['style']) && in_array($f['style'], $styles, true)) {
+        $box['style'] = $f['style'];
+    }
+    if (!empty($f['color']) && preg_match('/^#[0-9a-fA-F]{6}$/', (string) $f['color'])) {
+        $box['color'] = strtolower((string) $f['color']);
+    }
+    if ($box['style'] === 'round' && empty($f['radius'])) {
+        $box['radius'] = 3;
+    }
+    if (isset($f['thick'])) {
+        $thick = (float) $f['thick'];
+        if ($thick < 0.15) {
+            $thick = 0.15;
+        }
+        if ($thick > 3) {
+            $thick = 3;
+        }
+        $box['thick'] = $thick;
+    }
+    if (isset($f['radius'])) {
+        $radius = (float) $f['radius'];
+        if ($radius < 0) {
+            $radius = 0;
+        }
+        if ($radius > 20) {
+            $radius = 20;
+        }
+        $box['radius'] = $radius;
+    }
+    foreach (array('x', 'y', 'w', 'h') as $k) {
+        if (!isset($f[$k])) {
+            continue;
+        }
+        $n = (float) $f[$k];
+        if ($n < 0) {
+            $n = 0;
+        }
+        if ($n > 450) {
+            $n = 450;
+        }
+        $box[$k] = $n;
+    }
+    return $box;
+}
+
+function invoice_slip_field_value($slip, $kind)
+{
+    $when = isset($slip['created_at']) ? (string) $slip['created_at'] : '';
+    $date = strlen($when) >= 10 ? substr($when, 0, 10) : '';
+    $time = strlen($when) >= 16 ? substr($when, 11, 5) : '';
+    $map = array(
+        'name' => isset($slip['name']) ? $slip['name'] : '',
+        'package' => isset($slip['package']) ? $slip['package'] : '',
+        'start' => isset($slip['start']) ? $slip['start'] : '',
+        'end' => isset($slip['end']) ? $slip['end'] : '',
+        'amount' => isset($slip['amount']) ? $slip['amount'] : '',
+        'company' => isset($slip['company_name']) ? $slip['company_name'] : '',
+        'phone' => isset($slip['company_phone']) ? $slip['company_phone'] : '',
+        'address' => isset($slip['address']) ? $slip['address'] : '',
+        'username' => isset($slip['username']) ? $slip['username'] : '',
+        'mobile' => isset($slip['phone']) ? $slip['phone'] : '',
+        'number' => isset($slip['number']) ? $slip['number'] : '',
+        'date' => $date,
+        'time' => $time,
+    );
+    return isset($map[$kind]) ? (string) $map[$kind] : '';
+}
+
 function invoice_normalize_design($j)
 {
     $base = invoice_default_design();
     $base['id'] = (is_array($j) && !empty($j['id'])) ? (string) $j['id'] : 'main';
     $base['name'] = (is_array($j) && !empty($j['name'])) ? (string) $j['name'] : 'القالب الأساسي';
-    $frames = array('none', 'line', 'double', 'dashed', 'round');
-    $frame = (is_array($j) && !empty($j['frame'])) ? (string) $j['frame'] : 'none';
-    $base['frame'] = in_array($frame, $frames, true) ? $frame : 'none';
+    $frameBox = invoice_frame_normalize(is_array($j) ? $j : array());
+    $base['frame'] = $frameBox['style'];
+    $base['frame_box'] = $frameBox;
     $base['orient'] = (is_array($j) && isset($j['orient']) && $j['orient'] === 'landscape') ? 'landscape' : 'portrait';
     $mt = 3;
     if (is_array($j) && isset($j['margin_top'])) {
@@ -66,6 +159,55 @@ function invoice_normalize_design($j)
         $mt = 12;
     }
     $base['margin_top'] = $mt;
+    $sh = 0;
+    if (is_array($j) && isset($j['sheet_h'])) {
+        $sh = (float) $j['sheet_h'];
+    }
+    if ($sh < 0) {
+        $sh = 0;
+    }
+    if ($sh > 450) {
+        $sh = 450;
+    }
+    $base['sheet_h'] = $sh;
+    $sw = 0;
+    if (is_array($j) && isset($j['sheet_w'])) {
+        $sw = (float) $j['sheet_w'];
+    }
+    if ($sw < 0) {
+        $sw = 0;
+    }
+    if ($sw > 320) {
+        $sw = 320;
+    }
+    $base['sheet_w'] = $sw;
+    $fx = -1;
+    $fy = -1;
+    $fa = 'center';
+    if (is_array($j) && isset($j['footer_x'])) {
+        $fx = (float) $j['footer_x'];
+    }
+    if (is_array($j) && isset($j['footer_y'])) {
+        $fy = (float) $j['footer_y'];
+    }
+    if (is_array($j) && isset($j['footer_align']) && in_array($j['footer_align'], array('left', 'center', 'right'), true)) {
+        $fa = $j['footer_align'];
+    }
+    if ($fx < -1) {
+        $fx = -1;
+    }
+    if ($fx > 320) {
+        $fx = 320;
+    }
+    if ($fy < -1) {
+        $fy = -1;
+    }
+    if ($fy > 450) {
+        $fy = 450;
+    }
+    $base['footer_x'] = $fx;
+    $base['footer_y'] = $fy;
+    $base['footer_align'] = $fa;
     if (!is_array($j)) {
         return $base;
     }
@@ -392,8 +534,17 @@ function invoice_apply_post($tenantId)
         if ($design['name'] === '') {
             $design['name'] = ($act === 'add') ? 'قالب جديد' : 'قالب';
         }
-        $frame = (string) post('frame', 'none');
-        $design['frame'] = in_array($frame, array('none', 'line', 'double', 'dashed', 'round'), true) ? $frame : 'none';
+        $postedFrame = json_decode((string) post('frame_json'), true);
+        if (!is_array($postedFrame)) {
+            $postedFrame = array();
+        }
+        if (empty($postedFrame['style'])) {
+            $postedFrame['style'] = (string) post('frame', 'none');
+        }
+        $design['frame_box'] = $postedFrame;
+        $frameBox = invoice_frame_normalize($design);
+        $design['frame_box'] = $frameBox;
+        $design['frame'] = $frameBox['style'];
         $design['orient'] = ((string) post('orient', 'portrait') === 'landscape') ? 'landscape' : 'portrait';
         $mt = (float) post('margin_top', '3');
         if ($mt < 0) {
@@ -403,6 +554,25 @@ function invoice_apply_post($tenantId)
             $mt = 12;
         }
         $design['margin_top'] = $mt;
+        $sh = (float) post('sheet_h', '0');
+        if ($sh < 0) {
+            $sh = 0;
+        }
+        if ($sh > 450) {
+            $sh = 450;
+        }
+        $design['sheet_h'] = $sh;
+        $sw = (float) post('sheet_w', '0');
+        if ($sw < 0) {
+            $sw = 0;
+        }
+        if ($sw > 320) {
+            $sw = 320;
+        }
+        $design['sheet_w'] = $sw;
+        $design['footer_x'] = (float) post('footer_x', '-1');
+        $design['footer_y'] = (float) post('footer_y', '-1');
+        $design['footer_align'] = (string) post('footer_align', 'center');
         $design['company_name'] = trim((string) post('company_name'));
         $design['phone'] = trim((string) post('phone'));
         $design['address'] = trim((string) post('address'));
@@ -437,6 +607,398 @@ function invoice_apply_post($tenantId)
     return '';
 }
 
+function invoice_request_base()
+{
+    $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+        || (isset($_SERVER['SERVER_PORT']) && (int) $_SERVER['SERVER_PORT'] === 443)
+        || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https');
+    $host = isset($_SERVER['HTTP_HOST']) ? trim((string) $_SERVER['HTTP_HOST']) : 'localhost';
+    $script = isset($_SERVER['SCRIPT_NAME']) ? str_replace('\\', '/', (string) $_SERVER['SCRIPT_NAME']) : '';
+    $dir = rtrim(dirname($script), '/');
+    if ($dir === '.' || $dir === '/') {
+        $dir = '';
+    }
+    return ($https ? 'https' : 'http') . '://' . $host . $dir . '/';
+}
+
+function invoice_slip_root()
+{
+    $dir = invoice_studio_dir() . '/slips';
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0775, true);
+    }
+    return $dir;
+}
+
+function invoice_slip_token_clean($token)
+{
+    $token = strtolower(trim((string) $token));
+    return preg_replace('/[^a-f0-9]/', '', $token);
+}
+
+function invoice_slip_path($token)
+{
+    $token = invoice_slip_token_clean($token);
+    if (strlen($token) < 8) {
+        return '';
+    }
+    return invoice_slip_root() . '/' . $token . '.json';
+}
+
+function invoice_slip_index_path($tenantId)
+{
+    return invoice_studio_dir() . '/slip_index_t' . (int) $tenantId . '.json';
+}
+
+function invoice_slip_index_load($tenantId)
+{
+    $path = invoice_slip_index_path($tenantId);
+    if (!is_file($path)) {
+        return array();
+    }
+    $j = json_decode((string) @file_get_contents($path), true);
+    return is_array($j) ? $j : array();
+}
+
+function invoice_slip_index_save($tenantId, $rows)
+{
+    $json = json_encode(array_values($rows));
+    return $json !== false && @file_put_contents(invoice_slip_index_path($tenantId), $json, LOCK_EX) !== false;
+}
+
+function invoice_slip_load($token)
+{
+    $path = invoice_slip_path($token);
+    if ($path === '' || !is_file($path)) {
+        return null;
+    }
+    $j = json_decode((string) @file_get_contents($path), true);
+    return is_array($j) ? $j : null;
+}
+
+function invoice_slips_for_user($tenantId, $username)
+{
+    $username = strtolower(trim((string) $username));
+    $out = array();
+    foreach (invoice_slip_index_load($tenantId) as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        if (strtolower(trim((string) (isset($row['username']) ? $row['username'] : ''))) === $username) {
+            $out[] = $row;
+        }
+    }
+    return $out;
+}
+
+function invoice_slip_issue($tenantId, $meta, $design)
+{
+    $tenantId = (int) $tenantId;
+    if (!is_array($design)) {
+        $design = invoice_design_load($tenantId);
+    }
+    if (function_exists('random_bytes')) {
+        $token = bin2hex(random_bytes(8));
+    } else {
+        $token = substr(md5(uniqid('slip', true)), 0, 16);
+    }
+    $url = invoice_request_base() . 'slip.php?k=' . $token;
+    $sizes = invoice_paper_sizes();
+    $paper = isset($design['paper']) && isset($sizes[$design['paper']]) ? $design['paper'] : 'strip80';
+    $w = (int) $sizes[$paper]['w'];
+    if (!empty($design['orient']) && $design['orient'] === 'landscape' && (int) $sizes[$paper]['h'] > 0) {
+        $w = (int) $sizes[$paper]['h'];
+    }
+    if (!empty($design['sheet_w']) && (float) $design['sheet_w'] >= 30) {
+        $w = (float) $design['sheet_w'];
+    }
+    $h = isset($design['sheet_h']) ? (float) $design['sheet_h'] : 0;
+    if ($h < 40) {
+        $h = 0;
+    }
+    $blocks = array();
+    if (!empty($design['blocks']) && is_array($design['blocks'])) {
+        foreach ($design['blocks'] as $b) {
+            if (is_array($b)) {
+                $blocks[] = $b;
+            }
+        }
+    }
+    $username = trim((string) (isset($meta['username']) ? $meta['username'] : ''));
+    $name = trim((string) (isset($meta['name']) ? $meta['name'] : ''));
+    if ($name === '') {
+        $name = $username;
+    }
+    $slip = array(
+        'token' => $token,
+        'url' => $url,
+        'tenant_id' => $tenantId,
+        'username' => $username,
+        'name' => $name,
+        'phone' => trim((string) (isset($meta['phone']) ? $meta['phone'] : '')),
+        'package' => trim((string) (isset($meta['package']) ? $meta['package'] : '')),
+        'amount' => trim((string) (isset($meta['amount']) ? $meta['amount'] : '')),
+        'start' => trim((string) (isset($meta['start']) ? $meta['start'] : date('Y-m-d'))),
+        'end' => trim((string) (isset($meta['end']) ? $meta['end'] : '')),
+        'title' => trim((string) (isset($meta['title']) ? $meta['title'] : 'وصل')),
+        'number' => invoice_slip_next_number($tenantId),
+        'created_at' => date('Y-m-d H:i:s'),
+        'paper_w' => $w,
+        'paper_h' => $h,
+        'frame' => isset($design['frame']) ? (string) $design['frame'] : 'line',
+        'frame_box' => invoice_frame_normalize($design),
+        'blocks' => $blocks,
+        'margin_top' => isset($design['margin_top']) ? (float) $design['margin_top'] : 3,
+        'footer_x' => isset($design['footer_x']) ? (float) $design['footer_x'] : -1,
+        'footer_y' => isset($design['footer_y']) ? (float) $design['footer_y'] : -1,
+        'footer_align' => (isset($design['footer_align']) && in_array($design['footer_align'], array('left', 'center', 'right'), true)) ? $design['footer_align'] : 'center',
+        'logo' => isset($design['logo']) ? (string) $design['logo'] : '',
+        'company_name' => isset($design['company_name']) ? (string) $design['company_name'] : '',
+        'company_phone' => isset($design['phone']) ? (string) $design['phone'] : '',
+        'address' => isset($design['address']) ? (string) $design['address'] : '',
+        'footer' => invoice_system_footer(),
+    );
+    $path = invoice_slip_path($token);
+    $json = json_encode($slip);
+    if ($path === '' || $json === false || @file_put_contents($path, $json, LOCK_EX) === false) {
+        return null;
+    }
+    $index = invoice_slip_index_load($tenantId);
+    array_unshift($index, array(
+        'token' => $token,
+        'username' => $username,
+        'name' => $name,
+        'title' => $slip['title'],
+        'number' => $slip['number'],
+        'amount' => $slip['amount'],
+        'created_at' => $slip['created_at'],
+    ));
+    if (count($index) > 500) {
+        $index = array_slice($index, 0, 500);
+    }
+    invoice_slip_index_save($tenantId, $index);
+    return $slip;
+}
+
+function invoice_slip_next_number($tenantId)
+{
+    $path = invoice_studio_dir() . '/slip_seq_t' . (int) $tenantId . '.txt';
+    $fh = @fopen($path, 'c+');
+    if (!$fh) {
+        return 'AS_' . strtoupper(substr(md5(uniqid('as', true)), 0, 6));
+    }
+    @flock($fh, LOCK_EX);
+    $raw = stream_get_contents($fh);
+    $n = (int) $raw + 1;
+    if ($n > 999999) {
+        $n = 1;
+    }
+    rewind($fh);
+    ftruncate($fh, 0);
+    fwrite($fh, (string) $n);
+    fflush($fh);
+    flock($fh, LOCK_UN);
+    fclose($fh);
+    return 'AS_' . str_pad((string) $n, 6, '0', STR_PAD_LEFT);
+}
+
+function invoice_h($value)
+{
+    return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
+}
+
+function invoice_slip_design_html($slip)
+{
+    $blocks = (isset($slip['blocks']) && is_array($slip['blocks'])) ? $slip['blocks'] : array();
+    if (!$blocks) {
+        return '';
+    }
+    $w = isset($slip['paper_w']) ? (float) $slip['paper_w'] : 80;
+    if ($w < 40) {
+        $w = 80;
+    }
+    $h = isset($slip['paper_h']) ? (float) $slip['paper_h'] : 0;
+    if ($h < 30) {
+        $h = 24;
+        foreach ($blocks as $b) {
+            if (!is_array($b)) {
+                continue;
+            }
+            $kind = isset($b['kind']) ? (string) $b['kind'] : '';
+            $bh = ($kind === 'logo' || $kind === 'qr') ? (isset($b['w']) && (float) $b['w'] > 0 ? (float) $b['w'] : 18) : 8;
+            $bottom = (isset($b['y']) ? (float) $b['y'] : 0) + $bh;
+            if ($bottom > $h) {
+                $h = $bottom;
+            }
+        }
+        $h += 8;
+    }
+    $frame = invoice_frame_normalize($slip);
+    $thick = (float) $frame['thick'];
+    if ($frame['style'] === 'double' && $thick < 0.8) {
+        $thick = 0.8;
+    }
+    $fx = (float) $frame['x'];
+    $fy = (float) $frame['y'];
+    $fw = (float) $frame['w'] >= 8 ? (float) $frame['w'] : max(10, $w - ($fx * 2));
+    $fh = (float) $frame['h'] >= 8 ? (float) $frame['h'] : max(10, $h - ($fy * 2));
+    $styleMap = array('line' => 'solid', 'double' => 'double', 'dashed' => 'dashed', 'round' => 'solid');
+    $footY = isset($slip['footer_y']) ? (float) $slip['footer_y'] : -1;
+    if ($footY >= 0 && ($footY + 7) > $h) {
+        $h = $footY + 8;
+    }
+    $html = '<article class="slip slip-design" style="width:' . invoice_h($w) . 'mm;height:' . invoice_h($h) . 'mm;padding:0;position:relative;overflow:hidden;">';
+    if ($frame['style'] !== 'none' && isset($styleMap[$frame['style']])) {
+        $html .= '<div style="position:absolute;left:' . invoice_h($fx) . 'mm;top:' . invoice_h($fy) . 'mm;width:' . invoice_h($fw) . 'mm;height:' . invoice_h($fh) . 'mm;box-sizing:border-box;border:' . invoice_h($thick) . 'mm ' . $styleMap[$frame['style']] . ' ' . invoice_h($frame['color']) . ';border-radius:' . invoice_h($frame['radius']) . 'mm;"></div>';
+    }
+    foreach ($blocks as $b) {
+        if (!is_array($b) || (isset($b['on']) && !$b['on'])) {
+            continue;
+        }
+        $kind = isset($b['kind']) ? (string) $b['kind'] : 'custom';
+        $x = isset($b['x']) ? (float) $b['x'] : 0;
+        $y = isset($b['y']) ? (float) $b['y'] : 0;
+        $bw = isset($b['w']) ? (float) $b['w'] : 0;
+        $size = isset($b['size']) ? (float) $b['size'] : 13;
+        $color = (isset($b['color']) && preg_match('/^#[0-9a-fA-F]{6}$/', (string) $b['color'])) ? (string) $b['color'] : '#111827';
+        $align = (isset($b['align']) && in_array($b['align'], array('left', 'center', 'right'), true)) ? $b['align'] : 'right';
+        $dir = (isset($b['dir']) && $b['dir'] === 'ltr') ? 'ltr' : 'rtl';
+        $label = isset($b['label']) ? trim((string) $b['label']) : '';
+        $text = isset($b['text']) ? (string) $b['text'] : '';
+        $pos = 'position:absolute;left:' . invoice_h($x) . 'mm;top:' . invoice_h($y) . 'mm;';
+        if ($bw > 0) {
+            $pos .= 'width:' . invoice_h($bw) . 'mm;';
+        }
+        if ($kind === 'rule') {
+            $rw = $bw > 0 ? $bw : max(20, $w - 8);
+            $border = !empty($b['dash']) ? 'dashed' : 'solid';
+            $html .= '<div style="' . $pos . 'width:' . invoice_h($rw) . 'mm;border-top:0.4mm ' . $border . ' ' . invoice_h($color) . ';height:0;"></div>';
+            continue;
+        }
+        if ($kind === 'table' && !empty($b['rows']) && is_array($b['rows'])) {
+            $tw = $bw > 0 ? $bw : max(30, $w - 8);
+            $rowH = isset($b['rowH']) ? (float) $b['rowH'] : 7;
+            if ($rowH < 4) {
+                $rowH = 4;
+            }
+            if ($rowH > 30) {
+                $rowH = 30;
+            }
+            $cols = (isset($b['cols']) && is_array($b['cols'])) ? $b['cols'] : array();
+            $colSum = 0;
+            foreach ($cols as $cw) {
+                $colSum += ((float) $cw > 0) ? (float) $cw : 0;
+            }
+            $table = '<table dir="rtl" style="width:100%;table-layout:fixed;border-collapse:collapse;border:0.4mm solid #0f172a;box-sizing:border-box;font-size:' . invoice_h($size) . 'px;color:' . invoice_h($color) . ';background:#fff;">';
+            if ($colSum > 0) {
+                $cellN = 0;
+                foreach ($b['rows'] as $_r0) {
+                    if (is_array($_r0) && count($_r0) > $cellN) {
+                        $cellN = count($_r0);
+                    }
+                }
+                if ($cellN > 0 && count($cols) > $cellN) {
+                    $cols = array_slice($cols, 0, $cellN);
+                    $colSum = 0;
+                    foreach ($cols as $cw) {
+                        $colSum += ((float) $cw > 0) ? (float) $cw : 0;
+                    }
+                }
+                if ($colSum > 0) {
+                    $table .= '<colgroup>';
+                    foreach ($cols as $cw) {
+                        $pct = (((float) $cw > 0 ? (float) $cw : 0) / $colSum) * 100;
+                        $table .= '<col style="width:' . invoice_h(round($pct, 3)) . '%;">';
+                    }
+                    $table .= '</colgroup>';
+                }
+            }
+            foreach ($b['rows'] as $row) {
+                if (!is_array($row)) {
+                    continue;
+                }
+                $table .= '<tr style="height:' . invoice_h($rowH) . 'mm;">';
+                foreach ($row as $cell) {
+                    if (!is_array($cell)) {
+                        $cell = array();
+                    }
+                    $ct = isset($cell['t']) ? (string) $cell['t'] : '';
+                    $ck = isset($cell['k']) ? (string) $cell['k'] : '';
+                    $cv = $ck !== '' ? invoice_slip_field_value($slip, $ck) : '';
+                    $show = ($ct !== '' && $cv !== '') ? ($ct . '  ' . $cv) : ($ct !== '' ? $ct : $cv);
+                    if ($show === '') {
+                        $show = "\xc2\xa0";
+                    }
+                    $span = 1;
+                    $table .= '<td colspan="' . $span . '" style="border:0.35mm solid #0f172a;padding:1mm 1.2mm;height:' . invoice_h($rowH) . 'mm;vertical-align:middle;text-align:right;background:#fff;">' . invoice_h($show) . '</td>';
+                }
+                $table .= '</tr>';
+            }
+            $table .= '</table>';
+            $html .= '<div style="' . $pos . 'width:' . invoice_h($tw) . 'mm;">' . $table . '</div>';
+            continue;
+        }
+        if ($kind === 'logo') {
+            $logo = isset($slip['logo']) ? (string) $slip['logo'] : '';
+            if ($logo === '') {
+                continue;
+            }
+            $lw = $bw > 0 ? $bw : 18;
+            $html .= '<img alt="" src="' . invoice_h($logo) . '" style="' . $pos . 'width:' . invoice_h($lw) . 'mm;height:auto;">';
+            continue;
+        }
+        if ($kind === 'qr') {
+            $qw = $bw > 0 ? $bw : 22;
+            $url = isset($slip['url']) ? (string) $slip['url'] : '';
+            $html .= '<img alt="" data-qr="' . invoice_h($url) . '" style="' . $pos . 'width:' . invoice_h($qw) . 'mm;height:' . invoice_h($qw) . 'mm;background:#fff;">';
+            continue;
+        }
+        $value = ($kind === 'custom') ? $text : invoice_slip_field_value($slip, $kind);
+        if ($kind !== 'custom' && $label === '' && $text !== '') {
+            $value = $text;
+        }
+        $fw = (isset($b['weight']) && $b['weight'] === 'normal') ? '400' : '800';
+        $fst = !empty($b['italic']) ? 'italic' : 'normal';
+        $td = !empty($b['under']) ? 'underline' : 'none';
+        $type = 'font-weight:' . $fw . ';font-style:' . $fst . ';text-decoration:' . $td . ';';
+        $inner = '';
+        if ($kind !== 'custom' && $label !== '') {
+            if (!empty($b['stack'])) {
+                $flow = 'flex-direction:column;align-items:stretch;';
+            } elseif ($bw > 0) {
+                $flow = 'justify-content:space-between;align-items:baseline;';
+            } else {
+                $flow = 'justify-content:flex-start;align-items:baseline;';
+            }
+            $pairW = $bw > 0 ? 'width:100%;' : 'width:max-content;max-width:100%;';
+            $inner = '<span style="display:flex;' . $flow . 'gap:1.2mm;' . $pairW . $type . '">'
+                . '<span>' . invoice_h($label) . '</span>'
+                . '<span>' . invoice_h($value) . '</span></span>';
+        } else {
+            $inner = invoice_h($value);
+        }
+        $html .= '<div style="' . $pos . 'font-size:' . invoice_h($size) . 'px;color:' . invoice_h($color) . ';text-align:' . invoice_h($align) . ';direction:' . invoice_h($dir) . ';line-height:1.15;white-space:nowrap;' . $type . '">' . $inner . '</div>';
+    }
+    $footer = isset($slip['footer']) ? trim((string) $slip['footer']) : '';
+    if ($footer === '') {
+        $footer = invoice_system_footer();
+    }
+    $footY = isset($slip['footer_y']) ? (float) $slip['footer_y'] : -1;
+    $footX = isset($slip['footer_x']) ? (float) $slip['footer_x'] : -1;
+    $fa = (isset($slip['footer_align']) && in_array($slip['footer_align'], array('left', 'center', 'right'), true)) ? $slip['footer_align'] : 'center';
+    $fstyle = 'position:absolute;z-index:5;background:#fff;font-size:9px;line-height:1.3;font-weight:800;color:#64748b;padding:0.8mm 1.6mm;text-align:' . invoice_h($fa) . ';';
+    if ($footX >= 0 && $footY >= 0) {
+        $fstyle .= 'left:' . invoice_h($footX) . 'mm;top:' . invoice_h($footY) . 'mm;max-width:' . invoice_h(max(10, $w - $footX - 1)) . 'mm;';
+    } elseif ($footY >= 0) {
+        $fstyle .= 'left:1mm;right:1mm;top:' . invoice_h($footY) . 'mm;';
+    } else {
+        $fstyle .= 'left:1mm;right:1mm;bottom:1.2mm;';
+    }
+    $html .= '<div style="' . $fstyle . '">' . invoice_h($footer) . '</div>';
+    $html .= '</article>';
+    return $html;
+}
+
 function invoice_render_tab($tab, $tenantId, $isEn)
 {
     $rows = invoice_printers_load($tenantId);
@@ -454,8 +1016,16 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         array('id' => 'company', 'label' => $isEn ? 'Company' : 'الشركة'),
         array('id' => 'phone', 'label' => $isEn ? 'Phone' : 'الهاتف'),
         array('id' => 'address', 'label' => $isEn ? 'Address' : 'العنوان'),
+        array('id' => 'username', 'label' => $isEn ? 'Username' : 'اليوزر'),
+        array('id' => 'mobile', 'label' => $isEn ? 'Mobile' : 'هاتف المشترك'),
+        array('id' => 'number', 'label' => $isEn ? 'Number' : 'رقم الفاتورة'),
+        array('id' => 'date', 'label' => $isEn ? 'Date' : 'التاريخ'),
+        array('id' => 'time', 'label' => $isEn ? 'Time' : 'الوقت'),
         array('id' => 'logo', 'label' => $isEn ? 'Logo' : 'الشعار'),
         array('id' => 'qr', 'label' => 'QR'),
+        array('id' => 'rule', 'label' => $isEn ? 'Line' : 'خط'),
+        array('id' => 'ruledash', 'label' => $isEn ? 'Dashed' : 'متقطع'),
+        array('id' => 'table', 'label' => $isEn ? 'Table' : 'جدول'),
     );
     $frames = array(
         'none' => $isEn ? 'None' : 'بدون',
@@ -508,7 +1078,7 @@ function invoice_render_tab($tab, $tenantId, $isEn)
             'address' => $isEn ? 'Address' : 'العنوان',
             'logo' => $isEn ? 'Logo' : 'الشعار',
             'swapLogo' => $isEn ? 'Replace logo' : 'تبديل الشعار',
-            'oneCol' => $isEn ? 'One column' : 'عمود واحد',
+            'oneCol' => $isEn ? 'One column' : 'نسق واحد',
             'beside' => $isEn ? 'Side by side' : 'بجانب بعض',
             'guides' => $isEn ? 'Align' : 'محاذاة',
             'exporting' => $isEn ? 'Exporting…' : 'جارٍ التصدير…',
@@ -534,59 +1104,159 @@ function invoice_render_tab($tab, $tenantId, $isEn)
     .inv-app { flex: 1; min-height: 0; width: 100%; display: flex; flex-direction: column; }
     .inv-gallery, .inv-desk { flex: 1; min-height: 0; min-width: 0; background: linear-gradient(180deg,#f8fafc,#eef2f6); border: 1px solid #e6ebf2; border-radius: 22px; overflow: hidden; }
     .inv-gallery:not([hidden]), .inv-desk:not([hidden]) { display: flex; flex-direction: column; }
-    .inv-gbar, .inv-top { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: rgba(255,255,255,.94); border-bottom: 1px solid #e6ebf2; flex: 0 0 auto; }
+    .inv-gbar { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: rgba(255,255,255,.94); border-bottom: 1px solid #e6ebf2; flex: 0 0 auto; }
     .inv-gbar h2 { margin: 0; font-size: 18px; }
     .inv-gbar p { margin: 2px 0 0; color: #64748b; font-size: 12px; font-weight: 700; }
     .inv-gbar-acts, .inv-top-acts { display: flex; gap: 6px; margin-inline-start: auto; }
-    .inv-name { border: 0; background: transparent; font: inherit; font-weight: 800; font-size: 16px; min-width: 0; flex: 1; color: inherit; }
-    .inv-len { color: #0f766e; font-weight: 800; font-size: 12px; white-space: nowrap; }
-    .inv-cards { display: grid; grid-template-columns: repeat(auto-fill,minmax(190px,1fr)); gap: 12px; padding: 14px; overflow: auto; min-height: 0; }
-    .inv-card { position: relative; background: #fff; border: 1px solid #e6ebf2; border-radius: 18px; padding: 10px; cursor: pointer; box-shadow: 0 10px 28px rgba(15,23,42,.05); text-align: center; }
+    .inv-name { border: 0; background: rgba(255,255,255,.94); font: inherit; font-weight: 800; font-size: 16px; min-width: 0; flex: 1; color: inherit; border-radius: 12px; padding: 6px 10px; box-shadow: 0 6px 16px rgba(15,23,42,.06); }
+    .inv-len { color: #0f766e; font-weight: 800; font-size: 12px; white-space: nowrap; background: rgba(255,255,255,.94); border-radius: 999px; padding: 6px 10px; box-shadow: 0 6px 16px rgba(15,23,42,.06); }
+    .inv-cards { flex: 1 1 auto; min-height: 240px; display: grid; grid-template-columns: repeat(auto-fill,minmax(190px,1fr)); gap: 12px; padding: 14px; overflow: auto; align-content: start; }
+    .inv-card { position: relative; overflow: hidden; background: #fff; border: 1px solid #e6ebf2; border-radius: 18px; padding: 10px; cursor: pointer; box-shadow: 0 10px 28px rgba(15,23,42,.05); text-align: center; }
     .inv-card:hover { border-color: #99f6e4; transform: translateY(-2px); }
     .inv-card strong { display: block; margin-top: 8px; }
     .inv-card em { display: block; color: #64748b; font-style: normal; font-size: 12px; font-weight: 700; }
     .inv-thumb { height: 150px; border-radius: 12px; background: #f1f5f9; overflow: hidden; display: flex; align-items: flex-start; justify-content: center; }
     .inv-mini { position: relative; }
     .inv-card-del { position: absolute; top: 8px; inset-inline-end: 8px; width: 26px; height: 26px; border: 0; border-radius: 999px; background: #fff; color: #b91c1c; font-weight: 800; cursor: pointer; box-shadow: 0 4px 12px rgba(15,23,42,.12); }
-    .inv-prop { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #fff; border-bottom: 1px solid #e6ebf2; overflow-x: auto; flex: 0 0 auto; }
+    .inv-desk:not([hidden]) {
+      display: grid;
+      grid-template-columns: 56px minmax(0, 1fr);
+      grid-template-rows: minmax(0, 1fr) auto auto;
+    }
+    .inv-body { display: contents; }
+    .inv-prop {
+      grid-column: 2; grid-row: 2;
+      width: auto; max-width: 100%; min-width: 0;
+      display: flex; flex-direction: row; flex-wrap: nowrap; align-items: center;
+      gap: 8px; padding: 8px 10px; background: #fff;
+      border-top: 1px solid #e6ebf2; overflow-x: auto; overflow-y: hidden;
+    }
     .inv-prop[hidden] { display: none !important; }
-    .inv-field { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
-    .inv-field > span { font-size: 11px; font-weight: 800; color: #64748b; }
+    .inv-prop > * { position: relative; flex: 0 0 auto; }
+    .inv-field { display: flex; align-items: center; gap: 6px; }
+    .inv-prop .inv-seg { display: flex; flex-wrap: nowrap; width: auto; }
+    #pText { width: 150px; max-width: 150px; }
+    #pBind { width: 132px; max-width: 132px; height: 32px; }
+    .inv-prop input[type="number"] { width: 46px; }
+    .inv-field > span { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0; }
+    .inv-field > span.inv-keep { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip: auto; font-size: 11px; font-weight: 800; color: #64748b; }
     .inv-prop input[type="text"], .inv-prop input[type="number"] { height: 32px; border: 1px solid #e2e8f0; border-radius: 10px; padding: 0 8px; background: #fff; }
-    #pText { width: 150px; }
-    .inv-prop input[type="number"] { width: 62px; }
-    #pSize { width: 88px; }
-    #pColor { width: 36px; height: 32px; border: 0; background: transparent; padding: 0; }
-    .inv-seg { display: flex; background: #f1f5f9; border-radius: 10px; padding: 2px; }
-    .inv-seg button { border: 0; background: transparent; height: 28px; padding: 0 8px; border-radius: 8px; font-weight: 800; cursor: pointer; color: #334155; }
+    #pSizeN { width: 42px; text-align: center; border: 0; background: transparent; font-weight: 800; }
+    #pColor, #pFrameColor { width: 28px; height: 28px; border: 0; background: transparent; padding: 0; }
+    .inv-seg { display: flex; background: #f1f5f9; border-radius: 10px; padding: 2px; gap: 2px; }
+    .inv-seg button { width: 32px; height: 32px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: #334155; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+    .inv-seg button svg { display: block; }
     .inv-seg button.is-on { background: #fff; color: #0f766e; box-shadow: 0 1px 4px rgba(15,23,42,.08); }
-    .inv-check { display: flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 800; color: #334155; white-space: nowrap; }
-    .inv-body { flex: 1; min-height: 0; display: flex; gap: 10px; padding: 10px; }
-    .inv-rail { width: 58px; flex: 0 0 58px; display: flex; flex-direction: column; gap: 8px; align-items: center; align-self: center; padding: 8px; background: #fff; border: 1px solid #e6ebf2; border-radius: 18px; box-shadow: 0 10px 30px rgba(15,23,42,.06); }
+    .inv-ico { position: relative; width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center; border-radius: 8px; color: #334155; cursor: pointer; }
+    .inv-ico input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+    .inv-ico.is-on { background: #ccfbf1; color: #0f766e; }
+    .inv-rail { grid-column: 1; grid-row: 1 / 3; width: 56px; display: flex; flex-direction: column; gap: 8px; align-items: center; justify-content: flex-start; padding: 10px 6px; background: #fff; border-left: 1px solid #e6ebf2; }
+    .inv-stage { grid-column: 2; grid-row: 1; position: relative; min-width: 0; min-height: 0; display: flex; align-items: center; justify-content: center; overflow: auto; background: #e7edf3; padding: 20px; direction: ltr; }
+    .inv-bottom { grid-column: 1 / -1; grid-row: 3; }
     .inv-rail button { width: 42px; height: 42px; border: 0; border-radius: 12px; background: transparent; color: #334155; cursor: pointer; display: flex; align-items: center; justify-content: center; }
     .inv-rail button.is-on, .inv-rail button:hover { background: #ccfbf1; color: #0f766e; }
-    .inv-stage { position: relative; flex: 1; min-width: 0; min-height: 0; display: flex; align-items: flex-start; justify-content: center; overflow: auto; border-radius: 16px; background: #e7edf3; padding: 18px 12px 28px; }
-    .inv-fit { position: relative; flex: 0 0 auto; margin: 0 auto; }
+    .inv-name { border: 0; background: transparent; font: inherit; font-weight: 800; font-size: 15px; min-width: 0; width: 180px; flex: 0 1 220px; color: inherit; border-radius: 10px; padding: 4px 8px; box-shadow: none; }
+    .inv-len { color: #0f766e; font-weight: 800; font-size: 12px; white-space: nowrap; background: transparent; box-shadow: none; padding: 0; }
+    .inv-fit { position: relative; flex: 0 0 auto; margin: 0; }
     .inv-paper { position: absolute; left: 0; top: 0; background: #fff; box-shadow: 0 16px 40px rgba(15,23,42,.14); overflow: visible; box-sizing: border-box; }
-    .inv-paper.frame-line { border: 1.5px solid #0f172a; }
-    .inv-paper.frame-double { border: 4px double #0f172a; }
-    .inv-paper.frame-dashed { border: 1.5px dashed #334155; }
-    .inv-paper.frame-round { border: 1.5px solid #0f172a; border-radius: 14px; }
-    .inv-block { position: absolute; margin: 0; padding: 0; line-height: 1; letter-spacing: 0; background: transparent; border: 0; white-space: nowrap; box-sizing: border-box; user-select: none; }
+    .inv-frame { position: absolute; box-sizing: border-box; z-index: 1; pointer-events: none; }
+    .inv-frame.is-pick { outline: 1px dashed #0f766e; outline-offset: 2px; }
+    .inv-edge { position: absolute; pointer-events: auto; background: transparent; touch-action: none; }
+    .inv-edge[data-h="n"], .inv-edge[data-h="s"] { left: 0; right: 0; height: 12px; cursor: move; }
+    .inv-edge[data-h="n"] { top: -6px; }
+    .inv-edge[data-h="s"] { bottom: -6px; }
+    .inv-edge[data-h="e"], .inv-edge[data-h="w"] { top: 0; bottom: 0; width: 12px; cursor: move; }
+    .inv-edge[data-h="e"] { right: -6px; }
+    .inv-edge[data-h="w"] { left: -6px; }
+    .inv-fr-h { display: none; position: absolute; width: 9px; height: 9px; background: #0f766e; border-radius: 2px; pointer-events: auto; touch-action: none; z-index: 2; }
+    .inv-app.is-edit .inv-frame.is-pick .inv-fr-h { display: block; }
+    .inv-fr-h[data-h="nw"] { top: -5px; left: -5px; cursor: nwse-resize; }
+    .inv-fr-h[data-h="ne"] { top: -5px; right: -5px; cursor: nesw-resize; }
+    .inv-fr-h[data-h="sw"] { bottom: -5px; left: -5px; cursor: nesw-resize; }
+    .inv-fr-h[data-h="se"] { bottom: -5px; right: -5px; cursor: nwse-resize; }
+    .inv-fr-h[data-h="n"] { top: -5px; left: 50%; margin-left: -4px; cursor: ns-resize; }
+    .inv-fr-h[data-h="s"] { bottom: -5px; left: 50%; margin-left: -4px; cursor: ns-resize; }
+    .inv-fr-h[data-h="e"] { right: -5px; top: 50%; margin-top: -4px; cursor: ew-resize; }
+    .inv-fr-h[data-h="w"] { left: -5px; top: 50%; margin-top: -4px; cursor: ew-resize; }
+    .inv-block { position: absolute; margin: 0; padding: 0; line-height: 1.15; letter-spacing: 0; background: transparent; border: 0; white-space: nowrap; box-sizing: border-box; user-select: none; z-index: 5; touch-action: none; }
+    .inv-pair { display: flex; align-items: baseline; justify-content: flex-start; gap: 1.5mm; width: max-content; max-width: 100%; }
+    .inv-block:not(.is-hug) .inv-pair { width: 100%; justify-content: space-between; }
+    .inv-const, .inv-var { font-weight: inherit; font-style: inherit; text-decoration: inherit; }
+    .inv-app.is-edit .inv-var { background: rgba(15,118,110,.12); border-radius: 4px; padding: 0 1.2mm; }
+    #pBind { height: 32px; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; font-weight: 800; max-width: 150px; }
     .inv-block.is-hug { width: max-content; }
     .inv-app.is-edit .inv-block { cursor: grab; }
     .inv-block.is-pick { outline: 1.5px solid #0f766e; outline-offset: 1px; }
     .inv-val { padding: 0; margin: 0; }
-    .inv-resize { display: none; position: absolute; width: 8px; height: 8px; border-radius: 2px; background: #0f766e; bottom: -4px; inset-inline-end: -4px; cursor: ew-resize; }
+    .inv-resize {
+      display: none; position: absolute; width: 12px; height: 12px; border-radius: 3px;
+      background: #0f766e; border: 2px solid #fff; box-shadow: 0 1px 5px rgba(15,23,42,.35);
+      z-index: 12; box-sizing: border-box; touch-action: none;
+    }
+    .inv-resize[data-h="nw"] { top: -6px; left: -6px; cursor: nwse-resize; }
+    .inv-resize[data-h="n"]  { top: -6px; left: 50%; margin-left: -6px; cursor: ns-resize; }
+    .inv-resize[data-h="ne"] { top: -6px; right: -6px; cursor: nesw-resize; }
+    .inv-resize[data-h="e"]  { top: 50%; right: -6px; margin-top: -6px; cursor: ew-resize; }
+    .inv-resize[data-h="se"] { bottom: -6px; right: -6px; cursor: nwse-resize; }
+    .inv-resize[data-h="s"]  { bottom: -6px; left: 50%; margin-left: -6px; cursor: ns-resize; }
+    .inv-resize[data-h="sw"] { bottom: -6px; left: -6px; cursor: nesw-resize; }
+    .inv-resize[data-h="w"]  { top: 50%; left: -6px; margin-top: -6px; cursor: ew-resize; }
     .inv-guide { position: absolute; pointer-events: none; z-index: 6; display: none; }
     .inv-guide.is-on { display: block; }
     .inv-guide-v { top: 0; bottom: 0; width: 0; border-left: 1px dashed #0f766e; }
-    .inv-guide-h { left: 0; right: 0; height: 0; border-top: 1px dashed #e11d48; }
+    .inv-len-handle { position: absolute; left: 50%; bottom: -12px; transform: translateX(-50%); height: 22px; min-width: 72px; padding: 0 10px; border-radius: 999px; background: #0f172a; color: #fff; font-size: 11px; font-weight: 800; display: none; align-items: center; justify-content: center; cursor: ns-resize; z-index: 8; box-shadow: 0 8px 18px rgba(15,23,42,.28); letter-spacing: .02em; }
+    .inv-app.is-edit .inv-len-handle { display: flex; }
+    .inv-len-handle::before { content: ''; width: 18px; height: 2px; border-radius: 2px; background: rgba(255,255,255,.7); margin-inline-end: 6px; }
+    .inv-wid-handle { position: absolute; top: 50%; left: -16px; transform: translateY(-50%); width: 26px; min-height: 74px; padding: 8px 0; border-radius: 999px; background: #0f172a; color: #fff; font-size: 11px; font-weight: 800; display: none; align-items: center; justify-content: center; cursor: ew-resize; z-index: 8; box-shadow: 0 8px 18px rgba(15,23,42,.28); writing-mode: vertical-rl; }
+    .inv-len-handle, .inv-wid-handle { touch-action: none; }
+    #pCount { font-size: 12px; font-weight: 800; color: #0f766e; white-space: nowrap; }
     .inv-app.is-edit .inv-block.is-pick .inv-resize { display: block; }
     .inv-block img { width: 100%; height: auto; display: block; }
     .inv-logo-ph { display: flex; align-items: center; justify-content: center; width: 100%; height: 12mm; background: #f8fafc; color: #94a3b8; font-size: 10px; }
-    .inv-foot { position: absolute; left: 0; right: 0; bottom: 0; text-align: center; font-size: 9px; line-height: 1.2; font-weight: 700; color: #94a3b8; padding: 1px 0 2px; }
-    .inv-pop { position: absolute; top: 12px; inset-inline-start: 12px; width: 240px; max-height: calc(100% - 24px); overflow: auto; background: #fff; border-radius: 16px; border: 1px solid #e6ebf2; box-shadow: 0 18px 48px rgba(15,23,42,.16); padding: 12px; z-index: 5; }
+    .inv-foot { position: absolute; z-index: 4; margin: 0; background: #fff; text-align: center; font-size: 9px; line-height: 1.3; font-weight: 800; color: #64748b; padding: 0.7mm 1.6mm; box-sizing: border-box; max-width: calc(100% - 2mm); overflow: visible; white-space: nowrap; user-select: none; }
+    .inv-app.is-edit .inv-foot { cursor: grab; }
+    .inv-foot.is-pick { outline: 1.5px solid #0f766e; outline-offset: 1px; }
+    #pDel { width: 32px; min-width: 32px; height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+    #pFootNote { display: none !important; }
+    .inv-pop { position: absolute; top: 12px; left: 12px; right: auto; width: 280px; max-height: calc(100% - 24px); overflow: auto; background: #fff; border-radius: 16px; border: 1px solid #e6ebf2; box-shadow: 0 18px 48px rgba(15,23,42,.16); padding: 12px; z-index: 5; }
+    .inv-pair.is-stack { flex-direction: column; align-items: stretch; gap: 0.4mm; white-space: normal; }
+    .inv-block.is-stack { white-space: normal; }
+    .inv-pair.is-stack .inv-const, .inv-pair.is-stack .inv-var { display: block; white-space: normal; max-width: 100%; }
+    .inv-table {
+      width: 100%; table-layout: fixed; border-collapse: collapse;
+      border: none; background: #fff; box-sizing: border-box;
+      font: inherit; color: #0f172a; direction: rtl;
+    }
+    .inv-block.is-table {
+      overflow: hidden; box-sizing: border-box; background: #fff; padding: 0;
+    }
+    .inv-table td {
+      padding: 1.2mm 1.5mm; vertical-align: middle; text-align: right;
+      border: 0.35mm solid #0f172a; background: #fff; box-sizing: border-box;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      color: #0f172a; font-size: inherit; line-height: 1.25;
+    }
+    .inv-app.is-edit .inv-table td { cursor: grab; }
+    .inv-app.is-edit .inv-table td.inv-var { background: rgba(15,118,110,.08); }
+    .inv-table td.is-cell { background: rgba(15,118,110,.1); outline: 2px solid #0f766e; outline-offset: -2px; }
+    .inv-col-line {
+      position: absolute; top: 0; bottom: 0; width: 12px; margin-left: -6px;
+      cursor: col-resize; z-index: 11; touch-action: none;
+    }
+    .inv-col-line::after {
+      content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 2px;
+      transform: translateX(-50%); background: #0f766e; opacity: .4;
+    }
+    .inv-col-line:hover::after, .inv-col-line.is-drag::after { opacity: 1; width: 3px; }
+    .inv-block.is-table.is-pick .inv-resize { width: 14px; height: 14px; }
+    .inv-tbar { display: flex; flex-wrap: wrap; gap: 4px; justify-content: center; align-items: center; }
+    .inv-tbar button { height: 28px; padding: 0 6px; border: 0; border-radius: 8px; background: #f1f5f9; font-weight: 800; cursor: pointer; }
+    .inv-tbar .inv-rowh { display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 6px; border-radius: 8px; background: #f8fafc; border: 1px solid #e2e8f0; font-size: 11px; font-weight: 800; color: #475569; }
+    .inv-tbar .inv-rowh input { width: 44px; height: 22px; border: 0; background: transparent; font-weight: 800; text-align: center; }
+    .inv-trow { display: flex; gap: 4px; margin-bottom: 6px; }
+    .inv-trow input, .inv-trow select { height: 30px; border: 1px solid #e2e8f0; border-radius: 8px; min-width: 0; }
+    .inv-trow input { flex: 1; }
+    .inv-seg button.inv-lang, #pPack button { width: auto; min-width: 32px; padding: 0 8px; font-size: 12px; font-weight: 800; letter-spacing: .04em; }
     .inv-pop h3 { margin: 0 0 8px; font-size: 14px; }
     .inv-pop > button { margin-top: 10px; height: 34px; width: 100%; border-radius: 10px; border: 1px solid #e2e8f0; background: #fff; font-weight: 800; cursor: pointer; }
     .inv-pop label { display: block; margin: 8px 0 4px; font-size: 12px; font-weight: 800; color: #64748b; }
@@ -594,7 +1264,8 @@ function invoice_render_tab($tab, $tenantId, $isEn)
     .inv-kind, .inv-frames { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
     .inv-kind button, .inv-frames button { height: 34px; border-radius: 10px; border: 1px solid #e2e8f0; background: #fff; font-weight: 800; cursor: pointer; }
     .inv-frames button.is-on, .inv-kind button:hover { border-color: #0f766e; color: #0f766e; }
-    .inv-bottom { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 12px; background: #fff; border-top: 1px solid #e6ebf2; flex: 0 0 auto; }
+    .inv-bottom { grid-column: 1 / -1; grid-row: 3; display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #fff; border-top: 1px solid #e6ebf2; }
+    .inv-bottom-gap { flex: 1; }
     .inv-modal { position: fixed; inset: 0; background: rgba(15,23,42,.38); z-index: 80; display: flex; align-items: center; justify-content: center; padding: 16px; }
     .inv-modal[hidden] { display: none !important; }
     .inv-modal-card { width: min(560px,100%); max-height: min(78vh,640px); overflow: auto; background: #fff; border-radius: 20px; padding: 16px; box-shadow: 0 24px 60px rgba(15,23,42,.22); }
@@ -607,9 +1278,11 @@ function invoice_render_tab($tab, $tenantId, $isEn)
     .inv-acts { display: flex; gap: 6px; align-items: center; }
     .inv-def { background: #ccfbf1; color: #0f766e; font-weight: 800; border-radius: 999px; padding: 4px 10px; }
     @media (max-width: 760px) {
-      .inv-rail { flex-direction: row; width: auto; flex: 0 0 auto; }
-      .inv-body { flex-direction: column; }
-      .inv-gbar { flex-wrap: wrap; }
+      .inv-desk:not([hidden]) { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto auto; }
+      .inv-rail { grid-column: 1; grid-row: 1; flex-direction: row; width: auto; justify-content: center; border-left: 0; border-bottom: 1px solid #e6ebf2; }
+      .inv-stage { grid-column: 1; grid-row: 2; }
+      .inv-prop { grid-column: 1; grid-row: 3; }
+      .inv-bottom { grid-row: 4; }
     }
     </style>
     <div class="inv-app" id="invApp">
@@ -624,7 +1297,14 @@ function invoice_render_tab($tab, $tenantId, $isEn)
                     <button class="btn sm" type="button" id="invNew"><?php echo e($payload['ui']['new']); ?></button>
                 </div>
             </div>
-            <div class="inv-cards" id="invCards"></div>
+            <div class="inv-cards" id="invCards">
+                <?php foreach ($lib['templates'] as $tplCard): if (!is_array($tplCard)) continue; ?>
+                <div class="inv-card" role="button" tabindex="0" data-tpl="<?php echo e(isset($tplCard['id']) ? $tplCard['id'] : ''); ?>">
+                    <strong><?php echo e(isset($tplCard['name']) ? $tplCard['name'] : 'قالب'); ?></strong>
+                    <em><?php echo e(isset($tplCard['paper']) ? $tplCard['paper'] : ''); ?></em>
+                </div>
+                <?php endforeach; ?>
+            </div>
         </section>
         <form method="post" action="settings.php?tab=invoices" enctype="multipart/form-data" id="invDesignForm" class="inv-desk" hidden>
             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
@@ -634,44 +1314,82 @@ function invoice_render_tab($tab, $tenantId, $isEn)
             <input type="hidden" name="paper" id="fPaper" value="">
             <input type="hidden" name="orient" id="fOrient" value="">
             <input type="hidden" name="margin_top" id="fMargin" value="3">
+            <input type="hidden" name="sheet_h" id="fSheet" value="0">
+            <input type="hidden" name="sheet_w" id="fSheetW" value="0">
+            <input type="hidden" name="footer_x" id="fFootX" value="-1">
+            <input type="hidden" name="footer_y" id="fFootY" value="-1">
+            <input type="hidden" name="footer_align" id="fFootAlign" value="center">
             <input type="hidden" name="frame" id="fFrame" value="">
+            <input type="hidden" name="frame_json" id="fFrameBox" value="">
             <input type="hidden" name="company_name" id="fCompany" value="">
             <input type="hidden" name="phone" id="fPhone" value="">
             <input type="hidden" name="address" id="fAddress" value="">
             <input type="hidden" name="blocks_json" id="fBlocks" value="">
             <input type="file" name="logo" id="invLogo" accept="image/*" hidden>
-            <div class="inv-top">
-                <button class="btn ghost sm" type="button" id="invBack"><?php echo e($payload['ui']['back']); ?></button>
-                <input class="inv-name" name="template_name" id="invName" value="">
-                <span class="inv-len" id="invLen"></span>
-                <div class="inv-top-acts">
-                    <button class="btn ghost sm" type="button" id="invPrintOpen2"><?php echo e($payload['ui']['printers']); ?></button>
-                    <button class="btn ghost sm" type="button" id="invTestPrint"><?php echo e($payload['ui']['print']); ?></button>
-                    <button class="btn ghost sm" type="button" id="invPdf"><?php echo e($payload['ui']['pdf']); ?></button>
-                    <button class="btn danger sm" type="button" id="invDelTpl"><?php echo e($isEn ? 'Delete' : 'حذف القالب'); ?></button>
-                    <button class="btn sm" type="button" id="invEditBtn"><?php echo e($payload['ui']['edit']); ?></button>
-                </div>
-            </div>
+            <div class="inv-body">
             <div class="inv-prop" id="invProp" hidden>
-                <label class="inv-field inv-for-text"><span><?php echo e($payload['ui']['text']); ?></span><input id="pText" type="text"></label>
-                <label class="inv-field inv-for-text"><span><?php echo e($payload['ui']['size']); ?></span><input id="pSize" type="range" min="6" max="72" step="1"><input id="pSizeN" type="number" min="6" max="72"></label>
-                <label class="inv-field inv-for-text"><span><?php echo e($payload['ui']['color']); ?></span><input id="pColor" type="color"></label>
+                <label class="inv-field inv-for-text" title="<?php echo e($payload['ui']['text']); ?>"><span id="pTextLab"><?php echo e($payload['ui']['text']); ?></span><input id="pText" type="text" placeholder="<?php echo e($payload['ui']['text']); ?>"></label>
+                <label class="inv-field inv-for-var" title="<?php echo e($isEn ? 'Variable' : 'المتغير'); ?>"><span><?php echo e($isEn ? 'Variable' : 'المتغير'); ?></span><select id="pBind"></select></label>
+                <div class="inv-seg inv-for-frame" id="pFrameStyle" hidden>
+                    <button type="button" data-v="line" data-ico="fline" title="<?php echo e($isEn ? 'Line' : 'خط'); ?>"></button>
+                    <button type="button" data-v="double" data-ico="fdouble" title="<?php echo e($isEn ? 'Double' : 'مزدوج'); ?>"></button>
+                    <button type="button" data-v="dashed" data-ico="fdash" title="<?php echo e($isEn ? 'Dashed' : 'متقطع'); ?>"></button>
+                    <button type="button" data-v="round" data-ico="fround" title="<?php echo e($isEn ? 'Round' : 'دائري'); ?>"></button>
+                    <button type="button" data-v="none" data-ico="fnone" title="<?php echo e($isEn ? 'None' : 'بدون'); ?>"></button>
+                </div>
+                <label class="inv-field inv-for-frame" hidden title="<?php echo e($payload['ui']['color']); ?>"><span><?php echo e($payload['ui']['color']); ?></span><input id="pFrameColor" type="color"></label>
+                <label class="inv-field inv-for-frame" hidden title="<?php echo e($isEn ? 'Weight' : 'السماكة'); ?>"><span><?php echo e($isEn ? 'Weight' : 'السماكة'); ?></span><input id="pFrameThick" type="number" min="0.2" max="3" step="0.1"></label>
+                <label class="inv-field inv-for-frame" hidden title="<?php echo e($isEn ? 'Corners' : 'الزوايا'); ?>"><span><?php echo e($isEn ? 'Corners' : 'الزوايا'); ?></span><input id="pFrameRadius" type="number" min="0" max="20" step="0.5"></label>
+                <div class="inv-seg inv-for-text" id="pZoom">
+                    <button type="button" id="pSizeMinus" data-ico="zoomout" title="<?php echo e($isEn ? 'Smaller' : 'تصغير'); ?>"></button>
+                    <input id="pSizeN" type="number" min="6" max="72" title="<?php echo e($payload['ui']['size']); ?>">
+                    <button type="button" id="pSizePlus" data-ico="zoomin" title="<?php echo e($isEn ? 'Larger' : 'تكبير'); ?>"></button>
+                </div>
+                <label class="inv-field inv-for-text" title="<?php echo e($payload['ui']['color']); ?>"><span><?php echo e($payload['ui']['color']); ?></span><input id="pColor" type="color" value="#111827"></label>
+                <input id="pSize" type="range" min="6" max="72" step="1" hidden>
+                <input id="pHug" type="checkbox" hidden>
+                <div class="inv-seg inv-for-text" id="pWeight">
+                    <button type="button" data-v="normal" data-ico="regular" title="<?php echo e($isEn ? 'Regular' : 'عادي'); ?>"></button>
+                    <button type="button" data-v="bold" data-ico="bold" title="<?php echo e($isEn ? 'Bold' : 'بولد'); ?>"></button>
+                </div>
+                <div class="inv-seg inv-for-text" id="pStyle">
+                    <button type="button" data-v="italic" data-ico="italic" title="<?php echo e($isEn ? 'Italic' : 'مائل'); ?>"></button>
+                    <button type="button" data-v="under" data-ico="under" title="<?php echo e($isEn ? 'Underline' : 'تحت الخط'); ?>"></button>
+                </div>
+                <div class="inv-seg" id="pPack">
+                    <button type="button" data-pack="right" title="رص من اليمين">ي</button>
+                    <button type="button" data-pack="left" title="رص من اليسار">س</button>
+                </div>
                 <div class="inv-seg inv-for-text" id="pAlign">
-                    <button type="button" data-v="right"><?php echo e($payload['ui']['right']); ?></button>
-                    <button type="button" data-v="center"><?php echo e($payload['ui']['center']); ?></button>
-                    <button type="button" data-v="left"><?php echo e($payload['ui']['left']); ?></button>
+                    <button type="button" data-v="right" data-ico="alignr" title="<?php echo e($payload['ui']['right']); ?>"></button>
+                    <button type="button" data-v="center" data-ico="alignc" title="<?php echo e($payload['ui']['center']); ?>"></button>
+                    <button type="button" data-v="left" data-ico="alignl" title="<?php echo e($payload['ui']['left']); ?>"></button>
                 </div>
                 <div class="inv-seg inv-for-text" id="pDir">
-                    <button type="button" data-v="rtl"><?php echo e($payload['ui']['ar']); ?></button>
-                    <button type="button" data-v="ltr"><?php echo e($payload['ui']['ltr']); ?></button>
+                    <button type="button" class="inv-lang" data-v="rtl" title="عربي">AR</button>
+                    <button type="button" class="inv-lang" data-v="ltr" title="إنجليزي">EN</button>
                 </div>
-                <label class="inv-check inv-for-text"><input id="pHug" type="checkbox"> <?php echo e($payload['ui']['hug']); ?></label>
-                <label class="inv-field"><span>X</span><input id="pX" type="number" step="0.5"></label>
-                <label class="inv-field"><span>Y</span><input id="pY" type="number" step="0.5"></label>
-                <button class="btn danger sm" type="button" id="pDel"><?php echo e($payload['ui']['delItem']); ?></button>
+                <div class="inv-seg inv-for-var" id="pStack">
+                    <button type="button" data-v="row" data-ico="alignc" title="بجانب بعض"></button>
+                    <button type="button" data-v="stack" data-ico="stack" title="واحد تحت واحد"></button>
+                </div>
+                <button class="btn ghost sm inv-for-table" type="button" id="pTableEdit" hidden title="خلايا الجدول">جدول</button>
+                <div class="inv-tbar inv-for-table" id="pTableBar" hidden>
+                    <button type="button" id="tRowAdd" title="صف جديد">صف+</button>
+                    <button type="button" id="tRowDel" title="حذف صف">صف-</button>
+                    <button type="button" id="tColAdd" title="عمود جديد">عمود+</button>
+                    <button type="button" id="tColDel" title="حذف عمود">عمود-</button>
+                    <button type="button" id="tMerge" title="دمج الخلية مع اللي جنبها">دمج</button>
+                    <button type="button" id="tPack" title="ملاءمة العرض على المحتوى">ملاءمة</button>
+                    <label class="inv-rowh" title="ارتفاع الصف بالمليمتر"><span>ارتفاع</span><input id="pRowH" type="number" min="4" max="30" step="0.5" value="7"><span>مم</span></label>
+                </div>
+                <label class="inv-field inv-for-pos"><span class="inv-keep">X</span><input id="pX" type="number" step="0.5"></label>
+                <label class="inv-field inv-for-pos"><span class="inv-keep">Y</span><input id="pY" type="number" step="0.5"></label>
+                <span id="pFootNote" hidden>الفوتر ثابت</span>
+                <span id="pCount" hidden></span>
+                <button class="btn danger sm" type="button" id="pDel" data-ico="trash" title="<?php echo e($payload['ui']['delItem']); ?>"></button>
                 <button class="btn ghost sm inv-for-logo" type="button" id="pLogo" hidden><?php echo e($payload['ui']['swapLogo']); ?></button>
             </div>
-            <div class="inv-body">
                 <aside class="inv-rail" id="invRail">
                     <button type="button" data-tool="add" title="<?php echo e($payload['ui']['add']); ?>"></button>
                     <button type="button" data-tool="align" title="<?php echo e($payload['ui']['guides']); ?>"></button>
@@ -685,6 +1403,15 @@ function invoice_render_tab($tab, $tenantId, $isEn)
                 </div>
             </div>
             <div class="inv-bottom" id="invBottom">
+                <button class="btn ghost sm" type="button" id="invBack"><?php echo e($payload['ui']['back']); ?></button>
+                <input class="inv-name" name="template_name" id="invName" value="">
+                <span class="inv-len" id="invLen"></span>
+                <span class="inv-bottom-gap"></span>
+                <button class="btn ghost sm" type="button" id="invPrintOpen2"><?php echo e($payload['ui']['printers']); ?></button>
+                <button class="btn ghost sm" type="button" id="invTestPrint"><?php echo e($payload['ui']['print']); ?></button>
+                <button class="btn ghost sm" type="button" id="invPdf"><?php echo e($payload['ui']['pdf']); ?></button>
+                <button class="btn danger sm" type="button" id="invDelTpl"><?php echo e($isEn ? 'Delete' : 'حذف'); ?></button>
+                <button class="btn sm" type="button" id="invEditBtn"><?php echo e($payload['ui']['edit']); ?></button>
                 <button class="btn ghost" type="button" id="invCancel"><?php echo e($payload['ui']['cancel']); ?></button>
                 <button class="btn" type="button" id="invSave"><?php echo e($payload['ui']['save']); ?></button>
             </div>
@@ -760,6 +1487,7 @@ function invoice_render_tab($tab, $tenantId, $isEn)
       var snapshot = '';
       var isNew = false;
       var picked = null;
+      var pickedIds = [];
       var openTool = '';
       var drag = null;
       var ICO = {
@@ -767,30 +1495,109 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         paper: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="6" y="3" width="12" height="18" rx="1.5"/></svg>',
         frame: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>',
         company: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8" r="3"/><path d="M6 19c1.2-3 3.2-4.5 6-4.5s4.8 1.5 6 4.5"/></svg>',
-        align: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v18M3 12h18"/></svg>'
+        align: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v18M3 12h18"/></svg>',
+        zoomout: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="10" cy="10" r="6"/><path d="M14.5 14.5L20 20M7 10h6"/></svg>',
+        zoomin: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="10" cy="10" r="6"/><path d="M14.5 14.5L20 20M10 7v6M7 10h6"/></svg>',
+        regular: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M7 18L12 6l5 12M9 14h6"/></svg>',
+        bold: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M7 18L12 6l5 12M9 14h6"/></svg>',
+        italic: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M15 5H9M16 19H9M14 5l-4 14"/></svg>',
+        under: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M7 4v7a5 5 0 0 0 10 0V4M6 20h12"/></svg>',
+        alignr: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M8 12h12M6 18h14"/></svg>',
+        alignc: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M7 12h10M5 18h14"/></svg>',
+        alignl: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16M4 12h12M4 18h14"/></svg>',
+        dirrtl: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M15 6H8a3 3 0 0 0 0 6h4M12 6v12M19 15l-3 3-3-3"/></svg>',
+        dirltr: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 6h7a3 3 0 0 1 0 6h-4M12 6v12M5 15l3 3 3-3"/></svg>',
+        stack: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 7h14M5 12h14M5 17h14"/></svg>',
+        fline: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="5" width="14" height="14"/></svg>',
+        fdouble: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="4" y="4" width="16" height="16"/><rect x="7" y="7" width="10" height="10"/></svg>',
+        fdash: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-dasharray="3 2"><rect x="5" y="5" width="14" height="14"/></svg>',
+        fround: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="5" width="14" height="14" rx="4"/></svg>',
+        fnone: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="5" width="14" height="14" opacity=".35"/><path d="M7 17L17 7"/></svg>',
+        trash: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 7h14M9 7V5h6v2M8 7l1 12h6l1-12"/></svg>'
       };
-      var railBtns = rail.querySelectorAll('button');
+      var railBtns = rail ? rail.querySelectorAll('button') : [];
       for (var ri = 0; ri < railBtns.length; ri++) railBtns[ri].innerHTML = ICO[railBtns[ri].getAttribute('data-tool')] || '';
+      var icoNodes = document.querySelectorAll('[data-ico]');
+      for (var ii = 0; ii < icoNodes.length; ii++) {
+        var icoName = icoNodes[ii].getAttribute('data-ico');
+        if (ICO[icoName]) icoNodes[ii].innerHTML = ICO[icoName];
+      }
 
       function ymd(d) {
         var m = d.getMonth() + 1, day = d.getDate();
         return d.getFullYear() + '-' + (m < 10 ? '0' : '') + m + '-' + (day < 10 ? '0' : '') + day;
       }
       function sample(kind, design) {
+        var d = design || {};
         var today = new Date();
         var end = new Date(today.getTime() + 30 * 86400000);
         var map = {
-          company: design.company_name || 'اسم الشركة',
-          phone: design.phone || '07xx xxx xxxx',
-          address: design.address || 'عنوان الشركة',
+          company: d.company_name || 'اسم الشركة',
+          phone: d.phone || '07xx xxx xxxx',
+          address: d.address || 'عنوان الشركة',
           name: 'أحمد محمد',
           package: 'NB MAX-MSL',
           start: ymd(today),
           end: ymd(end),
           amount: '35,000',
+          username: 'user01',
+          mobile: '07700000000',
+          number: 'AS_000128',
+          date: ymd(today),
+          time: '12:30',
           custom: 'نص'
         };
         return map[kind] || 'نص';
+      }
+      var VAR_LABEL = {
+        name: 'اسم المشترك', package: 'نوع الاشتراك', start: 'تاريخ التفعيل', end: 'تاريخ الانتهاء',
+        amount: 'المبلغ', company: 'الشركة', phone: 'هاتف الشركة', address: 'العنوان',
+        username: 'اليوزر', mobile: 'هاتف المشترك', number: 'رقم الفاتورة', date: 'التاريخ', time: 'الوقت'
+      };
+      function isVarKind(kind) { return !!VAR_LABEL[kind]; }
+      function shownValue(b, design) {
+        if (!isVarKind(b.kind)) return b.text || 'نص';
+        if (b.label) return sample(b.kind, design);
+        if (b.text) return b.text;
+        return sample(b.kind, design);
+      }
+      function fillText(el, b, design) {
+        var old = el.querySelectorAll('.inv-val, .inv-pair');
+        for (var i = 0; i < old.length; i++) if (old[i].parentNode) old[i].parentNode.removeChild(old[i]);
+        var paired = isVarKind(b.kind) && String(b.label || '') !== '';
+        var handle = el.querySelector('.inv-resize');
+        var node;
+        if (paired) {
+          node = document.createElement('span');
+          node.className = 'inv-pair inv-val' + (b.stack ? ' is-stack' : '');
+          if (b.stack) el.classList.add('is-stack');
+          else el.classList.remove('is-stack');
+          var c = document.createElement('span');
+          c.className = 'inv-const';
+          c.textContent = b.label;
+          var v = document.createElement('span');
+          v.className = 'inv-var';
+          v.textContent = sample(b.kind, design);
+          if (b.kind === 'phone' || b.kind === 'amount' || b.kind === 'start' || b.kind === 'end' || b.kind === 'package' || b.kind === 'number' || b.kind === 'date' || b.kind === 'time' || b.kind === 'username' || b.kind === 'mobile') v.style.direction = 'ltr';
+          node.appendChild(c);
+          node.appendChild(v);
+          if (!(b.w > 0)) {
+            el.classList.add('is-hug');
+            el.style.width = '';
+          }
+        } else {
+          node = document.createElement('span');
+          node.className = 'inv-val';
+          node.textContent = shownValue(b, design);
+        }
+        if (handle) el.insertBefore(node, handle);
+        else el.appendChild(node);
+      }
+      function paintType(el, b) {
+        el.style.fontWeight = b.weight === 'normal' ? '400' : '800';
+        el.style.fontStyle = b.italic ? 'italic' : 'normal';
+        el.style.textDecoration = b.under ? 'underline' : 'none';
+        el.style.textUnderlineOffset = b.under ? '2px' : '';
       }
       function norm(b) {
         var align = (b.align === 'left' || b.align === 'center' || b.align === 'right') ? b.align : 'right';
@@ -806,6 +1613,16 @@ function invoice_render_tab($tab, $tenantId, $isEn)
           align: align,
           dir: b.dir === 'ltr' ? 'ltr' : 'rtl',
           text: b.text ? String(b.text) : '',
+          label: b.label ? String(b.label) : '',
+          weight: b.weight === 'normal' ? 'normal' : 'bold',
+          italic: b.italic ? 1 : 0,
+          under: b.under ? 1 : 0,
+          stack: b.stack ? 1 : 0,
+          dash: b.dash ? 1 : 0,
+          rows: (b.rows && b.rows.length) ? b.rows : [],
+          rowH: (parseFloat(b.rowH) > 0 ? Math.max(4, Math.min(30, parseFloat(b.rowH))) : 7),
+          cols: (b.cols && b.cols.length) ? b.cols.slice() : [],
+          pack: b.pack === 0 ? 0 : 1,
           on: 1
         };
       }
@@ -813,9 +1630,16 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         var o = {
           id: d.id, name: d.name || '', paper: d.paper || 'strip80',
           orient: d.orient === 'landscape' ? 'landscape' : 'portrait',
-          frame: d.frame || 'none', company_name: d.company_name || '',
+          frame: (d.frame_box && d.frame_box.style) || d.frame || 'none',
+          frame_box: frameCopy(d),
+          company_name: d.company_name || '',
           phone: d.phone || '', address: d.address || '', logo: d.logo || '',
           margin_top: (isFinite(parseFloat(d.margin_top)) ? Math.max(0, Math.min(12, parseFloat(d.margin_top))) : 3),
+          sheet_h: (parseFloat(d.sheet_h) > 0 ? Math.max(0, Math.min(450, parseFloat(d.sheet_h))) : 0),
+          sheet_w: (parseFloat(d.sheet_w) > 0 ? Math.max(0, Math.min(320, parseFloat(d.sheet_w))) : 0),
+          footer_x: (isFinite(parseFloat(d.footer_x)) ? parseFloat(d.footer_x) : -1),
+          footer_y: (isFinite(parseFloat(d.footer_y)) ? parseFloat(d.footer_y) : -1),
+          footer_align: (d.footer_align === 'left' || d.footer_align === 'right') ? d.footer_align : 'center',
           blocks: []
         };
         var blocks = d.blocks || [];
@@ -834,11 +1658,13 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         var blocks = design.blocks || [];
         for (var i = 0; i < blocks.length; i++) {
           var b = blocks[i];
-          var bh = (b.kind === 'logo' || b.kind === 'qr') ? (parseFloat(b.w) > 0 ? parseFloat(b.w) : 18) : (((parseFloat(b.size) || 13) * 25.4 / 96) + 1);
+          var bh = (b.kind === 'logo' || b.kind === 'qr') ? (parseFloat(b.w) > 0 ? parseFloat(b.w) : 18) : (b.kind === 'rule' ? 3 : (b.kind === 'table' ? Math.max(8, ((b.rows && b.rows.length) || 1) * (parseFloat(b.rowH) > 0 ? parseFloat(b.rowH) : 7)) : (b.stack ? (((parseFloat(b.size) || 13) * 25.4 / 96) * 2 + 3) : (((parseFloat(b.size) || 13) * 25.4 / 96) + 1))));
           var bottom = (parseFloat(b.y) || 0) + bh;
           if (bottom > h) h = bottom;
         }
-        return Math.max(18, Math.ceil(h + 6));
+        var fy = parseFloat(design.footer_y);
+        if (isFinite(fy) && fy >= 0 && fy + 6 > h) h = fy + 6;
+        return Math.max(18, Math.ceil(h + 8));
       }
       function boxMm(design) {
         var sizes = DATA.sizes || {};
@@ -850,7 +1676,13 @@ function invoice_render_tab($tab, $tenantId, $isEn)
           if (h > 0) { var t = w; w = h; h = t; }
           else { w = Math.max(160, Math.round(w * 2.2)); h = parseFloat(meta.w) || 80; fixed = true; }
         }
-        if (!fixed) h = contentH(design);
+        var customW = parseFloat(design.sheet_w) || 0;
+        if (customW >= 30) w = customW;
+        if (!fixed) {
+          var custom = parseFloat(design.sheet_h) || 0;
+          if (custom >= 30) h = custom;
+          else h = contentH(design);
+        }
         return {w: w, h: h, fixed: fixed};
       }
       function blockById(id) {
@@ -858,12 +1690,245 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         for (var i = 0; i < blocks.length; i++) if (blocks[i].id === id) return blocks[i];
         return null;
       }
+      function frameCopy(d) {
+        var src = (d && d.frame_box) ? d.frame_box : {};
+        var style = src.style || (d && d.frame) || 'none';
+        if (['none', 'line', 'double', 'dashed', 'round'].indexOf(style) < 0) style = 'none';
+        var color = /^#[0-9a-fA-F]{6}$/.test(src.color || '') ? src.color : '#0f172a';
+        var thick = parseFloat(src.thick);
+        if (!isFinite(thick) || thick <= 0) thick = 0.45;
+        thick = Math.max(0.15, Math.min(3, thick));
+        var radius = parseFloat(src.radius);
+        if (!isFinite(radius) || radius < 0) radius = (style === 'round' ? 3 : 0);
+        radius = Math.min(20, radius);
+        function num(v) { var n = parseFloat(v); return isFinite(n) && n > 0 ? Math.min(450, n) : 0; }
+        return { style: style, color: color, thick: thick, radius: radius, x: num(src.x), y: num(src.y), w: num(src.w), h: num(src.h) };
+      }
+      function frameGeom(design) {
+        var box = boxMm(design || current);
+        var f = frameCopy(design || current);
+        var w = f.w >= 8 ? f.w : Math.max(10, box.w - f.x * 2);
+        var h = f.h >= 8 ? f.h : Math.max(10, box.h - f.y * 2);
+        f.w = w;
+        f.h = h;
+        return f;
+      }
+      function paintFrame(el, design) {
+        var f = frameCopy(design);
+        if (f.style === 'none') return;
+        var g = frameGeom(design);
+        var fr = document.createElement('div');
+        fr.className = 'inv-frame frame-' + g.style;
+        fr.style.left = g.x + 'mm';
+        fr.style.top = g.y + 'mm';
+        fr.style.width = g.w + 'mm';
+        fr.style.height = g.h + 'mm';
+        var thick = g.thick;
+        if (g.style === 'double' && thick < 0.8) thick = 0.8;
+        fr.style.borderStyle = g.style === 'dashed' ? 'dashed' : (g.style === 'double' ? 'double' : 'solid');
+        fr.style.borderWidth = thick + 'mm';
+        fr.style.borderColor = g.color;
+        fr.style.borderRadius = g.radius + 'mm';
+        var edges = ['n', 'e', 's', 'w'];
+        for (var i = 0; i < edges.length; i++) {
+          var ed = document.createElement('i');
+          ed.className = 'inv-edge';
+          ed.setAttribute('data-h', edges[i]);
+          fr.appendChild(ed);
+        }
+        var hands = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
+        for (var k = 0; k < hands.length; k++) {
+          var h = document.createElement('i');
+          h.className = 'inv-fr-h';
+          h.setAttribute('data-h', hands[k]);
+          fr.appendChild(h);
+        }
+        el.appendChild(fr);
+      }
+      function tableRowH(b) {
+        var h = parseFloat(b && b.rowH);
+        if (!(h > 0)) h = 7;
+        return Math.max(4, Math.min(28, h));
+      }
+      function normalizeTable(b) {
+        if (!b) return;
+        if (!b.rows || !b.rows.length) {
+          b.rows = [[{ t: '', k: '' }, { t: '', k: '' }]];
+        }
+        var n = 0;
+        for (var r = 0; r < b.rows.length; r++) {
+          if (!b.rows[r]) b.rows[r] = [];
+          var clean = [];
+          for (var c = 0; c < b.rows[r].length; c++) {
+            var cell = b.rows[r][c] || {};
+            clean.push({ t: cell.t ? String(cell.t) : '', k: cell.k ? String(cell.k) : '' });
+          }
+          if (!clean.length) clean.push({ t: '', k: '' });
+          b.rows[r] = clean;
+          if (clean.length > n) n = clean.length;
+        }
+        for (var r2 = 0; r2 < b.rows.length; r2++) {
+          while (b.rows[r2].length < n) b.rows[r2].push({ t: '', k: '' });
+          if (b.rows[r2].length > n) b.rows[r2] = b.rows[r2].slice(0, n);
+        }
+        var sumCols = 0;
+        if (b.cols && b.cols.length === n) {
+          for (var s = 0; s < b.cols.length; s++) sumCols += parseFloat(b.cols[s]) || 0;
+        }
+        /* قيم بكسل قديمة أو عدد أعمدة غلط → نسب مئوية نظيفة */
+        if (!(b.cols && b.cols.length === n) || sumCols > 200 || sumCols <= 0) {
+          b.cols = [];
+          for (var i = 0; i < n; i++) b.cols.push(n === 2 ? (i === 0 ? 42 : 58) : (100 / n));
+        }
+      }
+      function clampTableBox(b) {
+        if (!b || b.kind !== 'table' || !current) return;
+        var box = boxMm(current);
+        if (!(b.x >= 0) || !isFinite(b.x)) b.x = 4;
+        b.x = Math.round(Math.max(0, Math.min(b.x, box.w - 20)) * 10) / 10;
+        var maxW = Math.max(20, box.w - b.x - 2);
+        if (!(b.w > 0)) b.w = Math.max(40, box.w - 8);
+        b.w = Math.round(Math.max(20, Math.min(b.w, maxW)) * 10) / 10;
+        b.rowH = tableRowH(b);
+        normalizeTable(b);
+      }
+      function addResizeHandles(el, full) {
+        var old = el.querySelectorAll('.inv-resize');
+        for (var i = 0; i < old.length; i++) {
+          if (old[i].parentNode) old[i].parentNode.removeChild(old[i]);
+        }
+        var spots = full ? ['nw', 'ne', 'se', 'sw'] : ['se', 'e'];
+        for (var s = 0; s < spots.length; s++) {
+          var h = document.createElement('i');
+          h.className = 'inv-resize';
+          h.setAttribute('data-h', spots[s]);
+          h.title = 'تكبير / تصغير';
+          el.appendChild(h);
+        }
+      }
+      function tableColCount(b) {
+        normalizeTable(b);
+        return b.rows[0].length;
+      }
+      function ensureTableCols(b) {
+        normalizeTable(b);
+        return b.cols;
+      }
+      function mergeTableCells(b, r, c) {
+        /* الدمج مبسّط: دمج نص الخليتين وحذف التالية */
+        if (!b || !b.rows || !b.rows[r] || !b.rows[r][c] || !b.rows[r][c + 1]) return false;
+        var a = b.rows[r][c];
+        var nxt = b.rows[r][c + 1];
+        if (!a.t && nxt.t) a.t = nxt.t;
+        if (!a.k && nxt.k) a.k = nxt.k;
+        b.rows[r].splice(c + 1, 1);
+        normalizeTable(b);
+        b._cell = { r: r, c: c };
+        return true;
+      }
+      function applyTableColsLive(el, b) {
+        var table = el && el.querySelector('table');
+        if (!table || !b) return;
+        normalizeTable(b);
+        var cols = b.cols;
+        var sum = 0;
+        for (var i = 0; i < cols.length; i++) sum += cols[i];
+        var nodes = table.querySelectorAll('col');
+        for (var c = 0; c < nodes.length && c < cols.length; c++) {
+          nodes[c].style.width = ((cols[c] / sum) * 100).toFixed(2) + '%';
+        }
+        var line = el.querySelector('.inv-col-line');
+        if (line && cols.length >= 2) {
+          line.style.left = ((cols[1] / sum) * 100) + '%';
+        }
+      }
+      function paintTable(el, b, design) {
+        var old = el.querySelector('table');
+        if (old && old.parentNode) old.parentNode.removeChild(old);
+        var oldLines = el.querySelectorAll('.inv-col-line');
+        for (var oi = 0; oi < oldLines.length; oi++) {
+          if (oldLines[oi].parentNode) oldLines[oi].parentNode.removeChild(oldLines[oi]);
+        }
+        normalizeTable(b);
+        clampTableBox(b);
+        /* عرض ثابت داخل الورقة — بدون قياس تلقائي يتكسر */
+        el.style.left = b.x + 'mm';
+        el.style.top = b.y + 'mm';
+        el.style.width = b.w + 'mm';
+        el.style.maxWidth = b.w + 'mm';
+        el.style.minWidth = b.w + 'mm';
+        var table = document.createElement('table');
+        table.className = 'inv-table';
+        var rowH = tableRowH(b);
+        b.rowH = rowH;
+        var cols = b.cols;
+        var sum = 0;
+        for (var s = 0; s < cols.length; s++) sum += cols[s];
+        var cg = document.createElement('colgroup');
+        for (var ci = 0; ci < cols.length; ci++) {
+          var col = document.createElement('col');
+          col.style.width = ((cols[ci] / sum) * 100).toFixed(2) + '%';
+          cg.appendChild(col);
+        }
+        table.appendChild(cg);
+        for (var r = 0; r < b.rows.length; r++) {
+          var tr = document.createElement('tr');
+          tr.style.height = rowH + 'mm';
+          for (var c = 0; c < b.rows[r].length; c++) {
+            var cell = b.rows[r][c] || {};
+            var td = document.createElement('td');
+            td.setAttribute('data-r', String(r));
+            td.setAttribute('data-c', String(c));
+            var key = String(cell.k || '').trim();
+            var label = String(cell.t || '').trim();
+            if (key) {
+              td.className = 'inv-var';
+              td.textContent = sample(key, design || current || {});
+            } else {
+              td.textContent = label || '\u00a0';
+            }
+            if (b._cell && b._cell.r === r && b._cell.c === c) {
+              td.className = (td.className ? td.className + ' ' : '') + 'is-cell';
+            }
+            tr.appendChild(td);
+          }
+          table.appendChild(tr);
+        }
+        var firstHandle = el.querySelector('.inv-resize');
+        if (firstHandle) el.insertBefore(table, firstHandle);
+        else el.appendChild(table);
+        if (mode === 'edit' && cols.length >= 2) {
+          var line = document.createElement('i');
+          line.className = 'inv-col-line';
+          line.setAttribute('data-col', '1');
+          line.title = 'اسحب لتغيير عرض العمود';
+          line.style.left = ((cols[1] / sum) * 100) + '%';
+          el.appendChild(line);
+        }
+      }
       function blockNode(b, design) {
         var el = document.createElement('div');
         el.className = 'inv-block' + (b.w > 0 ? '' : ' is-hug');
         el.setAttribute('data-id', b.id);
         el.style.left = (parseFloat(b.x) || 0) + 'mm';
         el.style.top = (parseFloat(b.y) || 0) + 'mm';
+        if (b.kind === 'rule') {
+          el.classList.remove('is-hug');
+          el.style.width = (b.w > 0 ? b.w : 40) + 'mm';
+          el.style.height = '0';
+          el.style.borderTop = (b.dash ? '0.35mm dashed ' : '0.45mm solid ') + (b.color || '#111827');
+          el.style.marginTop = '1.4mm';
+          addResizeHandles(el, false);
+          return el;
+        }
+        if (b.kind === 'table') {
+          el.classList.remove('is-hug');
+          el.classList.add('is-table');
+          paintType(el, b);
+          paintTable(el, b, design);
+          addResizeHandles(el, true);
+          return el;
+        }
         if (b.kind === 'logo') {
           el.classList.remove('is-hug');
           el.style.width = (b.w > 0 ? b.w : 18) + 'mm';
@@ -896,22 +1961,19 @@ function invoice_render_tab($tab, $tenantId, $isEn)
           el.style.color = b.color || '#111827';
           el.style.textAlign = b.align || 'right';
           el.style.direction = b.dir || 'rtl';
-          var span = document.createElement('span');
-          span.className = 'inv-val';
-          span.textContent = b.text ? b.text : sample(b.kind, design);
-          el.appendChild(span);
+          paintType(el, b);
+          fillText(el, b, design);
         }
-        var handle = document.createElement('i');
-        handle.className = 'inv-resize';
-        el.appendChild(handle);
+        addResizeHandles(el, false);
         return el;
       }
       function paint(el, design) {
         var box = boxMm(design);
-        el.className = 'inv-paper frame-' + (design.frame || 'none');
+        el.className = 'inv-paper';
         el.style.width = box.w + 'mm';
         el.style.height = box.h + 'mm';
         el.innerHTML = '';
+        paintFrame(el, design, box);
         var blocks = design.blocks || [];
         for (var i = 0; i < blocks.length; i++) el.appendChild(blockNode(blocks[i], design));
         var gv = document.createElement('i');
@@ -920,11 +1982,99 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         gh.className = 'inv-guide inv-guide-h';
         el.appendChild(gv);
         el.appendChild(gh);
+        var handle = document.createElement('div');
+        handle.className = 'inv-len-handle';
+        handle.innerHTML = '<b></b>';
+        el.appendChild(handle);
+        var wide = document.createElement('div');
+        wide.className = 'inv-wid-handle';
+        wide.innerHTML = '<b></b>';
+        el.appendChild(wide);
         var foot = document.createElement('div');
         foot.className = 'inv-foot';
-        foot.textContent = DATA.footer || '';
+        foot.textContent = footText();
+        foot.style.textAlign = (design.footer_align === 'left' || design.footer_align === 'right') ? design.footer_align : 'center';
+        var fx0 = parseFloat(design.footer_x);
+        var fy0 = parseFloat(design.footer_y);
+        foot.style.bottom = 'auto';
+        foot.style.right = 'auto';
+        if (!isFinite(fy0) || fy0 < 0) {
+          foot.style.top = 'auto';
+          foot.style.bottom = '1.2mm';
+        } else foot.style.top = fy0 + 'mm';
+        if (!isFinite(fx0) || fx0 < 0) {
+          foot.style.left = '1mm';
+          foot.style.right = '1mm';
+          foot.style.width = 'auto';
+        } else foot.style.left = fx0 + 'mm';
         el.appendChild(foot);
         return box;
+      }
+      function footText() {
+        var t = DATA.footer ? String(DATA.footer) : '';
+        return t || 'البوابة';
+      }
+      function settleFoot() {
+        if (!current || !paper) return null;
+        var foot = paper.querySelector('.inv-foot');
+        if (!foot) return null;
+        var box = boxMm(current);
+        var rect = paper.getBoundingClientRect();
+        if (!rect.width || !rect.height) return null;
+        foot.textContent = footText();
+        foot.style.whiteSpace = 'nowrap';
+        foot.style.width = 'max-content';
+        foot.style.maxWidth = (box.w - 2) + 'mm';
+        foot.style.bottom = 'auto';
+        foot.style.right = 'auto';
+        var footRect = foot.getBoundingClientRect();
+        var naturalW = footRect.width / rect.width * box.w;
+        var naturalH = Math.max(3.2, footRect.height / rect.height * box.h);
+        if (naturalW > box.w - 2) {
+          foot.style.whiteSpace = 'normal';
+          foot.style.width = (box.w - 2) + 'mm';
+          var wrapped = foot.getBoundingClientRect();
+          naturalW = box.w - 2;
+          naturalH = Math.max(3.2, wrapped.height / rect.height * box.h);
+        }
+        var x = parseFloat(current.footer_x);
+        var y = parseFloat(current.footer_y);
+        if (!isFinite(x) || x < 0) x = Math.max(0, (box.w - naturalW) / 2);
+        if (!isFinite(y) || y < 0) y = Math.max(0, box.h - naturalH - 1.2);
+        if (x + naturalW > box.w - 0.4) x = Math.max(0, box.w - naturalW - 0.4);
+        if (y + naturalH > box.h - 0.4) y = Math.max(0, box.h - naturalH - 0.4);
+        if (isFinite(parseFloat(current.footer_x)) && current.footer_x >= 0 && Math.abs(current.footer_x - x) > 0.05) current.footer_x = Math.round(x * 10) / 10;
+        if (isFinite(parseFloat(current.footer_y)) && current.footer_y >= 0 && Math.abs(current.footer_y - y) > 0.05) current.footer_y = Math.round(y * 10) / 10;
+        foot.style.left = x + 'mm';
+        foot.style.top = y + 'mm';
+        var band = { x: x, y: y, w: naturalW, h: naturalH };
+        current._foot = band;
+        return band;
+      }
+      function shoveOneBlock(b) {
+        var f = current && current._foot;
+        if (!f || !paper || !b) return;
+        var rect = paper.getBoundingClientRect();
+        var box = boxMm(current);
+        if (!rect.width || !rect.height) return;
+        var el = qBlock(b.id);
+        if (!el) return;
+        var r = el.getBoundingClientRect();
+        var l = (r.left - rect.left) / rect.width * box.w;
+        var t = (r.top - rect.top) / rect.height * box.h;
+        var rr = (r.right - rect.left) / rect.width * box.w;
+        var bb = (r.bottom - rect.top) / rect.height * box.h;
+        var hit = rr > f.x + 0.3 && l < f.x + f.w - 0.3 && bb > f.y + 0.2 && t < f.y + f.h - 0.2;
+        if (!hit) return;
+        var bh = Math.max(2, bb - t);
+        var above = f.y - 0.7 - bh;
+        if (above >= 0) b.y = Math.round(above * 10) / 10;
+        else b.y = Math.round((f.y + f.h + 0.7) * 10) / 10;
+        syncBlock(b);
+      }
+      function shoveOffFooter() {
+        var blocks = current && current.blocks ? current.blocks : [];
+        for (var i = 0; i < blocks.length; i++) shoveOneBlock(blocks[i]);
       }
       function fitInto(box, paperEl, maxW, maxH, cap) {
         paperEl.style.transform = 'none';
@@ -941,33 +2091,67 @@ function invoice_render_tab($tab, $tenantId, $isEn)
       function fitMain() {
         if (!current || !paper) return;
         var box = paint(paper, current);
-        fitInto(fitEl, paper, Math.max(80, stage.clientWidth - 36), Math.max(80, stage.clientHeight - 36), 1.6);
+        fitInto(fitEl, paper, Math.max(120, stage.clientWidth - 48), Math.max(120, stage.clientHeight - 48), 2.4);
+        if (stage) { stage.scrollLeft = 0; stage.scrollTop = 0; }
         if (len) len.textContent = (box.w / 10).toFixed(1) + ' × ' + (box.h / 10).toFixed(1) + ' سم';
+        var handleLab = paper.querySelector('.inv-len-handle b');
+        if (handleLab) handleLab.textContent = (box.h / 10).toFixed(1) + ' سم';
+        var wideLab = paper.querySelector('.inv-wid-handle b');
+        if (wideLab) wideLab.textContent = (box.w / 10).toFixed(1) + ' سم';
         clampInside(box);
-        if (picked) {
-          var el = qBlock(picked);
-          if (el) el.classList.add('is-pick');
+        var nodes = paper.querySelectorAll('.inv-block');
+        for (var pi = 0; pi < nodes.length; pi++) {
+          nodes[pi].classList.toggle('is-pick', pickedIds.indexOf(nodes[pi].getAttribute('data-id')) >= 0);
+        }
+        var fr = paper.querySelector('.inv-frame');
+        if (fr) fr.classList.toggle('is-pick', picked === '__frame__');
+        settleFoot();
+        var footPick = paper.querySelector('.inv-foot');
+        if (footPick) footPick.classList.toggle('is-pick', picked === '__foot__');
+      }
+      function repairDesignLayout(d) {
+        if (!d) return;
+        var sw = parseFloat(d.sheet_w) || 0;
+        /* عرض 15سم على شريط 80مم كان يقص اليسار بالكامل */
+        if (sw > 100 && String(d.paper || 'strip80').indexOf('strip') === 0) d.sheet_w = 0;
+        var box = boxMm(d);
+        var blocks = d.blocks || [];
+        var defKeys = ['name', 'package', 'start', 'end', 'amount'];
+        for (var i = 0; i < blocks.length; i++) {
+          var b = blocks[i];
+          if (!b || b.kind !== 'table') continue;
+          normalizeTable(b);
+          if (b.rows[0] && b.rows[0].length === 2) {
+            b.cols = [40, 60];
+            for (var ri = 0; ri < b.rows.length; ri++) {
+              var row = b.rows[ri];
+              if (!row[1]) row[1] = { t: '', k: '' };
+              if (!String(row[1].k || '').trim() && ri < defKeys.length) row[1].k = defKeys[ri];
+            }
+          }
+          b.x = 4;
+          b.w = Math.max(30, box.w - 8);
+          b.rowH = tableRowH(b);
+          clampTableBox(b);
         }
       }
       function clampInside(box) {
         if (!current || !paper) return;
-        var rect = paper.getBoundingClientRect();
-        if (!rect.width || !box) return;
-        var nodes = paper.querySelectorAll('.inv-block');
         var changed = false;
-        for (var i = 0; i < nodes.length; i++) {
-          var b = blockById(nodes[i].getAttribute('data-id'));
+        var blocks = current.blocks || [];
+        for (var i = 0; i < blocks.length; i++) {
+          var b = blocks[i];
           if (!b) continue;
-          var br = nodes[i].getBoundingClientRect();
-          var right = (br.right - rect.left) / rect.width * box.w;
-          if (right > box.w - 0.6) {
-            b.x = Math.max(0, Math.round((b.x - (right - (box.w - 0.6))) * 10) / 10);
-            changed = true;
-          }
           if (b.x < 0) { b.x = 0; changed = true; }
+          if (b.y < 0) { b.y = 0; changed = true; }
+          if (b.kind === 'table') {
+            var before = b.x + ':' + b.w;
+            clampTableBox(b);
+            if (b.x + ':' + b.w !== before) changed = true;
+          }
         }
         if (!changed) return;
-        for (var k = 0; k < current.blocks.length; k++) syncBlock(current.blocks[k]);
+        for (var k = 0; k < blocks.length; k++) syncBlock(blocks[k]);
       }
       function qBlock(id) {
         var nodes = paper.querySelectorAll('.inv-block');
@@ -979,6 +2163,20 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         if (!el) return;
         el.style.left = b.x + 'mm';
         el.style.top = b.y + 'mm';
+        if (b.kind === 'rule') {
+          el.classList.remove('is-hug');
+          el.style.width = (b.w > 0 ? b.w : 40) + 'mm';
+          el.style.borderTop = (b.dash ? '0.35mm dashed ' : '0.45mm solid ') + (b.color || '#111827');
+          return;
+        }
+        if (b.kind === 'table') {
+          el.classList.remove('is-hug');
+          el.classList.add('is-table');
+          paintType(el, b);
+          paintTable(el, b, current);
+          if (!el.querySelector('.inv-resize[data-h="se"]')) addResizeHandles(el, true);
+          return;
+        }
         if (b.kind === 'logo') {
           el.style.width = (b.w > 0 ? b.w : 18) + 'mm';
           return;
@@ -995,10 +2193,10 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         el.style.color = b.color || '#111827';
         el.style.textAlign = b.align || 'right';
         el.style.direction = b.dir || 'rtl';
+        paintType(el, b);
         if (b.w > 0) { el.classList.remove('is-hug'); el.style.width = b.w + 'mm'; }
         else { el.classList.add('is-hug'); el.style.width = ''; }
-        var val = el.querySelector('.inv-val');
-        if (val) val.textContent = b.text ? b.text : sample(b.kind, current);
+        fillText(el, b, current);
       }
       function paperLabel(design) {
         var sizes = DATA.sizes || {};
@@ -1017,15 +2215,31 @@ function invoice_render_tab($tab, $tenantId, $isEn)
       }
       function showGallery() {
         mode = 'gallery';
-        app.classList.remove('is-edit');
-        gallery.hidden = false;
-        form.hidden = true;
+        if (app) app.classList.remove('is-edit');
+        if (gallery) gallery.hidden = false;
+        if (form) form.hidden = true;
         closePop();
         picked = null;
-        cards.innerHTML = '';
+        if (!cards) return;
         var list = DATA.templates || [];
-        for (var i = 0; i < list.length; i++) cards.appendChild(cardEl(list[i], list.length > 1));
-        requestAnimationFrame(function () { requestAnimationFrame(fitThumbs); });
+        if (!list.length) return;
+        var frag = document.createDocumentFragment();
+        for (var i = 0; i < list.length; i++) {
+          try {
+            frag.appendChild(cardEl(list[i], list.length > 1));
+          } catch (err) {
+            var fallback = document.createElement('div');
+            fallback.className = 'inv-card';
+            fallback.setAttribute('data-tpl', list[i] && list[i].id ? list[i].id : '');
+            var strong = document.createElement('strong');
+            strong.textContent = (list[i] && list[i].name) || 'قالب';
+            fallback.appendChild(strong);
+            frag.appendChild(fallback);
+          }
+        }
+        cards.innerHTML = '';
+        cards.appendChild(frag);
+        requestAnimationFrame(function () { requestAnimationFrame(function () { try { fitThumbs(); } catch (err) {} }); });
       }
       function cardEl(design, canDel) {
         var card = document.createElement('div');
@@ -1066,7 +2280,9 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         var editing = mode === 'edit';
         app.classList.toggle('is-edit', editing);
         rail.hidden = !editing;
-        document.getElementById('invBottom').hidden = !editing;
+        document.getElementById('invBottom').hidden = false;
+        document.getElementById('invCancel').hidden = !editing;
+        document.getElementById('invSave').hidden = !editing;
         document.getElementById('invEditBtn').hidden = editing;
         document.getElementById('invDelTpl').hidden = editing || (DATA.templates || []).length < 2;
         nameInput.readOnly = !editing;
@@ -1074,6 +2290,7 @@ function invoice_render_tab($tab, $tenantId, $isEn)
       }
       function openPreview(id) {
         current = cloneDesign(findTpl(id));
+        repairDesignLayout(current);
         isNew = false;
         mode = 'preview';
         picked = null;
@@ -1085,6 +2302,7 @@ function invoice_render_tab($tab, $tenantId, $isEn)
       }
       function openEdit(design, asNew) {
         current = cloneDesign(design);
+        repairDesignLayout(current);
         isNew = !!asNew;
         mode = 'edit';
         picked = null;
@@ -1146,13 +2364,17 @@ function invoice_render_tab($tab, $tenantId, $isEn)
       }
       function buildAlign() {
         pop.appendChild(el('h3', '', UI.guides || 'محاذاة'));
-        var col = el('button', '', UI.oneCol || 'عمود واحد');
+        var col = el('button', '', 'رص من اليمين');
         col.type = 'button';
-        col.addEventListener('click', function () { alignColumn(); closePop(); });
+        col.addEventListener('click', function () { packEdge('right'); closePop(); });
+        var left = el('button', '', 'رص من اليسار');
+        left.type = 'button';
+        left.addEventListener('click', function () { packEdge('left'); closePop(); });
         var beside = el('button', '', UI.beside || 'بجانب بعض');
         beside.type = 'button';
         beside.addEventListener('click', function () { alignBeside(); closePop(); });
         pop.appendChild(col);
+        pop.appendChild(left);
         pop.appendChild(beside);
       }
       function buildPaper() {
@@ -1203,10 +2425,15 @@ function invoice_render_tab($tab, $tenantId, $isEn)
             var b = el('button', id === current.frame ? 'is-on' : '', label);
             b.type = 'button';
             b.addEventListener('click', function () {
+              var boxf = frameCopy(current);
+              boxf.style = id;
+              if (id === 'round' && !(boxf.radius > 0)) boxf.radius = 3;
+              current.frame_box = boxf;
               current.frame = id;
               var all = grid.querySelectorAll('button');
               for (var n = 0; n < all.length; n++) all[n].classList.toggle('is-on', all[n] === b);
               fitMain();
+              if (id !== 'none') pick('__frame__', false, true);
             });
             grid.appendChild(b);
           })(k, frames[k]);
@@ -1244,7 +2471,7 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         for (var i = 0; i < blocks.length; i++) {
           var b = blocks[i];
           if (!b || b.kind === 'logo' || b.kind === 'qr') continue;
-          var t = b.text ? String(b.text) : sample(b.kind, design);
+          var t = (b.label ? String(b.label) + ' ' : '') + shownValue(b, design);
           if (t) lines.push(t);
         }
         if (!lines.length) lines.push('وصل');
@@ -1286,25 +2513,35 @@ function invoice_render_tab($tab, $tenantId, $isEn)
           else { h.style.top = yMm + 'mm'; h.classList.add('is-on'); }
         }
       }
-      function alignColumn() {
-        if (!current) return;
+      function packEdge(side) {
+        if (!current || !paper) return;
         var rect = paper.getBoundingClientRect();
         var box = boxMm(current);
         if (!rect.width) return;
-        var anchor = blockById(picked);
-        var texts = [];
+        var items = [];
         for (var i = 0; i < current.blocks.length; i++) {
-          if (current.blocks[i].kind !== 'logo' && current.blocks[i].kind !== 'qr') texts.push(current.blocks[i]);
+          var b = current.blocks[i];
+          if (!b || b.kind === 'logo' || b.kind === 'qr') continue;
+          if (pickedIds.length > 1 && pickedIds.indexOf(b.id) < 0) continue;
+          var el = qBlock(b.id);
+          var m = el ? blockMm(el, rect, box) : { l: b.x, r: b.x + (b.w || 20), t: b.y, b: b.y + 6, w: b.w || 20 };
+          items.push({ b: b, m: m });
         }
-        if (!texts.length) return;
-        if (!anchor || anchor.kind === 'logo' || anchor.kind === 'qr') anchor = texts[0];
-        var aEl = qBlock(anchor.id);
-        var right = aEl ? blockMm(aEl, rect, box).r : (anchor.x + 20);
-        for (var k = 0; k < texts.length; k++) {
-          var el = qBlock(texts[k].id);
-          var w = el ? blockMm(el, rect, box).w : 12;
-          texts[k].x = Math.max(0, Math.round((right - w) * 10) / 10);
-          texts[k].align = 'right';
+        if (!items.length) return;
+        items.sort(function (a, c) { return a.m.t - c.m.t; });
+        var edge = side === 'left' ? items[0].m.l : items[0].m.r;
+        for (var k = 1; k < items.length; k++) {
+          if (side === 'left') edge = Math.min(edge, items[k].m.l);
+          else edge = Math.max(edge, items[k].m.r);
+        }
+        var y = items[0].m.t;
+        for (var n = 0; n < items.length; n++) {
+          var it = items[n];
+          var w = Math.max(4, it.m.w);
+          if (side === 'left') it.b.x = Math.max(0, Math.round(edge * 10) / 10);
+          else it.b.x = Math.max(0, Math.round((edge - w) * 10) / 10);
+          it.b.y = Math.round(y * 10) / 10;
+          y += Math.max(5, it.m.b - it.m.t) + 1.4;
         }
         fitMain();
       }
@@ -1336,20 +2573,200 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         }
         fitMain();
       }
+      function editTable(b) {
+        if (!b || !pop) return;
+        if (!b.rows || !b.rows.length) b.rows = [[{t:'', k:''}, {t:'', k:''}]];
+        pop.hidden = false;
+        pop.innerHTML = '';
+        normalizeTable(b);
+        pop.appendChild(el('h3', '', 'خلايا الجدول'));
+        var counts = el('div', 'inv-trow');
+        var rowLab = el('label', '');
+        rowLab.textContent = 'صفوف';
+        rowLab.style.fontSize = '11px';
+        rowLab.style.fontWeight = '800';
+        var rowN = document.createElement('input');
+        rowN.type = 'number';
+        rowN.min = '1';
+        rowN.max = '20';
+        rowN.value = String(b.rows.length);
+        rowN.title = 'عدد الصفوف';
+        rowLab.appendChild(rowN);
+        var colLab = el('label', '');
+        colLab.textContent = 'أعمدة';
+        colLab.style.fontSize = '11px';
+        colLab.style.fontWeight = '800';
+        var colN = document.createElement('input');
+        colN.type = 'number';
+        colN.min = '1';
+        colN.max = '8';
+        colN.value = String((b.rows[0] && b.rows[0].length) || 1);
+        colN.title = 'عدد الأعمدة';
+        colLab.appendChild(colN);
+        function resizeGrid() {
+          var nr = Math.max(1, Math.min(20, parseInt(rowN.value, 10) || 1));
+          var nc = Math.max(1, Math.min(8, parseInt(colN.value, 10) || 1));
+          while (b.rows.length < nr) {
+            var row = [];
+            for (var i = 0; i < nc; i++) row.push({ t: '', k: '', span: 1 });
+            b.rows.push(row);
+          }
+          if (b.rows.length > nr) b.rows = b.rows.slice(0, nr);
+          for (var r = 0; r < b.rows.length; r++) {
+            while (b.rows[r].length < nc) b.rows[r].push({ t: '', k: '', span: 1 });
+            if (b.rows[r].length > nc) b.rows[r] = b.rows[r].slice(0, nc);
+            for (var c = 0; c < b.rows[r].length; c++) b.rows[r][c].span = 1;
+          }
+          b.cols = [];
+          for (var ci = 0; ci < nc; ci++) b.cols.push(nc === 2 ? (ci === 0 ? 52 : 48) : (100 / nc));
+          normalizeTable(b);
+          clampTableBox(b);
+          syncBlock(b);
+          editTable(b);
+        }
+        rowN.addEventListener('change', resizeGrid);
+        colN.addEventListener('change', resizeGrid);
+        counts.appendChild(rowLab);
+        counts.appendChild(colLab);
+        pop.appendChild(counts);
+        function opts(sel, val) {
+          var empty = document.createElement('option');
+          empty.value = '';
+          empty.textContent = 'نص';
+          sel.appendChild(empty);
+          for (var key in VAR_LABEL) if (VAR_LABEL.hasOwnProperty(key)) {
+            var op = document.createElement('option');
+            op.value = key;
+            op.textContent = VAR_LABEL[key];
+            if (key === val) op.selected = true;
+            sel.appendChild(op);
+          }
+        }
+        for (var r = 0; r < b.rows.length; r++) {
+          (function (row, ri) {
+            var line = el('div', 'inv-trow');
+            for (var c = 0; c < row.length; c++) {
+              (function (cell) {
+                var inp = document.createElement('input');
+                inp.type = 'text';
+                inp.value = cell.t || '';
+                inp.placeholder = 'نص';
+                inp.addEventListener('input', function () { cell.t = inp.value; syncBlock(b); });
+                var sel = document.createElement('select');
+                opts(sel, cell.k || '');
+                sel.addEventListener('change', function () { cell.k = sel.value; syncBlock(b); });
+                var wrap = el('div', '');
+                wrap.style.flex = '1';
+                wrap.style.minWidth = '0';
+                wrap.appendChild(inp);
+                wrap.appendChild(sel);
+                line.appendChild(wrap);
+              })(row[c]);
+            }
+            var del = el('button', '', 'حذف الصف');
+            del.type = 'button';
+            del.style.width = 'auto';
+            del.style.marginTop = '0';
+            del.addEventListener('click', function () {
+              if (b.rows.length < 2) return;
+              b.rows.splice(ri, 1);
+              syncBlock(b);
+              editTable(b);
+            });
+            line.appendChild(del);
+            pop.appendChild(line);
+          })(b.rows[r], r);
+        }
+        var addRow = el('button', '', 'صف جديد');
+        addRow.type = 'button';
+        addRow.addEventListener('click', function () {
+          var cols = (b.rows[0] && b.rows[0].length) || 2;
+          var row = [];
+          for (var i = 0; i < cols; i++) row.push({t:'', k:''});
+          b.rows.push(row);
+          syncBlock(b);
+          editTable(b);
+        });
+        var addCol = el('button', '', 'عمود جديد');
+        addCol.type = 'button';
+        addCol.addEventListener('click', function () {
+          for (var i = 0; i < b.rows.length; i++) b.rows[i].push({t:'', k:''});
+          syncBlock(b);
+          editTable(b);
+        });
+        var dropCol = el('button', '', 'حذف آخر عمود');
+        dropCol.type = 'button';
+        dropCol.addEventListener('click', function () {
+          if (!b.rows[0] || b.rows[0].length < 2) return;
+          for (var i = 0; i < b.rows.length; i++) b.rows[i].pop();
+          syncBlock(b);
+          editTable(b);
+        });
+        pop.appendChild(addRow);
+        pop.appendChild(addCol);
+        pop.appendChild(dropCol);
+      }
       function addKind(kind) {
         var box = boxMm(current);
+        var variable = isVarKind(kind);
         var b = norm({
           id: 'b' + Date.now(),
           kind: kind,
-          x: Math.max(2, box.w - 30),
+          x: variable ? 4 : Math.max(2, box.w - 30),
           y: 4,
           w: kind === 'logo' ? 18 : (kind === 'qr' ? 22 : 0),
           size: kind === 'amount' ? 18 : 13,
           color: '#111827',
           align: 'right',
-          dir: (kind === 'phone' || kind === 'amount' || kind === 'start' || kind === 'end' || kind === 'package') ? 'ltr' : 'rtl',
-          text: kind === 'custom' ? 'نص' : ''
+          dir: 'rtl',
+          text: kind === 'custom' ? 'نص' : '',
+          label: variable ? (VAR_LABEL[kind] || '') : ''
         });
+        if (kind === 'rule' || kind === 'ruledash' || kind === 'table') {
+          b.kind = kind === 'table' ? 'table' : 'rule';
+          b.dash = kind === 'ruledash' ? 1 : 0;
+          b.x = 4;
+          b.w = Math.max(24, box.w - 8);
+          var below = 4;
+          for (var ri = 0; ri < current.blocks.length; ri++) {
+            var bot = (parseFloat(current.blocks[ri].y) || 0) + 8;
+            if (bot > below) below = bot;
+          }
+          b.y = Math.round(below * 10) / 10;
+          if (kind === 'table') {
+            b.rowH = 7;
+            b.cols = [42, 58];
+            b.x = 4;
+            b.w = Math.max(40, box.w - 8);
+            b.rows = [
+              [{ t: 'اسم العميل', k: '' }, { t: '', k: 'name' }],
+              [{ t: 'نوع الاشتراك', k: '' }, { t: '', k: 'package' }],
+              [{ t: 'تاريخ التفعيل', k: '' }, { t: '', k: 'start' }],
+              [{ t: 'تاريخ الانتهاء', k: '' }, { t: '', k: 'end' }],
+              [{ t: 'المبلغ', k: '' }, { t: '', k: 'amount' }]
+            ];
+            clampTableBox(b);
+          }
+          current.blocks.push(b);
+          closePop();
+          fitMain();
+          pick(b.id);
+          if (kind === 'table') editTable(b);
+          return;
+        }
+        if (variable) {
+          var prevY = 4;
+          for (var vi = 0; vi < current.blocks.length; vi++) {
+            var bottom = (parseFloat(current.blocks[vi].y) || 0) + 8;
+            if (bottom > prevY) prevY = bottom;
+          }
+          b.y = Math.round(prevY * 10) / 10;
+          current.blocks.push(b);
+          closePop();
+          fitMain();
+          pick(b.id);
+          return;
+        }
         var prev = null;
         for (var i = current.blocks.length - 1; i >= 0; i--) {
           if (current.blocks[i].kind !== 'logo') { prev = current.blocks[i]; break; }
@@ -1387,48 +2804,204 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         }
         pick(b.id);
       }
+      function showBits(sel, on) {
+        var nodes = prop.querySelectorAll(sel);
+        for (var i = 0; i < nodes.length; i++) nodes[i].hidden = !on;
+      }
       function fillProp() {
-        var b = picked ? blockById(picked) : null;
-        if (!b || mode !== 'edit') { prop.hidden = true; return; }
+        if (mode !== 'edit' || !picked) { prop.hidden = true; return; }
         prop.hidden = false;
+        if (picked === '__frame__') {
+          showBits('.inv-for-text', false);
+          showBits('.inv-for-var', false);
+          showBits('.inv-for-logo', false);
+          showBits('.inv-for-table', false);
+          showBits('.inv-for-frame', true);
+          showBits('.inv-for-pos', true);
+          var noteF = document.getElementById('pFootNote');
+          if (noteF) noteF.hidden = true;
+          var delF = document.getElementById('pDel');
+          if (delF) delF.hidden = false;
+          var f = frameCopy(current);
+          var g = frameGeom(current);
+          var styleBox = document.getElementById('pFrameStyle');
+          if (styleBox) setSeg(styleBox, f.style);
+          var fc = document.getElementById('pFrameColor');
+          if (fc && document.activeElement !== fc) fc.value = f.color;
+          var ft = document.getElementById('pFrameThick');
+          if (ft && document.activeElement !== ft) ft.value = String(f.thick);
+          var frad = document.getElementById('pFrameRadius');
+          if (frad && document.activeElement !== frad) frad.value = String(f.radius);
+          if (document.activeElement !== document.getElementById('pX')) document.getElementById('pX').value = g.x;
+          if (document.activeElement !== document.getElementById('pY')) document.getElementById('pY').value = g.y;
+          var pc0 = document.getElementById('pCount');
+          if (pc0) { pc0.hidden = true; pc0.textContent = ''; }
+          return;
+        }
+        if (picked === '__foot__') {
+          showBits('.inv-for-text', false);
+          showBits('.inv-for-var', false);
+          showBits('.inv-for-logo', false);
+          showBits('.inv-for-frame', false);
+          showBits('.inv-for-table', false);
+          showBits('.inv-for-pos', true);
+          var note = document.getElementById('pFootNote');
+          if (note) note.hidden = false;
+          var del = document.getElementById('pDel');
+          if (del) del.hidden = true;
+          var alignBox = document.getElementById('pAlign');
+          if (alignBox) { alignBox.hidden = false; setSeg(alignBox, current.footer_align || 'center'); }
+          var dirBox = document.getElementById('pDir');
+          if (dirBox) dirBox.hidden = true;
+          var band = current._foot || { x: 0, y: 0 };
+          var fx = parseFloat(current.footer_x);
+          var fy = parseFloat(current.footer_y);
+          var pXf = document.getElementById('pX');
+          var pYf = document.getElementById('pY');
+          if (pXf && document.activeElement !== pXf) pXf.value = (isFinite(fx) && fx >= 0) ? fx : Math.round(band.x * 10) / 10;
+          if (pYf && document.activeElement !== pYf) pYf.value = (isFinite(fy) && fy >= 0) ? fy : Math.round(band.y * 10) / 10;
+          var pc1 = document.getElementById('pCount');
+          if (pc1) { pc1.hidden = true; pc1.textContent = ''; }
+          return;
+        }
+        showBits('.inv-for-frame', false);
+        var noteOff = document.getElementById('pFootNote');
+        if (noteOff) noteOff.hidden = true;
+        var delOn = document.getElementById('pDel');
+        if (delOn) delOn.hidden = false;
+        showBits('.inv-for-pos', true);
+        var b = blockById(picked);
+        if (!b) { prop.hidden = true; return; }
         var special = b.kind === 'logo' || b.kind === 'qr';
-        var bits = prop.querySelectorAll('.inv-for-text');
-        for (var i = 0; i < bits.length; i++) bits[i].hidden = special;
+        var variable = isVarKind(b.kind);
+        showBits('.inv-for-text', !special && b.kind !== 'table' && b.kind !== 'rule');
+        showBits('.inv-for-var', variable);
+        showBits('.inv-for-table', b.kind === 'table');
+        var pRowH = document.getElementById('pRowH');
+        if (pRowH && b.kind === 'table') pRowH.value = String(tableRowH(b));
         var logoBits = prop.querySelectorAll('.inv-for-logo');
         for (var j = 0; j < logoBits.length; j++) logoBits[j].hidden = b.kind !== 'logo';
         var pText = document.getElementById('pText');
         var pSize = document.getElementById('pSize');
         var pSizeN = document.getElementById('pSizeN');
-        if (document.activeElement !== pText) pText.value = b.text ? b.text : sample(b.kind, current);
-        if (document.activeElement !== pSize && document.activeElement !== pSizeN) {
+        var lab = document.getElementById('pTextLab');
+        if (lab) lab.textContent = variable ? 'ثابت' : (UI.text || 'النص');
+        if (pText) {
+          pText.placeholder = variable ? (VAR_LABEL[b.kind] || 'كلمة ثابتة') : '';
+          if (document.activeElement !== pText) pText.value = variable ? (b.label || '') : (b.text || '');
+        }
+        var bind = document.getElementById('pBind');
+        if (bind && document.activeElement !== bind) bind.value = variable ? b.kind : 'custom';
+        if (pSize && pSizeN && document.activeElement !== pSize && document.activeElement !== pSizeN) {
           pSize.value = b.size;
           pSizeN.value = b.size;
         }
-        document.getElementById('pColor').value = /^#[0-9a-fA-F]{6}$/.test(b.color || '') ? b.color : '#111827';
-        document.getElementById('pHug').checked = !(b.w > 0);
-        if (document.activeElement !== document.getElementById('pX')) document.getElementById('pX').value = b.x;
-        if (document.activeElement !== document.getElementById('pY')) document.getElementById('pY').value = b.y;
-        setSeg(document.getElementById('pAlign'), b.align);
-        setSeg(document.getElementById('pDir'), b.dir);
+        var pColorEl = document.getElementById('pColor');
+        if (pColorEl) pColorEl.value = /^#[0-9a-fA-F]{6}$/.test(b.color || '') ? b.color : '#111827';
+        var pHugEl = document.getElementById('pHug');
+        if (pHugEl) pHugEl.checked = !(b.w > 0);
+        var hugWrap = document.getElementById('pHugWrap');
+        if (hugWrap) hugWrap.classList.toggle('is-on', !(b.w > 0));
+        var pXel = document.getElementById('pX');
+        var pYel = document.getElementById('pY');
+        if (pXel && document.activeElement !== pXel) pXel.value = b.x;
+        if (pYel && document.activeElement !== pYel) pYel.value = b.y;
+        var alignEl = document.getElementById('pAlign');
+        var dirEl = document.getElementById('pDir');
+        if (alignEl) setSeg(alignEl, b.align);
+        if (dirEl) setSeg(dirEl, b.dir);
+        var stackBox = document.getElementById('pStack');
+        if (stackBox) setSeg(stackBox, b.stack ? 'stack' : 'row');
+        var weightBox = document.getElementById('pWeight');
+        if (weightBox) setSeg(weightBox, b.weight === 'normal' ? 'normal' : 'bold');
+        var styleBox = document.getElementById('pStyle');
+        if (styleBox) {
+          var styleBtns = styleBox.querySelectorAll('button');
+          for (var si = 0; si < styleBtns.length; si++) {
+            var key = styleBtns[si].getAttribute('data-v');
+            styleBtns[si].classList.toggle('is-on', (key === 'italic' && !!b.italic) || (key === 'under' && !!b.under));
+          }
+        }
+        var pc = document.getElementById('pCount');
+        if (pc) {
+          if (pickedIds.length > 1) {
+            pc.hidden = false;
+            pc.textContent = pickedIds.length + ' عناصر';
+          } else {
+            pc.hidden = true;
+            pc.textContent = '';
+          }
+        }
       }
       function setSeg(box, val) {
+        if (!box) return;
         var btns = box.querySelectorAll('button');
         for (var i = 0; i < btns.length; i++) btns[i].classList.toggle('is-on', btns[i].getAttribute('data-v') === val);
       }
-      function pick(id) {
-        if (id) closePop();
+      function eachSelected(fn) {
+        var ids = pickedIds.length ? pickedIds : (picked ? [picked] : []);
+        for (var i = 0; i < ids.length; i++) {
+          var b = blockById(ids[i]);
+          if (b) fn(b);
+        }
+      }
+      function pick(id, additive, keepPop) {
+        if (id && !keepPop) closePop();
         var wasHidden = prop.hidden;
-        picked = id || null;
+        if (id === '__foot__') {
+          picked = '__foot__';
+          pickedIds = ['__foot__'];
+          var nodesFoot = paper.querySelectorAll('.inv-block');
+          for (var ffi = 0; ffi < nodesFoot.length; ffi++) nodesFoot[ffi].classList.remove('is-pick');
+          var frClear = paper.querySelector('.inv-frame');
+          if (frClear) frClear.classList.remove('is-pick');
+          var footOn = paper.querySelector('.inv-foot');
+          if (footOn) footOn.classList.add('is-pick');
+          try { fillProp(); } catch (errF) {}
+          return;
+        }
+        if (id === '__frame__') {
+          picked = '__frame__';
+          pickedIds = ['__frame__'];
+          var nodesF = paper.querySelectorAll('.inv-block');
+          for (var fi = 0; fi < nodesF.length; fi++) nodesF[fi].classList.remove('is-pick');
+          var frPick = paper.querySelector('.inv-frame');
+          if (frPick) frPick.classList.add('is-pick');
+          try { fillProp(); } catch (errFr) {}
+          return;
+        }
+        if (!id) {
+          picked = null;
+          pickedIds = [];
+        } else if (additive) {
+          var at = pickedIds.indexOf(id);
+          if (at >= 0) pickedIds.splice(at, 1);
+          else pickedIds.push(id);
+          picked = pickedIds.length ? pickedIds[pickedIds.length - 1] : null;
+        } else if (pickedIds.indexOf(id) < 0) {
+          pickedIds = [id];
+          picked = id;
+        } else {
+          picked = id;
+        }
         var nodes = paper.querySelectorAll('.inv-block');
-        for (var i = 0; i < nodes.length; i++) nodes[i].classList.toggle('is-pick', nodes[i].getAttribute('data-id') === picked);
-        fillProp();
+        for (var i = 0; i < nodes.length; i++) nodes[i].classList.toggle('is-pick', pickedIds.indexOf(nodes[i].getAttribute('data-id')) >= 0);
+        var frOff = paper.querySelector('.inv-frame');
+        if (frOff) frOff.classList.remove('is-pick');
+        var footOff = paper.querySelector('.inv-foot');
+        if (footOff) footOff.classList.remove('is-pick');
+        try { fillProp(); } catch (err) {}
         if (prop.hidden !== wasHidden) requestAnimationFrame(function () { requestAnimationFrame(function () { if (!drag) fitMain(); }); });
       }
       function removeBlock(b) {
+        var drop = {};
+        if (b) drop[b.id] = true;
+        else eachSelected(function (item) { drop[item.id] = true; });
         var next = [];
-        for (var i = 0; i < current.blocks.length; i++) if (current.blocks[i].id !== b.id) next.push(current.blocks[i]);
+        for (var i = 0; i < current.blocks.length; i++) if (!drop[current.blocks[i].id]) next.push(current.blocks[i]);
         current.blocks = next;
         picked = null;
+        pickedIds = [];
         prop.hidden = true;
         fitMain();
       }
@@ -1442,63 +3015,313 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         var pY = document.getElementById('pY');
         pText.addEventListener('input', function () {
           var b = blockById(picked); if (!b) return;
-          b.text = pText.value;
+          if (isVarKind(b.kind)) b.label = pText.value;
+          else b.text = pText.value;
           syncBlock(b);
         });
-        function setSize(n) {
-          var b = blockById(picked); if (!b) return;
-          n = Math.max(6, Math.min(72, parseFloat(n) || 13));
-          b.size = n;
-          pSize.value = n;
-          pSizeN.value = n;
-          syncBlock(b);
+        var pBind = document.getElementById('pBind');
+        if (pBind && !pBind.options.length) {
+          var opt0 = document.createElement('option');
+          opt0.value = 'custom';
+          opt0.textContent = 'نص فقط';
+          pBind.appendChild(opt0);
+          for (var bk in VAR_LABEL) if (VAR_LABEL.hasOwnProperty(bk)) {
+            var opt = document.createElement('option');
+            opt.value = bk;
+            opt.textContent = VAR_LABEL[bk];
+            pBind.appendChild(opt);
+          }
         }
-        pSize.addEventListener('input', function () { setSize(pSize.value); });
-        pSizeN.addEventListener('input', function () { setSize(pSizeN.value); });
-        pColor.addEventListener('input', function () {
+        if (pBind) pBind.addEventListener('change', function () {
           var b = blockById(picked); if (!b) return;
-          b.color = pColor.value;
-          syncBlock(b);
-        });
-        pHug.addEventListener('change', function () {
-          var b = blockById(picked); if (!b) return;
-          if (pHug.checked) b.w = 0;
-          else {
-            var el = qBlock(b.id);
-            var rect = paper.getBoundingClientRect();
-            var box = boxMm(current);
-            b.w = el ? Math.max(8, Math.round(el.getBoundingClientRect().width / rect.width * box.w * 10) / 10) : 20;
+          var v = pBind.value;
+          if (v === 'custom') {
+            if (!b.text) b.text = b.label || shownValue(b, current);
+            b.kind = 'custom';
+            b.label = '';
+          } else {
+            b.kind = v;
+            if (!b.label) b.label = VAR_LABEL[v] || '';
+            b.dir = 'rtl';
           }
           syncBlock(b);
+          fillProp();
         });
-        pX.addEventListener('input', function () {
+        function writeFrame(patch) {
+          var f = frameCopy(current);
+          var key;
+          for (key in patch) if (patch.hasOwnProperty(key)) f[key] = patch[key];
+          current.frame_box = f;
+          current.frame = f.style || 'none';
+          fitMain();
+        }
+        var pFrameStyle = document.getElementById('pFrameStyle');
+        if (pFrameStyle) pFrameStyle.addEventListener('click', function (e) {
+          var btn = e.target.closest ? e.target.closest('button') : null;
+          if (!btn || picked !== '__frame__') return;
+          var style = btn.getAttribute('data-v');
+          var patch = { style: style };
+          if (style === 'round') {
+            var now = frameCopy(current);
+            if (!(now.radius > 0)) patch.radius = 3;
+          }
+          writeFrame(patch);
+        });
+        var pFrameColor = document.getElementById('pFrameColor');
+        if (pFrameColor) pFrameColor.addEventListener('input', function () {
+          if (picked !== '__frame__') return;
+          writeFrame({ color: pFrameColor.value });
+        });
+        var pFrameThick = document.getElementById('pFrameThick');
+        if (pFrameThick) pFrameThick.addEventListener('input', function () {
+          if (picked !== '__frame__') return;
+          var n = parseFloat(pFrameThick.value);
+          if (!isFinite(n)) return;
+          writeFrame({ thick: Math.max(0.15, Math.min(3, n)) });
+        });
+        var pFrameRadius = document.getElementById('pFrameRadius');
+        if (pFrameRadius) pFrameRadius.addEventListener('input', function () {
+          if (picked !== '__frame__') return;
+          var n = parseFloat(pFrameRadius.value);
+          if (!isFinite(n)) return;
+          writeFrame({ radius: Math.max(0, Math.min(20, n)) });
+        });
+        function setSize(n) {
+          n = Math.max(6, Math.min(72, parseFloat(n) || 13));
+          if (pSize) pSize.value = n;
+          if (pSizeN) pSizeN.value = n;
+          eachSelected(function (b) {
+            if (b.kind === 'logo') return;
+            if (b.kind === 'qr') b.w = Math.max(12, Math.min(60, n));
+            else b.size = n;
+            syncBlock(b);
+          });
+        }
+        if (pSize) pSize.addEventListener('input', function () { setSize(pSize.value); });
+        if (pSizeN) pSizeN.addEventListener('input', function () { setSize(pSizeN.value); });
+        var pSizeMinus = document.getElementById('pSizeMinus');
+        var pSizePlus = document.getElementById('pSizePlus');
+        if (pSizeMinus) pSizeMinus.addEventListener('click', function () { setSize((parseFloat(pSizeN && pSizeN.value) || 13) - 1); });
+        if (pSizePlus) pSizePlus.addEventListener('click', function () { setSize((parseFloat(pSizeN && pSizeN.value) || 13) + 1); });
+        if (pColor) pColor.addEventListener('input', function () {
+          eachSelected(function (b) {
+            if (b.kind === 'logo' || b.kind === 'qr') return;
+            b.color = pColor.value;
+            syncBlock(b);
+          });
+        });
+        if (pHug) pHug.addEventListener('change', function () {
+          var hugWrap = document.getElementById('pHugWrap');
+          if (hugWrap) hugWrap.classList.toggle('is-on', pHug.checked);
+          eachSelected(function (b) {
+            if (b.kind === 'logo' || b.kind === 'qr') return;
+            if (pHug.checked) b.w = 0;
+            else {
+              var el = qBlock(b.id);
+              var rect = paper.getBoundingClientRect();
+              var box = boxMm(current);
+              b.w = el ? Math.max(8, Math.round(el.getBoundingClientRect().width / rect.width * box.w * 10) / 10) : 20;
+            }
+            syncBlock(b);
+          });
+        });
+        if (pX) pX.addEventListener('input', function () {
+          if (picked === '__foot__') {
+            var n = parseFloat(pX.value);
+            if (!isFinite(n) || n < 0) n = 0;
+            current.footer_x = n;
+            settleFoot();
+            return;
+          }
+          if (picked === '__frame__') {
+            var g = frameGeom(current);
+            writeFrame({ x: Math.max(0, parseFloat(pX.value) || 0), y: g.y, w: g.w, h: g.h });
+            return;
+          }
           var b = blockById(picked); if (!b) return;
           b.x = Math.max(0, parseFloat(pX.value) || 0);
           syncBlock(b);
         });
-        pY.addEventListener('input', function () {
+        if (pY) pY.addEventListener('input', function () {
+          if (picked === '__foot__') {
+            var n = parseFloat(pY.value);
+            if (!isFinite(n) || n < 0) n = 0;
+            current.footer_y = n;
+            settleFoot();
+            return;
+          }
+          if (picked === '__frame__') {
+            var g = frameGeom(current);
+            writeFrame({ y: Math.max(0, parseFloat(pY.value) || 0), x: g.x, w: g.w, h: g.h });
+            return;
+          }
           var b = blockById(picked); if (!b) return;
           b.y = Math.max(0, parseFloat(pY.value) || 0);
           syncBlock(b);
         });
-        document.getElementById('pAlign').addEventListener('click', function (e) {
+        var pAlignEl = document.getElementById('pAlign');
+        if (pAlignEl) pAlignEl.addEventListener('click', function (e) {
           var btn = e.target.closest ? e.target.closest('button') : null;
           if (!btn) return;
-          var b = blockById(picked); if (!b) return;
-          b.align = btn.getAttribute('data-v');
-          setSeg(document.getElementById('pAlign'), b.align);
-          syncBlock(b);
+          var align = btn.getAttribute('data-v');
+          setSeg(pAlignEl, align);
+          if (picked === '__foot__') {
+            current.footer_align = align;
+            var foot = paper.querySelector('.inv-foot');
+            if (foot) foot.style.textAlign = align;
+            return;
+          }
+          eachSelected(function (b) {
+            if (b.kind === 'logo' || b.kind === 'qr') return;
+            b.align = align;
+            syncBlock(b);
+          });
         });
-        document.getElementById('pDir').addEventListener('click', function (e) {
+        var pWeight = document.getElementById('pWeight');
+        if (pWeight) pWeight.addEventListener('click', function (e) {
           var btn = e.target.closest ? e.target.closest('button') : null;
           if (!btn) return;
-          var b = blockById(picked); if (!b) return;
-          b.dir = btn.getAttribute('data-v');
-          setSeg(document.getElementById('pDir'), b.dir);
+          var weight = btn.getAttribute('data-v') === 'normal' ? 'normal' : 'bold';
+          setSeg(pWeight, weight);
+          eachSelected(function (b) {
+            if (b.kind === 'logo' || b.kind === 'qr') return;
+            b.weight = weight;
+            syncBlock(b);
+          });
+        });
+        var pStyle = document.getElementById('pStyle');
+        if (pStyle) pStyle.addEventListener('click', function (e) {
+          var btn = e.target.closest ? e.target.closest('button') : null;
+          if (!btn) return;
+          var key = btn.getAttribute('data-v');
+          var on = !btn.classList.contains('is-on');
+          btn.classList.toggle('is-on', on);
+          eachSelected(function (b) {
+            if (b.kind === 'logo' || b.kind === 'qr') return;
+            if (key === 'italic') b.italic = on ? 1 : 0;
+            if (key === 'under') b.under = on ? 1 : 0;
+            syncBlock(b);
+          });
+        });
+        var pDirEl = document.getElementById('pDir');
+        if (pDirEl) pDirEl.addEventListener('click', function (e) {
+          var btn = e.target.closest ? e.target.closest('button') : null;
+          if (!btn) return;
+          var dir = btn.getAttribute('data-v');
+          setSeg(document.getElementById('pDir'), dir);
+          eachSelected(function (b) {
+            if (b.kind === 'logo' || b.kind === 'qr') return;
+            b.dir = dir;
+            syncBlock(b);
+          });
+        });
+        var pStack = document.getElementById('pStack');
+        if (pStack) pStack.addEventListener('click', function (e) {
+          var btn = e.target.closest ? e.target.closest('button') : null;
+          if (!btn) return;
+          var stacked = btn.getAttribute('data-v') === 'stack';
+          setSeg(pStack, stacked ? 'stack' : 'row');
+          eachSelected(function (b) {
+            if (!isVarKind(b.kind)) return;
+            b.stack = stacked ? 1 : 0;
+            syncBlock(b);
+          });
+        });
+        var pPack = document.getElementById('pPack');
+        if (pPack) pPack.addEventListener('click', function (e) {
+          var btn = e.target.closest ? e.target.closest('button') : null;
+          if (!btn) return;
+          packEdge(btn.getAttribute('data-pack') === 'left' ? 'left' : 'right');
+        });
+        var pTableEdit = document.getElementById('pTableEdit');
+        if (pTableEdit) pTableEdit.addEventListener('click', function () {
+          var b = blockById(picked);
+          if (b && b.kind === 'table') editTable(b);
+        });
+        function tableNow() {
+          var b = blockById(picked);
+          return (b && b.kind === 'table') ? b : null;
+        }
+        function blankCells(n) {
+          var row = [];
+          for (var i = 0; i < n; i++) row.push({t:'', k:'', span:1});
+          return row;
+        }
+        var tRowAdd = document.getElementById('tRowAdd');
+        if (tRowAdd) tRowAdd.addEventListener('click', function () {
+          var b = tableNow(); if (!b) return;
+          var n = (b.rows[0] && b.rows[0].length) || 2;
+          b.rowH = tableRowH(b);
+          b.pack = 1;
+          b.rows.push(blankCells(n));
+          ensureTableCols(b);
           syncBlock(b);
         });
-        document.getElementById('pDel').addEventListener('click', function () {
-          var b = blockById(picked); if (b) removeBlock(b);
+        var tRowDel = document.getElementById('tRowDel');
+        if (tRowDel) tRowDel.addEventListener('click', function () {
+          var b = tableNow(); if (!b || b.rows.length < 2) return;
+          var ri = b._cell ? b._cell.r : b.rows.length - 1;
+          if (ri < 0 || ri >= b.rows.length) ri = b.rows.length - 1;
+          b.rows.splice(ri, 1);
+          b._cell = null;
+          syncBlock(b);
+        });
+        var tColAdd = document.getElementById('tColAdd');
+        if (tColAdd) tColAdd.addEventListener('click', function () {
+          var b = tableNow(); if (!b) return;
+          var oldN = tableColCount(b);
+          ensureTableCols(b);
+          var avg = 0;
+          for (var a = 0; a < b.cols.length; a++) avg += b.cols[a];
+          avg = oldN > 0 ? avg / oldN : 50;
+          for (var i = 0; i < b.rows.length; i++) b.rows[i].push({t:'', k:'', span:1});
+          b.cols.push(avg);
+          b.pack = 1;
+          clampTableBox(b);
+          ensureTableCols(b);
+          syncBlock(b);
+        });
+        var tColDel = document.getElementById('tColDel');
+        if (tColDel) tColDel.addEventListener('click', function () {
+          var b = tableNow(); if (!b || !b.rows[0] || b.rows[0].length < 2) return;
+          var ci = b._cell ? b._cell.c : b.rows[0].length - 1;
+          for (var i = 0; i < b.rows.length; i++) {
+            if (ci >= 0 && ci < b.rows[i].length) b.rows[i].splice(ci, 1);
+          }
+          b._cell = null;
+          ensureTableCols(b);
+          syncBlock(b);
+        });
+        var tMerge = document.getElementById('tMerge');
+        if (tMerge) tMerge.addEventListener('click', function () {
+          var b = tableNow(); if (!b || !b._cell) return;
+          if (mergeTableCells(b, b._cell.r, b._cell.c)) {
+            ensureTableCols(b);
+            syncBlock(b);
+          }
+        });
+        var pRowHEl = document.getElementById('pRowH');
+        if (pRowHEl) pRowHEl.addEventListener('input', function () {
+          var b = tableNow(); if (!b) return;
+          b.rowH = Math.max(4, Math.min(30, parseFloat(pRowHEl.value) || 7));
+          syncBlock(b);
+        });
+        var tPack = document.getElementById('tPack');
+        if (tPack) tPack.addEventListener('click', function () {
+          var b = tableNow(); if (!b) return;
+          b.pack = 1;
+          syncBlock(b);
+        });
+        var pDelEl = document.getElementById('pDel');
+        if (pDelEl) pDelEl.addEventListener('click', function () {
+          if (picked === '__foot__') return;
+          if (picked === '__frame__') {
+            writeFrame({ style: 'none' });
+            pick(null);
+            return;
+          }
+          if (!picked && !pickedIds.length) return;
+          removeBlock(null);
         });
         var pLogo = document.getElementById('pLogo');
         if (pLogo) pLogo.addEventListener('click', function () { document.getElementById('invLogo').click(); });
@@ -1512,24 +3335,169 @@ function invoice_render_tab($tab, $tenantId, $isEn)
       }
       paper.addEventListener('pointerdown', function (e) {
         if (mode !== 'edit') return;
+        var grip = e.target && e.target.closest ? e.target.closest('.inv-len-handle, .inv-wid-handle') : null;
+        if (grip) {
+          var box0 = boxMm(current);
+          drag = {
+            mode: grip.classList.contains('inv-wid-handle') ? 'sheetw' : 'sheet',
+            sy: e.clientY,
+            sx: e.clientX,
+            sh: box0.h,
+            sw: box0.w,
+            id: ''
+          };
+          if (grip.setPointerCapture) { try { grip.setPointerCapture(e.pointerId); } catch (err) {} }
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+        var frameHit = e.target && e.target.closest ? e.target.closest('.inv-edge, .inv-fr-h') : null;
+        if (frameHit && !closestBlock(e.target)) {
+          var g0 = frameGeom(current);
+          var stored = frameCopy(current);
+          stored.x = g0.x;
+          stored.y = g0.y;
+          stored.w = g0.w;
+          stored.h = g0.h;
+          current.frame_box = stored;
+          current.frame = stored.style;
+          drag = {
+            mode: frameHit.classList.contains('inv-fr-h') ? 'frame-size' : 'frame-move',
+            handle: frameHit.getAttribute('data-h') || 'move',
+            sx: e.clientX,
+            sy: e.clientY,
+            fx: g0.x,
+            fy: g0.y,
+            fw: g0.w,
+            fh: g0.h,
+            id: '__frame__',
+            moved: false
+          };
+          pick('__frame__');
+          if (frameHit.setPointerCapture) { try { frameHit.setPointerCapture(e.pointerId); } catch (err) {} }
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+        var footHit = e.target && e.target.closest ? e.target.closest('.inv-foot') : null;
+        if (footHit && !closestBlock(e.target)) {
+          var band0 = current._foot || { x: 0, y: 0, w: 10, h: 4 };
+          drag = {
+            mode: 'foot',
+            sx: e.clientX,
+            sy: e.clientY,
+            fx: band0.x,
+            fy: band0.y,
+            fw: band0.w,
+            fh: band0.h,
+            id: '__foot__',
+            moved: false
+          };
+          pick('__foot__');
+          if (footHit.setPointerCapture) { try { footHit.setPointerCapture(e.pointerId); } catch (err) {} }
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
         var block = closestBlock(e.target);
         if (!block) { pick(null); return; }
         var id = block.getAttribute('data-id');
         var b = blockById(id);
         if (!b) return;
+        var mergeHit = e.target && e.target.closest ? e.target.closest('.inv-merge') : null;
+        if (mergeHit && b.kind === 'table') {
+          var mr = parseInt(mergeHit.getAttribute('data-r'), 10);
+          var mc = parseInt(mergeHit.getAttribute('data-c'), 10);
+          pick(id);
+          if (isFinite(mr) && isFinite(mc) && mc > 0 && mergeTableCells(b, mr, mc - 1)) {
+            ensureTableCols(b);
+            syncBlock(b);
+          }
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+        var colGrip = e.target && e.target.closest ? e.target.closest('.inv-col-line') : null;
+        if (colGrip && b.kind === 'table') {
+          ensureTableCols(b);
+          var slot = parseInt(colGrip.getAttribute('data-col'), 10);
+          pick(id);
+          normalizeTable(b);
+          colGrip.classList.add('is-drag');
+          drag = {
+            id: id,
+            mode: 'col',
+            sx: e.clientX,
+            sy: e.clientY,
+            slot: slot,
+            cols: b.cols.slice(),
+            line: colGrip,
+            moved: false
+          };
+          if (colGrip.setPointerCapture) { try { colGrip.setPointerCapture(e.pointerId); } catch (errC) {} }
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+        var rowGrip = e.target && e.target.closest ? e.target.closest('.inv-row-grip') : null;
+        if (rowGrip && b.kind === 'table') {
+          pick(id);
+          drag = {
+            id: id,
+            mode: 'rowh',
+            sx: e.clientX,
+            sy: e.clientY,
+            startH: tableRowH(b),
+            moved: false
+          };
+          if (rowGrip.setPointerCapture) { try { rowGrip.setPointerCapture(e.pointerId); } catch (errR) {} }
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+        var additive = e.shiftKey || e.ctrlKey || e.metaKey;
+        if (additive) {
+          pick(id, true);
+          return;
+        }
+        if (pickedIds.indexOf(id) < 0) pick(id, false);
+        var ids = pickedIds.slice();
+        var starts = {};
+        for (var si = 0; si < ids.length; si++) {
+          var sb = blockById(ids[si]);
+          if (sb) starts[ids[si]] = { x: sb.x, y: sb.y };
+        }
         pick(id);
         var br = block.getBoundingClientRect();
         var rect = paper.getBoundingClientRect();
         var box = boxMm(current);
+        var resizeHit = e.target && e.target.closest ? e.target.closest('.inv-resize') : null;
+        if (resizeHit && !block.contains(resizeHit)) resizeHit = null;
+        if (resizeHit && b.kind === 'table') b.pack = 0;
         drag = {
           id: id,
-          mode: (e.target.classList && e.target.classList.contains('inv-resize')) ? 'size' : 'move',
+          mode: resizeHit ? 'size' : 'move',
+          handle: resizeHit ? (resizeHit.getAttribute('data-h') || 'se') : '',
           sx: e.clientX,
+          sy: e.clientY,
           dx: e.clientX - br.left,
           dy: e.clientY - br.top,
           startW: br.width / rect.width * box.w,
+          startX: b.x,
+          startY: b.y,
+          startRowH: tableRowH(b),
+          rowCount: (b.rows && b.rows.length) ? b.rows.length : 1,
           selfH: br.height / rect.height * box.h,
-          moved: false
+          ids: ids,
+          starts: starts,
+          originX: b.x,
+          originY: b.y,
+          moved: false,
+          cell: (!resizeHit && e.target && e.target.closest) ? (function () {
+            var td = e.target.closest('td');
+            if (!td || !block.contains(td)) return null;
+            return { r: parseInt(td.getAttribute('data-r'), 10), c: parseInt(td.getAttribute('data-c'), 10) };
+          })() : null
         };
         if (block.setPointerCapture) { try { block.setPointerCapture(e.pointerId); } catch (err) {} }
         e.preventDefault();
@@ -1543,16 +3511,171 @@ function invoice_render_tab($tab, $tenantId, $isEn)
       });
       document.addEventListener('pointermove', function (e) {
         if (!drag) return;
-        var b = blockById(drag.id);
-        if (!b) return;
         drag.moved = true;
         var rect = paper.getBoundingClientRect();
         var box = boxMm(current);
         if (!rect.width || !rect.height) return;
+        if (drag.mode === 'col') {
+          var tbCol = blockById(drag.id);
+          if (!tbCol || tbCol.kind !== 'table') return;
+          var slot = drag.slot;
+          if (!(slot > 0) || !drag.cols || slot >= drag.cols.length) return;
+          var elCol = qBlock(drag.id);
+          if (!elCol) return;
+          var tw = elCol.offsetWidth || 1;
+          var dxPx = e.clientX - drag.sx;
+          var c0 = drag.cols[slot - 1];
+          var c1 = drag.cols[slot];
+          var pair = c0 + c1;
+          var next0 = c0 - (dxPx / tw) * pair;
+          if (next0 < pair * 0.2) next0 = pair * 0.2;
+          if (next0 > pair * 0.8) next0 = pair * 0.8;
+          tbCol.cols = drag.cols.slice();
+          tbCol.cols[slot - 1] = next0;
+          tbCol.cols[slot] = pair - next0;
+          applyTableColsLive(elCol, tbCol);
+          return;
+        }
+        if (drag.mode === 'rowh') {
+          var tbRow = blockById(drag.id);
+          if (!tbRow || tbRow.kind !== 'table') return;
+          var dyMm = (e.clientY - drag.sy) / (rect.height / box.h);
+          var nh = Math.max(4, Math.min(30, (drag.startH || 7) + dyMm));
+          tbRow.rowH = Math.round(nh * 10) / 10;
+          var pRowLive = document.getElementById('pRowH');
+          if (pRowLive && document.activeElement !== pRowLive) pRowLive.value = String(tbRow.rowH);
+          syncBlock(tbRow);
+          return;
+        }
+        if (drag.mode === 'sheet' || drag.mode === 'sheetw') {
+          if (drag.mode === 'sheet') {
+            var per = rect.height / (drag.sh || 1);
+            var next = drag.sh + (e.clientY - drag.sy) / (per || 1);
+            if (next < 40) next = 40;
+            if (next > 450) next = 450;
+            next = Math.round(next * 10) / 10;
+            current.sheet_h = next;
+            paper.style.height = next + 'mm';
+            var hb = paper.querySelector('.inv-len-handle b');
+            if (hb) hb.textContent = (next / 10).toFixed(1) + ' سم';
+            var footKeep = paper.querySelector('.inv-foot');
+            if (footKeep) {
+              var keepY = parseFloat(current.footer_y);
+              var keepH = (current._foot && current._foot.h) || 4.2;
+              if (!isFinite(keepY) || keepY < 0) keepY = Math.max(0, next - keepH - 1.2);
+              if (keepY + keepH > next - 0.4) {
+                keepY = Math.max(0, next - keepH - 0.4);
+                if (isFinite(parseFloat(current.footer_y)) && current.footer_y >= 0) current.footer_y = Math.round(keepY * 10) / 10;
+              }
+              footKeep.style.top = keepY + 'mm';
+              footKeep.style.bottom = 'auto';
+            }
+          } else {
+            var perW = rect.width / (drag.sw || 1);
+            var nextW = drag.sw + (drag.sx - e.clientX) / (perW || 1);
+            if (nextW < 40) nextW = 40;
+            if (nextW > 320) nextW = 320;
+            nextW = Math.round(nextW * 10) / 10;
+            current.sheet_w = nextW;
+            paper.style.width = nextW + 'mm';
+            var wb = paper.querySelector('.inv-wid-handle b');
+            if (wb) wb.textContent = (nextW / 10).toFixed(1) + ' سم';
+          }
+          if (len) len.textContent = ((current.sheet_w || box.w) / 10).toFixed(1) + ' × ' + ((current.sheet_h || box.h) / 10).toFixed(1) + ' سم';
+          return;
+        }
+        if (drag.mode === 'frame-move' || drag.mode === 'frame-size') {
+          var fdx = (e.clientX - drag.sx) / rect.width * box.w;
+          var fdy = (e.clientY - drag.sy) / rect.height * box.h;
+          var fx = drag.fx, fy = drag.fy, fw = drag.fw, fh = drag.fh;
+          var H = drag.handle || '';
+          if (drag.mode === 'frame-move') { fx = drag.fx + fdx; fy = drag.fy + fdy; }
+          else {
+            if (H === 'e' || H === 'ne' || H === 'se') fw = drag.fw + fdx;
+            if (H === 's' || H === 'sw' || H === 'se') fh = drag.fh + fdy;
+            if (H === 'w' || H === 'nw' || H === 'sw') { fx = drag.fx + fdx; fw = drag.fw - fdx; }
+            if (H === 'n' || H === 'nw' || H === 'ne') { fy = drag.fy + fdy; fh = drag.fh - fdy; }
+          }
+          if (fw < 12) fw = 12;
+          if (fh < 12) fh = 12;
+          if (fx < 0) fx = 0;
+          if (fy < 0) fy = 0;
+          if (fx + fw > box.w) fx = Math.max(0, box.w - fw);
+          if (fy + fh > box.h) fy = Math.max(0, box.h - fh);
+          var ff = frameCopy(current);
+          ff.x = Math.round(fx * 10) / 10;
+          ff.y = Math.round(fy * 10) / 10;
+          ff.w = Math.round(fw * 10) / 10;
+          ff.h = Math.round(fh * 10) / 10;
+          current.frame_box = ff;
+          current.frame = ff.style;
+          var fr = paper.querySelector('.inv-frame');
+          if (fr) {
+            fr.style.left = ff.x + 'mm';
+            fr.style.top = ff.y + 'mm';
+            fr.style.width = ff.w + 'mm';
+            fr.style.height = ff.h + 'mm';
+          }
+          var px = document.getElementById('pX');
+          var py = document.getElementById('pY');
+          if (px && document.activeElement !== px) px.value = ff.x;
+          if (py && document.activeElement !== py) py.value = ff.y;
+          return;
+        }
+        if (drag.mode === 'foot') {
+          var mdx = (e.clientX - drag.sx) / rect.width * box.w;
+          var mdy = (e.clientY - drag.sy) / rect.height * box.h;
+          var nx = drag.fx + mdx;
+          var ny = drag.fy + mdy;
+          if (nx < 0) nx = 0;
+          if (ny < 0) ny = 0;
+          if (nx + drag.fw > box.w - 0.4) nx = Math.max(0, box.w - drag.fw - 0.4);
+          if (ny + drag.fh > box.h - 0.4) ny = Math.max(0, box.h - drag.fh - 0.4);
+          current.footer_x = Math.round(nx * 10) / 10;
+          current.footer_y = Math.round(ny * 10) / 10;
+          var footEl = paper.querySelector('.inv-foot');
+          if (footEl) {
+            footEl.style.left = current.footer_x + 'mm';
+            footEl.style.top = current.footer_y + 'mm';
+            footEl.style.bottom = 'auto';
+          }
+          current._foot = { x: current.footer_x, y: current.footer_y, w: drag.fw, h: drag.fh };
+          shoveOffFooter();
+          var pxf = document.getElementById('pX');
+          var pyf = document.getElementById('pY');
+          if (pxf && document.activeElement !== pxf) pxf.value = current.footer_x;
+          if (pyf && document.activeElement !== pyf) pyf.value = current.footer_y;
+          return;
+        }
+        var b = blockById(drag.id);
+        if (!b) return;
         if (drag.mode === 'size') {
-          var rtl = (document.documentElement.getAttribute('dir') || 'rtl') !== 'ltr';
-          var delta = (rtl ? (drag.sx - e.clientX) : (e.clientX - drag.sx)) / rect.width * box.w;
-          b.w = Math.max(6, Math.round((drag.startW + delta) * 10) / 10);
+          var H = drag.handle || 'se';
+          var dxMm = (e.clientX - drag.sx) / rect.width * box.w;
+          var dyMm = (e.clientY - drag.sy) / rect.height * box.h;
+          var nw = drag.startW;
+          var nx = drag.startX;
+          if (H.indexOf('e') >= 0) nw = drag.startW + dxMm;
+          if (H.indexOf('w') >= 0) {
+            nw = drag.startW - dxMm;
+            nx = drag.startX + dxMm;
+          }
+          if (nw < 10) {
+            if (H.indexOf('w') >= 0) nx = drag.startX + drag.startW - 10;
+            nw = 10;
+          }
+          b.w = Math.round(nw * 10) / 10;
+          b.x = Math.max(0, Math.round(nx * 10) / 10);
+          if (b.kind === 'table') {
+            if (H.indexOf('s') >= 0 || H.indexOf('n') >= 0) {
+              var rowsN = Math.max(1, drag.rowCount || 1);
+              var nextH = (drag.startRowH || 7) + (dyMm / rowsN) * (H.indexOf('n') >= 0 ? -1 : 1);
+              b.rowH = Math.max(4, Math.min(28, Math.round(nextH * 10) / 10));
+              var pRowLive2 = document.getElementById('pRowH');
+              if (pRowLive2 && document.activeElement !== pRowLive2) pRowLive2.value = String(b.rowH);
+            }
+            clampTableBox(b);
+          } else if (b.x + b.w > box.w) b.x = Math.max(0, box.w - b.w);
           var hug = document.getElementById('pHug');
           if (hug) hug.checked = false;
         } else {
@@ -1565,10 +3688,26 @@ function invoice_render_tab($tab, $tenantId, $isEn)
             if (y > box.h - 4) y = box.h - 4;
           }
           var snapped = snapToOthers(b, x, y, rect, box);
-          x = snapped.x;
-          y = snapped.y;
-          b.x = Math.round(x * 10) / 10;
-          b.y = Math.round(y * 10) / 10;
+          var dx = snapped.x - drag.originX;
+          var dy = snapped.y - drag.originY;
+          var group = drag.ids && drag.ids.length ? drag.ids : [b.id];
+          for (var gi = 0; gi < group.length; gi++) {
+            var item = blockById(group[gi]);
+            var st = drag.starts ? drag.starts[group[gi]] : null;
+            if (!item || !st) continue;
+            item.x = Math.max(0, Math.round((st.x + dx) * 10) / 10);
+            item.y = Math.max(0, Math.round((st.y + dy) * 10) / 10);
+            var movedEl = qBlock(item.id);
+            if (movedEl) {
+              movedEl.style.left = item.x + 'mm';
+              movedEl.style.top = item.y + 'mm';
+            }
+          }
+          var pxm = document.getElementById('pX');
+          var pym = document.getElementById('pY');
+          if (pxm && document.activeElement !== pxm) pxm.value = b.x;
+          if (pym && document.activeElement !== pym) pym.value = b.y;
+          return;
         }
         syncBlock(b);
         fillProp();
@@ -1579,9 +3718,9 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         var mine = [x, x + selfW, x + selfW / 2];
         var mineY = [y, y + selfH, y + selfH / 2];
         var nodes = paper.querySelectorAll('.inv-block');
-        var bestX = 0.8, bestY = 0.8, sx = null, sy = null, gx = null, gy = null;
+        var bestX = 0.6, bestY = 0.6, sx = null, sy = null, gx = null, gy = null;
         for (var i = 0; i < nodes.length; i++) {
-          if (nodes[i].getAttribute('data-id') === b.id) continue;
+          if (drag.ids && drag.ids.indexOf(nodes[i].getAttribute('data-id')) >= 0) continue;
           var o = blockMm(nodes[i], rect, box);
           var xs = [o.l, o.r, (o.l + o.r) / 2];
           var ys = [o.t, o.b, (o.t + o.b) / 2];
@@ -1605,9 +3744,25 @@ function invoice_render_tab($tab, $tenantId, $isEn)
       document.addEventListener('pointerup', function () {
         if (!drag) return;
         var moved = drag.moved;
+        var frameDrag = drag.mode === 'frame-move' || drag.mode === 'frame-size';
+        var tableGeom = drag.mode === 'col' || drag.mode === 'rowh';
+        var cell = drag.cell;
+        var id = drag.id;
+        if (drag.line && drag.line.classList) drag.line.classList.remove('is-drag');
         drag = null;
         showGuide(null, null);
-        if (moved) fitMain();
+        if (!moved && cell && isFinite(cell.r)) {
+          var tb = blockById(id);
+          if (tb && tb.kind === 'table') {
+            tb._cell = cell;
+            syncBlock(tb);
+          }
+        }
+        if (tableGeom) {
+          var tbDone = blockById(id);
+          if (tbDone) syncBlock(tbDone);
+        }
+        if (moved || frameDrag || tableGeom) fitMain();
       });
       rail.addEventListener('click', function (e) {
         var btn = e.target.closest ? e.target.closest('button') : null;
@@ -1638,7 +3793,19 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         document.getElementById('fPaper').value = current ? current.paper : '';
         document.getElementById('fOrient').value = current ? current.orient : '';
         document.getElementById('fMargin').value = current ? String(topMarginMm()) : '3';
-        document.getElementById('fFrame').value = current ? current.frame : 'none';
+        var fSheet = document.getElementById('fSheet');
+        if (fSheet) fSheet.value = current && parseFloat(current.sheet_h) > 0 ? String(current.sheet_h) : '0';
+        var fSheetW = document.getElementById('fSheetW');
+        if (fSheetW) fSheetW.value = current && parseFloat(current.sheet_w) > 0 ? String(current.sheet_w) : '0';
+        document.getElementById('fFrame').value = current ? ((current.frame_box && current.frame_box.style) || current.frame || 'none') : 'none';
+        var fFrameBox = document.getElementById('fFrameBox');
+        if (fFrameBox) fFrameBox.value = JSON.stringify(current ? frameCopy(current) : {});
+        var fFootX = document.getElementById('fFootX');
+        var fFootY = document.getElementById('fFootY');
+        var fFootAlign = document.getElementById('fFootAlign');
+        if (fFootX) fFootX.value = current && isFinite(parseFloat(current.footer_x)) ? String(current.footer_x) : '-1';
+        if (fFootY) fFootY.value = current && isFinite(parseFloat(current.footer_y)) ? String(current.footer_y) : '-1';
+        if (fFootAlign) fFootAlign.value = current && current.footer_align ? current.footer_align : 'center';
         document.getElementById('fCompany').value = current ? (current.company_name || '') : '';
         document.getElementById('fPhone').value = current ? (current.phone || '') : '';
         document.getElementById('fAddress').value = current ? (current.address || '') : '';
@@ -1648,7 +3815,13 @@ function invoice_render_tab($tab, $tenantId, $isEn)
           var b = src[i];
           blocks.push({
             id: b.id, kind: b.kind, x: b.x, y: b.y, w: b.w > 0 ? b.w : 0,
-            size: b.size, color: b.color, align: b.align, dir: b.dir, text: b.text || '', on: 1
+            size: b.size, color: b.color, align: b.align, dir: b.dir, text: b.text || '', label: b.label || '',
+            weight: b.weight === 'normal' ? 'normal' : 'bold', italic: b.italic ? 1 : 0, under: b.under ? 1 : 0,
+            stack: b.stack ? 1 : 0, dash: b.dash ? 1 : 0, rows: b.rows || [],
+            rowH: (parseFloat(b.rowH) > 0 ? parseFloat(b.rowH) : 7),
+            cols: b.cols || [],
+            pack: b.pack === 0 ? 0 : 1,
+            on: 1
           });
         }
         document.getElementById('fBlocks').value = JSON.stringify(blocks);
@@ -1690,8 +3863,8 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         clone.style.left = '0';
         clone.style.top = '0';
         clone.style.boxShadow = 'none';
-        var handles = clone.querySelectorAll('.inv-resize');
-        for (var i = 0; i < handles.length; i++) handles[i].parentNode.removeChild(handles[i]);
+        var handles = clone.querySelectorAll('.inv-resize, .inv-edge, .inv-fr-h, .inv-len-handle, .inv-wid-handle, .inv-guide');
+        for (var i = 0; i < handles.length; i++) if (handles[i].parentNode) handles[i].parentNode.removeChild(handles[i]);
         var marks = clone.querySelectorAll('.is-pick');
         for (var j = 0; j < marks.length; j++) marks[j].classList.remove('is-pick');
         return clone;
@@ -1782,9 +3955,15 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         clone.style.margin = '0';
         holder.appendChild(clone);
         document.body.appendChild(holder);
+        var chosen = parseFloat(current && current.sheet_h) || 0;
+        if (chosen >= 30) {
+          clone.style.height = chosen + 'mm';
+          box = { w: box.w, h: chosen, fixed: true };
+          return { holder: holder, node: clone, box: box };
+        }
         var crect = clone.getBoundingClientRect();
         var pxPerMm = crect.width / (box.w || 1);
-        var nodes = clone.querySelectorAll('.inv-block');
+        var nodes = clone.querySelectorAll('.inv-block, .inv-foot');
         var minTop = Infinity;
         var maxBottom = 0;
         var rows = [];
@@ -1804,12 +3983,6 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         var span = Math.max(8, maxBottom - minTop);
         var h = Math.ceil(span + margin + 6);
         clone.style.height = h + 'mm';
-        var foot = clone.querySelector('.inv-foot');
-        if (foot) {
-          foot.style.bottom = 'auto';
-          foot.style.top = (span + margin + 1) + 'mm';
-          foot.style.background = '#fff';
-        }
         box = { w: box.w, h: h, fixed: false };
         return { holder: holder, node: clone, box: box };
       }
@@ -1863,7 +4036,10 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         }).then(function (canvas) {
           var box = mounted.box;
           clearPrintSheet(mounted);
-          try { canvas = cropVertical(canvas, topMarginMm(), 1.2, box.w); } catch (err) {}
+          var keepH = parseFloat(current && current.sheet_h) || 0;
+          if (!(keepH >= 30)) {
+            try { canvas = cropVertical(canvas, topMarginMm(), 2.4, box.w); } catch (err) {}
+          }
           box = { w: box.w, h: box.w * canvas.height / canvas.width, fixed: false };
           done(null, canvas, box);
         }).catch(function (err) {
@@ -1938,19 +4114,72 @@ function invoice_render_tab($tab, $tenantId, $isEn)
           closePop();
           return;
         }
-        if (mode !== 'edit' || !picked) return;
+        if (mode !== 'edit' || !pickedIds.length) return;
+        if (picked === '__foot__') {
+          var tagFoot = e.target && e.target.tagName;
+          if (tagFoot === 'INPUT' || tagFoot === 'TEXTAREA' || tagFoot === 'SELECT') return;
+          if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); return; }
+          var stepFoot = e.shiftKey ? 2 : 0.5;
+          var bandK = current._foot || { x: 0, y: 0, w: 12, h: 4 };
+          var kx = isFinite(parseFloat(current.footer_x)) && current.footer_x >= 0 ? current.footer_x : bandK.x;
+          var ky = isFinite(parseFloat(current.footer_y)) && current.footer_y >= 0 ? current.footer_y : bandK.y;
+          if (e.key === 'ArrowLeft') kx -= stepFoot;
+          else if (e.key === 'ArrowRight') kx += stepFoot;
+          else if (e.key === 'ArrowUp') ky -= stepFoot;
+          else if (e.key === 'ArrowDown') ky += stepFoot;
+          else return;
+          e.preventDefault();
+          current.footer_x = Math.max(0, kx);
+          current.footer_y = Math.max(0, ky);
+          settleFoot();
+          shoveOffFooter();
+          fillProp();
+          return;
+        }
+        if (picked === '__frame__') {
+          var tagF = e.target && e.target.tagName;
+          if (tagF === 'INPUT' || tagF === 'TEXTAREA' || tagF === 'SELECT') return;
+          var stepF = e.shiftKey ? 2 : 0.5;
+          var gF = frameGeom(current);
+          var nx = gF.x, ny = gF.y;
+          if (e.key === 'ArrowLeft') nx -= stepF;
+          else if (e.key === 'ArrowRight') nx += stepF;
+          else if (e.key === 'ArrowUp') ny -= stepF;
+          else if (e.key === 'ArrowDown') ny += stepF;
+          else if (e.key === 'Delete' || e.key === 'Backspace') {
+            var gone = frameCopy(current);
+            gone.style = 'none';
+            current.frame_box = gone;
+            current.frame = 'none';
+            pick(null);
+            fitMain();
+            return;
+          } else return;
+          e.preventDefault();
+          gF.x = Math.max(0, nx);
+          gF.y = Math.max(0, ny);
+          current.frame_box = gF;
+          current.frame = gF.style;
+          fitMain();
+          return;
+        }
         var tag = e.target && e.target.tagName;
         if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-        var b = blockById(picked);
-        if (!b) return;
+        if (e.key === 'Delete' || e.key === 'Backspace') { removeBlock(null); return; }
         var step = e.shiftKey ? 2 : 0.5;
-        if (e.key === 'ArrowLeft') { b.x = Math.max(0, b.x - step); e.preventDefault(); }
-        else if (e.key === 'ArrowRight') { b.x += step; e.preventDefault(); }
-        else if (e.key === 'ArrowUp') { b.y = Math.max(0, b.y - step); e.preventDefault(); }
-        else if (e.key === 'ArrowDown') { b.y += step; e.preventDefault(); }
-        else if (e.key === 'Delete' || e.key === 'Backspace') { removeBlock(b); return; }
+        var dx = 0;
+        var dy = 0;
+        if (e.key === 'ArrowLeft') dx = -step;
+        else if (e.key === 'ArrowRight') dx = step;
+        else if (e.key === 'ArrowUp') dy = -step;
+        else if (e.key === 'ArrowDown') dy = step;
         else return;
-        syncBlock(b);
+        e.preventDefault();
+        eachSelected(function (item) {
+          item.x = Math.max(0, item.x + dx);
+          item.y = Math.max(0, item.y + dy);
+          syncBlock(item);
+        });
         fillProp();
       });
       window.addEventListener('resize', function () {
@@ -1967,8 +4196,15 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         });
         stageWatch.observe(stage);
       }
-      bindProp();
-      showGallery();
+      try { bindProp(); } catch (err) {}
+      try { showGallery(); } catch (err) {}
+      if (cards) cards.addEventListener('click', function (e) {
+        var card = e.target && e.target.closest ? e.target.closest('[data-tpl]') : null;
+        if (!card || (e.target.closest && e.target.closest('.inv-card-del'))) return;
+        if (card.querySelector && card.querySelector('.inv-thumb')) return;
+        var id = card.getAttribute('data-tpl');
+        if (id) openPreview(id);
+      });
     })();
     </script>
     <?php

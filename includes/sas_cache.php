@@ -5008,23 +5008,38 @@ function sas_dash_live_refresh($pdo, $config, $force = false, $withSoon = null)
         'source' => 'cache',
     );
 
-    // اختياري: حدّث online من الساس إن رجّع رقم أكبر (لا تنقص الإجمالي)
-    if (function_exists('sas_is_ready') && sas_is_ready($config)) {
+    $pureSas = true;
+    if (function_exists('tenant_sas_accounts_ready')) {
+        $readyAcc = tenant_sas_accounts_ready($pdo, $tid);
+        if ($readyAcc) {
+            foreach ($readyAcc as $accRow) {
+                if (function_exists('tenant_sas_account_is_earthlink') && tenant_sas_account_is_earthlink($pdo, $accRow)) {
+                    $pureSas = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    // وكالة ساس فقط: أرقام الوجدز نفس لوحة الرسلر (status 1/2 و index/online)
+    if ($pureSas && function_exists('sas_is_ready') && sas_is_ready($config)) {
         $api = function_exists('sas_make_connector') ? sas_make_connector($config) : null;
         if ($api && method_exists($api, 'dashboardCounts')) {
             try {
                 if (method_exists($api, 'setTimeout')) {
-                    $api->setTimeout(8);
+                    $api->setTimeout(12);
                 }
                 if ($withSoon === null) {
-                    $withSoon = !$force;
+                    $withSoon = true;
                 }
                 $live = $api->dashboardCounts($withSoon ? true : false);
-                if (is_array($live) && isset($live['online']) && (int) $live['online'] > $out['online']) {
-                    // لا نستبدل total/active بأرقام الساس فقط — online من الساس قد يكون أدق لحظياً لساس
-                    // لكن مع إيرث نأخذ الأكبر من الكاش
-                    $out['online'] = max($out['online'], (int) $live['online']);
-                    $out['source'] = 'cache+sas_online';
+                if (is_array($live) && !empty($live['total'])) {
+                    foreach (array('total', 'active', 'expired', 'online', 'today') as $k) {
+                        if (isset($live[$k]) && (int) $live[$k] >= 0) {
+                            $out[$k] = (int) $live[$k];
+                        }
+                    }
+                    $out['source'] = 'sas';
                 }
             } catch (Exception $e) {
             }
@@ -5049,32 +5064,26 @@ function sas_dash_user_counts($pdo)
 {
     ensure_sas_users_cache_table($pdo);
     $scope = function_exists('sas_agent_scope_sql') ? sas_agent_scope_sql('c') : '';
-    if (sas_dash_live_allowed() && function_exists('sas_ownership_search_tenant_ids')) {
-        $wide = sas_ownership_search_tenant_ids($pdo);
-        $in = array();
-        foreach ($wide as $wid) {
-            $wid = (int) $wid;
-            if ($wid > 0) {
-                $in[$wid] = $wid;
-            }
-        }
-        if (count($in) > 1) {
-            $scope = ' AND c.tenant_id IN (' . implode(',', $in) . ')';
-        }
-    }
     $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
     if ($scope === '' && $tid > 0) {
         $scope = ' AND c.tenant_id = ' . (int) $tid;
     }
     $out = sas_dash_counts_from_cache($pdo, $scope);
-    // كاش الوجدز الحي يُحدَّث من نفس مصدر DB — لا تغطية بأرقام ساس-فقط القديمة
     if (sas_dash_live_allowed()) {
-        $live = sas_dash_live_read($tid, 30);
-        if (is_array($live) && isset($live['source']) && strpos((string) $live['source'], 'cache') === 0) {
-            foreach (array('total', 'active', 'online', 'expired', 'soon', 'today') as $key) {
-                if (isset($live[$key]) && (int) $live[$key] > 0) {
-                    // لا تنقص عن عدّ DB الحالي
-                    $out[$key] = max((int) $out[$key], (int) $live[$key]);
+        $live = sas_dash_live_read($tid, 45);
+        if (is_array($live)) {
+            $src = isset($live['source']) ? (string) $live['source'] : '';
+            if ($src === 'sas') {
+                foreach (array('total', 'active', 'online', 'expired', 'soon', 'today') as $key) {
+                    if (isset($live[$key]) && (int) $live[$key] >= 0) {
+                        $out[$key] = (int) $live[$key];
+                    }
+                }
+            } elseif (strpos($src, 'cache') === 0) {
+                foreach (array('total', 'active', 'online', 'expired', 'soon', 'today') as $key) {
+                    if (isset($live[$key]) && (int) $live[$key] > 0) {
+                        $out[$key] = max((int) $out[$key], (int) $live[$key]);
+                    }
                 }
             }
         }

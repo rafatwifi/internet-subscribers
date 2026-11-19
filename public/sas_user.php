@@ -892,6 +892,11 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
 }
 .su-card-h { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
 .su-card .meta { margin: 0; color: #64748b; font-size: 12px; font-weight: 700; }
+.su-slip-list { list-style: none; margin: 0; padding: 0; }
+.su-slip-list a { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 0; border-bottom: 1px solid #e2e8f0; color: inherit; text-decoration: none; }
+.su-slip-list span { color: #64748b; font-size: 12px; font-weight: 700; }
+.su-slip-list em { font-style: normal; font-weight: 800; }
+.su-slip-list strong { font-weight: 800; }
 .su-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .su-fact {
   padding: 10px 12px; border-radius: 12px; background: #f8fafc; border: 1px solid #eef2f7;
@@ -1249,6 +1254,58 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
             <p class="meta"><?php echo e($isEn ? 'This line is not linked to a local subscriber yet.' : 'هذا الخط مو مربوط بمشترك محلي بعد.'); ?></p>
         <?php endif; ?>
     </section>
+    <?php
+    $suSlips = array();
+    if (!$isNew && $username !== '') {
+        require_once __DIR__ . '/../includes/invoice_studio.php';
+        $suSlips = invoice_slips_for_user(function_exists('current_tenant_id') ? (int) current_tenant_id() : 1, $username);
+    }
+    ?>
+    <section class="su-card" id="su-slips">
+        <div class="su-card-h">
+            <h2><?php echo e($isEn ? 'Receipts' : 'الوصولات'); ?></h2>
+            <button class="btn sm" type="button" id="suSlipNew"><?php echo e($isEn ? 'New receipt' : 'وصل جديد'); ?></button>
+        </div>
+        <?php if (!$suSlips): ?>
+            <p class="meta"><?php echo e($isEn ? 'No receipts yet.' : 'ماكو وصولات بعد.'); ?></p>
+        <?php else: ?>
+            <ul class="su-slip-list">
+                <?php foreach ($suSlips as $srow): ?>
+                    <li>
+                        <a href="slip.php?k=<?php echo e(isset($srow['token']) ? $srow['token'] : ''); ?>">
+                            <span dir="ltr"><?php echo e(isset($srow['number']) && $srow['number'] !== '' ? $srow['number'] : 'وصل'); ?></span>
+                            <em dir="ltr"><?php echo e(isset($srow['created_at']) ? $srow['created_at'] : ''); ?></em>
+                            <strong dir="ltr"><?php echo e(isset($srow['amount']) && $srow['amount'] !== '' ? $srow['amount'] : '—'); ?></strong>
+                        </a>
+                    </li>
+                <?php endforeach; ?>
+            </ul>
+        <?php endif; ?>
+    </section>
+    <script>
+    (function () {
+      var btn = document.getElementById('suSlipNew');
+      if (!btn) return;
+      btn.addEventListener('click', function () {
+        btn.disabled = true;
+        var fd = new FormData();
+        fd.append('csrf', <?php echo json_encode(csrf_token()); ?>);
+        fd.append('action', 'issue');
+        fd.append('username', <?php echo json_encode($username); ?>);
+        fd.append('name', <?php echo json_encode($dispName); ?>);
+        fd.append('phone', <?php echo json_encode(isset($phoneShow) ? $phoneShow : ''); ?>);
+        fd.append('package', <?php echo json_encode($profileLabel); ?>);
+        fd.append('end', <?php echo json_encode(isset($expireShow) ? $expireShow : ''); ?>);
+        fd.append('title', 'وصل');
+        fetch('slip.php', { method: 'POST', credentials: 'same-origin', body: fd }).then(function (r) { return r.json(); }).then(function (j) {
+          btn.disabled = false;
+          if (!j || !j.ok || !j.url) return;
+          window.open(j.url + '&print=1', 'slip');
+          window.location.reload();
+        }).catch(function () { btn.disabled = false; });
+      });
+    })();
+    </script>
 </div>
 <?php endif; ?>
 <section class="su-card su-panel" id="su-edit"<?php echo $isNew ? '' : ' hidden'; ?>>
