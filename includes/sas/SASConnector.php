@@ -233,6 +233,9 @@ class SASConnector
             'username' => $this->username,
             'password' => $this->password,
         );
+        if ($this->portal === 'ucp') {
+            $payload['language'] = 'ar';
+        }
         $otp = trim((string) $otp);
         if ($otp === '') {
             $cached = $this->readTokenCache();
@@ -4573,6 +4576,61 @@ class SASConnector
         return false;
     }
 
+    /**
+     * تفعيل كرت FTTH فقط. حساب الفايبر يرفض حقل user_id بـ 403،
+     * ويرفض الكرت إذا باقته غير باقة المشترك. مسار الواي فاي ما يمر من هنا.
+     */
+    public function activateUserCardFtth($username, $pin, $userId = 0)
+    {
+        if (!$this->token && !$this->login()) {
+            return array('__auth_error' => true, 'message' => 'SAS login failed');
+        }
+        $pin = trim((string) $pin);
+        $username = trim((string) $username);
+        $userId = (int) $userId;
+        if ($pin === '') {
+            return array('message' => 'ماكو رقم كرت', 'status' => -1, 'success' => false);
+        }
+        if ($userId <= 0) {
+            $userId = $this->connectorUserId($this->findUserByUsername($username));
+        }
+        $beforeTs = $this->liveExpireTs($userId, $username);
+        $oldTimeout = $this->timeout;
+        $this->setTimeout(12);
+        $payload = array(
+            'user_id' => $userId,
+            'username' => $username,
+            'pin' => $pin,
+            'method' => 'card',
+            'units' => 1,
+            'comments' => '',
+        );
+        $last = $this->postActivateOnce('user/activate', $payload);
+        $this->setTimeout($oldTimeout);
+        $st = (is_array($last) && isset($last['status'])) ? (int) $last['status'] : 0;
+        $msg = (is_array($last) && isset($last['message'])) ? strtolower((string) $last['message']) : '';
+        if ($st === 403 || strpos($msg, 'http 403') !== false || strpos($msg, 'forbidden') !== false) {
+            return array(
+                'success' => false,
+                'message' => 'الساس رفض التفعيل: هذا المشترك تابع لمدير غير حساب الدخول. الصلاحية موجودة، بس مو على مشتركي مدير ثاني',
+            );
+        }
+        if ($this->isActivateOkStrict($last)) {
+            $afterTs = $this->liveExpireTs($userId, $username);
+            if ($this->expireMoved($beforeTs, $afterTs)) {
+                $last['_verified'] = 1;
+            } else {
+                $last['_api_ok'] = 1;
+            }
+            return $last;
+        }
+        if (!is_array($last)) {
+            $last = array('success' => false, 'message' => 'فشل تفعيل الكرت');
+        }
+        $last['success'] = false;
+        return $last;
+    }
+
     public function activateUserCard($username, $pin, $userId = 0, $cardId = 0, $profileId = 0)
     {
         if (!$this->token && !$this->login()) {
@@ -5227,6 +5285,33 @@ class SASConnector
         }
 
         return $data;
+    }
+
+    /**
+     * تفعيل كرت من بوابة المشترك (/user) ثم تسجيل الخروج.
+     * @return array(bool ok, string message)
+     */
+    public function redeemSubscriberCard($pin)
+    {
+        $pin = trim((string) $pin);
+        if ($pin === '' || $this->portal !== 'ucp') {
+            return array(false, 'تعذر دخول بوابة المشترك');
+        }
+        if (!$this->login()) {
+            return array(false, 'تعذر دخول بوابة المشترك');
+        }
+        $res = $this->decodeApiBody($this->post('redeem', array('pin' => $pin), true, 'POST'), false);
+        $this->post('auth/logout', array(), true, 'POST');
+        $this->token = '';
+        $this->clearTokenCache();
+        if ($this->isActivateOkStrict($res)) {
+            return array(true, 'تم تفعيل الكرت من بوابة المشترك');
+        }
+        $msg = (is_array($res) && isset($res['message'])) ? trim((string) $res['message']) : '';
+        if ($msg === '') {
+            $msg = 'فشل تفعيل الكرت من بوابة المشترك';
+        }
+        return array(false, $msg);
     }
 }
 }

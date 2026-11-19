@@ -56,6 +56,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'invoice_design
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'invoice_printer') {
     $tab = 'invoices';
 }
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'invoice_send') {
+    $tab = 'invoices';
+}
 if (!in_array($tab, array('general', 'whatsapp', 'rental', 'users', 'plans', 'sas', 'saas', 'schedule', 'sensitive', 'update', 'maintenance', 'widgets', 'theme', 'invoices', 'printers'), true)) {
     $tab = 'general';
 }
@@ -266,6 +269,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf(post('csrf'))) {
         flash('error', t('saved') === 'Saved' ? 'Invalid request' : 'طلب غير صالح');
         redirect('settings.php?tab=' . $tab);
+    }
+    if ((string) post('section') === 'invoice_send') {
+        require_once __DIR__ . '/../includes/invoice_studio.php';
+        $invTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        $slipSend = invoice_slip_agent_may($invTid, (string) post('slip_token', ''));
+        if (!$slipSend) {
+            flash('error', $lang === 'en' ? 'Invoice not found' : 'الفاتورة غير موجودة');
+        } else {
+            list($sentOk, $sentMsg) = invoice_slip_send_whatsapp($config, $slipSend);
+            flash($sentOk ? 'success' : 'error', $sentMsg);
+        }
+        redirect('settings.php?tab=invoices');
     }
     if (in_array((string) post('section'), array('invoice_design', 'invoice_printer'), true)) {
         require_once __DIR__ . '/../includes/invoice_studio.php';
@@ -1175,6 +1190,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 'sas_extend_profile_id' => $data['sas_extend_profile_id'],
                 'sas_on_failure' => $data['sas_on_failure'],
                 'is_default' => post('is_default') === '1',
+                'service_kind' => post('service_kind') === 'ftth' ? 'ftth' : 'wireless',
             );
             // اكتشاف Parent
             $passKeep = $pass;
@@ -3502,6 +3518,17 @@ if ($sasTenantIdUi > 1) {
                     <div class="sas-acc-name"><?php echo e($accName); ?></div>
                     <div class="sas-acc-meta ltr"><?php echo e($acc['sas_username']); ?> · <?php echo e($acc['sas_host']); ?></div>
                     <?php
+                    $accKind = (isset($acc['service_kind']) && $acc['service_kind'] === 'ftth') ? 'FTTH' : 'Wireless';
+                    ?>
+                    <div class="sas-acc-meta"><?php echo e($isEn ? 'Service' : 'الخدمة'); ?>: <?php echo e($accKind); ?></div>
+                    <?php if (isset($acc['act_via']) && $acc['act_via'] === 'user'): ?>
+                    <div class="sas-acc-meta" style="color:#9a3412;font-weight:700;margin-top:4px">
+                        <?php echo e($isEn
+                            ? 'Activation permission is off. Cards are redeemed from the subscriber portal, then the session is logged out.'
+                            : 'هذا الريسيلر حاول التفعيل وصلاحية التفعيل معطلة. تم توجيه التفعيل عن طريق المشترك، وبعدها تسجيل الخروج.'); ?>
+                    </div>
+                    <?php endif; ?>
+                    <?php
                     $accBank = '—';
                     $accHost = preg_replace('#^https?://#i', '', rtrim(trim((string) $acc['sas_host']), '/'));
                     if ($accHost !== '' && function_exists('system_latency_to_host')) {
@@ -3717,6 +3744,13 @@ if ($sasTenantIdUi > 1) {
                 <label><?php echo e($isEn ? 'Agency password' : 'باسورد الوكالة'); ?></label>
                 <input class="ltr" type="password" name="sas_password" autocomplete="new-password" required>
             </div>
+            <div>
+                <label><?php echo e($isEn ? 'Service' : 'خدماته'); ?></label>
+                <select name="service_kind" id="sasServiceKind">
+                    <option value="wireless">Wireless</option>
+                    <option value="ftth">FTTH</option>
+                </select>
+            </div>
         </div>
         <input type="hidden" name="account_id" value="0">
         <input type="hidden" name="sas_enabled" value="1">
@@ -3769,6 +3803,9 @@ if ($sasTenantIdUi > 1) {
             var h = opt && opt.getAttribute('data-host') ? opt.getAttribute('data-host') : '';
             if (h) host.value = h;
             if (lab && opt) lab.value = opt.getAttribute('data-name') || '';
+            var kind = document.getElementById('sasServiceKind');
+            var blob = ((opt && opt.getAttribute('data-name')) || '') + ' ' + h;
+            if (kind) kind.value = /ftth/i.test(blob) ? 'ftth' : 'wireless';
           });
         })();
         </script>

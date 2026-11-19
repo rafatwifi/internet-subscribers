@@ -666,6 +666,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'pay_mode' => post('pay_mode', 'cash'),
             'wa_template' => post('wa_template', 'activation'),
             'amount' => post('amount', ''),
+            'ftth' => post('ftth', '0'),
         );
         $bgActivate = in_array($action, array('sas_activate_card', 'sas_activate_credit', 'sas_activate_reward'), true);
         if ($bgActivate && function_exists('app_session_close')) {
@@ -3067,28 +3068,26 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   overflow: hidden;
   z-index: 2;
 }
-#sasActModal.is-ftth .sas-act-ico .emo {
-  display: inline-block;
-  transform-origin: 50% 50%;
-  will-change: transform;
-}
+.sas-act-ico .ico-ftth { display: none; }
+.sas-act-ico .ico-old { display: inline-flex; align-items: center; justify-content: center; line-height: 1; }
+#sasActModal.is-ftth .sas-act-ico .ico-old { display: none; }
+#sasActModal.is-ftth .sas-act-ico .ico-ftth { display: inline-flex; align-items: center; justify-content: center; }
+#sasActModal.is-ftth .sas-act-ico .ico-ftth svg { display: block; }
 #sasActModal.is-ftth .sas-act-ico.is-refresh {
   inset-inline-start: 2px;
   background: linear-gradient(145deg, #ecfeff, #a5f3fc 55%, #67e8f9);
   color: #0e7490;
   box-shadow: 0 10px 22px rgba(6, 182, 212, 0.22);
 }
-#sasActModal.is-ftth .sas-act-ico.is-refresh .emo {
-  font-size: 22px;
+#sasActModal.is-ftth .sas-act-ico.is-refresh .ico-ftth {
   animation: ftthRefreshIdle 2.2s ease-in-out infinite;
-  filter: drop-shadow(0 2px 4px rgba(8, 145, 178, 0.25));
 }
 #sasActModal.is-ftth .sas-act-ico.is-refresh:hover {
   transform: translateY(-1px) scale(1.05);
   box-shadow: 0 14px 28px rgba(6, 182, 212, 0.3);
 }
-#sasActModal.is-ftth .sas-act-ico.is-refresh:hover .emo,
-#sasActModal.is-ftth .sas-act-ico.is-refresh.is-spin .emo {
+#sasActModal.is-ftth .sas-act-ico.is-refresh:hover .ico-ftth,
+#sasActModal.is-ftth .sas-act-ico.is-refresh.is-spin .ico-ftth {
   animation: ftthRefreshSpin .65s linear infinite;
 }
 #sasActModal.is-ftth .sas-act-ico.is-close {
@@ -3098,16 +3097,14 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   font-size: 18px;
   box-shadow: 0 10px 22px rgba(244, 63, 94, 0.2);
 }
-#sasActModal.is-ftth .sas-act-ico.is-close .emo {
-  font-size: 20px;
+#sasActModal.is-ftth .sas-act-ico.is-close .ico-ftth {
   animation: ftthClosePulse 1.7s ease-in-out infinite;
-  filter: drop-shadow(0 2px 4px rgba(225, 29, 72, 0.28));
 }
 #sasActModal.is-ftth .sas-act-ico.is-close:hover {
   transform: translateY(-1px) scale(1.05);
   box-shadow: 0 14px 28px rgba(244, 63, 94, 0.28);
 }
-#sasActModal.is-ftth .sas-act-ico.is-close:hover .emo {
+#sasActModal.is-ftth .sas-act-ico.is-close:hover .ico-ftth {
   animation: ftthClosePop .42s ease;
 }
 #sasActModal.is-ftth .sas-act-ico:disabled {
@@ -5127,8 +5124,8 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
                 </div>
             </div>
             <div class="sas-act-head-actions">
-                <button type="button" class="sas-act-ico is-refresh" id="sasActRefresh" title="<?php echo e($lang === 'en' ? 'Refresh cards' : 'تحديث الكروت'); ?>" aria-label="<?php echo e($lang === 'en' ? 'Refresh cards' : 'تحديث الكروت'); ?>"><span class="emo" aria-hidden="true">♻️</span></button>
-                <button type="button" class="sas-act-ico is-close" id="sasActClose" title="<?php echo e($lang === 'en' ? 'Close' : 'إغلاق'); ?>" aria-label="<?php echo e($lang === 'en' ? 'Close' : 'إغلاق'); ?>"><span class="emo" aria-hidden="true">❌</span></button>
+                <button type="button" class="sas-act-ico is-refresh" id="sasActRefresh" title="<?php echo e($lang === 'en' ? 'Refresh cards' : 'تحديث الكروت'); ?>" aria-label="<?php echo e($lang === 'en' ? 'Refresh cards' : 'تحديث الكروت'); ?>"><span class="ico-old" aria-hidden="true">↻</span><span class="ico-ftth" aria-hidden="true"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"/><path d="M3 21v-5h5"/><path d="M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5"/></svg></span></button>
+                <button type="button" class="sas-act-ico is-close" id="sasActClose" title="<?php echo e($lang === 'en' ? 'Close' : 'إغلاق'); ?>" aria-label="<?php echo e($lang === 'en' ? 'Close' : 'إغلاق'); ?>"><span class="ico-old" aria-hidden="true">×</span><span class="ico-ftth" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span></button>
             </div>
         </div>
         <div class="sas-act-body">
@@ -5558,7 +5555,42 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
     echo json_encode($seedActCards);
   ?>;
   var actWaDefaultOn = <?php echo (function_exists('whatsapp_notifications_enabled') && isset($pdo) && whatsapp_notifications_enabled($pdo)) ? 'true' : 'false'; ?>;
-  var actTenantFtth = <?php echo (function_exists('tenant_is_ftth') && tenant_is_ftth($pdo, $config)) ? 'true' : 'false'; ?>;
+  var actTenantFtth = <?php
+    $actFtth = function_exists('tenant_is_ftth') && tenant_is_ftth($pdo, $config);
+    if (!$actFtth && isset($pdo) && function_exists('tenant_sas_accounts_list') && function_exists('current_tenant_id')) {
+        $actTid = (int) current_tenant_id();
+        if ($actTid > 0) {
+            foreach (tenant_sas_accounts_list($pdo, $actTid) as $actAcc) {
+                $actBlob = strtolower(trim(
+                    (isset($actAcc['label']) ? (string) $actAcc['label'] : '')
+                    . ' '
+                    . (isset($actAcc['sas_host']) ? (string) $actAcc['sas_host'] : '')
+                ));
+                $actCid = !empty($actAcc['company_id']) ? (int) $actAcc['company_id'] : 0;
+                if (strpos($actBlob, 'ftth') !== false) {
+                    $actFtth = true;
+                    break;
+                }
+                if ($actCid > 0 && isset($pdo)) {
+                    try {
+                        $actCo = $pdo->prepare('SELECT name, sas_host FROM platform_companies WHERE id = :id LIMIT 1');
+                        $actCo->execute(array(':id' => $actCid));
+                        $actCoRow = $actCo->fetch(PDO::FETCH_ASSOC);
+                        if ($actCoRow) {
+                            $actCoBlob = strtolower(trim((string) $actCoRow['name'] . ' ' . (string) $actCoRow['sas_host']));
+                            if (strpos($actCoBlob, 'ftth') !== false) {
+                                $actFtth = true;
+                                break;
+                            }
+                        }
+                    } catch (Exception $eActFtth) {
+                    }
+                }
+            }
+        }
+    }
+    echo $actFtth ? 'true' : 'false';
+  ?>;
   var ftthCompanyIds = <?php
     $ftthIds = array();
     try {
@@ -6177,6 +6209,7 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
       if (e.target.closest('a,button,input,label')) return;
       markSasRowCtx(tr);
       selectOnlyRow(tr);
+      openOpsMenu(e.clientX, e.clientY);
     });
     tbody.addEventListener('contextmenu', function (e) {
       var tr = e.target && e.target.closest ? e.target.closest('tr[data-id]') : null;
@@ -6669,6 +6702,19 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
     if (!sel) return;
     if ((!cards || !cards.length) && window.sasCardsLoading) {
       ftthHasStockCards = false;
+      if (ftth) {
+        var pinWait = document.getElementById('sasActCardPin');
+        var typedWait = pinWait && String(pinWait.value || '').replace(/\D+/g, '') !== '';
+        var boxWait = document.getElementById('sasActCardBox');
+        var alreadyManual = !!(boxWait && boxWait.classList.contains('is-manual'));
+        if (typedWait) ftthPreferManual = true;
+        setFtthCardMode(true, { silent: alreadyManual, keepPin: true, forced: false });
+        sel.disabled = true;
+        setCardHintText(typedWait
+          ? <?php echo json_encode($lang === 'en' ? 'Enter card number' : 'ادخل رقم البطاقة'); ?>
+          : <?php echo json_encode($lang === 'en' ? 'Cards are still loading — you can type the number now' : 'جاري جلب الكروت… تقدر تدخل رقم البطاقة الآن'); ?>);
+        return;
+      }
       setFtthCardMode(false, { silent: true, forced: false });
       sel.innerHTML = '';
       var waitOpt = document.createElement('option');
@@ -6710,6 +6756,8 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
       if (i === 0) o.selected = true;
       sel.appendChild(o);
     });
+    var pinTyped = document.getElementById('sasActCardPin');
+    if (pinTyped && String(pinTyped.value || '').replace(/\D+/g, '') !== '') ftthPreferManual = true;
     if (ftth && ftthPreferManual) {
       setFtthCardMode(true, { silent: true, keepPin: true, forced: false });
       setCardHintText(<?php echo json_encode($lang === 'en' ? 'Enter card number' : 'ادخل رقم البطاقة'); ?>);
@@ -6841,7 +6889,8 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
       if (modal.parentNode !== document.body) document.body.appendChild(modal);
       modal.classList.remove('hidden', 'is-locking');
       var coId = parseInt(row.companyId || '0', 10) || 0;
-      var isFtth = !!actTenantFtth || (ftthCompanyIds.indexOf(coId) >= 0);
+      var pageCo = parseInt((liveQs && liveQs.company) || '0', 10) || 0;
+      var isFtth = !!actTenantFtth || ftthCompanyIds.indexOf(coId) >= 0 || ftthCompanyIds.indexOf(pageCo) >= 0;
       modal.classList.toggle('is-ftth', isFtth);
     }
     var lockEl = document.getElementById('sasActLock');
@@ -7453,8 +7502,9 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
           profile_name: profileName,
           send_whatsapp: waFields.send_whatsapp,
           send_old_debts: waFields.send_old_debts,
-          pay_mode: waFields.pay_mode
-        }, 35000);
+          pay_mode: waFields.pay_mode,
+          ftth: (typeof isFtthActModal === 'function' && isFtthActModal()) ? '1' : '0'
+        }, (typeof isFtthActModal === 'function' && isFtthActModal()) ? 70000 : 35000);
       }
       req.then(function (d) {
         if (d && Array.isArray(d.cards)) {
@@ -7465,8 +7515,14 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
         if (!d || !d.ok) {
           paintActMark(actName, '');
           var failMsg = (d && d.message) || <?php echo json_encode($lang === 'en' ? 'Activate failed' : 'فشل التفعيل'); ?>;
-          // كرت مرفوض/مستخدم: حدّث القائمة واختر الكرت التالي تلقائياً
-          if (actModeNow === 'card' && pin) {
+          var lm = String(failMsg).toLowerCase();
+          var kind = 'other';
+          if (/403|401|forbidden|unauthorized|permission|صلاحية/.test(lm) || failMsg.indexOf('صلاحية') !== -1) kind = 'perm';
+          else if (/already used|card used|used card|voucher used|pin used|كرت مستخدم|مستخدم مسبقا|البطاقة مستخدمة|الرقم مستخدم|مستعملة|تم استخدام/.test(lm)
+            || /كرت مستخدم|مستخدم مسبقا|البطاقة مستخدمة|الرقم مستخدم|مستعملة|تم استخدام/.test(failMsg)) kind = 'used';
+          else if (/invalid pin|wrong pin|pin invalid|غير صحيح|الرقم خطأ/.test(lm) || failMsg.indexOf('غير صحيح') !== -1 || failMsg.indexOf('الرقم خطأ') !== -1) kind = 'wrong';
+          else if (lm.indexOf('invalid_profile') !== -1 || failMsg.indexOf('رفض باقة') !== -1) kind = 'profile';
+          if (actModeNow === 'card' && pin && kind === 'used') {
             cardsCacheAll = (Array.isArray(cardsCacheAll) ? cardsCacheAll : []).filter(function (c) {
               return String((c && c.pin) || '') !== String(pin);
             });
@@ -7474,54 +7530,40 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
             var pid2 = profileSel2 ? profileSel2.value : (actUser ? actUser.profileId : '0');
             var pname2 = selectedProfileName(profileSel2) || (actUser ? actUser.profileName : '') || '';
             if (!manualPin) renderCards(cardsForProfile(pid2, pname2));
-            var lm = String(failMsg).toLowerCase();
-            var usedish = lm.indexOf('invalid_profile') !== -1
-              || lm.indexOf('used') !== -1
-              || lm.indexOf('already') !== -1
-              || failMsg.indexOf('رفض باقة') !== -1
-              || failMsg.indexOf('مستخدم') !== -1
-              || failMsg.indexOf('مستعملة') !== -1;
-            var wrongish = lm.indexOf('invalid') !== -1
-              || lm.indexOf('not found') !== -1
-              || failMsg.indexOf('خطأ') !== -1
-              || failMsg.indexOf('غير صحيح') !== -1
-              || failMsg.indexOf('غلط') !== -1;
-            if (manualPin) {
-              failMsg = String(failMsg || '').replace(/ماكو/g, 'لا يوجد');
-              if (usedish) {
-                failMsg = <?php echo json_encode($lang === 'en' ? 'Card already used' : 'الرقم مستخدم'); ?>;
-              } else if (wrongish) {
-                failMsg = <?php echo json_encode($lang === 'en' ? 'Wrong card number' : 'الرقم خطأ'); ?>;
-              }
-              var permish = /صلاحية|403|forbidden/i.test(failMsg);
-              var pinKeep = document.getElementById('sasActCardPin');
-              if (permish) {
-                setFtthPinStatus('');
-                setCardHintText(failMsg);
-              } else {
-                setFtthPinStatus('bad', failMsg);
-              }
-              if (pinKeep) {
-                pinKeep.dataset.keep = '1';
-                pinKeep.readOnly = false;
-                pinKeep.classList.remove('is-ok');
-                if (!permish) pinKeep.classList.add('is-bad');
-                else pinKeep.classList.remove('is-bad');
-                setTimeout(function () {
-                  try {
-                    pinKeep.focus();
-                    if (!permish) pinKeep.select();
-                  } catch (e1) {}
-                }, 30);
-              }
-              if (actModal) actModal.classList.remove('hidden');
-            } else if (usedish) {
-              failMsg = <?php echo json_encode($lang === 'en'
-                ? 'That card was already used — next unused card selected. Try again.'
-                : 'هذا الكرت صار مستخدم — تم اختيار الكرت التالي. حاول مرة ثانية.'); ?>;
-            }
           }
-          if (err) err.textContent = failMsg;
+          if (manualPin) {
+            failMsg = String(failMsg || '').replace(/ماكو/g, 'لا يوجد');
+            if (kind === 'used') {
+              failMsg = <?php echo json_encode($lang === 'en' ? 'Card already used' : 'الرقم مستخدم'); ?>;
+            } else if (kind === 'wrong') {
+              failMsg = <?php echo json_encode($lang === 'en' ? 'Wrong card number' : 'الرقم خطأ'); ?>;
+            } else if (kind === 'perm') {
+              failMsg = <?php echo json_encode($lang === 'en' ? 'This SAS account cannot activate cards' : 'لا يوجد صلاحية تفعيل في حساب SAS'); ?>;
+            }
+            var pinKeep = document.getElementById('sasActCardPin');
+            if (kind === 'used' || kind === 'wrong') setFtthPinStatus('bad', '');
+            else setFtthPinStatus('');
+            setCardHintText('');
+            if (pinKeep) {
+              pinKeep.dataset.keep = '1';
+              pinKeep.readOnly = false;
+              pinKeep.classList.remove('is-ok');
+              if (kind === 'used' || kind === 'wrong') pinKeep.classList.add('is-bad');
+              else pinKeep.classList.remove('is-bad');
+              setTimeout(function () {
+                try {
+                  pinKeep.focus();
+                  if (kind === 'used' || kind === 'wrong') pinKeep.select();
+                } catch (e1) {}
+              }, 30);
+            }
+            if (actModal) actModal.classList.remove('hidden');
+          } else if (kind === 'used') {
+            failMsg = <?php echo json_encode($lang === 'en'
+              ? 'That card was already used — next unused card selected. Try again.'
+              : 'هذا الكرت صار مستخدم — تم اختيار الكرت التالي. حاول مرة ثانية.'); ?>;
+          }
+          if (err) err.textContent = '';
           showAppToast(failMsg, 'error');
           return;
         }
@@ -7533,7 +7575,7 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
         }
         var fromIdentity = String(window.__sasActFromIdentity || '');
         var printBox = document.getElementById('sasActPrint');
-        function finishAct() {
+        function finishAct(slipBlocked) {
           if (fromIdentity && fromIdentity.toLowerCase() === String(actName || '').toLowerCase()) {
             window.__sasActFromIdentity = '';
             window.location.href = 'sas_user.php?u=' + encodeURIComponent(fromIdentity);
@@ -7541,7 +7583,9 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
           }
           releaseActivatedRow(actName);
           if (window.showCornerToast) {
-            window.showCornerToast(<?php echo json_encode($lang === 'en' ? 'Activated' : 'تم التفعيل'); ?>, 'ok');
+            window.showCornerToast(slipBlocked
+              ? <?php echo json_encode($lang === 'en' ? 'Activated. The invoice is saved under Invoices' : 'تم التفعيل. الفاتورة محفوظة في الفواتير'); ?>
+              : <?php echo json_encode($lang === 'en' ? 'Activated' : 'تم التفعيل'); ?>, 'ok');
           }
         }
         var wantSlip = ftthOn || (printBox && printBox.checked);
@@ -7556,9 +7600,12 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
           fd.append('amount', String(actAmountNow));
           fd.append('title', 'تفعيل');
           fetch('slip.php', { method: 'POST', credentials: 'same-origin', body: fd }).then(function (r) { return r.json(); }).then(function (j) {
-            if (j && j.url) window.open(j.url + ((printBox && printBox.checked) || ftthOn ? '&print=1' : ''), 'slip');
-            finishAct();
-          }).catch(function () { finishAct(); });
+            var pop = null;
+            if (j && j.url) {
+              pop = window.open(j.url + ((printBox && printBox.checked) || ftthOn ? '&print=1' : ''), 'slip');
+            }
+            finishAct(!(pop && j && j.url));
+          }).catch(function () { finishAct(true); });
           return;
         }
         finishAct();
@@ -7567,12 +7614,13 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
         var manualPin2 = !!(document.getElementById('sasActCardBox') && document.getElementById('sasActCardBox').classList.contains('is-manual'));
         var netMsg = <?php echo json_encode($lang === 'en' ? 'Activation timed out or network error — check SAS, money was NOT recorded if activate failed' : 'انتهت مهلة التفعيل أو فشل الاتصال — تحقق من الساس؛ المبلغ ما ينسجل إذا التفعيل فشل'); ?>;
         if (manualPin2) {
-          setFtthPinStatus('bad', netMsg);
+          setFtthPinStatus('');
+          setCardHintText('');
           var pinEl2 = document.getElementById('sasActCardPin');
           if (pinEl2) pinEl2.readOnly = false;
           if (actModal) actModal.classList.remove('hidden');
         }
-        if (err) err.textContent = netMsg;
+        if (err) err.textContent = '';
         showAppToast(netMsg, 'error');
       });
     }
@@ -7605,7 +7653,7 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
     var actCardSwap = document.getElementById('sasActCardSwap');
     if (actCardSwap) {
       actCardSwap.addEventListener('click', function () {
-        if (!isFtthActModal() || actCardSwap.classList.contains('is-forced') || !ftthHasStockCards) return;
+        if (!isFtthActModal() || actCardSwap.classList.contains('is-forced')) return;
         ftthPreferManual = !ftthPreferManual;
         if (ftthPreferManual) {
           setFtthCardMode(true, { forced: false });

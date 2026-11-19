@@ -1,8 +1,11 @@
 <?php
-require_once __DIR__ . '/../includes/bootstrap.php';
+$slipIsPost = isset($_SERVER['REQUEST_METHOD']) && strtoupper((string) $_SERVER['REQUEST_METHOD']) === 'POST';
+if ($slipIsPost) {
+    require_once __DIR__ . '/../includes/bootstrap.php';
+}
 require_once __DIR__ . '/../includes/invoice_studio.php';
 
-if (isset($_SERVER['REQUEST_METHOD']) && strtoupper((string) $_SERVER['REQUEST_METHOD']) === 'POST') {
+if ($slipIsPost) {
     header('Content-Type: application/json; charset=utf-8');
     if (function_exists('require_login')) {
         require_login();
@@ -17,6 +20,23 @@ if (isset($_SERVER['REQUEST_METHOD']) && strtoupper((string) $_SERVER['REQUEST_M
         echo json_encode(array('ok' => false, 'message' => 'اليوزر ناقص'));
         exit;
     }
+    $start = trim((string) (function_exists('post') ? post('start') : ''));
+    $end = trim((string) (function_exists('post') ? post('end') : ''));
+    if (($start === '' || $end === '') && isset($pdo)) {
+        try {
+            $stExp = $pdo->prepare('SELECT expire_at FROM sas_users_cache WHERE tenant_id = :t AND username = :u LIMIT 1');
+            $stExp->execute(array(':t' => $tid, ':u' => $username));
+            $exp = $stExp->fetchColumn();
+            $expTs = $exp ? strtotime((string) $exp) : 0;
+            if ($end === '' && $expTs > 0) {
+                $end = date('Y-m-d', $expTs);
+            }
+        } catch (Exception $eExp) {
+        }
+    }
+    if ($start === '') {
+        $start = date('Y-m-d');
+    }
     $design = invoice_design_load($tid);
     $slip = invoice_slip_issue($tid, array(
         'username' => $username,
@@ -24,8 +44,8 @@ if (isset($_SERVER['REQUEST_METHOD']) && strtoupper((string) $_SERVER['REQUEST_M
         'phone' => function_exists('post') ? (string) post('phone') : '',
         'package' => function_exists('post') ? (string) post('package') : '',
         'amount' => function_exists('post') ? (string) post('amount') : '',
-        'start' => function_exists('post') ? (string) post('start') : '',
-        'end' => function_exists('post') ? (string) post('end') : '',
+        'start' => $start,
+        'end' => $end,
         'title' => function_exists('post') ? (string) post('title') : 'وصل',
     ), $design);
     if (!$slip) {
@@ -36,13 +56,29 @@ if (isset($_SERVER['REQUEST_METHOD']) && strtoupper((string) $_SERVER['REQUEST_M
     exit;
 }
 
-$slip = invoice_slip_load(isset($_GET['k']) ? (string) $_GET['k'] : '');
-if (!$slip) {
+$tokenIn = isset($_GET['k']) ? (string) $_GET['k'] : '';
+if (!preg_match('/^[a-f0-9]{16,64}$/', strtolower($tokenIn))) {
     http_response_code(404);
+    header('Content-Type: text/plain; charset=utf-8');
     echo 'الوصل غير موجود';
     exit;
 }
-$autoPrint = isset($_GET['print']);
+$slip = invoice_slip_load($tokenIn);
+if (!$slip) {
+    http_response_code(404);
+    header('Content-Type: text/plain; charset=utf-8');
+    echo 'الوصل غير موجود';
+    exit;
+}
+header('X-Content-Type-Options: nosniff');
+header('X-Frame-Options: DENY');
+header('Referrer-Policy: no-referrer');
+header('X-Robots-Tag: noindex, nofollow');
+header('Content-Security-Policy: default-src \'none\'; img-src \'self\' data:; style-src \'self\' \'unsafe-inline\'; script-src \'self\' \'unsafe-inline\'; base-uri \'none\'; form-action \'none\'; frame-ancestors \'none\'');
+header('Cache-Control: private, no-store');
+$tokenShown = invoice_slip_token_clean($tokenIn);
+$slip['url'] = invoice_request_base() . 'slip.php?k=' . $tokenShown;
+$autoPrint = isset($_GET['print']) && (string) $_GET['print'] === '1';
 $w = isset($slip['paper_w']) ? (int) $slip['paper_w'] : 80;
 if ($w < 48) {
     $w = 80;
@@ -52,7 +88,7 @@ $frame = isset($slip['frame']) ? (string) $slip['frame'] : 'line';
 if (!in_array($frame, array('none', 'line', 'double', 'dashed', 'round'), true)) {
     $frame = 'line';
 }
-$logo = isset($slip['logo']) ? (string) $slip['logo'] : '';
+$logo = function_exists('invoice_slip_safe_asset') ? invoice_slip_safe_asset(isset($slip['logo']) ? $slip['logo'] : '') : '';
 $company = isset($slip['company_name']) && $slip['company_name'] !== '' ? $slip['company_name'] : 'الوصل';
 $cphone = isset($slip['company_phone']) ? (string) $slip['company_phone'] : '';
 $address = isset($slip['address']) ? (string) $slip['address'] : '';
@@ -115,9 +151,13 @@ $designed = function_exists('invoice_slip_design_html') ? invoice_slip_design_ht
   .slip-qr { display: block; width: 28mm; height: 28mm; margin: 4mm auto 1mm; background: #fff; }
   .slip-hint { margin: 0; text-align: center; color: #94a3b8; font-size: 10px; font-weight: 700; }
   .slip-foot { margin: 4mm 0 0; text-align: center; color: #94a3b8; font-size: 10px; font-weight: 800; }
+  .slip, .slip-design, .slip-line, .slip-pair {
+    font-family: "Tajawal", "Segoe UI", Tahoma, Arial, sans-serif;
+    font-weight: 400;
+  }
   @media print {
     html, body { background: #fff; padding: 0; }
-    .slip { box-shadow: none; margin: 0; }
+    .slip, .slip-design, .slip-line, .slip-pair { box-shadow: none; margin: 0; font-family: "Tajawal", "Segoe UI", Tahoma, Arial, sans-serif !important; }
     @page { size: <?php echo (int) $w; ?>mm <?php echo $minH > 0 ? ((float) $minH . 'mm') : 'auto'; ?>; margin: 0; }
   }
 </style>
@@ -162,17 +202,33 @@ $designed = function_exists('invoice_slip_design_html') ? invoice_slip_design_ht
 <script src="assets/qrcode.js"></script>
 <script>
 (function () {
-  var img = document.querySelector('[data-qr]');
-  if (!img || !window.qrcode) return;
-  try {
-    if (window.qrcode.stringToBytesFuncs && window.qrcode.stringToBytesFuncs['UTF-8']) {
-      window.qrcode.stringToBytes = window.qrcode.stringToBytesFuncs['UTF-8'];
+  var fits = document.querySelectorAll('.slip-fit');
+  for (var i = 0; i < fits.length; i++) {
+    var el = fits[i];
+    var size = parseFloat(window.getComputedStyle(el).fontSize) || 13;
+    var guard = 0;
+    while (el.scrollWidth > el.clientWidth + 1 && size > 7 && guard < 24) {
+      size -= 0.5;
+      el.style.fontSize = size + 'px';
+      guard++;
     }
-    var qr = window.qrcode(0, 'M');
-    qr.addData(img.getAttribute('data-qr') || '');
-    qr.make();
-    img.src = qr.createDataURL(4, 0);
-  } catch (e) {}
+    if (el.scrollWidth > el.clientWidth + 1) {
+      el.style.whiteSpace = 'normal';
+      el.style.lineHeight = '1.05';
+    }
+  }
+  var img = document.querySelector('[data-qr]');
+  if (img && window.qrcode) {
+    try {
+      if (window.qrcode.stringToBytesFuncs && window.qrcode.stringToBytesFuncs['UTF-8']) {
+        window.qrcode.stringToBytes = window.qrcode.stringToBytesFuncs['UTF-8'];
+      }
+      var qr = window.qrcode(0, 'M');
+      qr.addData(img.getAttribute('data-qr') || '');
+      qr.make();
+      img.src = qr.createDataURL(4, 0);
+    } catch (e) {}
+  }
   <?php if ($autoPrint): ?>
   setTimeout(function () { try { window.print(); } catch (e) {} }, 400);
   <?php endif; ?>

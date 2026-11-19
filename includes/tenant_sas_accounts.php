@@ -47,10 +47,21 @@ function ensure_tenant_sas_accounts_schema($pdo)
             tenants_ensure_column($pdo, 'tenant_sas_accounts', 'ping_mode', "VARCHAR(16) NOT NULL DEFAULT 'off'");
             tenants_ensure_column($pdo, 'tenant_sas_accounts', 'login_fail_count', 'INT UNSIGNED NOT NULL DEFAULT 0');
             tenants_ensure_column($pdo, 'tenant_sas_accounts', 'login_next_retry_at', 'DATETIME NULL DEFAULT NULL');
+            tenants_ensure_column($pdo, 'tenant_sas_accounts', 'service_kind', "VARCHAR(16) NOT NULL DEFAULT 'wireless'");
+            tenants_ensure_column($pdo, 'tenant_sas_accounts', 'act_via', "VARCHAR(16) NOT NULL DEFAULT 'api'");
+            tenants_ensure_column($pdo, 'tenant_sas_accounts', 'act_denied_count', 'INT UNSIGNED NOT NULL DEFAULT 0');
+            tenants_ensure_column($pdo, 'tenant_sas_accounts', 'act_checked_at', 'DATETIME NULL DEFAULT NULL');
+            tenants_ensure_column($pdo, 'tenant_sas_accounts', 'ucp_pin', "VARCHAR(40) NOT NULL DEFAULT '2211'");
+            tenants_ensure_column($pdo, 'tenant_sas_accounts', 'act_note', 'VARCHAR(255) NULL DEFAULT NULL');
         } catch (Exception $e) {
         }
     }
-    // ترحيل بيانات الساس القديمة من صف الـ tenant إن ماكو حسابات
+        try {
+            $pdo->exec("UPDATE tenant_sas_accounts SET service_kind = 'ftth' WHERE service_kind = 'wireless' AND (label LIKE '%FTTH%' OR label LIKE '%ftth%')");
+            $pdo->exec("UPDATE tenant_sas_accounts SET service_kind = 'ftth', ucp_pin = '2211', act_via = 'user', act_denied_count = 2, act_note = 'صلاحية تفعيل الوكالة مقفلة. التفعيل يتم من بوابة المشترك ثم تسجيل الخروج.' WHERE company_id = 3 AND (act_note IS NULL OR act_note = '')");
+        } catch (Exception $eFtthSeed) {
+        }
+        // ترحيل بيانات الساس القديمة من صف الـ tenant إن ماكو حسابات
     try {
         $rows = $pdo->query(
             'SELECT id, sas_enabled, sas_host, sas_username, sas_password, sas_parent_id,
@@ -538,6 +549,14 @@ function tenant_sas_account_save($pdo, $tenantId, $fields, $accountId = 0)
         }
         if (function_exists('sas_profiles_cache_clear')) {
             sas_profiles_cache_clear();
+        }
+        if ($id > 0 && isset($fields['service_kind'])) {
+            $kind = ((string) $fields['service_kind'] === 'ftth') ? 'ftth' : 'wireless';
+            try {
+                $pdo->prepare('UPDATE tenant_sas_accounts SET service_kind = :k WHERE id = :id AND tenant_id = :t')
+                    ->execute(array(':k' => $kind, ':id' => $id, ':t' => $tenantId));
+            } catch (Exception $eKind) {
+            }
         }
         $ftthFile = dirname(__DIR__) . '/storage/cache/ftth_profiles_t' . (int) $tenantId . '.json';
         if (is_file($ftthFile)) {

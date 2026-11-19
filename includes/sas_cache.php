@@ -5526,7 +5526,7 @@ function sas_activate_may_force_expire($res)
         'insufficient', 'not enough', 'no balance', 'no credit',
         'permission', 'forbidden', 'unauthorized',
         'invalid_profile', 'rsp_invalid_profile', 'invalid profile',
-        'ماكو رصيد', 'رصيد غير', 'غير كاف', 'ماكو صلاح',
+        'ماكو رصيد', 'رصيد غير', 'غير كاف', 'ماكو صلاح', 'باقة البطاقة',
     );
     foreach ($block as $n) {
         if (strpos($msg, $n) !== false) {
@@ -5775,6 +5775,182 @@ function sas_finish_local_activation($pdo, $config, $username, $fields, $okMsg)
         return 'تم تفعيل المشترك — محلي: ' . $lmsg;
     }
     return 'تم تفعيل المشترك';
+}
+
+function sas_ftth_account($pdo, $config = null)
+{
+    if (!$pdo || !function_exists('current_tenant_id')) {
+        return null;
+    }
+    if (function_exists('ensure_tenant_sas_accounts_schema')) {
+        ensure_tenant_sas_accounts_schema($pdo);
+    }
+    $tid = (int) current_tenant_id();
+    $acc = null;
+    $wantUser = '';
+    $wantHost = '';
+    if (function_exists('sas_config')) {
+        $s = sas_config($config);
+        if (is_array($s)) {
+            $wantUser = strtolower(trim((string) (isset($s['username']) ? $s['username'] : '')));
+            $wantHost = strtolower(preg_replace('#^https?://#i', '', trim((string) (isset($s['host']) ? $s['host'] : ''))));
+        }
+    }
+    if ($wantUser !== '' && function_exists('tenant_sas_accounts_list')) {
+        foreach (tenant_sas_accounts_list($pdo, $tid) as $row) {
+            $u = strtolower(trim((string) (isset($row['sas_username']) ? $row['sas_username'] : '')));
+            $h = strtolower(preg_replace('#^https?://#i', '', trim((string) (isset($row['sas_host']) ? $row['sas_host'] : ''))));
+            if ($u === $wantUser && ($wantHost === '' || $h === $wantHost)) {
+                $acc = $row;
+                break;
+            }
+        }
+    }
+    if (!$acc && function_exists('tenant_sas_account_default')) {
+        $acc = tenant_sas_account_default($pdo, $tid);
+    }
+    if (!$acc) {
+        return null;
+    }
+    $kind = isset($acc['service_kind']) ? (string) $acc['service_kind'] : '';
+    $blob = strtolower(trim((isset($acc['label']) ? $acc['label'] : '') . ' ' . (isset($acc['sas_host']) ? $acc['sas_host'] : '')));
+    $companyBlob = '';
+    if (!empty($acc['company_id'])) {
+        if (function_exists('ensure_platform_companies_schema')) {
+            ensure_platform_companies_schema($pdo);
+        }
+        try {
+            $st = $pdo->prepare('SELECT name, sas_host, service_kind FROM platform_companies WHERE id = :id LIMIT 1');
+            $st->execute(array(':id' => (int) $acc['company_id']));
+            $co = $st->fetch(PDO::FETCH_ASSOC);
+            if ($co) {
+                $companyBlob = strtolower(trim((isset($co['name']) ? $co['name'] : '') . ' ' . (isset($co['sas_host']) ? $co['sas_host'] : '')));
+                if (isset($co['service_kind']) && $co['service_kind'] === 'ftth') {
+                    $kind = 'ftth';
+                }
+            }
+        } catch (Exception $e) {
+        }
+    }
+    if ($kind !== 'ftth' && strpos($blob, 'ftth') === false && strpos($companyBlob, 'ftth') === false) {
+        return null;
+    }
+    return $acc;
+}
+
+function sas_ftth_api_open($api, $userId)
+{
+    if (!$api || (int) $userId <= 0) {
+        return false;
+    }
+    $raw = $api->post('user/activate', array(
+        'user_id' => (int) $userId,
+        'pin' => '000000000000',
+        'method' => 'card',
+    ), true, 'POST');
+    if (!is_string($raw) || trim($raw) === '') {
+        return false;
+    }
+    $msg = strtolower($raw);
+    if (strpos($msg, 'http 403') !== false || strpos($msg, 'صلاحية تفعيل') !== false) {
+        return false;
+    }
+    return true;
+}
+
+function sas_ftth_save_channel($pdo, $accountId, $via, $denied, $note)
+{
+    $accountId = (int) $accountId;
+    if ($accountId <= 0) {
+        return;
+    }
+    try {
+        $pdo->prepare(
+            'UPDATE tenant_sas_accounts
+             SET act_via = :v, act_denied_count = :d, act_note = :n, act_checked_at = NOW()
+             WHERE id = :id'
+        )->execute(array(
+            ':v' => $via === 'user' ? 'user' : 'api',
+            ':d' => max(0, (int) $denied),
+            ':n' => $note,
+            ':id' => $accountId,
+        ));
+    } catch (Exception $e) {
+    }
+}
+
+function sas_ucp_redeem_card($host, $login, $password, $pin)
+{
+    if (!class_exists('SASConnector')) {
+        return array(false, 'تعذر دخول بوابة المشترك');
+    }
+    $api = new SASConnector($host, $login, $password, 'ucp');
+    if (!method_exists($api, 'redeemSubscriberCard')) {
+        return array(false, 'تعذر دخول بوابة المشترك');
+    }
+    return $api->redeemSubscriberCard($pin);
+}
+
+function sas_ftth_user_portal_activate($pdo, $config, $acc, $username, $pin, $fields, $cache, $api = null, $sasUserId = 0, $beforeTs = 0)
+{
+    $host = isset($acc['sas_host']) ? (string) $acc['sas_host'] : '';
+    $pass = (isset($acc['ucp_pin']) && trim((string) $acc['ucp_pin']) !== '') ? (string) $acc['ucp_pin'] : '2211';
+    $logins = array($username);
+    $phone = '';
+    if (is_array($cache)) {
+        if (!empty($cache['phone'])) {
+            $phone = preg_replace('/\D+/', '', (string) $cache['phone']);
+        } elseif (!empty($cache['local_phone'])) {
+            $phone = preg_replace('/\D+/', '', (string) $cache['local_phone']);
+        }
+    }
+    if ($phone !== '' && $phone !== $username) {
+        $logins[] = $phone;
+    }
+    $last = array(false, 'تعذر دخول بوابة المشترك');
+    foreach ($logins as $login) {
+        $last = sas_ucp_redeem_card($host, $login, $pass, $pin);
+        if (!empty($last[0])) {
+            break;
+        }
+        if ($last[1] !== 'تعذر دخول بوابة المشترك') {
+            break;
+        }
+    }
+    if (empty($last[0])) {
+        return array(false, $last[1], array());
+    }
+    $confirmed = false;
+    $after = null;
+    if ($api) {
+        list($confirmed, $after) = sas_confirm_live_activation($api, $username, $sasUserId, $beforeTs);
+        if (!$confirmed) {
+            usleep(800000);
+            list($confirmed, $after) = sas_confirm_live_activation($api, $username, $sasUserId, $beforeTs);
+        }
+        if (!$confirmed) {
+            return array(false, 'الكرت انرسل من بوابة المشترك، بس تاريخ الانتهاء على الساس ما تغيّر. ما انسجل تفعيل.', array());
+        }
+    }
+    if (is_array($after)) {
+        sas_cache_upsert_row($pdo, $after);
+    } elseif ($api && function_exists('sas_cache_refresh_one')) {
+        sas_cache_refresh_one($pdo, $config, $username, $sasUserId);
+    }
+    if ($pin !== '' && function_exists('sas_mark_card_pin_used')) {
+        sas_mark_card_pin_used($pin);
+    }
+    $okMsg = function_exists('sas_finish_local_activation')
+        ? sas_finish_local_activation($pdo, $config, $username, $fields, 'تم تفعيل المشترك')
+        : 'تم تفعيل المشترك';
+    $end = '';
+    if (is_array($after) && function_exists('sas_row_expire_ts')) {
+        $endTs = (int) sas_row_expire_ts($after);
+        if ($endTs > 0) {
+            $end = date('Y-m-d', $endTs);
+        }
+    }
+    return array(true, $okMsg, array('via' => 'user', 'expire_at' => $end));
 }
 
 function sas_write_user($pdo, $config, $action, $username, $fields)
@@ -6367,15 +6543,60 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
         if (function_exists('set_time_limit')) {
             @set_time_limit(60);
         }
-        $res = $api->activateUserCard(
-            $username,
-            $pin !== '' ? $pin : (string) $cardId,
-            $sasUserId,
-            $cardId,
-            $profileId
-        );
+        $ftthAcc = sas_ftth_account($pdo, $config);
+        $ftthOn = $ftthAcc && (!empty($fields['ftth']) || (isset($ftthAcc['service_kind']) && $ftthAcc['service_kind'] === 'ftth'));
+        if ($ftthOn && isset($ftthAcc['act_via']) && $ftthAcc['act_via'] === 'user') {
+            $checked = isset($ftthAcc['act_checked_at']) ? strtotime((string) $ftthAcc['act_checked_at']) : 0;
+            if ($checked <= 0 || (time() - $checked) > 86400) {
+                if (sas_ftth_api_open($api, $sasUserId)) {
+                    sas_ftth_save_channel($pdo, $ftthAcc['id'], 'api', 0, 'رجعت صلاحية التفعيل من الوكالة');
+                    $ftthAcc['act_via'] = 'api';
+                } else {
+                    sas_ftth_save_channel($pdo, $ftthAcc['id'], 'user', isset($ftthAcc['act_denied_count']) ? $ftthAcc['act_denied_count'] : 2, isset($ftthAcc['act_note']) ? $ftthAcc['act_note'] : 'صلاحية تفعيل الوكالة مقفلة. التفعيل يتم من بوابة المشترك ثم تسجيل الخروج.');
+                }
+            }
+        }
+        if ($ftthOn && isset($ftthAcc['act_via']) && $ftthAcc['act_via'] === 'user') {
+            return sas_ftth_user_portal_activate($pdo, $config, $ftthAcc, $username, $pin, $fields, $cache, $api, $sasUserId, $beforeTs);
+        }
+        if ($ftthOn && method_exists($api, 'activateUserCardFtth')) {
+            $res = $api->activateUserCardFtth(
+                $username,
+                $pin !== '' ? $pin : (string) $cardId,
+                $sasUserId
+            );
+        } else {
+            $res = $api->activateUserCard(
+                $username,
+                $pin !== '' ? $pin : (string) $cardId,
+                $sasUserId,
+                $cardId,
+                $profileId
+            );
+        }
         if (is_array($res) && !empty($res['__auth_error'])) {
             return array(false, 'SAS: ' . (function_exists('sas_response_message') ? sas_response_message($res) : 'فشل الدخول'), array());
+        }
+        if ($ftthOn && empty($res['_verified']) && empty($res['_api_ok'])) {
+            $failMsg = function_exists('sas_response_message') ? sas_response_message($res) : '';
+            if ($failMsg === '' && isset($res['message'])) {
+                $failMsg = (string) $res['message'];
+            }
+            $low = strtolower($failMsg);
+            $denied = (strpos($low, '403') !== false || strpos($failMsg, 'صلاحية') !== false || strpos($failMsg, 'مدير') !== false);
+            if ($denied && $ftthAcc) {
+                $hits = (isset($ftthAcc['act_denied_count']) ? (int) $ftthAcc['act_denied_count'] : 0) + 1;
+                $note = 'صلاحية تفعيل الوكالة مقفلة. التفعيل يتم من بوابة المشترك ثم تسجيل الخروج.';
+                if ($hits >= 2) {
+                    sas_ftth_save_channel($pdo, $ftthAcc['id'], 'user', $hits, $note);
+                    return sas_ftth_user_portal_activate($pdo, $config, $ftthAcc, $username, $pin, $fields, $cache, $api, $sasUserId, $beforeTs);
+                }
+                sas_ftth_save_channel($pdo, $ftthAcc['id'], 'api', $hits, $note);
+            }
+            if ($failMsg === '') {
+                $failMsg = 'فشل تفعيل الكرت';
+            }
+            return array(false, $failMsg, array());
         }
         if (!empty($res['_verified'])) {
             // موثّق من الساس مباشرة
@@ -6384,10 +6605,11 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
             // كرت مرفوض/مستخدم — لا ترجعه بالقائمة الشاغرة
             if ($pin !== '' && function_exists('sas_mark_card_pin_used')) {
                 $lm = strtolower($failMsg);
-                if (strpos($lm, 'invalid_profile') !== false
+                if (empty($fields['ftth'])
+                    && (strpos($lm, 'invalid_profile') !== false
                     || strpos($lm, 'رفض باقة') !== false
                     || strpos($lm, 'used') !== false
-                    || strpos($lm, 'مستخدم') !== false) {
+                    || strpos($lm, 'مستخدم') !== false)) {
                     sas_mark_card_pin_used($pin);
                 }
             }
@@ -6409,7 +6631,7 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
         );
         if (!$confirmed) {
             $failDetail = sas_activate_fail_detail($res, $beforeTs, $afterRow);
-            if ($pin !== '' && function_exists('sas_mark_card_pin_used')) {
+            if (empty($fields['ftth']) && $pin !== '' && function_exists('sas_mark_card_pin_used')) {
                 $lm = strtolower($failDetail);
                 if (strpos($lm, 'invalid_profile') !== false || strpos($lm, 'رفض باقة') !== false) {
                     sas_mark_card_pin_used($pin);

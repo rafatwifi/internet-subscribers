@@ -743,6 +743,8 @@ function invoice_slip_issue($tenantId, $meta, $design)
         'title' => trim((string) (isset($meta['title']) ? $meta['title'] : 'وصل')),
         'number' => invoice_slip_next_number($tenantId),
         'created_at' => date('Y-m-d H:i:s'),
+        'issuer_id' => 0,
+        'issuer_name' => '',
         'paper_w' => $w,
         'paper_h' => $h,
         'frame' => isset($design['frame']) ? (string) $design['frame'] : 'line',
@@ -758,6 +760,20 @@ function invoice_slip_issue($tenantId, $meta, $design)
         'address' => isset($design['address']) ? (string) $design['address'] : '',
         'footer' => invoice_system_footer(),
     );
+    $issuerId = 0;
+    $issuerName = '';
+    if (function_exists('current_admin')) {
+        $meSlip = current_admin();
+        if (is_array($meSlip)) {
+            $issuerId = isset($meSlip['id']) ? (int) $meSlip['id'] : 0;
+            $issuerName = isset($meSlip['display_name']) ? trim((string) $meSlip['display_name']) : '';
+            if ($issuerName === '' && isset($meSlip['username'])) {
+                $issuerName = trim((string) $meSlip['username']);
+            }
+        }
+    }
+    $slip['issuer_id'] = $issuerId;
+    $slip['issuer_name'] = $issuerName;
     $path = invoice_slip_path($token);
     $json = json_encode($slip);
     if ($path === '' || $json === false || @file_put_contents($path, $json, LOCK_EX) === false) {
@@ -771,13 +787,100 @@ function invoice_slip_issue($tenantId, $meta, $design)
         'title' => $slip['title'],
         'number' => $slip['number'],
         'amount' => $slip['amount'],
+        'phone' => $slip['phone'],
         'created_at' => $slip['created_at'],
+        'issuer_id' => $issuerId,
+        'issuer_name' => $issuerName,
     ));
     if (count($index) > 500) {
         $index = array_slice($index, 0, 500);
     }
     invoice_slip_index_save($tenantId, $index);
     return $slip;
+}
+
+function invoice_slips_visible($tenantId)
+{
+    $agent = function_exists('is_agent_user') && is_agent_user();
+    $myId = 0;
+    if ($agent && function_exists('current_admin')) {
+        $me = current_admin();
+        $myId = (is_array($me) && isset($me['id'])) ? (int) $me['id'] : 0;
+    }
+    $out = array();
+    foreach (invoice_slip_index_load($tenantId) as $row) {
+        if (!is_array($row) || empty($row['token'])) {
+            continue;
+        }
+        $issuer = isset($row['issuer_id']) ? (int) $row['issuer_id'] : 0;
+        if ($agent && $issuer > 0 && $issuer !== $myId) {
+            continue;
+        }
+        $out[] = $row;
+        if (count($out) >= 80) {
+            break;
+        }
+    }
+    return $out;
+}
+
+function invoice_slip_agent_may($tenantId, $token)
+{
+    $slip = invoice_slip_load($token);
+    if (!is_array($slip)) {
+        return null;
+    }
+    if ((int) (isset($slip['tenant_id']) ? $slip['tenant_id'] : 0) !== (int) $tenantId) {
+        return null;
+    }
+    if (function_exists('is_agent_user') && is_agent_user() && function_exists('current_admin')) {
+        $me = current_admin();
+        $myId = (is_array($me) && isset($me['id'])) ? (int) $me['id'] : 0;
+        $issuer = isset($slip['issuer_id']) ? (int) $slip['issuer_id'] : 0;
+        if ($issuer > 0 && $issuer !== $myId) {
+            return null;
+        }
+    }
+    return $slip;
+}
+
+function invoice_slip_send_whatsapp($config, $slip)
+{
+    if (!is_array($slip) || !function_exists('whatsapp_send')) {
+        return array(false, 'إرسال الواتساب غير جاهز');
+    }
+    $phone = isset($slip['phone']) ? trim((string) $slip['phone']) : '';
+    if ($phone === '') {
+        return array(false, 'ماكو رقم هاتف لهذا المشترك');
+    }
+    $token = isset($slip['token']) ? invoice_slip_token_clean($slip['token']) : '';
+    $url = $token !== '' ? (invoice_request_base() . 'slip.php?k=' . $token) : '';
+    $name = isset($slip['name']) ? trim((string) $slip['name']) : '';
+    $number = isset($slip['number']) ? trim((string) $slip['number']) : '';
+    $amount = isset($slip['amount']) ? trim((string) $slip['amount']) : '';
+    $msg = "فاتورة التفعيل\n" . $name;
+    if ($number !== '') {
+        $msg .= "\n" . $number;
+    }
+    if ($amount !== '') {
+        $msg .= "\nالمبلغ: " . $amount;
+    }
+    if ($url !== '') {
+        $msg .= "\n" . $url;
+    }
+    $result = whatsapp_send($config, $phone, $msg, 'invoice');
+    $ok = is_array($result) && !empty($result['success']);
+    if ($ok) {
+        return array(true, 'انرسلت الفاتورة للمشترك');
+    }
+    $why = (is_array($result) && isset($result['response'])) ? trim((string) $result['response']) : '';
+    if ($why === '' && function_exists('whatsapp_fail_user_message')) {
+        $why = whatsapp_fail_user_message($result);
+    }
+    if ($why === '') {
+        $why = 'ما انرسلت الفاتورة';
+    }
+    return array(false, $why);
 }
 
 function invoice_slip_next_number($tenantId)
@@ -805,6 +908,27 @@ function invoice_slip_next_number($tenantId)
 function invoice_h($value)
 {
     return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
+}
+
+function invoice_slip_safe_asset($url)
+{
+    $url = trim((string) $url);
+    if ($url === '' || strpos($url, '..') !== false || strpos($url, "\n") !== false || strpos($url, "\r") !== false) {
+        return '';
+    }
+    if (preg_match('#^\s*(javascript|data|file|php):#i', $url)) {
+        return '';
+    }
+    if (preg_match('#\.php($|\?)#i', $url)) {
+        return '';
+    }
+    if (preg_match('#^(https?:)?//#i', $url)) {
+        return '';
+    }
+    if (!preg_match('#^(uploads/|assets/)#i', $url)) {
+        return '';
+    }
+    return $url;
 }
 
 function invoice_slip_design_html($slip)
@@ -847,7 +971,10 @@ function invoice_slip_design_html($slip)
     if ($footY >= 0 && ($footY + 7) > $h) {
         $h = $footY + 8;
     }
-    $html = '<article class="slip slip-design" style="width:' . invoice_h($w) . 'mm;height:' . invoice_h($h) . 'mm;padding:0;position:relative;overflow:hidden;">';
+    if (($fy + $fh + 1.6) > $h) {
+        $h = $fy + $fh + 1.6;
+    }
+    $html = '<article class="slip slip-design" style="width:' . invoice_h($w) . 'mm;height:' . invoice_h($h) . 'mm;padding:0;position:relative;overflow:hidden;font-family:Tajawal,\'Segoe UI\',Tahoma,Arial,sans-serif;font-weight:400;color:#444;">';
     if ($frame['style'] !== 'none' && isset($styleMap[$frame['style']])) {
         $html .= '<div style="position:absolute;left:' . invoice_h($fx) . 'mm;top:' . invoice_h($fy) . 'mm;width:' . invoice_h($fw) . 'mm;height:' . invoice_h($fh) . 'mm;box-sizing:border-box;border:' . invoice_h($thick) . 'mm ' . $styleMap[$frame['style']] . ' ' . invoice_h($frame['color']) . ';border-radius:' . invoice_h($frame['radius']) . 'mm;"></div>';
     }
@@ -944,6 +1071,10 @@ function invoice_slip_design_html($slip)
                 continue;
             }
             $lw = $bw > 0 ? $bw : 18;
+            $logo = invoice_slip_safe_asset($logo);
+            if ($logo === '') {
+                continue;
+            }
             $html .= '<img alt="" src="' . invoice_h($logo) . '" style="' . $pos . 'width:' . invoice_h($lw) . 'mm;height:auto;">';
             continue;
         }
@@ -957,7 +1088,11 @@ function invoice_slip_design_html($slip)
         if ($kind !== 'custom' && $label === '' && $text !== '') {
             $value = $text;
         }
-        $fw = (isset($b['weight']) && $b['weight'] === 'normal') ? '400' : '800';
+        if ($label === '' && ($kind === 'name' || $kind === 'address') && $align === 'center') {
+            $align = 'right';
+        }
+        $wrapLine = ($kind === 'address');
+        $fw = (isset($b['weight']) && $b['weight'] === 'normal') ? '400' : '500';
         $fst = !empty($b['italic']) ? 'italic' : 'normal';
         $td = !empty($b['under']) ? 'underline' : 'none';
         $type = 'font-weight:' . $fw . ';font-style:' . $fst . ';text-decoration:' . $td . ';';
@@ -965,19 +1100,40 @@ function invoice_slip_design_html($slip)
         if ($kind !== 'custom' && $label !== '') {
             if (!empty($b['stack'])) {
                 $flow = 'flex-direction:column;align-items:stretch;';
+                $valStyle = 'flex:1 1 auto;min-width:0;overflow:hidden;white-space:nowrap;';
+            } elseif ($align === 'center') {
+                $flow = 'justify-content:space-between;align-items:baseline;';
+                $valStyle = 'flex:0 1 auto;min-width:0;white-space:nowrap;text-align:left;direction:ltr;';
             } elseif ($bw > 0) {
                 $flow = 'justify-content:space-between;align-items:baseline;';
+                $valStyle = 'flex:1 1 auto;min-width:0;overflow:hidden;white-space:nowrap;text-align:left;';
             } else {
                 $flow = 'justify-content:flex-start;align-items:baseline;';
+                $valStyle = 'flex:0 1 auto;min-width:0;white-space:nowrap;';
             }
-            $pairW = $bw > 0 ? 'width:100%;' : 'width:max-content;max-width:100%;';
-            $inner = '<span style="display:flex;' . $flow . 'gap:1.2mm;' . $pairW . $type . '">'
-                . '<span>' . invoice_h($label) . '</span>'
-                . '<span>' . invoice_h($value) . '</span></span>';
+            $inner = '<span class="slip-pair" style="display:flex;' . $flow . 'gap:2mm;width:100%;min-width:0;' . $type . '">'
+                . '<span style="flex:0 0 auto;">' . invoice_h($label) . '</span>'
+                . '<span class="slip-fit" style="' . $valStyle . '">' . invoice_h($value) . '</span></span>';
         } else {
             $inner = invoice_h($value);
         }
-        $html .= '<div style="' . $pos . 'font-size:' . invoice_h($size) . 'px;color:' . invoice_h($color) . ';text-align:' . invoice_h($align) . ';direction:' . invoice_h($dir) . ';line-height:1.15;white-space:nowrap;' . $type . '">' . $inner . '</div>';
+        $lineStyle = $pos . 'font-family:Tajawal,\'Segoe UI\',Tahoma,Arial,sans-serif;font-size:' . invoice_h($size) . 'px;color:' . invoice_h($color) . ';text-align:' . invoice_h($align) . ';direction:' . invoice_h($dir) . ';line-height:' . ($wrapLine ? '1.35' : '1.25') . ';white-space:' . ($wrapLine ? 'normal' : 'nowrap') . ';' . $type;
+        $lineClass = 'slip-line';
+        $frameRight = (isset($frame['x']) ? (float) $frame['x'] : 0) + (isset($frame['w']) ? (float) $frame['w'] : $w);
+        $fitW = $bw > 0 ? $bw : max(12, $frameRight - $x - 1.5);
+        if ($x + $fitW > $frameRight - 0.8) {
+            $fitW = max(12, $frameRight - $x - 0.8);
+        }
+        if ($bw > 0 || $label !== '') {
+            $lineStyle .= 'width:' . invoice_h($fitW) . 'mm;max-width:' . invoice_h($fitW) . 'mm;';
+            if (!$wrapLine) {
+                $lineStyle .= 'overflow:hidden;';
+            }
+        } elseif (!$wrapLine) {
+            $lineClass .= ' slip-fit';
+            $lineStyle .= 'max-width:' . invoice_h($fitW) . 'mm;overflow:hidden;';
+        }
+        $html .= '<div class="' . $lineClass . '" style="' . $lineStyle . '">' . $inner . '</div>';
     }
     $footer = isset($slip['footer']) ? trim((string) $slip['footer']) : '';
     if ($footer === '') {
@@ -986,7 +1142,7 @@ function invoice_slip_design_html($slip)
     $footY = isset($slip['footer_y']) ? (float) $slip['footer_y'] : -1;
     $footX = isset($slip['footer_x']) ? (float) $slip['footer_x'] : -1;
     $fa = (isset($slip['footer_align']) && in_array($slip['footer_align'], array('left', 'center', 'right'), true)) ? $slip['footer_align'] : 'center';
-    $fstyle = 'position:absolute;z-index:5;background:#fff;font-size:9px;line-height:1.3;font-weight:800;color:#64748b;padding:0.8mm 1.6mm;text-align:' . invoice_h($fa) . ';';
+    $fstyle = 'position:absolute;z-index:5;background:transparent;font-family:inherit;font-size:11px;line-height:1.35;font-weight:400;color:#64748b;padding:0.4mm 1.6mm;text-align:' . invoice_h($fa) . ';';
     if ($footX >= 0 && $footY >= 0) {
         $fstyle .= 'left:' . invoice_h($footX) . 'mm;top:' . invoice_h($footY) . 'mm;max-width:' . invoice_h(max(10, $w - $footX - 1)) . 'mm;';
     } elseif ($footY >= 0) {
@@ -1158,7 +1314,7 @@ function invoice_render_tab($tab, $tenantId, $isEn)
     .inv-name { border: 0; background: transparent; font: inherit; font-weight: 800; font-size: 15px; min-width: 0; width: 180px; flex: 0 1 220px; color: inherit; border-radius: 10px; padding: 4px 8px; box-shadow: none; }
     .inv-len { color: #0f766e; font-weight: 800; font-size: 12px; white-space: nowrap; background: transparent; box-shadow: none; padding: 0; }
     .inv-fit { position: relative; flex: 0 0 auto; margin: 0; }
-    .inv-paper { position: absolute; left: 0; top: 0; background: #fff; box-shadow: 0 16px 40px rgba(15,23,42,.14); overflow: visible; box-sizing: border-box; }
+    .inv-paper { position: absolute; left: 0; top: 0; background: #fff; box-shadow: 0 16px 40px rgba(15,23,42,.14); overflow: visible; box-sizing: border-box; font-family: "Tajawal", "Segoe UI", Tahoma, Arial, sans-serif; font-weight: 400; color: #444; }
     .inv-frame { position: absolute; box-sizing: border-box; z-index: 1; pointer-events: none; }
     .inv-frame.is-pick { outline: 1px dashed #0f766e; outline-offset: 2px; }
     .inv-edge { position: absolute; pointer-events: auto; background: transparent; touch-action: none; }
@@ -1181,6 +1337,9 @@ function invoice_render_tab($tab, $tenantId, $isEn)
     .inv-block { position: absolute; margin: 0; padding: 0; line-height: 1.15; letter-spacing: 0; background: transparent; border: 0; white-space: nowrap; box-sizing: border-box; user-select: none; z-index: 5; touch-action: none; }
     .inv-pair { display: flex; align-items: baseline; justify-content: flex-start; gap: 1.5mm; width: max-content; max-width: 100%; }
     .inv-block:not(.is-hug) .inv-pair { width: 100%; justify-content: space-between; }
+    .inv-block.is-center .inv-pair { width: 100%; justify-content: space-between; }
+    .inv-block.is-center .inv-var { direction: ltr; text-align: left; }
+    .inv-block.is-wrap { white-space: normal; line-height: 1.35; }
     .inv-const, .inv-var { font-weight: inherit; font-style: inherit; text-decoration: inherit; }
     .inv-app.is-edit .inv-var { background: rgba(15,118,110,.12); border-radius: 4px; padding: 0 1.2mm; }
     #pBind { height: 32px; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; font-weight: 800; max-width: 150px; }
@@ -1213,7 +1372,7 @@ function invoice_render_tab($tab, $tenantId, $isEn)
     .inv-app.is-edit .inv-block.is-pick .inv-resize { display: block; }
     .inv-block img { width: 100%; height: auto; display: block; }
     .inv-logo-ph { display: flex; align-items: center; justify-content: center; width: 100%; height: 12mm; background: #f8fafc; color: #94a3b8; font-size: 10px; }
-    .inv-foot { position: absolute; z-index: 4; margin: 0; background: #fff; text-align: center; font-size: 9px; line-height: 1.3; font-weight: 800; color: #64748b; padding: 0.7mm 1.6mm; box-sizing: border-box; max-width: calc(100% - 2mm); overflow: visible; white-space: nowrap; user-select: none; }
+    .inv-foot { position: absolute; z-index: 4; margin: 0; background: transparent; text-align: center; font-size: 11px; line-height: 1.35; font-weight: 400; color: #64748b; padding: 0.4mm 1.6mm; box-sizing: border-box; max-width: calc(100% - 2mm); overflow: visible; white-space: nowrap; user-select: none; font-family: "Tajawal", "Segoe UI", Tahoma, Arial, sans-serif; }
     .inv-app.is-edit .inv-foot { cursor: grab; }
     .inv-foot.is-pick { outline: 1.5px solid #0f766e; outline-offset: 1px; }
     #pDel { width: 32px; min-width: 32px; height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
@@ -1287,7 +1446,46 @@ function invoice_render_tab($tab, $tenantId, $isEn)
     </style>
     <div class="inv-app" id="invApp">
         <section class="inv-gallery" id="invGallery">
+            <?php $issued = function_exists('invoice_slips_visible') ? invoice_slips_visible($tenantId) : array(); ?>
             <div class="inv-gbar">
+                <div>
+                    <h2><?php echo e($isEn ? 'Issued invoices' : 'الفواتير الصادرة'); ?></h2>
+                    <p><?php echo e($isEn ? 'Open, print, or send a saved invoice' : 'افتح الفاتورة أو اطبعها أو أرسلها للمشترك'); ?></p>
+                </div>
+            </div>
+            <?php if (!$issued): ?>
+                <p class="inv-empty"><?php echo e($isEn ? 'No invoices yet' : 'ماكو فواتير صادرة بعد'); ?></p>
+            <?php endif; ?>
+            <?php foreach ($issued as $slipRow):
+                if (!is_array($slipRow)) continue;
+                $tok = isset($slipRow['token']) ? preg_replace('/[^a-f0-9]/', '', strtolower((string) $slipRow['token'])) : '';
+                if ($tok === '') continue;
+                $slipNo = isset($slipRow['number']) ? (string) $slipRow['number'] : '';
+                $slipName = isset($slipRow['name']) ? (string) $slipRow['name'] : '';
+                $slipAmt = isset($slipRow['amount']) ? trim((string) $slipRow['amount']) : '';
+                $slipWhen = isset($slipRow['created_at']) ? (string) $slipRow['created_at'] : '';
+                $slipAgent = isset($slipRow['issuer_name']) ? trim((string) $slipRow['issuer_name']) : '';
+                $slipPhone = isset($slipRow['phone']) ? trim((string) $slipRow['phone']) : '';
+                ?>
+            <div class="inv-printer">
+                <div>
+                    <strong class="ltr"><?php echo e($slipNo !== '' ? $slipNo : $tok); ?></strong>
+                    <span><?php echo e($slipName); ?><?php echo $slipAmt !== '' ? e(' · ' . $slipAmt) : ''; ?></span>
+                    <em><?php echo e(trim($slipWhen . ($slipAgent !== '' ? ' · ' . $slipAgent : ''))); ?></em>
+                </div>
+                <div class="inv-acts">
+                    <a class="btn ghost sm" target="_blank" href="slip.php?k=<?php echo e($tok); ?>"><?php echo e($isEn ? 'Open' : 'فتح'); ?></a>
+                    <a class="btn ghost sm" target="_blank" href="slip.php?k=<?php echo e($tok); ?>&amp;print=1"><?php echo e($isEn ? 'Print' : 'طباعة'); ?></a>
+                    <form method="post" action="settings.php?tab=invoices">
+                        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                        <input type="hidden" name="section" value="invoice_send">
+                        <input type="hidden" name="slip_token" value="<?php echo e($tok); ?>">
+                        <button class="btn sm" type="submit"><?php echo e($isEn ? 'Send' : 'إرسال'); ?></button>
+                    </form>
+                </div>
+            </div>
+            <?php endforeach; ?>
+            <div class="inv-gbar" style="margin-top:18px">
                 <div>
                     <h2><?php echo e($payload['ui']['templates']); ?></h2>
                     <p><?php echo e($payload['ui']['pick']); ?></p>
@@ -1594,7 +1792,7 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         else el.appendChild(node);
       }
       function paintType(el, b) {
-        el.style.fontWeight = b.weight === 'normal' ? '400' : '800';
+        el.style.fontWeight = b.weight === 'normal' ? '400' : '500';
         el.style.fontStyle = b.italic ? 'italic' : 'normal';
         el.style.textDecoration = b.under ? 'underline' : 'none';
         el.style.textUnderlineOffset = b.under ? '2px' : '';
@@ -1908,7 +2106,7 @@ function invoice_render_tab($tab, $tenantId, $isEn)
       }
       function blockNode(b, design) {
         var el = document.createElement('div');
-        el.className = 'inv-block' + (b.w > 0 ? '' : ' is-hug');
+        el.className = 'inv-block' + (b.w > 0 ? '' : ' is-hug') + (b.kind === 'address' ? ' is-wrap' : '');
         el.setAttribute('data-id', b.id);
         el.style.left = (parseFloat(b.x) || 0) + 'mm';
         el.style.top = (parseFloat(b.y) || 0) + 'mm';
@@ -1960,6 +2158,7 @@ function invoice_render_tab($tab, $tenantId, $isEn)
           el.style.fontSize = (b.size || 13) + 'px';
           el.style.color = b.color || '#111827';
           el.style.textAlign = b.align || 'right';
+          el.classList.toggle('is-center', (b.align || 'right') === 'center');
           el.style.direction = b.dir || 'rtl';
           paintType(el, b);
           fillText(el, b, design);
@@ -2885,10 +3084,12 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         var pSize = document.getElementById('pSize');
         var pSizeN = document.getElementById('pSizeN');
         var lab = document.getElementById('pTextLab');
-        if (lab) lab.textContent = variable ? 'ثابت' : (UI.text || 'النص');
+        if (lab) lab.textContent = (isVarKind(b.kind) && String(b.label || '') !== '') ? 'ثابت' : (UI.text || 'النص');
         if (pText) {
-          pText.placeholder = variable ? (VAR_LABEL[b.kind] || 'كلمة ثابتة') : '';
-          if (document.activeElement !== pText) pText.value = variable ? (b.label || '') : (b.text || '');
+          pText.placeholder = (isVarKind(b.kind) && String(b.label || '') !== '') ? (VAR_LABEL[b.kind] || 'كلمة ثابتة') : '';
+          if (document.activeElement !== pText) {
+            pText.value = (isVarKind(b.kind) && String(b.label || '') !== '') ? (b.label || '') : (b.text || '');
+          }
         }
         var bind = document.getElementById('pBind');
         if (bind && document.activeElement !== bind) bind.value = variable ? b.kind : 'custom';
@@ -3015,7 +3216,7 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         var pY = document.getElementById('pY');
         pText.addEventListener('input', function () {
           var b = blockById(picked); if (!b) return;
-          if (isVarKind(b.kind)) b.label = pText.value;
+          if (isVarKind(b.kind) && String(b.label || '') !== '') b.label = pText.value;
           else b.text = pText.value;
           syncBlock(b);
         });

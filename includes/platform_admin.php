@@ -195,6 +195,7 @@ function ensure_platform_companies_schema($pdo)
         'provider_type VARCHAR(32) NOT NULL DEFAULT "sas"',
         'logo_path VARCHAR(255) NOT NULL DEFAULT ""',
         'api_alt_host VARCHAR(255) NOT NULL DEFAULT ""',
+        'service_kind VARCHAR(16) NOT NULL DEFAULT "wireless"',
     ) as $colDef) {
         $col = preg_replace('/\s.*/', '', $colDef);
         try {
@@ -204,6 +205,10 @@ function ensure_platform_companies_schema($pdo)
             }
         } catch (Exception $e) {
         }
+    }
+    try {
+        $pdo->exec("UPDATE platform_companies SET service_kind = 'ftth' WHERE service_kind = 'wireless' AND (name LIKE '%FTTH%' OR name LIKE '%ftth%' OR sas_host LIKE '%ftth%')");
+    } catch (Exception $eKind) {
     }
     // ترحيل من tenants الكتالوج القديم إن الجدول فاضي
     try {

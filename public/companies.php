@@ -13,6 +13,9 @@ $isEn = ($lang === 'en');
 if (function_exists('ensure_platform_companies_schema')) {
     ensure_platform_companies_schema($pdo);
 }
+if (function_exists('ensure_tenant_sas_accounts_schema')) {
+    ensure_tenant_sas_accounts_schema($pdo);
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!verify_csrf(post('csrf'))) {
@@ -53,6 +56,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
         flash($ok ? 'success' : 'error', $msg);
+        if ($ok && $cid > 0) {
+            $kind = post('service_kind') === 'ftth' ? 'ftth' : 'wireless';
+            try {
+                $pdo->prepare('UPDATE platform_companies SET service_kind = :k WHERE id = :id')
+                    ->execute(array(':k' => $kind, ':id' => $cid));
+            } catch (Exception $eKind) {
+            }
+        }
         redirect($ok && $cid > 0 ? ('companies.php?id=' . (int) $cid) : 'companies.php');
     }
     if ($action === 'delete') {
@@ -69,6 +80,25 @@ $edit = $editId > 0 ? platform_company_row($pdo, $editId) : null;
 $editProvider = $edit && !empty($edit['provider_type'])
     ? platform_company_normalize_provider($edit['provider_type'])
     : 'sas';
+$editKind = ($edit && isset($edit['service_kind']) && $edit['service_kind'] === 'ftth') ? 'ftth' : 'wireless';
+$actNotes = array();
+try {
+    $noteRows = $pdo->query(
+        "SELECT company_id, label, sas_username, act_note
+         FROM tenant_sas_accounts
+         WHERE act_via = 'user'"
+    )->fetchAll(PDO::FETCH_ASSOC);
+    if (is_array($noteRows)) {
+        foreach ($noteRows as $nr) {
+            $ncid = (int) $nr['company_id'];
+            if (!isset($actNotes[$ncid])) {
+                $actNotes[$ncid] = array();
+            }
+            $actNotes[$ncid][] = $nr;
+        }
+    }
+} catch (Exception $eNotes) {
+}
 
 $pingById = array();
 if (function_exists('dash_platform_company_pings')) {
@@ -128,7 +158,17 @@ render_header($isEn ? 'Companies' : 'الشركات', 'companies');
                             —
                         <?php endif; ?>
                     </td>
-                    <td><strong><?php echo e($t['name']); ?></strong></td>
+                    <td>
+                        <strong><?php echo e($t['name']); ?></strong>
+                        <div style="color:#64748b;font-size:12px;margin-top:2px"><?php echo (isset($t['service_kind']) && $t['service_kind'] === 'ftth') ? 'FTTH' : 'Wireless'; ?></div>
+                        <?php if (!empty($actNotes[$cid])): ?>
+                            <div style="color:#9a3412;font-size:12px;font-weight:700;margin-top:4px">
+                                <?php echo e($isEn
+                                    ? 'Activation permission is off. Activation goes through the subscriber portal.'
+                                    : 'هذا الريسيلر حاول التفعيل وصلاحية التفعيل معطلة. تم توجيه التفعيل عن طريق المشترك.'); ?>
+                            </div>
+                        <?php endif; ?>
+                    </td>
                     <td><?php echo e($prov === 'earthlink' ? 'Earthlink' : 'SAS'); ?></td>
                     <td class="ltr"><?php echo e($t['sas_host']); ?></td>
                     <td>
@@ -169,6 +209,13 @@ render_header($isEn ? 'Companies' : 'الشركات', 'companies');
                 <select name="provider_type">
                     <option value="sas" <?php echo $editProvider === 'sas' ? 'selected' : ''; ?>>SAS</option>
                     <option value="earthlink" <?php echo $editProvider === 'earthlink' ? 'selected' : ''; ?>>Earthlink</option>
+                </select>
+            </div>
+            <div>
+                <label><?php echo e($isEn ? 'Service' : 'خدماته'); ?></label>
+                <select name="service_kind">
+                    <option value="wireless" <?php echo $editKind !== 'ftth' ? 'selected' : ''; ?>>Wireless</option>
+                    <option value="ftth" <?php echo $editKind === 'ftth' ? 'selected' : ''; ?>>FTTH</option>
                 </select>
             </div>
             <div style="grid-column:1/-1">
