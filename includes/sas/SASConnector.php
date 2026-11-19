@@ -5154,8 +5154,12 @@ class SASConnector
                     if ($st === 403) {
                         if (strpos($route, 'series/changeOwner') === 0) {
                             $hint .= ' — حساب SAS هذا ما يقدر يغيّر مالك السلسلة';
+                        } elseif (strpos($route, 'user/activate') === 0) {
+                            $hint .= ' — لا يوجد صلاحية تفعيل في حساب SAS';
+                        } elseif (strpos($route, 'extend') !== false || strpos($route, 'test') !== false) {
+                            $hint .= ' — لا يوجد صلاحية تست في حساب SAS';
                         } else {
-                            $hint .= ' — ماكو صلاحية تست في حساب SAS';
+                            $hint .= ' — لا يوجد صلاحية في حساب SAS';
                         }
                     } elseif ($st === 404) {
                         $hint .= ' — المسار غير موجود';

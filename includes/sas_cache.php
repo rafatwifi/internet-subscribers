@@ -5757,7 +5757,7 @@ function sas_finish_local_activation($pdo, $config, $username, $fields, $okMsg)
         } catch (Exception $e) {
         }
     }
-    list($lok, $lmsg) = activate_one_subscriber($pdo, $config, $localId, array(
+    $actOpts = array(
         'plan_id' => $planId,
         'pay_mode' => $payMode,
         'send_whatsapp' => $sendWa,
@@ -5766,7 +5766,11 @@ function sas_finish_local_activation($pdo, $config, $username, $fields, $okMsg)
         'skip_grace' => true,
         'simple_msg' => true,
         'carry_days' => true,
-    ));
+    );
+    if (isset($fields['amount']) && $fields['amount'] !== '' && is_numeric($fields['amount'])) {
+        $actOpts['amount'] = max(0, (float) $fields['amount']);
+    }
+    list($lok, $lmsg) = activate_one_subscriber($pdo, $config, $localId, $actOpts);
     if (!$lok && $lmsg !== '') {
         return 'تم تفعيل المشترك — محلي: ' . $lmsg;
     }

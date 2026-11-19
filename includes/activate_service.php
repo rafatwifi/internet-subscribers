@@ -212,6 +212,9 @@ function activate_one_subscriber($pdo, $config, $subscriberId, $opts = array())
             }
         }
     }
+    if (isset($opts['amount']) && $opts['amount'] !== '' && is_numeric($opts['amount'])) {
+        $monthlyPrice = max(0, (float) $opts['amount']);
+    }
     $planIdSaved = isset($plan['id']) ? (int) $plan['id'] : 0;
 
     if ($daysLeftPost >= 0) {

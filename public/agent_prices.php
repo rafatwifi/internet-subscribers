@@ -1102,8 +1102,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $postedW = isset($row['wholesale_price']) ? (float) $row['wholesale_price'] : 0;
             $postedA = isset($row['agent_price']) ? (float) $row['agent_price'] : 0;
             $postedR = isset($row['retail_price']) ? (float) $row['retail_price'] : 0;
+            if ($postedW <= 0 && $postedR > 0) {
+                $postedW = $postedR;
+            }
             if ($targetOpen && function_exists('account_user_price_positive') && !account_user_price_positive($pdo, $agentId, 0, '')) {
                 $needVals = array();
+                if (isset($row['wholesale_price'])) {
+                    $needVals[] = $postedW;
+                }
                 if (isset($row['retail_price'])) {
                     $needVals[] = $postedR;
                 }
@@ -1215,6 +1221,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $profileId = isset($row['profile_id']) ? (int) $row['profile_id'] : 0;
             $postedW = isset($row['wholesale_price']) ? (float) $row['wholesale_price'] : 0;
             $postedA = isset($row['agent_price']) ? (float) $row['agent_price'] : 0;
+            $postedRSave = isset($row['retail_price']) ? (float) $row['retail_price'] : 0;
+            if ($postedW <= 0 && $postedRSave > 0) {
+                $postedW = $postedRSave;
+                $row['wholesale_price'] = $postedW;
+            }
+            if ($postedW <= 0 && isset($row['subagent_price']) && (float) $row['subagent_price'] > 0) {
+                $postedW = (float) $row['subagent_price'];
+                $row['wholesale_price'] = $postedW;
+            }
             $old = function_exists('agent_card_price_get') ? agent_card_price_get($pdo, $agentId, $profileId, $profileName) : null;
             $subP = null;
             if ($isPriceAdmin || $isAccPrice) {
@@ -1944,8 +1959,12 @@ foreach ($picker as $downOpt) {
                         <td class="ltr js-profit" data-label="<?php echo e($isEn ? 'Profit' : 'الربح'); ?>" style="font-weight:800"><?php echo (int) $profitNow; ?></td>
                         <?php elseif ($isSelf): ?>
                         <td data-label="<?php echo e($isEn ? 'Cost' : 'التكلفة'); ?>">
+                            <?php if ($openSheet || $isPriceAdmin || $isAccPrice): ?>
+                            <input class="ltr js-price" data-col="w" type="number" min="0" step="1" inputmode="numeric" data-floor="<?php echo (int) $floorW; ?>" name="rows[<?php echo (int) $i; ?>][wholesale_price]" value="<?php echo (int) $orig; ?>">
+                            <?php else: ?>
                             <input class="ltr pkg-price" data-col="w" type="text" readonly tabindex="-1" value="<?php echo (int) $orig; ?>">
-                            <input type="hidden" name="rows[<?php echo (int) $i; ?>][wholesale_price]" value="<?php echo (int) $savedW; ?>">
+                            <input type="hidden" name="rows[<?php echo (int) $i; ?>][wholesale_price]" value="<?php echo (int) (($savedW > 0) ? $savedW : $orig); ?>">
+                            <?php endif; ?>
                         </td>
                         <?php if ($hasDownline): ?>
                         <td data-label="<?php echo e($isEn ? 'Agent' : 'الوكيل'); ?>"><input class="ltr js-price" data-col="s" data-bind="1" type="number" min="0" step="1" data-floor="<?php echo (int) $floorA; ?>" name="rows[<?php echo (int) $i; ?>][subagent_price]" value="<?php echo (int) $subagent; ?>"></td>
@@ -1953,7 +1972,7 @@ foreach ($picker as $downOpt) {
                         <td data-label="<?php echo e($isEn ? 'Final' : 'النهائي'); ?>"><input class="ltr js-price" data-col="r" data-bind="1" type="number" min="0" step="1" data-floor="<?php echo (int) $floorR; ?>" name="rows[<?php echo (int) $i; ?>][retail_price]" value="<?php echo (int) $retail; ?>"></td>
                         <?php else: ?>
                         <?php if ($isAccPrice): ?>
-                        <td data-label="<?php echo e($isEn ? 'Cost' : 'التكلفة'); ?>"><input class="ltr js-price" data-col="w" type="number" min="0" step="1" data-floor="<?php echo (int) $floorW; ?>" name="rows[<?php echo (int) $i; ?>][wholesale_price]" value="<?php echo (int) $orig; ?>" <?php echo $lockWholesale ? 'readonly' : ''; ?>></td>
+                        <td data-label="<?php echo e($isEn ? 'Cost' : 'التكلفة'); ?>"><input class="ltr js-price" data-col="w" type="number" min="0" step="1" inputmode="numeric" data-floor="<?php echo (int) $floorW; ?>" name="rows[<?php echo (int) $i; ?>][wholesale_price]" value="<?php echo (int) $orig; ?>" <?php echo $lockWholesale ? 'readonly' : ''; ?>></td>
                         <td data-label="<?php echo e($isEn ? 'Final' : 'النهائي'); ?>"><input class="ltr js-price" data-col="r" type="number" min="0" step="1" data-floor="<?php echo (int) $floorR; ?>" name="rows[<?php echo (int) $i; ?>][retail_price]" value="<?php echo (int) $retail; ?>" <?php echo $canRetail ? '' : 'readonly'; ?>></td>
                         <?php endif; ?>
                         <?php endif; ?>

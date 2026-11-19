@@ -665,6 +665,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'send_old_debts' => post('send_old_debts', '0'),
             'pay_mode' => post('pay_mode', 'cash'),
             'wa_template' => post('wa_template', 'activation'),
+            'amount' => post('amount', ''),
         );
         $bgActivate = in_array($action, array('sas_activate_card', 'sas_activate_credit', 'sas_activate_reward'), true);
         if ($bgActivate && function_exists('app_session_close')) {
@@ -3025,20 +3026,209 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 #sasActModal.is-ftth #sasActCreditBox,
 #sasActModal.is-ftth #sasActRewardBox,
 #sasActModal.is-ftth .sas-act-debts.is-empty { display: none !important; }
-#sasActModal.is-ftth .ops-modal-head { justify-content: center; text-align: center; }
-#sasActModal.is-ftth .sas-act-who { width: 100%; text-align: center; }
+#sasActModal.is-ftth .ops-modal-head {
+  position: relative;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  min-height: 52px;
+  margin-bottom: 10px;
+  padding: 6px 56px;
+  box-sizing: border-box;
+}
+#sasActModal.is-ftth .ops-modal-head > div:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+#sasActModal.is-ftth .sas-act-who { width: 100%; text-align: center; margin: 0; min-width: 0; max-width: 100%; overflow: hidden; }
+#sasActModal.is-ftth .sas-act-user { display: none !important; }
 #sasActModal.is-ftth .sas-act-name {
-  font-size: 26px; text-align: center; width: 100%;
+  font-size: 22px; text-align: center; width: 100%; max-width: 100%;
+  line-height: 1.2; letter-spacing: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: clip;
   background: linear-gradient(120deg, #0f172a, #0f766e 55%, #22c55e);
   -webkit-background-clip: text; background-clip: text; color: transparent;
   animation: ftthName 2.8s ease-in-out infinite;
 }
-#sasActModal.is-ftth .sas-act-user { justify-content: center; }
+#sasActModal.is-ftth .sas-act-head-actions {
+  position: static;
+  display: contents;
+}
+#sasActModal.is-ftth .sas-act-ico {
+  position: absolute;
+  top: 2px;
+  width: 42px; height: 42px; min-width: 42px;
+  border: 0; border-radius: 14px;
+  font-size: 20px; line-height: 1;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.10);
+  transition: transform .18s ease, box-shadow .18s ease, filter .18s ease;
+  overflow: hidden;
+  z-index: 2;
+}
+#sasActModal.is-ftth .sas-act-ico .emo {
+  display: inline-block;
+  transform-origin: 50% 50%;
+  will-change: transform;
+}
+#sasActModal.is-ftth .sas-act-ico.is-refresh {
+  inset-inline-start: 2px;
+  background: linear-gradient(145deg, #ecfeff, #a5f3fc 55%, #67e8f9);
+  color: #0e7490;
+  box-shadow: 0 10px 22px rgba(6, 182, 212, 0.22);
+}
+#sasActModal.is-ftth .sas-act-ico.is-refresh .emo {
+  font-size: 22px;
+  animation: ftthRefreshIdle 2.2s ease-in-out infinite;
+  filter: drop-shadow(0 2px 4px rgba(8, 145, 178, 0.25));
+}
+#sasActModal.is-ftth .sas-act-ico.is-refresh:hover {
+  transform: translateY(-1px) scale(1.05);
+  box-shadow: 0 14px 28px rgba(6, 182, 212, 0.3);
+}
+#sasActModal.is-ftth .sas-act-ico.is-refresh:hover .emo,
+#sasActModal.is-ftth .sas-act-ico.is-refresh.is-spin .emo {
+  animation: ftthRefreshSpin .65s linear infinite;
+}
+#sasActModal.is-ftth .sas-act-ico.is-close {
+  inset-inline-end: 2px;
+  background: linear-gradient(145deg, #fff1f2, #fecdd3 50%, #fda4af);
+  color: #be123c;
+  font-size: 18px;
+  box-shadow: 0 10px 22px rgba(244, 63, 94, 0.2);
+}
+#sasActModal.is-ftth .sas-act-ico.is-close .emo {
+  font-size: 20px;
+  animation: ftthClosePulse 1.7s ease-in-out infinite;
+  filter: drop-shadow(0 2px 4px rgba(225, 29, 72, 0.28));
+}
+#sasActModal.is-ftth .sas-act-ico.is-close:hover {
+  transform: translateY(-1px) scale(1.05);
+  box-shadow: 0 14px 28px rgba(244, 63, 94, 0.28);
+}
+#sasActModal.is-ftth .sas-act-ico.is-close:hover .emo {
+  animation: ftthClosePop .42s ease;
+}
+#sasActModal.is-ftth .sas-act-ico:disabled {
+  opacity: 0.55; filter: grayscale(0.35);
+}
+@keyframes ftthRefreshIdle {
+  0%, 100% { transform: rotate(0deg) scale(1); }
+  35% { transform: rotate(-20deg) scale(1.06); }
+  65% { transform: rotate(20deg) scale(1.04); }
+}
+@keyframes ftthRefreshSpin {
+  to { transform: rotate(360deg); }
+}
+@keyframes ftthClosePulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.12); }
+}
+@keyframes ftthClosePop {
+  0% { transform: scale(1) rotate(0deg); }
+  35% { transform: scale(1.28) rotate(-10deg); }
+  70% { transform: scale(0.92) rotate(6deg); }
+  100% { transform: scale(1) rotate(0deg); }
+}
 #sasActModal.is-ftth #sasActCardBox select {
   height: 52px; border-radius: 16px; font-weight: 800; font-size: 15px;
   border: 1px solid #99f6e4; background: #f0fdfa;
 }
 #sasActModal.is-ftth .sas-act-print { display: flex !important; }
+#sasActCardManual { display: none; margin-top: 0; }
+#sasActModal.is-ftth #sasActCardBox.is-manual #sasActCardSelect { display: none; }
+#sasActModal.is-ftth #sasActCardBox.is-manual #sasActCardManual { display: block; }
+#sasActModal.is-ftth #sasActCardBox:not(.is-manual) #sasActCardManual { display: none; }
+#sasActCardSwap {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 10px;
+  margin: 0 0 6px auto;
+  border: 1px solid #99f6e4;
+  border-radius: 999px;
+  background: #fff;
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(15, 118, 110, 0.08);
+  transition: transform .15s ease, background .15s ease, box-shadow .15s ease;
+}
+#sasActModal.is-ftth #sasActCardSwap { display: inline-flex; }
+#sasActCardSwap .emo { font-size: 13px; line-height: 1; }
+#sasActCardSwap:hover {
+  transform: translateY(-1px);
+  background: #f0fdfa;
+  box-shadow: 0 8px 16px rgba(15, 118, 110, 0.14);
+}
+#sasActCardSwap.is-forced {
+  opacity: 0.72;
+  cursor: default;
+  pointer-events: none;
+  background: #f8fafc;
+  border-color: #e2e8f0;
+  color: #64748b;
+  box-shadow: none;
+}
+#sasActModal.is-ftth #sasActCardBox {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+#sasActModal.is-ftth #sasActCardHint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 6px 0 0;
+}
+#sasActModal.is-ftth #sasActCardHint .sas-act-hint-txt { flex: 1; min-width: 0; }
+.sas-act-pin-wrap {
+  position: relative; display: flex; align-items: center; gap: 10px;
+  max-width: 100%; min-width: 0;
+}
+.sas-act-pin-wrap input {
+  flex: 1; width: 100%; min-width: 0; max-width: 100%; height: 52px; border-radius: 16px; font-weight: 800; font-size: 18px;
+  letter-spacing: 0.04em; text-align: center; direction: ltr;
+  border: 1px solid #99f6e4; background: #f0fdfa; color: #0f172a;
+  box-sizing: border-box; padding: 0 14px;
+}
+.sas-act-pin-wrap input:focus {
+  outline: none; border-color: #14b8a6; box-shadow: 0 0 0 3px rgba(20, 184, 166, 0.18);
+}
+.sas-act-pin-wrap input.is-bad {
+  border-color: #f87171; background: #fef2f2; color: #991b1b;
+}
+.sas-act-pin-wrap input.is-ok {
+  border-color: #4ade80; background: #f0fdf4; color: #166534;
+}
+.sas-act-pin-status {
+  flex: 0 0 42px; width: 42px; height: 42px; border-radius: 999px;
+  display: none; align-items: center; justify-content: center;
+  font-size: 20px; font-weight: 900; box-sizing: border-box;
+}
+.sas-act-pin-status.is-wait,
+.sas-act-pin-status.is-ok,
+.sas-act-pin-status.is-bad { display: inline-flex; }
+.sas-act-pin-status.is-wait {
+  border: 3px solid rgba(22, 163, 74, 0.22);
+  border-top-color: #16a34a;
+  animation: sasActSpin .7s linear infinite;
+  background: #ecfdf5;
+}
+.sas-act-pin-status.is-ok {
+  background: #16a34a; color: #fff; box-shadow: 0 8px 18px rgba(22, 163, 74, 0.28);
+}
+.sas-act-pin-status.is-bad {
+  background: #dc2626; color: #fff; box-shadow: 0 8px 18px rgba(220, 38, 38, 0.28);
+}
+#sasActCardManual .sas-act-pin-lab {
+  display: block; margin: 0 0 8px; font-size: 13px; font-weight: 800; color: #0f766e;
+}
 .sas-act-print { display: none; }
 @keyframes ftthName {
   0%, 100% { filter: drop-shadow(0 0 0 rgba(34,197,94,0)); }
@@ -3047,9 +3237,24 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
 #sasActModal .sas-act-body {
   flex: 1 1 auto;
   min-height: 0;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   padding-bottom: 4px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+#sasActModal .sas-act-body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+#sasActModal .sas-act-body > * {
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 #sasActModal .sas-act-field { margin: 0 0 6px; }
 #sasActModal .sas-seg { margin: 0 0 6px; }
@@ -3490,6 +3695,8 @@ body:has(#sasActModal:not(.hidden)) .sidebar-toggle-bar {
   #sasActModal .sas-act-body {
     overflow-x: hidden !important;
     overflow-y: auto !important;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
     display: flex;
@@ -4920,8 +5127,8 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
                 </div>
             </div>
             <div class="sas-act-head-actions">
-                <button type="button" class="sas-act-ico is-refresh" id="sasActRefresh" title="<?php echo e($lang === 'en' ? 'Refresh cards' : 'تحديث الكروت'); ?>" aria-label="<?php echo e($lang === 'en' ? 'Refresh cards' : 'تحديث الكروت'); ?>">↻</button>
-                <button type="button" class="sas-act-ico is-close" id="sasActClose" title="<?php echo e($lang === 'en' ? 'Close' : 'إغلاق'); ?>" aria-label="<?php echo e($lang === 'en' ? 'Close' : 'إغلاق'); ?>">×</button>
+                <button type="button" class="sas-act-ico is-refresh" id="sasActRefresh" title="<?php echo e($lang === 'en' ? 'Refresh cards' : 'تحديث الكروت'); ?>" aria-label="<?php echo e($lang === 'en' ? 'Refresh cards' : 'تحديث الكروت'); ?>"><span class="emo" aria-hidden="true">♻️</span></button>
+                <button type="button" class="sas-act-ico is-close" id="sasActClose" title="<?php echo e($lang === 'en' ? 'Close' : 'إغلاق'); ?>" aria-label="<?php echo e($lang === 'en' ? 'Close' : 'إغلاق'); ?>"><span class="emo" aria-hidden="true">❌</span></button>
             </div>
         </div>
         <div class="sas-act-body">
@@ -4943,8 +5150,19 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
             </label>
         </div>
         <div id="sasActCardBox">
+            <button type="button" id="sasActCardSwap" hidden aria-pressed="false" title="<?php echo e($lang === 'en' ? 'Switch card entry' : 'تبديل طريقة البطاقة'); ?>">
+                <span class="emo" aria-hidden="true">⌨️</span>
+                <span class="sas-act-swap-txt"><?php echo e($lang === 'en' ? 'Type card' : 'إدخال بطاقة'); ?></span>
+            </button>
             <select id="sasActCardSelect"></select>
-            <div class="sas-sync-note" id="sasActCardHint"><?php echo e($lang === 'en' ? 'Unused cards' : 'الكروت الشاغرة'); ?></div>
+            <div id="sasActCardManual" hidden>
+                <label class="sas-act-pin-lab" for="sasActCardPin"><?php echo e($lang === 'en' ? 'Enter card number' : 'ادخل رقم البطاقة'); ?></label>
+                <div class="sas-act-pin-wrap">
+                    <input type="text" id="sasActCardPin" inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="24" placeholder="<?php echo e($lang === 'en' ? 'Card PIN' : 'رقم البطاقة'); ?>">
+                    <span class="sas-act-pin-status" id="sasActPinStatus" aria-hidden="true"></span>
+                </div>
+            </div>
+            <div class="sas-sync-note" id="sasActCardHint"><span class="sas-act-hint-txt"><?php echo e($lang === 'en' ? 'Unused cards' : 'الكروت الشاغرة'); ?></span></div>
         </div>
         <div id="sasActCreditBox" class="hidden">
             <input type="hidden" id="sasActUnits" value="1">
@@ -5415,6 +5633,7 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
         localId: tr.getAttribute('data-local-id') || '0',
         name: tr.getAttribute('data-name') || '',
         firstname: tr.getAttribute('data-firstname') || '',
+        lastname: tr.getAttribute('data-lastname') || '',
         username: tr.getAttribute('data-username') || tr.getAttribute('data-id') || '',
         debt: tr.getAttribute('data-debt') === '1',
         hasDays: tr.getAttribute('data-has-days') === '1',
@@ -6308,36 +6527,179 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
     if (!on) inp.checked = false;
     else if (!inp.dataset.userTouched) inp.checked = true;
   }
+  function isFtthActModal() {
+    var modal = document.getElementById('sasActModal');
+    return !!(modal && modal.classList.contains('is-ftth'));
+  }
+  function fitFtthActName() {
+    var nameEl = document.getElementById('sasActName');
+    var head = document.querySelector('#sasActModal.is-ftth .ops-modal-head');
+    if (!nameEl || !head) return;
+    var maxPx = 24;
+    var minPx = 11;
+    nameEl.style.fontSize = maxPx + 'px';
+    var guard = 0;
+    while (guard < 40 && nameEl.scrollWidth > nameEl.clientWidth + 1 && maxPx > minPx) {
+      maxPx -= 1;
+      nameEl.style.fontSize = maxPx + 'px';
+      guard++;
+    }
+  }
+  function expectedCardPinLen() {
+    var lens = {};
+    var best = 0;
+    var bestN = 0;
+    var all = Array.isArray(cardsCacheAll) ? cardsCacheAll : [];
+    for (var i = 0; i < all.length; i++) {
+      var p = String((all[i] && all[i].pin) || '').replace(/\D+/g, '');
+      if (p.length < 6) continue;
+      lens[p.length] = (lens[p.length] || 0) + 1;
+      if (lens[p.length] > bestN) {
+        bestN = lens[p.length];
+        best = p.length;
+      }
+    }
+    return best >= 6 ? best : 14;
+  }
+  var ftthPreferManual = false;
+  var ftthHasStockCards = false;
+  function setCardHintText(msg, ok) {
+    var hint = document.getElementById('sasActCardHint');
+    if (!hint) return;
+    hint.className = 'sas-sync-note' + (ok ? ' is-ok' : '');
+    var txt = hint.querySelector('.sas-act-hint-txt');
+    if (!txt) {
+      txt = document.createElement('span');
+      txt.className = 'sas-act-hint-txt';
+      hint.insertBefore(txt, hint.firstChild);
+    }
+    txt.textContent = msg || '';
+  }
+  function syncFtthCardSwap(forced) {
+    var swap = document.getElementById('sasActCardSwap');
+    var box = document.getElementById('sasActCardBox');
+    if (!swap) return;
+    var ftth = isFtthActModal();
+    if (!ftth) {
+      swap.hidden = true;
+      swap.setAttribute('hidden', 'hidden');
+      return;
+    }
+    swap.hidden = false;
+    swap.removeAttribute('hidden');
+    var manual = !!(box && box.classList.contains('is-manual'));
+    swap.classList.toggle('is-forced', !!forced);
+    swap.setAttribute('aria-pressed', manual ? 'true' : 'false');
+    var emo = swap.querySelector('.emo');
+    var lab = swap.querySelector('.sas-act-swap-txt');
+    if (forced) {
+      if (emo) emo.textContent = '⌨️';
+      if (lab) lab.textContent = <?php echo json_encode($lang === 'en' ? 'Type card' : 'إدخال بطاقة'); ?>;
+      swap.title = <?php echo json_encode($lang === 'en' ? 'No stock cards' : 'لا يوجد كروت بالمخزن'); ?>;
+      return;
+    }
+    if (manual) {
+      if (emo) emo.textContent = '📇';
+      if (lab) lab.textContent = <?php echo json_encode($lang === 'en' ? 'Pick card' : 'اختيار كرت'); ?>;
+      swap.title = <?php echo json_encode($lang === 'en' ? 'Use stock cards' : 'الرجوع لكروت المخزن'); ?>;
+    } else {
+      if (emo) emo.textContent = '⌨️';
+      if (lab) lab.textContent = <?php echo json_encode($lang === 'en' ? 'Type card' : 'إدخال بطاقة'); ?>;
+      swap.title = <?php echo json_encode($lang === 'en' ? 'Enter card number' : 'تفعيل بإدخال رقم البطاقة'); ?>;
+    }
+  }
+  function setFtthCardMode(manual, opts) {
+    opts = opts || {};
+    var box = document.getElementById('sasActCardBox');
+    var man = document.getElementById('sasActCardManual');
+    var pin = document.getElementById('sasActCardPin');
+    if (!box) return;
+    if (manual) {
+      box.classList.add('is-manual');
+      if (man) {
+        man.hidden = false;
+        man.removeAttribute('hidden');
+      }
+      if (pin && !pin.dataset.keep && !opts.keepPin) {
+        pin.value = '';
+        pin.classList.remove('is-ok', 'is-bad');
+        pin.readOnly = false;
+      }
+      setFtthPinStatus('');
+      if (!opts.silent) {
+        setTimeout(function () {
+          try { if (pin && !pin.hidden) pin.focus(); } catch (eF) {}
+        }, 80);
+      }
+    } else {
+      box.classList.remove('is-manual');
+      if (man) {
+        man.hidden = true;
+        man.setAttribute('hidden', 'hidden');
+      }
+      if (pin) {
+        delete pin.dataset.keep;
+        pin.readOnly = false;
+        pin.classList.remove('is-ok', 'is-bad');
+      }
+      setFtthPinStatus('');
+    }
+    syncFtthCardSwap(!!opts.forced);
+  }
+  function setFtthPinStatus(state, msg) {
+    var st = document.getElementById('sasActPinStatus');
+    var pin = document.getElementById('sasActCardPin');
+    var err = document.getElementById('sasActErr');
+    if (st) {
+      st.className = 'sas-act-pin-status' + (state ? (' is-' + state) : '');
+      st.textContent = state === 'ok' ? '✓' : (state === 'bad' ? '✕' : '');
+      st.setAttribute('aria-hidden', state ? 'false' : 'true');
+    }
+    if (pin) {
+      pin.classList.toggle('is-ok', state === 'ok');
+      pin.classList.toggle('is-bad', state === 'bad');
+      pin.readOnly = state === 'wait' || state === 'ok';
+    }
+    if (msg) setCardHintText(msg, state === 'ok');
+    if (err && (state === 'bad' || state === '')) err.textContent = state === 'bad' ? (msg || '') : '';
+  }
   function renderCards(cards) {
     var sel = document.getElementById('sasActCardSelect');
-    var hint = document.getElementById('sasActCardHint');
+    var ftth = isFtthActModal();
     if (!sel) return;
     if ((!cards || !cards.length) && window.sasCardsLoading) {
+      ftthHasStockCards = false;
+      setFtthCardMode(false, { silent: true, forced: false });
       sel.innerHTML = '';
       var waitOpt = document.createElement('option');
       waitOpt.value = '';
       waitOpt.textContent = <?php echo json_encode($lang === 'en' ? 'Loading unused cards…' : 'جاري جلب الكروت الشاغرة…'); ?>;
       sel.appendChild(waitOpt);
       sel.disabled = true;
-      if (hint) {
-        hint.className = 'sas-sync-note';
-        hint.textContent = <?php echo json_encode($lang === 'en' ? 'Loading unused cards…' : 'جاري جلب الكروت الشاغرة…'); ?>;
-      }
+      setCardHintText(<?php echo json_encode($lang === 'en' ? 'Loading unused cards…' : 'جاري جلب الكروت الشاغرة…'); ?>);
+      syncFtthCardSwap(false);
       return;
     }
     sel.innerHTML = '';
     if (!cards.length) {
+      ftthHasStockCards = false;
+      if (ftth) {
+        ftthPreferManual = true;
+        setFtthCardMode(true, { forced: true, silent: true, keepPin: true });
+        sel.disabled = true;
+        setCardHintText(<?php echo json_encode($lang === 'en' ? 'No stock cards — enter the card number' : 'لا يوجد كروت بالمخزن — ادخل رقم البطاقة'); ?>);
+        return;
+      }
+      setFtthCardMode(false, { silent: true });
       var empty = document.createElement('option');
       empty.value = '';
-      empty.textContent = <?php echo json_encode($lang === 'en' ? 'No unused cards' : 'ماكو كروت شاغرة'); ?>;
+      empty.textContent = <?php echo json_encode($lang === 'en' ? 'No unused cards' : 'لا يوجد كروت شاغرة'); ?>;
       sel.appendChild(empty);
       sel.disabled = true;
-      if (hint) {
-        hint.className = 'sas-sync-note';
-        hint.textContent = <?php echo json_encode($lang === 'en' ? 'No unused cards for this profile' : 'ماكو كروت شاغرة لهذه الفئة'); ?>;
-      }
+      setCardHintText(<?php echo json_encode($lang === 'en' ? 'No unused cards for this profile' : 'لا يوجد كروت شاغرة لهذه الفئة'); ?>);
       return;
     }
+    ftthHasStockCards = true;
     sel.disabled = false;
     cards.forEach(function (c, i) {
       var o = document.createElement('option');
@@ -6348,10 +6710,38 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
       if (i === 0) o.selected = true;
       sel.appendChild(o);
     });
-    if (hint) {
-      hint.className = 'sas-sync-note';
-      hint.textContent = cards.length + ' ' + <?php echo json_encode($lang === 'en' ? 'unused cards' : 'كروت متوفرة'); ?>;
+    if (ftth && ftthPreferManual) {
+      setFtthCardMode(true, { silent: true, keepPin: true, forced: false });
+      setCardHintText(<?php echo json_encode($lang === 'en' ? 'Enter card number' : 'ادخل رقم البطاقة'); ?>);
+    } else {
+      setFtthCardMode(false, { silent: true, forced: false });
+      setCardHintText(cards.length + ' ' + <?php echo json_encode($lang === 'en' ? 'unused cards' : 'كروت متوفرة'); ?>);
     }
+  }
+  function readActCardPin() {
+    var box = document.getElementById('sasActCardBox');
+    var pinEl = document.getElementById('sasActCardPin');
+    if (box && box.classList.contains('is-manual') && pinEl) {
+      return String(pinEl.value || '').replace(/\D+/g, '');
+    }
+    var cardSel = document.getElementById('sasActCardSelect');
+    return cardSel ? String(cardSel.value || '') : '';
+  }
+  function readActCardMeta() {
+    var box = document.getElementById('sasActCardBox');
+    if (box && box.classList.contains('is-manual')) {
+      return { pin: readActCardPin(), cardId: '0', cardProfileId: '0' };
+    }
+    var cardSel = document.getElementById('sasActCardSelect');
+    var pin = cardSel ? String(cardSel.value || '') : '';
+    var cardId = '0';
+    var cardProfileId = '0';
+    if (cardSel && cardSel.selectedIndex >= 0 && cardSel.options[cardSel.selectedIndex]) {
+      var opt = cardSel.options[cardSel.selectedIndex];
+      cardId = opt.getAttribute('data-card-id') || '0';
+      cardProfileId = opt.getAttribute('data-profile-id') || '0';
+    }
+    return { pin: pin, cardId: cardId, cardProfileId: cardProfileId };
   }
   function currentActMode() {
     var on = document.querySelector('#sasActModal input[name="sas_act_mode"]:checked');
@@ -6423,9 +6813,29 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
     var err = document.getElementById('sasActErr');
     var hint = document.getElementById('sasActCardHint');
     var cardSel = document.getElementById('sasActCardSelect');
-    if (nameEl) nameEl.textContent = row.firstname || row.name || row.id || '';
+    if (nameEl) {
+      var fullNm = String(row.name || row.display_name || '').replace(/^\s+|\s+$/g, '');
+      if (!fullNm) {
+        var fn = String(row.firstname || row.fn || '').replace(/^\s+|\s+$/g, '');
+        var ln = String(row.lastname || row.ln || '').replace(/^\s+|\s+$/g, '');
+        fullNm = (fn && ln) ? (fn + ' ' + ln) : (fn || ln || row.id || '');
+      }
+      nameEl.textContent = fullNm;
+      nameEl.style.fontSize = '';
+    }
     if (userEl) userEl.textContent = row.username || row.id || '';
     if (err) err.textContent = '';
+    ftthPreferManual = false;
+    ftthHasStockCards = false;
+    var pinOpen = document.getElementById('sasActCardPin');
+    if (pinOpen) {
+      delete pinOpen.dataset.keep;
+      pinOpen.value = '';
+      pinOpen.readOnly = false;
+      pinOpen.classList.remove('is-ok', 'is-bad');
+    }
+    setFtthPinStatus('');
+    syncFtthCardSwap(false);
     if (modal) {
       // خارج .main حتى position:fixed يغطي الشاشة كاملة (مو فراغ فوق بسبب transform/filter)
       if (modal.parentNode !== document.body) document.body.appendChild(modal);
@@ -6446,6 +6856,10 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
       if (waEl && !waEl.dataset.userTouched) waEl.checked = !!actWaDefaultOn;
       var prEl = document.getElementById('sasActPrint');
       if (prEl && !prEl.dataset.userTouched) prEl.checked = true;
+      requestAnimationFrame(function () {
+        fitFtthActName();
+        requestAnimationFrame(fitFtthActName);
+      });
     }
     paintRewardPts(rewardPtsDisp);
     actWallet = { balance: '', balance_need: '', points: '', points_need: '', currency: '' };
@@ -6982,19 +7396,22 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
       var sendWa = document.getElementById('sasActSendWa');
       var sendOld = document.getElementById('sasActOldDebts');
       var payModeEl = document.querySelector('#sasActModal input[name="sas_pay_mode"]:checked');
+      var actAmountNow = Math.round(Number(actBill.charge) || 0);
       var waFields = {
         send_whatsapp: (sendWa && sendWa.checked) ? '1' : '0',
         send_old_debts: (sendWa && sendWa.checked && sendOld && sendOld.checked) ? '1' : '0',
         pay_mode: (payModeEl && payModeEl.value === 'credit') ? 'credit' : 'cash'
       };
       var req;
+      var pin = '';
       var actModeNow = currentActMode();
       var actName = actUser.username || actUser.id || '';
       hideActFab();
       var actModal = document.getElementById('sasActModal');
+      var manualStart = !!(document.getElementById('sasActCardBox') && document.getElementById('sasActCardBox').classList.contains('is-manual') && actModeNow === 'card');
       if (actModal) {
         actModal.classList.remove('is-locking');
-        actModal.classList.add('hidden');
+        if (!manualStart) actModal.classList.add('hidden');
       }
       paintActMark(actName, 'wait');
       if (actModeNow === 'credit' || actModeNow === 'reward') {
@@ -7009,20 +7426,24 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
           pay_mode: waFields.pay_mode
         }, 55000);
       } else {
-        var cardSel = document.getElementById('sasActCardSelect');
-        var pin = cardSel ? cardSel.value : '';
-        var cardId = '0';
-        var cardProfileId = '0';
-        if (cardSel && cardSel.selectedIndex >= 0 && cardSel.options[cardSel.selectedIndex]) {
-          var opt = cardSel.options[cardSel.selectedIndex];
-          cardId = opt.getAttribute('data-card-id') || '0';
-          cardProfileId = opt.getAttribute('data-profile-id') || '0';
-        }
+        var cardMeta = readActCardMeta();
+        pin = cardMeta.pin;
+        var cardId = cardMeta.cardId;
+        var cardProfileId = cardMeta.cardProfileId;
+        var manualPin = !!manualStart;
         if (!pin) {
           paintActMark(actName, '');
           if (actModal) actModal.classList.remove('hidden');
-          if (err) err.textContent = <?php echo json_encode($lang === 'en' ? 'No unused cards' : 'ماكو كروت شاغرة'); ?>;
+          if (manualPin) {
+            setFtthPinStatus('bad', <?php echo json_encode($lang === 'en' ? 'Enter the card number' : 'ادخل رقم البطاقة'); ?>);
+          }
+          if (err) err.textContent = manualPin
+            ? <?php echo json_encode($lang === 'en' ? 'Enter the card number' : 'ادخل رقم البطاقة'); ?>
+            : <?php echo json_encode($lang === 'en' ? 'No unused cards' : 'لا يوجد كروت شاغرة'); ?>;
           return;
+        }
+        if (manualPin) {
+          setFtthPinStatus('wait', <?php echo json_encode($lang === 'en' ? 'Checking card…' : 'جاري فحص البطاقة…'); ?>);
         }
         req = postSas('sas_activate_card', {
           id: actUser.id,
@@ -7039,6 +7460,8 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
         if (d && Array.isArray(d.cards)) {
           cardsCacheAll = d.cards;
         }
+        var manualPin = !!(document.getElementById('sasActCardBox') && document.getElementById('sasActCardBox').classList.contains('is-manual'));
+        var ftthOn = isFtthActModal();
         if (!d || !d.ok) {
           paintActMark(actName, '');
           var failMsg = (d && d.message) || <?php echo json_encode($lang === 'en' ? 'Activate failed' : 'فشل التفعيل'); ?>;
@@ -7050,9 +7473,49 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
             var profileSel2 = document.getElementById('sasActProfile');
             var pid2 = profileSel2 ? profileSel2.value : (actUser ? actUser.profileId : '0');
             var pname2 = selectedProfileName(profileSel2) || (actUser ? actUser.profileName : '') || '';
-            renderCards(cardsForProfile(pid2, pname2));
+            if (!manualPin) renderCards(cardsForProfile(pid2, pname2));
             var lm = String(failMsg).toLowerCase();
-            if (lm.indexOf('invalid_profile') !== -1 || failMsg.indexOf('رفض باقة') !== -1) {
+            var usedish = lm.indexOf('invalid_profile') !== -1
+              || lm.indexOf('used') !== -1
+              || lm.indexOf('already') !== -1
+              || failMsg.indexOf('رفض باقة') !== -1
+              || failMsg.indexOf('مستخدم') !== -1
+              || failMsg.indexOf('مستعملة') !== -1;
+            var wrongish = lm.indexOf('invalid') !== -1
+              || lm.indexOf('not found') !== -1
+              || failMsg.indexOf('خطأ') !== -1
+              || failMsg.indexOf('غير صحيح') !== -1
+              || failMsg.indexOf('غلط') !== -1;
+            if (manualPin) {
+              failMsg = String(failMsg || '').replace(/ماكو/g, 'لا يوجد');
+              if (usedish) {
+                failMsg = <?php echo json_encode($lang === 'en' ? 'Card already used' : 'الرقم مستخدم'); ?>;
+              } else if (wrongish) {
+                failMsg = <?php echo json_encode($lang === 'en' ? 'Wrong card number' : 'الرقم خطأ'); ?>;
+              }
+              var permish = /صلاحية|403|forbidden/i.test(failMsg);
+              var pinKeep = document.getElementById('sasActCardPin');
+              if (permish) {
+                setFtthPinStatus('');
+                setCardHintText(failMsg);
+              } else {
+                setFtthPinStatus('bad', failMsg);
+              }
+              if (pinKeep) {
+                pinKeep.dataset.keep = '1';
+                pinKeep.readOnly = false;
+                pinKeep.classList.remove('is-ok');
+                if (!permish) pinKeep.classList.add('is-bad');
+                else pinKeep.classList.remove('is-bad');
+                setTimeout(function () {
+                  try {
+                    pinKeep.focus();
+                    if (!permish) pinKeep.select();
+                  } catch (e1) {}
+                }, 30);
+              }
+              if (actModal) actModal.classList.remove('hidden');
+            } else if (usedish) {
               failMsg = <?php echo json_encode($lang === 'en'
                 ? 'That card was already used — next unused card selected. Try again.'
                 : 'هذا الكرت صار مستخدم — تم اختيار الكرت التالي. حاول مرة ثانية.'); ?>;
@@ -7061,6 +7524,12 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
           if (err) err.textContent = failMsg;
           showAppToast(failMsg, 'error');
           return;
+        }
+        if (manualPin) {
+          setFtthPinStatus('ok', <?php echo json_encode($lang === 'en' ? 'Card accepted — activating' : 'البطاقة صحيحة — تم التفعيل'); ?>);
+          setTimeout(function () {
+            if (actModal) actModal.classList.add('hidden');
+          }, 650);
         }
         var fromIdentity = String(window.__sasActFromIdentity || '');
         var printBox = document.getElementById('sasActPrint');
@@ -7075,17 +7544,19 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
             window.showCornerToast(<?php echo json_encode($lang === 'en' ? 'Activated' : 'تم التفعيل'); ?>, 'ok');
           }
         }
-        if (printBox && printBox.checked) {
+        var wantSlip = ftthOn || (printBox && printBox.checked);
+        if (wantSlip) {
           var fd = new FormData();
           fd.append('csrf', csrf);
           fd.append('action', 'issue');
           fd.append('username', (actUser && (actUser.username || actUser.id)) || actName);
-          fd.append('name', (actUser && (actUser.name || actUser.display_name || actUser.fn)) || '');
+          fd.append('name', (actUser && (actUser.name || actUser.display_name || actUser.fn || actUser.firstname)) || '');
           fd.append('phone', (actUser && actUser.phone) || '');
-          fd.append('package', profileName || '');
+          fd.append('package', profileName || (actUser && actUser.profileName) || '');
+          fd.append('amount', String(actAmountNow));
           fd.append('title', 'تفعيل');
           fetch('slip.php', { method: 'POST', credentials: 'same-origin', body: fd }).then(function (r) { return r.json(); }).then(function (j) {
-            if (j && j.url) window.open(j.url + '&print=1', 'slip');
+            if (j && j.url) window.open(j.url + ((printBox && printBox.checked) || ftthOn ? '&print=1' : ''), 'slip');
             finishAct();
           }).catch(function () { finishAct(); });
           return;
@@ -7093,7 +7564,14 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
         finishAct();
       }).catch(function () {
         paintActMark(actName, '');
+        var manualPin2 = !!(document.getElementById('sasActCardBox') && document.getElementById('sasActCardBox').classList.contains('is-manual'));
         var netMsg = <?php echo json_encode($lang === 'en' ? 'Activation timed out or network error — check SAS, money was NOT recorded if activate failed' : 'انتهت مهلة التفعيل أو فشل الاتصال — تحقق من الساس؛ المبلغ ما ينسجل إذا التفعيل فشل'); ?>;
+        if (manualPin2) {
+          setFtthPinStatus('bad', netMsg);
+          var pinEl2 = document.getElementById('sasActCardPin');
+          if (pinEl2) pinEl2.readOnly = false;
+          if (actModal) actModal.classList.remove('hidden');
+        }
         if (err) err.textContent = netMsg;
         showAppToast(netMsg, 'error');
       });
@@ -7103,9 +7581,18 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
       var err = document.getElementById('sasActErr');
       if (err) err.textContent = '';
       if (currentActMode() === 'card') {
-        var cardSel = document.getElementById('sasActCardSelect');
-        if (!cardSel || !cardSel.value) {
-          if (err) err.textContent = <?php echo json_encode($lang === 'en' ? 'No unused cards' : 'ماكو كروت شاغرة'); ?>;
+        var pinNow = readActCardPin();
+        var box = document.getElementById('sasActCardBox');
+        var manual = !!(box && box.classList.contains('is-manual'));
+        if (!pinNow) {
+          if (err) err.textContent = manual
+            ? <?php echo json_encode($lang === 'en' ? 'Enter the card number' : 'ادخل رقم البطاقة'); ?>
+            : <?php echo json_encode($lang === 'en' ? 'No unused cards' : 'لا يوجد كروت شاغرة'); ?>;
+          if (manual) setFtthPinStatus('bad', err.textContent);
+          return;
+        }
+        if (manual && isFtthActModal()) {
+          runActivateNow();
           return;
         }
       }
@@ -7115,6 +7602,66 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
       e.stopPropagation();
       runActivateNow();
     });
+    var actCardSwap = document.getElementById('sasActCardSwap');
+    if (actCardSwap) {
+      actCardSwap.addEventListener('click', function () {
+        if (!isFtthActModal() || actCardSwap.classList.contains('is-forced') || !ftthHasStockCards) return;
+        ftthPreferManual = !ftthPreferManual;
+        if (ftthPreferManual) {
+          setFtthCardMode(true, { forced: false });
+          setCardHintText(<?php echo json_encode($lang === 'en' ? 'Enter card number' : 'ادخل رقم البطاقة'); ?>);
+        } else {
+          setFtthCardMode(false, { forced: false });
+          var n = 0;
+          var selNow = document.getElementById('sasActCardSelect');
+          if (selNow && selNow.options) n = selNow.options.length;
+          setCardHintText(n + ' ' + <?php echo json_encode($lang === 'en' ? 'unused cards' : 'كروت متوفرة'); ?>);
+        }
+      });
+    }
+    var actPinEl = document.getElementById('sasActCardPin');
+    var ftthPinTimer = null;
+    var ftthPinBusy = false;
+    function maybeAutoFtthPin() {
+      if (!actUser || !isFtthActModal() || ftthPinBusy) return;
+      var box = document.getElementById('sasActCardBox');
+      if (!box || !box.classList.contains('is-manual') || !actPinEl) return;
+      if (currentActMode() !== 'card') return;
+      if (actPinEl.readOnly) return;
+      var digits = String(actPinEl.value || '').replace(/\D+/g, '');
+      if (digits !== actPinEl.value) actPinEl.value = digits;
+      var need = expectedCardPinLen();
+      if (digits.length < need) {
+        setFtthPinStatus('');
+        return;
+      }
+      if (digits.length > need) {
+        actPinEl.value = digits.slice(0, need);
+        digits = actPinEl.value;
+      }
+      ftthPinBusy = true;
+      setFtthPinStatus('wait', <?php echo json_encode($lang === 'en' ? 'Checking card…' : 'جاري فحص البطاقة…'); ?>);
+      try { runActivateNow(); } finally {
+        setTimeout(function () { ftthPinBusy = false; }, 1800);
+      }
+    }
+    if (actPinEl) {
+      actPinEl.addEventListener('input', function () {
+        delete actPinEl.dataset.keep;
+        actPinEl.classList.remove('is-ok', 'is-bad');
+        var digits = String(actPinEl.value || '').replace(/\D+/g, '');
+        if (digits !== actPinEl.value) actPinEl.value = digits;
+        if (ftthPinTimer) clearTimeout(ftthPinTimer);
+        ftthPinTimer = setTimeout(maybeAutoFtthPin, 280);
+      });
+      actPinEl.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          if (ftthPinTimer) clearTimeout(ftthPinTimer);
+          maybeAutoFtthPin();
+        }
+      });
+    }
     var actRefresh = document.getElementById('sasActRefresh');
     function setCardsLoad(on) {
       var modal = document.getElementById('sasActModal');
@@ -7130,7 +7677,10 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
           layer.setAttribute('aria-hidden', 'true');
         }
       }
-      if (actRefresh) actRefresh.disabled = on;
+      if (actRefresh) {
+        actRefresh.disabled = on;
+        actRefresh.classList.toggle('is-spin', on);
+      }
     }
     if (actRefresh) {
       actRefresh.addEventListener('click', function () {
@@ -8598,6 +9148,7 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
           localId: tr.getAttribute('data-local-id') || '0',
           name: tr.getAttribute('data-name') || '',
           firstname: tr.getAttribute('data-firstname') || '',
+          lastname: tr.getAttribute('data-lastname') || '',
           username: tr.getAttribute('data-username') || tr.getAttribute('data-id') || '',
           debt: tr.getAttribute('data-debt') === '1',
           hasDays: tr.getAttribute('data-has-days') === '1',
@@ -8619,6 +9170,7 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
           localId: '0',
           name: sp.get('nm') || '',
           firstname: sp.get('fn') || sp.get('nm') || '',
+          lastname: sp.get('ln') || '',
           username: want,
           debt: false,
           hasDays: false,
