@@ -3180,7 +3180,7 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
                                 <?php endforeach; ?>
                             </div>
                         <?php else: ?>
-                            <div class="empty-cat"><?php echo e($isEn ? 'No free cards' : 'ماكو كروت شاغرة'); ?></div>
+                            <div class="empty-cat"><?php echo e($isEn ? 'No free cards' : 'لا توجد كروت شاغرة'); ?></div>
                         <?php endif; ?>
                         <?php if ($usedCards): ?>
                             <div class="used-fold" data-used-fold>
@@ -3346,7 +3346,7 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
           });
           html += '</div>';
         } else {
-          html += '<div class="empty-cat">' + (isEn ? 'No free cards' : 'ماكو كروت شاغرة') + '</div>';
+          html += '<div class="empty-cat">' + (isEn ? 'No free cards' : 'لا توجد كروت شاغرة') + '</div>';
         }
         if (used.length) {
           html += '<div class="used-fold" data-used-fold><button type="button" class="used-fold-btn" data-toggle-used><span>' + (isEn ? 'Used cards' : 'الكروت المستخدمة') + ' (' + used.length + ')</span><span class="used-fold-chevron">›</span></button><div class="used-fold-body"><div class="chip-grid chip-grid-used">';
@@ -3396,7 +3396,7 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
       });
       html += '</div>';
     } else {
-      html += '<div class="empty-cat">' + (isEn ? 'No free cards' : 'ماكو كروت شاغرة') + '</div>';
+      html += '<div class="empty-cat">' + (isEn ? 'No free cards' : 'لا توجد كروت شاغرة') + '</div>';
     }
     if (used.length) {
       html += '<div class="used-fold" data-used-fold><button type="button" class="used-fold-btn" data-toggle-used><span>' + (isEn ? 'Used cards' : 'الكروت المستخدمة') + ' (' + used.length + ')</span><span class="used-fold-chevron">›</span></button><div class="used-fold-body"><div class="chip-grid chip-grid-used">';

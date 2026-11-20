@@ -2809,6 +2809,42 @@ body.ltr .chart-year-total { text-align: right; }
   margin-top: 2px;
 }
 
+.year-rail {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border-radius: 16px;
+  background: rgba(255,255,255,.86);
+  border: 1px solid rgba(15,23,42,.06);
+  box-shadow: 0 8px 22px rgba(15,23,42,.04);
+}
+.year-rail-meta { flex: 0 0 auto; min-width: 64px; }
+.year-rail-meta strong { display: block; font-size: 14px; font-weight: 800; color: #0f172a; letter-spacing: .02em; }
+.year-rail-meta span { display: block; margin-top: 2px; font-size: 12px; font-weight: 800; color: #0f766e; }
+.year-rail-track { display: flex; flex: 1; gap: 4px; min-width: 0; }
+.year-rail-cell {
+  flex: 1 1 0;
+  min-width: 0;
+  text-align: center;
+  border-radius: 10px;
+  padding: 4px 0 5px;
+  background: #f8fafc;
+}
+.year-rail-cell b { display: block; font-size: 13px; font-weight: 800; font-variant-numeric: tabular-nums; color: #94a3b8; line-height: 1.1; }
+.year-rail-cell em { display: block; margin-top: 2px; font-style: normal; font-size: 10px; font-weight: 700; color: #94a3b8; }
+.year-rail-cell.has { background: #ecfdf5; }
+.year-rail-cell.has b { color: #0f766e; }
+.year-rail-cell.is-now { box-shadow: inset 0 0 0 1.5px #0f766e; background: #f0fdfa; }
+.year-rail-cell.is-now b { color: #0f766e; }
+body.theme-glass .year-rail { background: rgba(255,255,255,.55); }
+@media (max-width: 720px) {
+  .year-rail { padding: 6px 8px; gap: 6px; }
+  .year-rail-cell b { font-size: 11px; }
+  .year-rail-cell em { font-size: 9px; }
+}
+
 /* Twin loom: profit + activations on one pulse */
 .twin-panel {
   position: relative;

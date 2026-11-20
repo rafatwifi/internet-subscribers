@@ -354,7 +354,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
         'sas_ms' => null,
         'cards' => array(),
         'card_total' => 0,
-        'card_sub' => $en ? 'No free cards' : 'ماكو كروت شاغرة',
+        'card_sub' => $en ? 'No free cards' : 'لا توجد كروت شاغرة',
         'from_cache' => false,
     );
 
@@ -476,7 +476,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
                     $out['card_total'] = isset($payload['card_total']) ? (int) $payload['card_total'] : 0;
                     $out['card_sub'] = !empty($payload['card_sub'])
                         ? (string) $payload['card_sub']
-                        : ($en ? 'No free cards' : 'ماكو كروت شاغرة');
+                        : ($en ? 'No free cards' : 'لا توجد كروت شاغرة');
                     $out['from_cache'] = false;
                 }
             } catch (Exception $e) {
@@ -486,7 +486,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_sas') {
     if ($viewerOwnsSasWarehouse && (int) $out['card_total'] <= 0) {
         $out['card_total'] = 0;
         $out['cards'] = array();
-        $out['card_sub'] = $en ? 'No free cards' : 'ماكو كروت شاغرة';
+        $out['card_sub'] = $en ? 'No free cards' : 'لا توجد كروت شاغرة';
     }
     echo json_encode($out);
     exit;
@@ -554,6 +554,18 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_stats') {
         )->fetchColumn();
     } catch (Exception $e) {
     }
+    if (function_exists('dash_portal_slips_between')) {
+        $slipMonth = dash_portal_slips_between(strtotime($monthA), strtotime($monthB));
+        if ($salesN <= 0 && !empty($slipMonth['amount'])) {
+            $salesN = (float) $slipMonth['amount'];
+        }
+    }
+    if ($actN <= 0 && function_exists('dash_month_activation_total')) {
+        $sasActs = dash_month_activation_total($pdo, strtotime($monthA), strtotime($monthB));
+        if ($sasActs > 0) {
+            $actN = (int) $sasActs;
+        }
+    }
     $curcy = isset($config['currency']) ? $config['currency'] : 'د.ع';
     $stats['collected'] = function_exists('money_format_iqd') ? money_format_iqd($gotN, $curcy) : (string) $gotN;
     $stats['debts'] = function_exists('money_format_iqd') ? money_format_iqd($debtN, $curcy) : (string) $debtN;
@@ -584,7 +596,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_stats') {
         $stats['card_total'] = $cardSum;
         $stats['card_sub'] = $cardBits
             ? implode(' · ', $cardBits)
-            : ($enStats ? 'No free cards' : 'ماكو كروت شاغرة');
+            : ($enStats ? 'No free cards' : 'لا توجد كروت شاغرة');
     }
     echo json_encode($stats);
     exit;
@@ -648,16 +660,27 @@ $activatedMonth = (int) $pdo->query(
      JOIN subscribers s ON s.id = sub.subscriber_id
      WHERE sub.created_at >= " . $pdo->quote($monthStart) . " AND sub.created_at < " . $pdo->quote($monthEnd) . $agentScope
 )->fetchColumn();
+if (function_exists('dash_portal_slips_between')) {
+    $slipMonthPage = dash_portal_slips_between(strtotime($monthStart), strtotime($monthEnd));
+    if ($salesMonth <= 0 && !empty($slipMonthPage['amount'])) {
+        $salesMonth = (float) $slipMonthPage['amount'];
+    }
+}
+if ($activatedMonth <= 0 && function_exists('dash_month_activation_total')) {
+    $sasActsPage = dash_month_activation_total($pdo, strtotime($monthStart), strtotime($monthEnd));
+    if ($sasActsPage > 0) {
+        $activatedMonth = (int) $sasActsPage;
+    }
+}
 $dashGrowth = '0%';
 $dashGrowthSub = '';
 try {
     $yNow = (int) date('Y');
-    $newThis = (int) $pdo->query(
-        'SELECT COUNT(*) FROM subscribers s WHERE YEAR(s.created_at) = ' . $yNow . $agentScope
-    )->fetchColumn();
-    $newLast = (int) $pdo->query(
-        'SELECT COUNT(*) FROM subscribers s WHERE YEAR(s.created_at) = ' . ($yNow - 1) . $agentScope
-    )->fetchColumn();
+    $newThis = 0;
+    $newLast = 0;
+    if (function_exists('dash_subscriber_growth_pair')) {
+        list($newThis, $newLast) = dash_subscriber_growth_pair($pdo);
+    }
     if ($newLast > 0) {
         $pct = (int) round((($newThis - $newLast) / $newLast) * 100);
         $dashGrowth = ($pct > 0 ? '+' : '') . $pct . '%';
@@ -845,77 +868,19 @@ if (($dashBalSeedDisp === '—' || $dashBalSeedDisp === '')
     }
 }
 
-$chartMonths = array();
-$chartProfit = array();
-$chartActs = array();
-$chartProfitFmt = array();
 $chartYear = (int) date('Y');
+$chartMonths = array();
+$chartActs = function_exists('dash_year_activation_counts')
+    ? dash_year_activation_counts($pdo, $chartYear)
+    : array_fill(0, 12, 0);
 for ($m = 1; $m <= 12; $m++) {
-    $ym = sprintf('%04d-%02d', $chartYear, $m);
-    $chartMonths[] = month_short_label($ym, true);
-    $chartProfit[] = 0.0;
-    $chartActs[] = 0;
-    $chartProfitFmt[] = money_format_iqd(0, $config['currency']);
+    $chartMonths[] = month_short_label(sprintf('%04d-%02d', $chartYear, $m), true);
 }
-$chartRangeA = sprintf('%04d-01-01 00:00:00', $chartYear);
-$chartRangeB = sprintf('%04d-01-01 00:00:00', $chartYear + 1);
-try {
-    $chartStmt = $pdo->prepare(
-        "SELECT MONTH(i.paid_at) AS m, COALESCE(SUM(i.profit),0) AS amt
-         FROM invoices i
-         JOIN subscribers s ON s.id = i.subscriber_id
-         WHERE i.status = 'paid'
-           AND i.paid_at >= :a AND i.paid_at < :b" . $agentScope . "
-         GROUP BY MONTH(i.paid_at)"
-    );
-    $chartStmt->execute(array(':a' => $chartRangeA, ':b' => $chartRangeB));
-    while ($chartRow = $chartStmt->fetch()) {
-        $chartMi = (int) $chartRow['m'];
-        if ($chartMi >= 1 && $chartMi <= 12) {
-            $chartProfit[$chartMi - 1] = (float) $chartRow['amt'];
-            $chartProfitFmt[$chartMi - 1] = money_format_iqd($chartProfit[$chartMi - 1], $config['currency']);
-        }
-    }
-} catch (Exception $e) {
-}
-try {
-    $chartActStmt = $pdo->prepare(
-        "SELECT MONTH(sub.created_at) AS m, COUNT(*) AS n
-         FROM subscriptions sub
-         JOIN subscribers s ON s.id = sub.subscriber_id
-         WHERE sub.created_at >= :a AND sub.created_at < :b" . $agentScope . "
-         GROUP BY MONTH(sub.created_at)"
-    );
-    $chartActStmt->execute(array(':a' => $chartRangeA, ':b' => $chartRangeB));
-    while ($chartRow = $chartActStmt->fetch()) {
-        $chartMi = (int) $chartRow['m'];
-        if ($chartMi >= 1 && $chartMi <= 12) {
-            $chartActs[$chartMi - 1] = (int) $chartRow['n'];
-        }
-    }
-} catch (Exception $e) {
-}
-$yearProfitTotal = array_sum($chartProfit);
 $yearActsTotal = 0;
 foreach ($chartActs as $chartActN) {
     $yearActsTotal += (int) $chartActN;
 }
-$twinChartJson = json_encode(array(
-    'months' => $chartMonths,
-    'profit' => $chartProfit,
-    'profitFmt' => $chartProfitFmt,
-    'acts' => $chartActs,
-    'cur' => ((int) date('n')) - 1,
-    'year' => $chartYear,
-    'labels' => array(
-        'profit' => ($lang === 'en' ? 'Profit' : 'الأرباح'),
-        'acts' => ($lang === 'en' ? 'Activations' : 'التفعيلات'),
-        'empty' => ($lang === 'en' ? 'No data' : 'ماكو بيانات'),
-    ),
-));
-if ($twinChartJson === false) {
-    $twinChartJson = '{}';
-}
+$chartCurMonth = (int) date('n') - 1;
 
 $sasCounts = array(
     'total' => $totalSubscribers,
@@ -1564,7 +1529,7 @@ if ($isAccDash) {
         $cardTotal += $pn;
         $cardParts[] = trim($pnm . ' ' . $pn);
     }
-    $cardSub = $cardParts ? implode(' · ', $cardParts) : ($en ? 'No free cards' : 'ماكو كروت شاغرة');
+    $cardSub = $cardParts ? implode(' · ', $cardParts) : ($en ? 'No free cards' : 'لا توجد كروت شاغرة');
     $usersHome = 'sas.php';
     echo '<div class="sas-boxes">';
     foreach ($order as $wid) {
@@ -1708,7 +1673,7 @@ if ($sasReadyDash && $showWid('cards')) {
             $cardParts[] = trim($nm . ' ' . $n);
         }
     }
-    $cardSub = $cardParts ? implode(' · ', $cardParts) : ($en ? 'No free cards' : 'ماكو كروت شاغرة');
+    $cardSub = $cardParts ? implode(' · ', $cardParts) : ($en ? 'No free cards' : 'لا توجد كروت شاغرة');
     dash_sas_box('cards.php', 'tone-navy', $en ? 'Cards' : 'الكروت', $cardSub, (string) (int) $cardTotal, 'cards', 'dashCards', '', 'cards');
 }
 if (!$accLocked) {
@@ -1957,204 +1922,29 @@ if (!$accLocked) {
 </script>
 <?php endif; ?>
 
-<div class="panel twin-panel glass-panel panel-compact" id="twinLoom" data-year="<?php echo (int) $chartYear; ?>">
-    <div class="twin-head">
-        <div class="twin-title">
-            <h2><?php echo e($lang === 'en' ? 'Year pulse' : 'نبض السنة'); ?> <?php echo (int) $chartYear; ?></h2>
-            <div class="chart-sub"><?php echo e($lang === 'en'
-                ? 'Profit and activations woven on one timeline — hover a month'
-                : 'الأرباح والتفعيلات على خط واحد — مرّر على الشهر'); ?></div>
-        </div>
-        <div class="twin-totals">
-            <div class="twin-tot is-profit">
-                <span class="twin-tot-lab"><?php echo e($lang === 'en' ? 'Year profit' : 'أرباح السنة'); ?></span>
-                <strong><?php echo e(money_format_iqd($yearProfitTotal, $config['currency'])); ?></strong>
-            </div>
-            <div class="twin-tot is-acts">
-                <span class="twin-tot-lab"><?php echo e($lang === 'en' ? 'Year activations' : 'تفعيلات السنة'); ?></span>
-                <strong><?php echo e(number_format((int) $yearActsTotal)); ?></strong>
-            </div>
-        </div>
+<section class="year-rail" aria-label="<?php echo e($lang === 'en' ? 'Activations this year' : 'تفعيلات السنة'); ?>">
+    <div class="year-rail-meta">
+        <strong><?php echo (int) $chartYear; ?></strong>
+        <span><?php echo e(number_format((int) $yearActsTotal)); ?> <?php echo e($lang === 'en' ? 'activations' : 'تفعيل'); ?></span>
     </div>
-    <div class="twin-legend" aria-hidden="true">
-        <span class="twin-leg is-profit"><i></i><?php echo e($lang === 'en' ? 'Profit' : 'الأرباح'); ?></span>
-        <span class="twin-leg is-acts"><i></i><?php echo e($lang === 'en' ? 'Activations' : 'التفعيلات'); ?></span>
-    </div>
-    <div class="twin-stage">
-        <svg class="twin-svg" id="twinSvg" viewBox="0 0 1200 340" preserveAspectRatio="none" role="img" aria-label="<?php echo e($lang === 'en' ? 'Profit and activations chart' : 'مخطط الأرباح والتفعيلات'); ?>"></svg>
-        <div class="twin-tip" id="twinTip" hidden>
-            <b id="twinTipMonth"></b>
-            <div class="twin-tip-row is-profit"><span><?php echo e($lang === 'en' ? 'Profit' : 'الأرباح'); ?></span><strong id="twinTipProfit"></strong></div>
-            <div class="twin-tip-row is-acts"><span><?php echo e($lang === 'en' ? 'Activations' : 'التفعيلات'); ?></span><strong id="twinTipActs"></strong></div>
+    <div class="year-rail-track">
+        <?php foreach ($chartMonths as $railI => $railLabel):
+            $railN = isset($chartActs[$railI]) ? (int) $chartActs[$railI] : 0;
+            $railCls = 'year-rail-cell';
+            if ($railI === $chartCurMonth) {
+                $railCls .= ' is-now';
+            }
+            if ($railN > 0) {
+                $railCls .= ' has';
+            }
+            ?>
+        <div class="<?php echo $railCls; ?>">
+            <b><?php echo $railN; ?></b>
+            <em><?php echo e($railLabel); ?></em>
         </div>
+        <?php endforeach; ?>
     </div>
-    <div class="twin-months" id="twinMonths"></div>
-</div>
-<script>
-(function () {
-  var raw = <?php echo $twinChartJson; ?>;
-  if (!raw || !raw.months) return;
-  var svg = document.getElementById('twinSvg');
-  var tip = document.getElementById('twinTip');
-  var tipM = document.getElementById('twinTipMonth');
-  var tipP = document.getElementById('twinTipProfit');
-  var tipA = document.getElementById('twinTipActs');
-  var monthsBox = document.getElementById('twinMonths');
-  var stage = svg && svg.parentNode;
-  if (!svg || !stage || !monthsBox) return;
-
-  var W = 1200, H = 340, padL = 28, padR = 28, padT = 28, padB = 36;
-  var n = raw.months.length;
-  var profit = raw.profit || [];
-  var acts = raw.acts || [];
-  var maxP = 0, maxA = 0, i;
-  for (i = 0; i < n; i++) {
-    if ((+profit[i] || 0) > maxP) maxP = +profit[i];
-    if ((+acts[i] || 0) > maxA) maxA = +acts[i];
-  }
-  if (maxP <= 0) maxP = 1;
-  if (maxA <= 0) maxA = 1;
-
-  function xAt(i) {
-    if (n <= 1) return W / 2;
-    return padL + (i * (W - padL - padR) / (n - 1));
-  }
-  function yP(v) {
-    return padT + (1 - (Math.max(0, +v || 0) / maxP)) * (H - padT - padB);
-  }
-  function yA(v) {
-    return padT + (1 - (Math.max(0, +v || 0) / maxA)) * (H - padT - padB);
-  }
-  function smooth(pts) {
-    if (!pts.length) return '';
-    if (pts.length === 1) return 'M' + pts[0][0] + ',' + pts[0][1];
-    var d = 'M' + pts[0][0] + ',' + pts[0][1];
-    for (var j = 0; j < pts.length - 1; j++) {
-      var p0 = pts[j === 0 ? j : j - 1];
-      var p1 = pts[j];
-      var p2 = pts[j + 1];
-      var p3 = pts[j + 2] || p2;
-      var cp1x = p1[0] + (p2[0] - p0[0]) / 6;
-      var cp1y = p1[1] + (p2[1] - p0[1]) / 6;
-      var cp2x = p2[0] - (p3[0] - p1[0]) / 6;
-      var cp2y = p2[1] - (p3[1] - p1[1]) / 6;
-      d += 'C' + cp1x + ',' + cp1y + ',' + cp2x + ',' + cp2y + ',' + p2[0] + ',' + p2[1];
-    }
-    return d;
-  }
-
-  var ptsP = [], ptsA = [];
-  for (i = 0; i < n; i++) {
-    ptsP.push([xAt(i), yP(profit[i])]);
-    ptsA.push([xAt(i), yA(acts[i])]);
-  }
-  var baseY = H - padB;
-  var lineP = smooth(ptsP);
-  var lineA = smooth(ptsA);
-  var areaP = lineP + 'L' + ptsP[ptsP.length - 1][0] + ',' + baseY + 'L' + ptsP[0][0] + ',' + baseY + 'Z';
-
-  var ns = 'http://www.w3.org/2000/svg';
-  function el(name, attrs) {
-    var nEl = document.createElementNS(ns, name);
-    for (var k in attrs) if (attrs.hasOwnProperty(k)) nEl.setAttribute(k, attrs[k]);
-    return nEl;
-  }
-  while (svg.firstChild) svg.removeChild(svg.firstChild);
-
-  var defs = el('defs', {});
-  var gP = el('linearGradient', { id: 'twinGradP', x1: '0', y1: '0', x2: '0', y2: '1' });
-  gP.appendChild(el('stop', { offset: '0%', 'stop-color': '#f59e0b', 'stop-opacity': '0.38' }));
-  gP.appendChild(el('stop', { offset: '100%', 'stop-color': '#f59e0b', 'stop-opacity': '0.02' }));
-  var gA = el('linearGradient', { id: 'twinGradA', x1: '0', y1: '0', x2: '1', y2: '0' });
-  gA.appendChild(el('stop', { offset: '0%', 'stop-color': '#0d9488', 'stop-opacity': '0.95' }));
-  gA.appendChild(el('stop', { offset: '100%', 'stop-color': '#38bdf8', 'stop-opacity': '0.95' }));
-  defs.appendChild(gP);
-  defs.appendChild(gA);
-  svg.appendChild(defs);
-
-  for (i = 0; i < 4; i++) {
-    var gy = padT + i * ((H - padT - padB) / 3);
-    svg.appendChild(el('line', { x1: padL, x2: W - padR, y1: gy, y2: gy, class: 'twin-grid' }));
-  }
-  if (raw.cur >= 0 && raw.cur < n) {
-    var cx = xAt(raw.cur);
-    svg.appendChild(el('rect', {
-      x: cx - 28, y: padT - 8, width: 56, height: H - padT - padB + 16,
-      class: 'twin-now'
-    }));
-  }
-
-  svg.appendChild(el('path', { d: areaP, class: 'twin-area-p', fill: 'url(#twinGradP)' }));
-  svg.appendChild(el('path', { d: lineP, class: 'twin-line-p twin-draw' }));
-  svg.appendChild(el('path', { d: lineA, class: 'twin-line-a twin-draw', stroke: 'url(#twinGradA)' }));
-
-  var hit = el('g', { class: 'twin-hits' });
-  for (i = 0; i < n; i++) {
-    hit.appendChild(el('circle', {
-      cx: ptsP[i][0], cy: ptsP[i][1], r: 5.5, class: 'twin-dot-p' + (i === raw.cur ? ' is-cur' : '')
-    }));
-    var rA = 6 + Math.min(14, (maxA > 0 ? ((+acts[i] || 0) / maxA) * 14 : 0));
-    hit.appendChild(el('circle', {
-      cx: ptsA[i][0], cy: ptsA[i][1], r: rA, class: 'twin-bead-a' + (i === raw.cur ? ' is-cur' : '')
-    }));
-    hit.appendChild(el('circle', {
-      cx: ptsA[i][0], cy: ptsA[i][1], r: Math.max(3, rA * 0.35), class: 'twin-bead-core'
-    }));
-    var band = el('rect', {
-      x: xAt(i) - ((W - padL - padR) / Math.max(1, n - 1)) / 2,
-      y: 0, width: (W - padL - padR) / Math.max(1, n - 1), height: H,
-      class: 'twin-hit', 'data-i': String(i), fill: 'transparent'
-    });
-    hit.appendChild(band);
-  }
-  svg.appendChild(hit);
-
-  monthsBox.innerHTML = '';
-  for (i = 0; i < n; i++) {
-    var b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'twin-m' + (i === raw.cur ? ' is-cur' : '');
-    b.setAttribute('data-i', String(i));
-    b.textContent = raw.months[i];
-    monthsBox.appendChild(b);
-  }
-
-  function show(i, clientX) {
-    if (i < 0 || i >= n) return;
-    tip.hidden = false;
-    tipM.textContent = raw.months[i] + ' · ' + (raw.year || '');
-    tipP.textContent = (raw.profitFmt && raw.profitFmt[i]) ? raw.profitFmt[i] : String(profit[i] || 0);
-    tipA.textContent = String(acts[i] || 0);
-    var rect = stage.getBoundingClientRect();
-    var left = clientX - rect.left;
-    if (left < 90) left = 90;
-    if (left > rect.width - 90) left = rect.width - 90;
-    tip.style.left = left + 'px';
-    tip.style.top = '18px';
-    var ms = monthsBox.querySelectorAll('.twin-m');
-    for (var j = 0; j < ms.length; j++) ms[j].classList.toggle('is-on', j === i);
-  }
-  function hide() {
-    tip.hidden = true;
-    var ms = monthsBox.querySelectorAll('.twin-m');
-    for (var j = 0; j < ms.length; j++) ms[j].classList.remove('is-on');
-  }
-  svg.addEventListener('pointermove', function (e) {
-    var t = e.target;
-    var idx = t && t.getAttribute ? t.getAttribute('data-i') : null;
-    if (idx === null) return;
-    show(parseInt(idx, 10), e.clientX);
-  });
-  svg.addEventListener('pointerleave', hide);
-  monthsBox.addEventListener('click', function (e) {
-    var b = e.target.closest ? e.target.closest('[data-i]') : null;
-    if (!b) return;
-    var idx = parseInt(b.getAttribute('data-i'), 10);
-    var r = b.getBoundingClientRect();
-    show(idx, r.left + r.width / 2);
-  });
-})();
-</script>
+</section>
 <?php if (empty($sasReadyDash)): ?>
 <script>
 (function () {

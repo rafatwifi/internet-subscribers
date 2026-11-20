@@ -134,6 +134,37 @@ try {
 } catch (Exception $e) {
 } catch (Throwable $e) {
 }
+if (!$activationRows && isset($pdo)) {
+    try {
+        $from = $month . '-01 00:00:00';
+        $toTs = strtotime($from . ' +1 month');
+        $where = function_exists('dash_cache_owner_where') ? dash_cache_owner_where() : '';
+        if ($where !== '' && $toTs) {
+            $sasList = $pdo->query(
+                'SELECT display_name, username, phone, profile_name, sas_created_at, expire_at, local_subscriber_id
+                 FROM sas_users_cache WHERE ' . $where . '
+                   AND sas_created_at >= ' . $pdo->quote($from) . '
+                   AND sas_created_at < ' . $pdo->quote(date('Y-m-d H:i:s', $toTs)) . '
+                 ORDER BY sas_created_at DESC'
+            );
+            if ($sasList) {
+                foreach ($sasList->fetchAll(PDO::FETCH_ASSOC) as $sr) {
+                    $activationRows[] = array(
+                        'subscriber_id' => !empty($sr['local_subscriber_id']) ? (int) $sr['local_subscriber_id'] : 0,
+                        'name' => trim((string) $sr['display_name']) !== '' ? $sr['display_name'] : $sr['username'],
+                        'phone' => isset($sr['phone']) ? $sr['phone'] : '',
+                        'service_name' => isset($sr['profile_name']) ? $sr['profile_name'] : '',
+                        'monthly_price' => 0,
+                        'start_date' => substr((string) $sr['sas_created_at'], 0, 10),
+                        'end_date' => !empty($sr['expire_at']) ? substr((string) $sr['expire_at'], 0, 10) : '',
+                        'created_at' => $sr['sas_created_at'],
+                    );
+                }
+            }
+        }
+    } catch (Exception $e) {
+    }
+}
 
 try {
     if (function_exists('compute_month_stats')) {
@@ -281,7 +312,11 @@ render_header(t('reports'), 'reports');
             <?php foreach ($activationRows as $row): ?>
                 <tr>
                     <td>
+                        <?php if (!empty($row['subscriber_id'])): ?>
                         <a href="subscriber.php?id=<?php echo (int) $row['subscriber_id']; ?>"><?php echo e($row['name']); ?></a>
+                        <?php else: ?>
+                        <?php echo e($row['name']); ?>
+                        <?php endif; ?>
                         <br><small><?php echo e(format_phone_display($row['phone'])); ?></small>
                     </td>
                     <td><?php echo e($row['service_name']); ?></td>

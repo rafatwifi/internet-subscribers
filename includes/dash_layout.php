@@ -397,3 +397,204 @@ function dash_widget_icon($key)
         . $inner
         . '</svg>';
 }
+
+function dash_portal_slips_between($fromTs, $toTs)
+{
+    $out = array('count' => 0, 'amount' => 0.0);
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    if ($tid <= 0) {
+        return $out;
+    }
+    $file = dirname(__DIR__) . '/storage/invoices/slip_index_t' . $tid . '.json';
+    if (!is_file($file)) {
+        return $out;
+    }
+    $rows = json_decode((string) @file_get_contents($file), true);
+    if (!is_array($rows)) {
+        return $out;
+    }
+    $agent = function_exists('is_agent_user') && is_agent_user();
+    $me = function_exists('current_admin') ? current_admin() : null;
+    $myId = (is_array($me) && isset($me['id'])) ? (int) $me['id'] : 0;
+    foreach ($rows as $row) {
+        if (!is_array($row) || empty($row['created_at'])) {
+            continue;
+        }
+        $ts = strtotime((string) $row['created_at']);
+        if (!$ts || $ts < (int) $fromTs || $ts >= (int) $toTs) {
+            continue;
+        }
+        $issuer = isset($row['issuer_id']) ? (int) $row['issuer_id'] : 0;
+        if ($agent && $issuer > 0 && $issuer !== $myId) {
+            continue;
+        }
+        $out['count']++;
+        $rawAmt = isset($row['amount']) ? (string) $row['amount'] : '0';
+        $out['amount'] += (float) preg_replace('/[^\d.\-]/', '', $rawAmt);
+    }
+    return $out;
+}
+
+function dash_subscriber_growth_pair($pdo)
+{
+    $yNow = (int) date('Y');
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    $where = 'tenant_id = ' . (int) $tid;
+    if (!empty($_SESSION['admin_sas_shadow']) || (function_exists('is_agent_user') && is_agent_user())) {
+        $u = function_exists('current_admin') ? current_admin() : null;
+        $mid = ($u && !empty($u['sas_manager_id'])) ? (int) $u['sas_manager_id'] : 0;
+        if ($mid > 0) {
+            $where .= ' AND parent_id = ' . $mid;
+        }
+    }
+    try {
+        $has = (int) $pdo->query(
+            'SELECT COUNT(*) FROM sas_users_cache WHERE ' . $where . ' AND sas_created_at IS NOT NULL'
+        )->fetchColumn();
+        if ($has > 0) {
+            $newThis = (int) $pdo->query(
+                'SELECT COUNT(*) FROM sas_users_cache WHERE ' . $where . ' AND YEAR(sas_created_at) = ' . $yNow
+            )->fetchColumn();
+            $newLast = (int) $pdo->query(
+                'SELECT COUNT(*) FROM sas_users_cache WHERE ' . $where . ' AND YEAR(sas_created_at) = ' . ($yNow - 1)
+            )->fetchColumn();
+            return array($newThis, $newLast);
+        }
+    } catch (Exception $e) {
+    }
+    $agentScope = function_exists('subscriber_agent_scope_sql') ? subscriber_agent_scope_sql('s') : '';
+    try {
+        $newThis = (int) $pdo->query(
+            'SELECT COUNT(*) FROM subscribers s WHERE YEAR(s.created_at) = ' . $yNow . $agentScope
+        )->fetchColumn();
+        $newLast = (int) $pdo->query(
+            'SELECT COUNT(*) FROM subscribers s WHERE YEAR(s.created_at) = ' . ($yNow - 1) . $agentScope
+        )->fetchColumn();
+        return array($newThis, $newLast);
+    } catch (Exception $e) {
+        return array(0, 0);
+    }
+}
+
+function dash_cache_owner_where()
+{
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    $where = 'tenant_id = ' . $tid;
+    if (!empty($_SESSION['admin_sas_shadow']) || (function_exists('is_agent_user') && is_agent_user())) {
+        $u = function_exists('current_admin') ? current_admin() : null;
+        $mid = ($u && !empty($u['sas_manager_id'])) ? (int) $u['sas_manager_id'] : 0;
+        if ($mid > 0) {
+            $where .= ' AND parent_id = ' . $mid;
+        }
+    }
+    return $where;
+}
+
+function dash_month_activation_total($pdo, $fromTs, $toTs)
+{
+    $names = array();
+    $extra = 0;
+    $fromTs = (int) $fromTs;
+    $toTs = (int) $toTs;
+    if ($pdo && $fromTs > 0 && $toTs > $fromTs) {
+        try {
+            $st = $pdo->query(
+                'SELECT username FROM sas_users_cache WHERE ' . dash_cache_owner_where()
+                . ' AND sas_created_at >= ' . $pdo->quote(date('Y-m-d H:i:s', $fromTs))
+                . ' AND sas_created_at < ' . $pdo->quote(date('Y-m-d H:i:s', $toTs))
+            );
+            if ($st) {
+                foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                    $u = strtolower(trim((string) $row['username']));
+                    if ($u !== '') {
+                        $names[$u] = 1;
+                    }
+                }
+            }
+        } catch (Exception $e) {
+        }
+    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    $file = dirname(__DIR__) . '/storage/invoices/slip_index_t' . $tid . '.json';
+    if (is_file($file)) {
+        $rows = json_decode((string) @file_get_contents($file), true);
+        $agent = function_exists('is_agent_user') && is_agent_user();
+        $me = function_exists('current_admin') ? current_admin() : null;
+        $myId = (is_array($me) && isset($me['id'])) ? (int) $me['id'] : 0;
+        if (is_array($rows)) {
+            foreach ($rows as $row) {
+                if (!is_array($row) || empty($row['created_at'])) {
+                    continue;
+                }
+                $ts = strtotime((string) $row['created_at']);
+                if (!$ts || $ts < $fromTs || $ts >= $toTs) {
+                    continue;
+                }
+                $issuer = isset($row['issuer_id']) ? (int) $row['issuer_id'] : 0;
+                if ($agent && $issuer > 0 && $issuer !== $myId) {
+                    continue;
+                }
+                $u = strtolower(trim((string) (isset($row['username']) ? $row['username'] : '')));
+                if ($u === '') {
+                    $extra++;
+                } else {
+                    $names[$u] = 1;
+                }
+            }
+        }
+    }
+    return count($names) + $extra;
+}
+
+function dash_year_activation_counts($pdo, $year)
+{
+    $sets = array();
+    for ($i = 0; $i < 12; $i++) {
+        $sets[$i] = array();
+    }
+    $year = (int) $year;
+    if ($pdo) {
+        try {
+            $st = $pdo->query(
+                'SELECT username, MONTH(sas_created_at) AS m FROM sas_users_cache WHERE ' . dash_cache_owner_where()
+                . ' AND sas_created_at IS NOT NULL AND YEAR(sas_created_at) = ' . $year
+            );
+            if ($st) {
+                foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                    $mi = (int) $row['m'];
+                    $u = strtolower(trim((string) $row['username']));
+                    if ($mi >= 1 && $mi <= 12 && $u !== '') {
+                        $sets[$mi - 1][$u] = 1;
+                    }
+                }
+            }
+        } catch (Exception $e) {
+        }
+    }
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    $file = dirname(__DIR__) . '/storage/invoices/slip_index_t' . $tid . '.json';
+    if (is_file($file)) {
+        $rows = json_decode((string) @file_get_contents($file), true);
+        if (is_array($rows)) {
+            foreach ($rows as $row) {
+                if (!is_array($row) || empty($row['created_at'])) {
+                    continue;
+                }
+                $ts = strtotime((string) $row['created_at']);
+                if (!$ts || (int) date('Y', $ts) !== $year) {
+                    continue;
+                }
+                $mi = (int) date('n', $ts);
+                $u = strtolower(trim((string) (isset($row['username']) ? $row['username'] : '')));
+                if ($mi >= 1 && $mi <= 12) {
+                    $sets[$mi - 1][$u !== '' ? $u : ('slip' . $mi . count($sets[$mi - 1]))] = 1;
+                }
+            }
+        }
+    }
+    $out = array();
+    for ($i = 0; $i < 12; $i++) {
+        $out[$i] = count($sets[$i]);
+    }
+    return $out;
+}

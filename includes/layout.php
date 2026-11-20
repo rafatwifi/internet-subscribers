@@ -34,6 +34,54 @@ function nav_side_ico($key)
         . '</svg></span>';
 }
 
+function nav_tenant_is_ftth($pdo, $config)
+{
+    if (function_exists('tenant_is_ftth') && tenant_is_ftth($pdo, $config)) {
+        return true;
+    }
+    if (!$pdo || !function_exists('tenant_sas_accounts_list') || !function_exists('current_tenant_id')) {
+        return false;
+    }
+    $tid = (int) current_tenant_id();
+    if ($tid <= 0) {
+        return false;
+    }
+    foreach (tenant_sas_accounts_list($pdo, $tid) as $acc) {
+        if (!is_array($acc)) {
+            continue;
+        }
+        if (isset($acc['service_kind']) && (string) $acc['service_kind'] === 'ftth') {
+            return true;
+        }
+        $blob = strtolower(trim(
+            (isset($acc['label']) ? (string) $acc['label'] : '')
+            . ' '
+            . (isset($acc['sas_host']) ? (string) $acc['sas_host'] : '')
+        ));
+        if (strpos($blob, 'ftth') !== false) {
+            return true;
+        }
+        $cid = !empty($acc['company_id']) ? (int) $acc['company_id'] : 0;
+        if ($cid <= 0) {
+            continue;
+        }
+        try {
+            $st = $pdo->prepare('SELECT name, sas_host FROM platform_companies WHERE id = :id LIMIT 1');
+            $st->execute(array(':id' => $cid));
+            $co = $st->fetch(PDO::FETCH_ASSOC);
+            if (!$co) {
+                continue;
+            }
+            $coBlob = strtolower(trim((string) $co['name'] . ' ' . (string) $co['sas_host']));
+            if (strpos($coBlob, 'ftth') !== false) {
+                return true;
+            }
+        } catch (Exception $e) {
+        }
+    }
+    return false;
+}
+
 function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $topToolsHtml = '')
 {
     global $siteName, $lang, $settings, $pdo, $config;
@@ -80,7 +128,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     <link rel="icon" href="assets/favicon.png?v=2" type="image/png" sizes="32x32">
     <?php endif; ?>
     <link rel="apple-touch-icon" href="<?php echo e($brandIcon !== '' ? $brandIcon : 'assets/apple-touch-icon.png?v=2'); ?>">
-    <link rel="stylesheet" href="assets/style.css?v=ui26">
+    <link rel="stylesheet" href="assets/style.css?v=ui27">
     <?php
     // خلفية صورة حتى يشتغل blur — شخصي ثم نظام ثم الافتراضي
     $glassBgSrc = 'assets/glass-bg.jpg?v=1';
@@ -826,6 +874,38 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
         }
         .side-links a.active .nav-ico { color: #7dd3fc; }
         .side-links .nav-user { display: none !important; }
+        .side-drop { display: block; }
+        .side-drop summary {
+          list-style: none;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          min-height: 42px;
+          padding: 10px 14px;
+          border-radius: 10px;
+          font-size: 13.5px;
+          font-weight: 700;
+          color: rgba(248,250,252,0.72);
+        }
+        .side-drop summary::-webkit-details-marker { display: none; }
+        .side-drop summary .nav-caret {
+          margin-inline-start: auto;
+          width: 7px;
+          height: 7px;
+          border-right: 2px solid currentColor;
+          border-bottom: 2px solid currentColor;
+          transform: rotate(45deg);
+          opacity: .7;
+        }
+        .side-drop[open] summary .nav-caret { transform: rotate(-135deg); margin-top: 4px; }
+        .side-drop.is-on > summary,
+        .side-drop[open] > summary { color: #fff; }
+        .side-sub { display: flex; flex-direction: column; gap: 2px; padding: 0 8px 8px; }
+        .side-sub a { min-height: 36px; font-size: 13px; padding: 8px 12px; }
+        body.theme-classic .side-drop summary { color: #b8c7ce; }
+        body.theme-classic .side-drop.is-on > summary,
+        body.theme-classic .side-drop[open] > summary { color: #fff; }
         .sidebar .lang-mini { display: none !important; }
         .main-top-end .top-user-cluster {
           display: inline-flex;
@@ -969,6 +1049,86 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <a class="<?php echo $active === 'company' ? 'active' : ''; ?>" href="company.php"><?php echo nav_side_ico('company'); ?><?php echo e($isEn ? 'About company' : 'عن الشركة'); ?></a>
             <a href="logout.php"><?php echo nav_side_ico('logout'); ?><?php echo e(t('logout')); ?></a>
             <?php else: ?>
+            <?php
+            $navFtth = nav_tenant_is_ftth(isset($pdo) ? $pdo : null, isset($config) ? $config : null);
+            ?>
+            <?php if ($navFtth): ?>
+            <?php
+            $navSettingsHref = 'settings.php?tab=theme';
+            if ($navTidEarly > 1) {
+                $navSettingsHref = 'settings.php?tab=sas';
+            }
+            $showCards = $can('cards') && !(isset($pdo) && function_exists('account_viewer_is_leaf_child') && account_viewer_is_leaf_child($pdo));
+            $showPlans = $can('plans');
+            $showAccountant = $can('agents') || (function_exists('is_agent_user') && is_agent_user()) || (function_exists('is_group_manager_user') && is_group_manager_user());
+            $showReports = $can('reports');
+            $showInvoices = $navTidEarly > 1;
+            $showAccounts = $showCards || $showPlans || $showAccountant || $showReports || $showInvoices;
+            $showSettings = $can('settings') || $can('users') || $can('plans') || $can('backup');
+            $showImport = $can('subscribers');
+            $showSettingsDrop = $showSettings || $showImport;
+            $showBilling = $navTidEarly > 1;
+            $accountsOpen = in_array($active, array('cards', 'plans', 'accountants', 'reports', 'invoices'), true);
+            $settingsOpen = ($settingsActive && $active !== 'schedule') || $active === 'import_export';
+            $companyOpen = in_array($active, array('company', 'billing'), true);
+            ?>
+            <?php if ($can('dashboard')): ?>
+            <a class="<?php echo $active === 'dashboard' ? 'active' : ''; ?>" href="index.php"><?php echo nav_side_ico('dashboard'); ?><?php echo e(t('dashboard')); ?></a>
+            <?php endif; ?>
+            <?php if ($can('subscribers')): ?>
+            <a class="<?php echo $active === 'sas' ? 'active' : ''; ?>" href="sas.php"><?php echo nav_side_ico('subscribers'); ?><?php echo e(t('sas')); ?></a>
+            <?php endif; ?>
+            <?php if ($can('subscribers') || $can('dashboard')): ?>
+            <a class="<?php echo $active === 'cabinets' ? 'active' : ''; ?>" href="cabinets.php"><?php echo nav_side_ico('cabinets'); ?><?php echo e($isEn ? 'Cabinets' : 'الكابينات'); ?></a>
+            <?php endif; ?>
+            <?php if ($can('subscriptions')): ?>
+            <a class="<?php echo $active === 'subscriptions' ? 'active' : ''; ?>" href="subscriptions.php"><?php echo nav_side_ico('movements'); ?><?php echo e(t('movements')); ?></a>
+            <?php endif; ?>
+            <?php if ($showAccounts): ?>
+            <details class="side-drop<?php echo $accountsOpen ? ' is-on' : ''; ?>"<?php echo $accountsOpen ? ' open' : ''; ?>>
+                <summary><?php echo nav_side_ico('agents'); ?><span><?php echo e($isEn ? 'Accounts' : 'الحسابات'); ?></span><i class="nav-caret" aria-hidden="true"></i></summary>
+                <div class="side-sub">
+                    <?php if ($showCards): ?>
+                    <a class="<?php echo $active === 'cards' ? 'active' : ''; ?>" href="cards.php"><?php echo nav_side_ico('cards'); ?><?php echo e($isEn ? 'Cards' : 'الكارتات'); ?></a>
+                    <?php endif; ?>
+                    <?php if ($showPlans): ?>
+                    <a class="<?php echo $active === 'plans' ? 'active' : ''; ?>" href="plans.php"><?php echo nav_side_ico('plans'); ?><?php echo e(t('plans')); ?></a>
+                    <?php endif; ?>
+                    <?php if ($showAccountant): ?>
+                    <a class="<?php echo $active === 'accountants' ? 'active' : ''; ?>" href="agents.php?view=accountant"><?php echo nav_side_ico('accountants'); ?><?php echo e($isEn ? 'Accountant' : 'المحاسب'); ?></a>
+                    <?php endif; ?>
+                    <?php if ($showReports): ?>
+                    <a class="<?php echo $active === 'reports' ? 'active' : ''; ?>" href="reports.php"><?php echo nav_side_ico('reports'); ?><?php echo e(t('reports')); ?></a>
+                    <?php endif; ?>
+                    <?php if ($showInvoices): ?>
+                    <a class="<?php echo $active === 'invoices' ? 'active' : ''; ?>" href="settings.php?tab=invoices"><?php echo nav_side_ico('invoices'); ?><?php echo e($isEn ? 'Invoices' : 'الفواتير'); ?></a>
+                    <?php endif; ?>
+                </div>
+            </details>
+            <?php endif; ?>
+            <?php if ($showSettingsDrop): ?>
+            <details class="side-drop<?php echo $settingsOpen ? ' is-on' : ''; ?>"<?php echo $settingsOpen ? ' open' : ''; ?>>
+                <summary><?php echo nav_side_ico('settings'); ?><span><?php echo e(t('settings')); ?></span><i class="nav-caret" aria-hidden="true"></i></summary>
+                <div class="side-sub">
+                    <?php if ($showSettings): ?>
+                    <a class="<?php echo $settingsActive && $active !== 'schedule' ? 'active' : ''; ?>" href="<?php echo e($navSettingsHref); ?>"><?php echo nav_side_ico('settings'); ?><?php echo e(t('settings')); ?></a>
+                    <?php endif; ?>
+                    <?php if ($showImport): ?>
+                    <a class="<?php echo $active === 'import_export' ? 'active' : ''; ?>" href="import_export.php"><?php echo nav_side_ico('import_export'); ?><?php echo e($isEn ? 'Import & Export' : 'استيراد وتصدير'); ?></a>
+                    <?php endif; ?>
+                </div>
+            </details>
+            <?php endif; ?>
+            <details class="side-drop<?php echo $companyOpen ? ' is-on' : ''; ?>"<?php echo $companyOpen ? ' open' : ''; ?>>
+                <summary><?php echo nav_side_ico('company'); ?><span><?php echo e($isEn ? 'About company' : 'عن الشركة'); ?></span><i class="nav-caret" aria-hidden="true"></i></summary>
+                <div class="side-sub">
+                    <a class="<?php echo $active === 'company' ? 'active' : ''; ?>" href="company.php"><?php echo nav_side_ico('company'); ?><?php echo e($isEn ? 'About company' : 'عن الشركة'); ?></a>
+                    <?php if ($showBilling): ?>
+                    <a class="<?php echo $active === 'billing' ? 'active' : ''; ?>" href="billing.php"><?php echo nav_side_ico('billing'); ?><?php echo e($isEn ? 'Subscription' : 'الاشتراك'); ?></a>
+                    <?php endif; ?>
+                </div>
+            </details>
+            <?php else: ?>
             <?php /* —— قائمة الوكالة / الوكيل (كل خصائص المشتركين تبقى هنا) —— */ ?>
             <?php if ($can('dashboard')): ?>
             <a class="<?php echo $active === 'dashboard' ? 'active' : ''; ?>" href="index.php"><?php echo nav_side_ico('dashboard'); ?><?php echo e(t('dashboard')); ?></a>
@@ -1054,6 +1214,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             if (!$hideSideLogout):
             ?>
             <a href="logout.php"><?php echo nav_side_ico('logout'); ?><?php echo e(t('logout')); ?></a>
+            <?php endif; ?>
             <?php endif; ?>
             <?php endif; ?>
         </nav>

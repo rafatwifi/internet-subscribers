@@ -98,7 +98,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
         if ($qtyRet <= 0) {
-            flash('error', $isEn ? 'This agent has no free cards in that package' : 'ماكو كروت شاغرة بهالفئة عند الوكيل');
+            flash('error', $isEn ? 'This agent has no free cards in that package' : 'لا توجد كروت شاغرة بهالفئة عند الوكيل');
             redirect('agents.php');
         }
         $wholesale = 0;

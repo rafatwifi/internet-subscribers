@@ -54,6 +54,16 @@ function compute_month_stats($pdo, $ym, $scopeSql = '')
         }
     } catch (Exception $e) {
     }
+    if ($out['activations'] <= 0 && function_exists('dash_month_activation_total') && preg_match('/^\d{4}-\d{2}$/', (string) $ym)) {
+        $from = strtotime($ym . '-01 00:00:00');
+        $to = $from ? strtotime(date('Y-m-d H:i:s', $from) . ' +1 month') : 0;
+        if ($from && $to) {
+            $sasActs = dash_month_activation_total($pdo, $from, $to);
+            if ($sasActs > 0) {
+                $out['activations'] = (int) $sasActs;
+            }
+        }
+    }
 
     try {
         $st = $pdo->prepare(
