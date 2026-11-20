@@ -87,59 +87,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($saas['registration_enabled'
     }
 }
 
+$loginBgUrl = function_exists('login_bg_url') ? login_bg_url($settings) : '';
 $loginBgColor = function_exists('login_bg_color') ? login_bg_color($settings) : '#1b2a38';
+$bgMode = function_exists('app_bg_mode') ? app_bg_mode($settings) : 'color';
+$useImage = ($bgMode === 'image' && $loginBgUrl !== '');
+$loginBgCss = $useImage
+    ? ('url("' . htmlspecialchars($loginBgUrl, ENT_QUOTES, 'UTF-8') . '")')
+    : 'none';
+$brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($settings) : '';
+$brandSrc = ($brandIconUrl !== '') ? $brandIconUrl : 'assets/favicon.svg?v=2';
 ?>
 <!DOCTYPE html>
 <html lang="<?php echo e($lang); ?>" dir="<?php echo $isEn ? 'ltr' : 'rtl'; ?>">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title><?php echo e($isEn ? 'Agent register' : 'تسجيل وكيل'); ?> | <?php echo e($siteName); ?></title>
-    <link rel="stylesheet" href="assets/app.css?v=2">
+    <link rel="icon" href="assets/favicon.svg?v=2" type="image/svg+xml">
+    <link rel="stylesheet" href="assets/style.css?v=ui27">
+    <link rel="stylesheet" href="assets/gate.css?v=gate5">
     <style>
-      body.reg-page { min-height:100vh; margin:0; display:flex; align-items:center; justify-content:center;
-        padding:24px 16px; background:
-          radial-gradient(900px 420px at 10% -10%, rgba(56,189,248,.35), transparent 60%),
-          radial-gradient(700px 380px at 110% 110%, rgba(45,212,191,.28), transparent 55%),
-          linear-gradient(165deg, <?php echo e($loginBgColor); ?> 0%, #0b1220 100%);
-        font-family: Tajawal, sans-serif; }
-      .reg-card { width:min(560px, 96vw); background:rgba(255,255,255,.96); border:1px solid rgba(255,255,255,.7);
-        border-radius:24px; padding:28px 26px 22px; box-shadow:0 24px 60px rgba(8,14,22,.28); }
-      .reg-kicker { display:inline-block; margin:0 0 8px; padding:4px 10px; border-radius:999px; background:#e0f2fe; color:#0369a1; font-size:12px; font-weight:800; }
-      .reg-card h1 { margin:0 0 6px; font-size:26px; font-weight:800; color:#0f172a; }
-      .reg-card .meta { color:#64748b; font-size:14px; margin:0 0 18px; line-height:1.6; }
-      .reg-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px 14px; }
-      .reg-grid .full { grid-column:1 / -1; }
-      .reg-card label { display:block; margin:0 0 6px; font-weight:700; font-size:13px; color:#334155; }
-      .reg-card input { width:100%; box-sizing:border-box; height:48px; padding:0 14px; border:1px solid #e2e8f0; border-radius:14px; background:#fff; font:inherit; font-size:15px; }
-      .reg-card input:focus { outline:none; border-color:#38bdf8; box-shadow:0 0 0 4px rgba(56,189,248,.18); }
-      .reg-card .btn { margin-top:16px; width:100%; height:48px; border:0; border-radius:14px; background:#0f766e; color:#fff; font:inherit; font-size:16px; font-weight:800; cursor:pointer; box-shadow:0 10px 22px rgba(15,118,110,.28); }
-      .reg-back { display:inline-block; margin-top:14px; color:#0f766e; font-weight:800; text-decoration:none; }
-      .alert { padding:12px 14px; border-radius:14px; margin-bottom:14px; font-weight:700; }
-      .alert-error { background:#fef2f2; color:#b91c1c; }
-      .wait-stage { display:flex; flex-direction:column; align-items:center; text-align:center; padding:8px 0 4px; }
-      .wait-orb { position:relative; width:112px; height:112px; margin:6px 0 18px; }
-      .wait-orb i { position:absolute; inset:0; border-radius:50%; border:2px solid rgba(14,165,233,.28); }
-      .wait-orb i:nth-child(1) { animation:waitSpin 2.8s linear infinite; border-top-color:#0284c7; }
-      .wait-orb i:nth-child(2) { inset:14px; animation:waitSpin 2.1s linear infinite reverse; border-top-color:#0f766e; }
-      .wait-orb b { position:absolute; inset:32px; border-radius:50%; background:linear-gradient(160deg,#e0f2fe,#ccfbf1); box-shadow:0 8px 20px rgba(14,165,233,.25); }
-      .wait-name { margin:0 0 8px; font-size:18px; font-weight:800; color:#0f172a; }
-      .wait-note { margin:0; color:#64748b; font-size:14px; line-height:1.7; }
-      .wait-dots { display:flex; gap:8px; margin:16px 0 4px; }
-      .wait-dots span { width:8px; height:8px; border-radius:50%; background:#0f766e; animation:waitDot 1.2s ease-in-out infinite; }
-      .wait-dots span:nth-child(2) { animation-delay:.15s; }
-      .wait-dots span:nth-child(3) { animation-delay:.3s; }
-      .wait-stage.is-in .wait-orb i { animation:none; border-color:#34d399; }
-      .wait-stage.is-in .wait-orb b { background:linear-gradient(160deg,#d1fae5,#a7f3d0); }
-      .wait-stage.is-no .wait-note { color:#b91c1c; }
-      @keyframes waitSpin { to { transform:rotate(360deg); } }
-      @keyframes waitDot { 0%,80%,100% { opacity:.25; transform:translateY(0); } 40% { opacity:1; transform:translateY(-3px); } }
-      @media (max-width:640px) { .reg-grid { grid-template-columns:1fr; } .reg-card { padding:22px 16px; } .reg-card h1 { font-size:22px; } }
+        .login-photo { background-color: <?php echo e($loginBgColor); ?>; background-image: <?php echo $loginBgCss; ?>; opacity: <?php echo $useImage ? '0.28' : '0'; ?>; }
+        .alert { padding: 12px 14px; border-radius: 14px; margin-bottom: 14px; font-weight: 700; }
+        .alert-error { background: rgba(127, 29, 29, 0.45); color: #fecaca; border: 1px solid rgba(252, 165, 165, 0.35); }
     </style>
 </head>
-<body class="reg-page <?php echo $isEn ? 'ltr' : 'rtl'; ?>">
-<div class="reg-card">
-    <div class="reg-kicker"><?php echo e($siteName); ?></div>
+<body class="login-page <?php echo $isEn ? 'ltr' : 'rtl'; ?>">
+<canvas id="loginField" class="login-field" aria-hidden="true"></canvas>
+<div class="login-photo" aria-hidden="true"></div>
+<div class="login-wrap">
+<div class="login-card" id="loginCard">
+    <span class="login-glow" id="loginGlow" aria-hidden="true"></span>
+    <span class="login-bead" aria-hidden="true"></span>
+    <div class="login-brand">
+        <img src="<?php echo e($brandSrc); ?>" alt="">
+        <h1><?php echo e($siteName); ?></h1>
+    </div>
     <?php if ($waiting): ?>
     <div class="wait-stage" id="waitStage">
         <div class="wait-orb" aria-hidden="true"><i></i><i></i><b></b></div>
@@ -196,26 +179,26 @@ $loginBgColor = function_exists('login_bg_color') ? login_bg_color($settings) : 
     <form method="post">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
         <div class="reg-grid">
-            <div>
-                <label><?php echo e($isEn ? 'Your name' : 'اسمك'); ?></label>
-                <input name="display_name" value="<?php echo e(post('display_name', '')); ?>" placeholder="<?php echo e($isEn ? 'Your name' : 'الاسم الظاهر'); ?>">
-            </div>
-            <div>
-                <label><?php echo e($isEn ? 'Username' : 'اسم الدخول'); ?></label>
-                <input class="ltr" name="username" required pattern="[A-Za-z0-9._@\-]{2,40}" value="<?php echo e(post('username', '')); ?>" placeholder="wifi@name">
-            </div>
-            <div>
-                <label><?php echo e($isEn ? 'Phone' : 'الهاتف'); ?></label>
-                <input class="ltr" name="phone" value="<?php echo e(post('phone', '')); ?>" placeholder="07xxxxxxxxx">
-            </div>
-            <div>
-                <label><?php echo e($isEn ? 'Password' : 'كلمة المرور'); ?></label>
-                <input class="ltr" type="password" name="password" required minlength="4" placeholder="••••">
-            </div>
-            <div class="full">
-                <label><?php echo e($isEn ? 'Email' : 'الإيميل'); ?></label>
-                <input class="ltr" type="email" name="email" value="<?php echo e(post('email', '')); ?>" placeholder="name@example.com">
-            </div>
+            <label class="login-float">
+                <input type="text" name="display_name" value="<?php echo e(post('display_name', '')); ?>" placeholder=" ">
+                <span><?php echo e($isEn ? 'Your name' : 'اسمك'); ?></span>
+            </label>
+            <label class="login-float">
+                <input class="ltr" type="text" name="username" required pattern="[A-Za-z0-9._@\-]{2,40}" value="<?php echo e(post('username', '')); ?>" placeholder=" ">
+                <span><?php echo e($isEn ? 'Username' : 'اسم الدخول'); ?></span>
+            </label>
+            <label class="login-float">
+                <input class="ltr" type="tel" name="phone" inputmode="tel" value="<?php echo e(post('phone', '')); ?>" placeholder=" ">
+                <span><?php echo e($isEn ? 'Phone' : 'الهاتف'); ?></span>
+            </label>
+            <label class="login-float">
+                <input class="ltr" type="password" name="password" required minlength="4" placeholder=" ">
+                <span><?php echo e($isEn ? 'Password' : 'كلمة المرور'); ?></span>
+            </label>
+            <label class="login-float full">
+                <input class="ltr" type="email" name="email" value="<?php echo e(post('email', '')); ?>" placeholder=" ">
+                <span><?php echo e($isEn ? 'Email' : 'الإيميل'); ?></span>
+            </label>
         </div>
         <button class="btn" type="submit"><?php echo e($isEn ? 'Create account' : 'إنشاء الحساب'); ?></button>
     </form>
@@ -223,5 +206,7 @@ $loginBgColor = function_exists('login_bg_color') ? login_bg_color($settings) : 
     <?php endif; ?>
     <a class="reg-back" href="login.php"><?php echo e($isEn ? 'Back to login' : 'رجوع لتسجيل الدخول'); ?></a>
 </div>
+</div>
+<script src="assets/gate-field.js?v=gate2"></script>
 </body>
 </html>

@@ -56,158 +56,21 @@ $brandSrc = ($brandIconUrl !== '') ? $brandIconUrl : 'assets/favicon.svg?v=2';
     <link rel="icon" href="assets/favicon.svg?v=2" type="image/svg+xml">
     <link rel="icon" href="assets/favicon.png?v=2" type="image/png" sizes="32x32">
     <link rel="apple-touch-icon" href="assets/apple-touch-icon.png?v=2">
-    <link rel="stylesheet" href="assets/style.css?v=login4">
-    <style>
-        html, body.login-page {
-            min-height: 100%;
-            min-height: 100dvh;
-        }
-        body.login-page {
-            margin: 0;
-            background-color: <?php echo e($loginBgColor); ?> !important;
-            background-image: <?php echo $loginBgCss; ?> !important;
-            background-size: cover !important;
-            background-position: center center !important;
-            background-repeat: no-repeat !important;
-            background-attachment: scroll !important;
-        }
-        .login-wrap {
-            min-height: 100vh;
-            min-height: 100dvh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: max(20px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
-            background: transparent;
-            position: relative;
-        }
-        .login-wrap::before {
-            content: "";
-            position: absolute;
-            inset: 0;
-            background: linear-gradient(180deg, rgba(10,16,24,0.28) 0%, rgba(10,16,24,0.55) 100%);
-            pointer-events: none;
-        }
-        .login-card {
-            position: relative;
-            z-index: 1;
-            width: min(420px, 100%);
-            background: rgba(255,255,255,0.94);
-            border: 1px solid rgba(255,255,255,0.7);
-            border-radius: 22px;
-            padding: 28px 24px 24px;
-            box-shadow: 0 24px 60px rgba(8, 14, 22, 0.28);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
-        }
-        .login-brand {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            margin: 0 0 8px;
-        }
-        .login-brand img {
-            width: 84px;
-            height: 84px;
-            border-radius: 18px;
-            flex: 0 0 84px;
-            object-fit: contain;
-            background: #1b2a38;
-        }
-        .login-card h1 {
-            margin: 0;
-            font-size: 22px;
-            font-weight: 800;
-            color: #1c2430;
-            line-height: 1.3;
-        }
-        .login-card .login-sub {
-            margin: 0 0 18px;
-            color: #6e7886;
-            font-weight: 600;
-            font-size: 14px;
-        }
-        .login-card label {
-            color: #334155;
-            font-weight: 700;
-            font-size: 13px;
-            margin-bottom: 6px;
-        }
-        .login-card input[type="text"],
-        .login-card input[type="password"] {
-            width: 100%;
-            height: 48px;
-            font-size: 16px;
-            border-radius: 14px;
-            background: #fff !important;
-            margin-bottom: 14px;
-        }
-        .login-pass-wrap {
-            position: relative;
-        }
-        .login-pass-wrap input {
-            padding-inline-end: 72px;
-            margin-bottom: 14px;
-        }
-        .login-pass-toggle {
-            position: absolute;
-            inset-inline-end: 8px;
-            top: 8px;
-            height: 32px;
-            border: 0;
-            background: #eef2f6;
-            color: #334155;
-            border-radius: 10px;
-            font: inherit;
-            font-size: 12px;
-            font-weight: 800;
-            padding: 0 10px;
-            cursor: pointer;
-        }
-        .login-card .actions {
-            margin-top: 6px;
-        }
-        .login-card .actions { display: block; }
-        .login-card .btn {
-            width: 100% !important;
-            height: 48px;
-            border-radius: 14px;
-            background: #2b6c9a !important;
-            box-shadow: 0 10px 22px rgba(43, 108, 154, 0.28);
-            font-size: 16px;
-        }
-        .login-lang {
-            width: 100%;
-            margin: 0 0 16px;
-            background: #eef2f6;
-            justify-content: center;
-        }
-        .login-lang a {
-            flex: 1;
-            text-align: center;
-            color: #5b6b7a;
-        }
-        .login-lang a.on {
-            background: #2b3640;
-            color: #fff;
-        }
-        @media (max-width: 480px) {
-            .login-card {
-                padding: 22px 16px 18px;
-                border-radius: 18px;
-            }
-            .login-card h1 { font-size: 20px; }
-        }
-        @media (min-width: 900px) {
-            body.login-page {
-                background-attachment: fixed !important;
-            }
-        }
-    </style>
+    <link rel="stylesheet" href="assets/style.css?v=login6">
+    <link rel="stylesheet" href="assets/gate.css?v=gate5">
+
 </head>
 <body class="login-page <?php echo $isEn ? 'ltr' : 'rtl'; ?>">
+<canvas id="loginField" class="login-field" aria-hidden="true"></canvas>
+<style>
+        .login-photo { background-color: <?php echo e($loginBgColor); ?>; background-image: <?php echo $loginBgCss; ?>; opacity: <?php echo $useImage ? '0.22' : '0'; ?>; }
+        .login-card .alert-error { background: rgba(127, 29, 29, 0.55); color: #fecaca; border: 1px solid rgba(252, 165, 165, 0.35); }
+    </style>
+<div class="login-photo" aria-hidden="true"></div>
 <div class="login-wrap">
-    <form class="login-card" method="post" autocomplete="on">
+    <form class="login-card" id="loginCard" method="post" autocomplete="on">
+        <span class="login-glow" id="loginGlow" aria-hidden="true"></span>
+        <span class="login-bead" aria-hidden="true"></span>
         <div class="login-brand">
             <img src="<?php echo e($brandSrc); ?>" alt="">
             <h1><?php echo e($siteName); ?></h1>
@@ -225,14 +88,16 @@ $brandSrc = ($brandIconUrl !== '') ? $brandIconUrl : 'assets/favicon.svg?v=2';
         </div>
         <input type="hidden" name="language" value="<?php echo e($lang); ?>">
 
-        <label><?php echo e($isEn ? 'Username' : 'اسم المستخدم'); ?></label>
-        <input type="text" name="username" required autofocus autocomplete="username" inputmode="text" placeholder="<?php echo e($isEn ? 'Username' : 'اسم المستخدم'); ?>">
+        <label class="login-float">
+            <input type="text" name="username" required autofocus autocomplete="username" inputmode="text" placeholder=" ">
+            <span><?php echo e($isEn ? 'Username' : 'اسم المستخدم'); ?></span>
+        </label>
 
-        <label><?php echo e(t('password')); ?></label>
-        <div class="login-pass-wrap">
-            <input id="loginPassword" type="password" name="password" required autocomplete="current-password" placeholder="<?php echo e($isEn ? 'Password' : 'كلمة المرور'); ?>">
-            <button class="login-pass-toggle" type="button" id="loginPassToggle"><?php echo e($isEn ? 'Show' : 'إظهار'); ?></button>
-        </div>
+        <label class="login-float login-pass-wrap">
+            <input id="loginPassword" type="password" name="password" required autocomplete="current-password" placeholder=" ">
+            <span><?php echo e(t('password')); ?></span>
+            <button class="login-pass-toggle" type="button" id="loginPassToggle" aria-label="<?php echo e($isEn ? 'Show password' : 'إظهار كلمة المرور'); ?>"><?php echo e($isEn ? 'Show' : 'إظهار'); ?></button>
+        </label>
         <div class="actions">
             <button class="btn" type="submit"><?php echo e(t('login')); ?></button>
         </div>
@@ -244,10 +109,8 @@ $brandSrc = ($brandIconUrl !== '') ? $brandIconUrl : 'assets/favicon.svg?v=2';
         }
         if ($regOpen):
         ?>
-        <p style="margin:14px 0 0;text-align:center;font-size:13px;color:#5b6b7a">
-            <a href="register.php" style="color:#1d4ed8;font-weight:700;text-decoration:none">
-                <?php echo e($isEn ? 'Register as agent' : 'تسجيل وكيل جديد'); ?>
-            </a>
+        <p class="login-reg">
+            <a href="register.php"><?php echo e($isEn ? 'Register as agent' : 'تسجيل وكيل جديد'); ?></a>
         </p>
         <?php endif; ?>
     </form>
@@ -256,15 +119,17 @@ $brandSrc = ($brandIconUrl !== '') ? $brandIconUrl : 'assets/favicon.svg?v=2';
 (function () {
   var btn = document.getElementById('loginPassToggle');
   var inp = document.getElementById('loginPassword');
-  if (!btn || !inp) return;
-  var show = <?php echo json_encode($isEn ? 'Show' : 'إظهار'); ?>;
-  var hide = <?php echo json_encode($isEn ? 'Hide' : 'إخفاء'); ?>;
-  btn.addEventListener('click', function () {
-    var on = inp.type === 'password';
-    inp.type = on ? 'text' : 'password';
-    btn.textContent = on ? hide : show;
-  });
-})();
+  if (btn && inp) {
+    var show = <?php echo json_encode($isEn ? 'Show' : 'إظهار'); ?>;
+    var hide = <?php echo json_encode($isEn ? 'Hide' : 'إخفاء'); ?>;
+    btn.addEventListener('click', function () {
+      var on = inp.type === 'password';
+      inp.type = on ? 'text' : 'password';
+      btn.textContent = on ? hide : show;
+    });
+  }
+
 </script>
+<script src="assets/gate-field.js?v=gate2"></script>
 </body>
 </html>
