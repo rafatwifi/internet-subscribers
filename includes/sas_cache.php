@@ -2782,17 +2782,26 @@ function sas_cache_unique_name($pdo, $base, $username)
     if ($base === '') {
         $base = $username !== '' ? $username : 'SAS';
     }
-    if (!subscriber_name_taken($pdo, $base)) {
+    $nameFree = function ($candidate) use ($pdo) {
+        try {
+            $st = $pdo->prepare('SELECT id FROM subscribers WHERE name = :n LIMIT 1');
+            $st->execute(array(':n' => $candidate));
+            return !$st->fetchColumn();
+        } catch (Exception $e) {
+            return !subscriber_name_taken($pdo, $candidate);
+        }
+    };
+    if ($nameFree($base)) {
         return $base;
     }
     $withUser = $base . ' · ' . $username;
-    if ($username !== '' && !subscriber_name_taken($pdo, $withUser)) {
+    if ($username !== '' && $nameFree($withUser)) {
         return $withUser;
     }
     $i = 2;
     while ($i < 80) {
         $try = $base . ' · ' . $i;
-        if (!subscriber_name_taken($pdo, $try)) {
+        if ($nameFree($try)) {
             return $try;
         }
         $i++;
@@ -2906,28 +2915,56 @@ function sas_cache_ensure_local($pdo, $config, $cacheRow)
         ':grace' => $graceDef,
         ':tid' => $tidIns,
     );
-    try {
-        $stmt = $pdo->prepare(
-            'INSERT INTO subscribers (name, phone, notes, preferred_plan_id, agent_user_id, sas_username, sas_user_id, grace_days, tenant_id)
-             VALUES (:name, :phone, :notes, :plan_id, :agent_id, :sas_u, :sas_id, :grace, :tid)'
-        );
-        $stmt->execute($params);
-    } catch (Exception $e) {
-        unset($params[':grace']);
+    $inserted = false;
+    $attempt = 0;
+    while (!$inserted && $attempt < 4) {
+        $attempt++;
+        $params[':name'] = $name;
         try {
             $stmt = $pdo->prepare(
-                'INSERT INTO subscribers (name, phone, notes, preferred_plan_id, agent_user_id, sas_username, sas_user_id, tenant_id)
-                 VALUES (:name, :phone, :notes, :plan_id, :agent_id, :sas_u, :sas_id, :tid)'
+                'INSERT INTO subscribers (name, phone, notes, preferred_plan_id, agent_user_id, sas_username, sas_user_id, grace_days, tenant_id)
+                 VALUES (:name, :phone, :notes, :plan_id, :agent_id, :sas_u, :sas_id, :grace, :tid)'
             );
             $stmt->execute($params);
-        } catch (Exception $e2) {
-            unset($params[':tid']);
-            $stmt = $pdo->prepare(
-                'INSERT INTO subscribers (name, phone, notes, preferred_plan_id, agent_user_id, sas_username, sas_user_id)
-                 VALUES (:name, :phone, :notes, :plan_id, :agent_id, :sas_u, :sas_id)'
-            );
-            $stmt->execute($params);
+            $inserted = true;
+        } catch (Exception $e) {
+            $dup = (strpos($e->getMessage(), '1062') !== false);
+            if (!$dup) {
+                unset($params[':grace']);
+                try {
+                    $stmt = $pdo->prepare(
+                        'INSERT INTO subscribers (name, phone, notes, preferred_plan_id, agent_user_id, sas_username, sas_user_id, tenant_id)
+                         VALUES (:name, :phone, :notes, :plan_id, :agent_id, :sas_u, :sas_id, :tid)'
+                    );
+                    $stmt->execute($params);
+                    $inserted = true;
+                } catch (Exception $e2) {
+                    $dup = (strpos($e2->getMessage(), '1062') !== false);
+                    if (!$dup) {
+                        unset($params[':tid']);
+                        try {
+                            $stmt = $pdo->prepare(
+                                'INSERT INTO subscribers (name, phone, notes, preferred_plan_id, agent_user_id, sas_username, sas_user_id)
+                                 VALUES (:name, :phone, :notes, :plan_id, :agent_id, :sas_u, :sas_id)'
+                            );
+                            $stmt->execute($params);
+                            $inserted = true;
+                        } catch (Exception $e3) {
+                            $dup = (strpos($e3->getMessage(), '1062') !== false);
+                            if (!$dup) {
+                                return array(0, 'تعذر ربط المشترك محلياً');
+                            }
+                        }
+                    }
+                }
+            }
+            if (!$inserted) {
+                $name = sas_cache_unique_name($pdo, $display . ' · ' . $username . ' · ' . ($attempt + 1), $username);
+            }
         }
+    }
+    if (!$inserted) {
+        return array(0, 'تعذر ربط المشترك محلياً');
     }
     $newId = (int) $pdo->lastInsertId();
     $pdo->prepare('UPDATE sas_users_cache SET local_subscriber_id = :lid WHERE username = :u AND tenant_id = :t')
@@ -4941,7 +4978,7 @@ function sas_dash_counts_from_cache($pdo, $scope = '')
     if (!$pdo) {
         return $out;
     }
-    $countExpr = (strpos($scope, ' IN (') !== false) ? 'COUNT(DISTINCT c.username)' : 'COUNT(*)';
+    $countExpr = 'COUNT(DISTINCT c.username)';
     try {
         $out['total'] = (int) $pdo->query('SELECT ' . $countExpr . ' FROM sas_users_cache c WHERE 1=1' . $scope)->fetchColumn();
         $out['disabled'] = (int) $pdo->query('SELECT ' . $countExpr . ' FROM sas_users_cache c WHERE c.enabled = 0' . $scope)->fetchColumn();
@@ -5034,12 +5071,12 @@ function sas_dash_live_refresh($pdo, $config, $force = false, $withSoon = null)
                 }
                 $live = $api->dashboardCounts($withSoon ? true : false);
                 if (is_array($live) && !empty($live['total'])) {
-                    foreach (array('total', 'active', 'expired', 'online', 'today') as $k) {
+                    foreach (array('active', 'expired', 'online', 'today') as $k) {
                         if (isset($live[$k]) && (int) $live[$k] >= 0) {
                             $out[$k] = (int) $live[$k];
                         }
                     }
-                    $out['source'] = 'sas';
+                    $out['source'] = 'cache+sas';
                 }
             } catch (Exception $e) {
             }
@@ -5074,7 +5111,7 @@ function sas_dash_user_counts($pdo)
         if (is_array($live)) {
             $src = isset($live['source']) ? (string) $live['source'] : '';
             if ($src === 'sas') {
-                foreach (array('total', 'active', 'online', 'expired', 'soon', 'today') as $key) {
+                foreach (array('active', 'online', 'expired', 'soon', 'today') as $key) {
                     if (isset($live[$key]) && (int) $live[$key] >= 0) {
                         $out[$key] = (int) $live[$key];
                     }
@@ -5706,7 +5743,8 @@ function sas_confirm_activation_result($api, $username, $sasUserId, $beforeTs, $
 
     // فرض انتهاء فقط عند نجاح API واضح (مو رد فاضي/_accepted وهمي)
     $apiOk = !empty($res['_verified']) || !empty($res['_api_ok']) || sas_activate_api_ok($res);
-    if ($apiOk && function_exists('sas_activate_may_force_expire') && sas_activate_may_force_expire($res)) {
+    $keepSasExpire = function_exists('subscription_period_mode') && subscription_period_mode($config) === 'sas';
+    if (!$keepSasExpire && $apiOk && function_exists('sas_activate_may_force_expire') && sas_activate_may_force_expire($res)) {
         list($confirmed, $afterRow) = sas_force_activation_expire(
             $api,
             $username,

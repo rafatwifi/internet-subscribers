@@ -1903,8 +1903,27 @@ if (!$accLocked) {
       .then(paintWallet)
       .catch(function () {});
   }
+  var subSyncBusy = false;
+  function syncSubscribersQuiet() {
+    if (dashLeaving || subSyncBusy) return;
+    subSyncBusy = true;
+    function step(reset) {
+      return fetch('sas.php?ajax=pull&force=1' + (reset ? '&reset=1' : ''), { credentials: 'same-origin', cache: 'no-store' })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (d && d.mode === 'progress') return step(false);
+          return d;
+        });
+    }
+    step(false).then(function () {
+      subSyncBusy = false;
+      loadStats();
+    }).catch(function () { subSyncBusy = false; });
+  }
   loadDash(false, true);
   loadStats();
+  setTimeout(syncSubscribersQuiet, 1500);
+  setInterval(syncSubscribersQuiet, 120000);
   // فوري من الكاش ثم تحديث حي بالخلفية — بدون ما يوقف الصفحة
   setTimeout(function () { loadPoints(); }, 40);
   setTimeout(function () { refreshWalletsLive(); }, 600);

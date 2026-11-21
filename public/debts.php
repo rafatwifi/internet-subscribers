@@ -1166,9 +1166,13 @@ render_header(t('debts'), 'debts');
             if (mode === 'pay' && inv) {
               var row = document.querySelector('tbody tr[data-invoice="' + inv + '"]');
               if (row && row.parentNode) row.parentNode.removeChild(row);
+            } else if (mode === 'pay_all' && sub) {
+              var rows = document.querySelectorAll('tbody tr[data-sub="' + sub + '"]');
+              for (var ri = 0; ri < rows.length; ri++) {
+                if (rows[ri].parentNode) rows[ri].parentNode.removeChild(rows[ri]);
+              }
             }
           } catch (eRm) {}
-          setTimeout(function () { window.location.reload(); }, 450);
         }
       }).catch(function () {
         okBtn.removeAttribute('data-busy');

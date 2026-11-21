@@ -131,11 +131,20 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     <link rel="stylesheet" href="assets/style.css?v=ui27">
     <?php
     // خلفية صورة حتى يشتغل blur — شخصي ثم نظام ثم الافتراضي
-    $glassBgSrc = 'assets/glass-bg.jpg?v=1';
+    $bgOff = ($bgMode === 'none');
+    if (!$bgOff && isset($pdo) && function_exists('admin_ui_prefs_load')) {
+        $prefsBg = admin_ui_prefs_load($pdo);
+        if (is_array($prefsBg) && !empty($prefsBg['app_bg_off'])) {
+            $bgOff = true;
+        }
+    }
+    $glassBgSrc = $bgOff ? '' : 'assets/glass-bg.jpg?v=1';
     $glassCustom = function_exists('ui_glass_bg_url')
         ? ui_glass_bg_url(isset($pdo) ? $pdo : null, is_array($settings) ? $settings : null)
         : '';
-    if ($glassCustom !== '') {
+    if ($bgOff) {
+        $glassBgSrc = '';
+    } elseif ($glassCustom !== '') {
         $glassBgSrc = $glassCustom;
     } elseif ($bgUrl !== '') {
         $glassBgSrc = $bgUrl;
@@ -246,7 +255,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             --glass-muted: #334155;
             --glass-side: rgba(12, 18, 28, 0.78);
             background-color: #1a1f2a !important;
-            background-image: url("<?php echo e($glassBgSrc); ?>") !important;
+            background-image: <?php echo $glassBgSrc !== '' ? ('url("' . e($glassBgSrc) . '")') : 'none'; ?> !important;
             background-size: cover !important;
             background-position: center center !important;
             background-repeat: no-repeat !important;
@@ -254,6 +263,37 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             color: var(--glass-ink);
         }
         body.theme-glass .bg-bubbles { display: none !important; }
+        body.theme-classic {
+            --card: #ffffff;
+            --card-solid: #ffffff;
+            --line: #e6ebf2;
+            --blur: none;
+            background: #eef2f6 !important;
+            background-image: none !important;
+        }
+        body.theme-classic .bg-bubbles { display: none !important; }
+        body.theme-classic .panel,
+        body.theme-classic .card,
+        body.theme-classic .glass-panel,
+        body.theme-classic .main-top,
+        body.theme-classic .sas-table-card,
+        body.theme-classic .modal-card,
+        body.theme-classic .cat-block,
+        body.theme-classic .sched-table-wrap,
+        body.theme-classic .msg-table-wrap,
+        body.theme-classic .debts-table-wrap,
+        body.theme-classic .chart-panel,
+        body.theme-classic .login-as-card {
+            background: #fff !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+            border-color: #e6ebf2 !important;
+        }
+        body.theme-classic .sidebar {
+            background: #2f3844 !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+        }
         body.theme-glass .app,
         body.theme-glass .main,
         body.theme-glass .container,
@@ -1011,9 +1051,9 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
     </style>
 </head>
 <body class="<?php echo $isEn ? 'ltr' : 'rtl'; ?> theme-<?php echo e($uiTheme); ?><?php
-    if ($bgMode === 'image' && $bgUrl !== '') {
+    if (empty($bgOff) && $bgMode === 'image' && $bgUrl !== '') {
         echo ' app-bg-image';
-    } elseif ($bgMode === 'color') {
+    } elseif (empty($bgOff) && $bgMode === 'color') {
         echo ' app-bg-color';
     }
 ?>">
@@ -1054,10 +1094,7 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             ?>
             <?php if ($navFtth): ?>
             <?php
-            $navSettingsHref = 'settings.php?tab=theme';
-            if ($navTidEarly > 1) {
-                $navSettingsHref = 'settings.php?tab=sas';
-            }
+            $navSettingsHref = 'settings.php?tab=general';
             $showCards = $can('cards') && !(isset($pdo) && function_exists('account_viewer_is_leaf_child') && account_viewer_is_leaf_child($pdo));
             $showPlans = $can('plans');
             $showAccountant = $can('agents') || (function_exists('is_agent_user') && is_agent_user()) || (function_exists('is_group_manager_user') && is_group_manager_user());
@@ -1129,22 +1166,9 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
                 </div>
             </details>
             <?php else: ?>
-            <?php /* —— قائمة الوكالة / الوكيل (كل خصائص المشتركين تبقى هنا) —— */ ?>
-            <?php if ($can('dashboard')): ?>
-            <a class="<?php echo $active === 'dashboard' ? 'active' : ''; ?>" href="index.php"><?php echo nav_side_ico('dashboard'); ?><?php echo e(t('dashboard')); ?></a>
-            <?php endif; ?>
-            <?php if ($can('subscribers')): ?>
-            <a class="<?php echo $active === 'sas' ? 'active' : ''; ?>" href="sas.php"><?php echo nav_side_ico('subscribers'); ?><?php echo e(t('sas')); ?></a>
-            <?php endif; ?>
             <?php
             $hideLeafCards = isset($pdo) && function_exists('account_viewer_is_leaf_child') && account_viewer_is_leaf_child($pdo);
-            if ($can('cards') && !$hideLeafCards): ?>
-            <a class="<?php echo $active === 'cards' ? 'active' : ''; ?>" href="cards.php"><?php echo nav_side_ico('cards'); ?><?php echo e($isEn ? 'Cards' : 'الكارتات'); ?></a>
-            <?php endif; ?>
-            <?php if ($can('plans')): ?>
-            <a class="<?php echo $active === 'plans' ? 'active' : ''; ?>" href="plans.php"><?php echo nav_side_ico('plans'); ?><?php echo e(t('plans')); ?></a>
-            <?php endif; ?>
-            <?php
+            $showCardsNav = $can('cards') && !$hideLeafCards;
             $navChildAgents = 0;
             if (isset($pdo) && function_exists('admin_user_child_count') && function_exists('current_admin')) {
                 $navMe = current_admin();
@@ -1154,61 +1178,110 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             }
             $accSeesAgents = function_exists('is_accountant_user') && is_accountant_user()
                 && function_exists('user_boss_has_downline') && user_boss_has_downline(isset($pdo) ? $pdo : null);
-            if (($can('agents') && $navChildAgents > 0) || $accSeesAgents): ?>
-            <a class="<?php echo $active === 'agents' ? 'active' : ''; ?>" href="agents.php"><?php echo nav_side_ico('agents'); ?><?php echo e($isEn ? 'Agents' : 'الوكلاء'); ?></a>
-            <?php endif; ?>
-            <?php if ($can('agents') || (function_exists('is_agent_user') && is_agent_user()) || (function_exists('is_group_manager_user') && is_group_manager_user())): ?>
-            <a class="<?php echo $active === 'accountants' ? 'active' : ''; ?>" href="agents.php?view=accountant"><?php echo nav_side_ico('accountants'); ?><?php echo e($isEn ? 'Accountant' : 'المحاسب'); ?></a>
-            <?php endif; ?>
-            <?php
-            $navFtth = isset($pdo) && function_exists('tenant_is_ftth') && tenant_is_ftth($pdo);
-            if ($navFtth && ($can('subscribers') || $can('dashboard'))): ?>
-            <a class="<?php echo $active === 'cabinets' ? 'active' : ''; ?>" href="cabinets.php"><?php echo nav_side_ico('cabinets'); ?><?php echo e($isEn ? 'Cabinets' : 'الكابينات'); ?></a>
-            <?php endif; ?>
-            <?php
+            $showAgentsNav = ($can('agents') && $navChildAgents > 0) || $accSeesAgents;
+            $showAccountantNav = $can('agents') || (function_exists('is_agent_user') && is_agent_user()) || (function_exists('is_group_manager_user') && is_group_manager_user());
+            $navCab = isset($pdo) && function_exists('tenant_is_ftth') && tenant_is_ftth($pdo);
             $navRentOn = !function_exists('rental_system_is_on') || rental_system_is_on();
-            if ($can('rentals') && !$navFtth && $navRentOn): ?>
-            <a class="<?php echo $active === 'rentals' ? 'active' : ''; ?>" href="rentals.php"><?php echo nav_side_ico('rentals'); ?><?php echo e($isEn ? 'Rentals' : 'الإيجار'); ?></a>
-            <?php endif; ?>
-            <?php if ($can('debts') && !$navFtth): ?>
-            <a class="<?php echo $active === 'debts' ? 'active' : ''; ?>" href="debts.php"><?php echo nav_side_ico('debts'); ?><?php echo e(t('debts')); ?></a>
+            $showRentNav = $can('rentals') && !$navCab && $navRentOn;
+            $showDebtsNav = $can('debts') && !$navCab;
+            $showPlansNav = $can('plans');
+            $showReportsNav = $can('reports');
+            $showMovesNav = $can('subscriptions');
+            $showMsgNav = $can('messages');
+            $showLogsNav = $can('logs');
+            $showImportNav = $can('subscribers');
+            $showSettingsNav = $can('settings') || $can('users') || $can('plans') || $can('backup');
+            $showInvoicesNav = $navTidEarly > 1;
+            $showBillingNav = $navTidEarly > 1;
+            $showMoneyNav = $showPlansNav || $showAccountantNav || $showReportsNav || $showDebtsNav;
+            $showOpsNav = $showMovesNav || $showMsgNav || $showLogsNav || $showRentNav || ($navCab && ($can('subscribers') || $can('dashboard')));
+            $showSettingsDrop = $showSettingsNav || $showImportNav;
+            $navSettingsHref = 'settings.php?tab=general';
+            $moneyOpen = in_array($active, array('plans', 'accountants', 'reports', 'profit', 'debts'), true);
+            $opsOpen = in_array($active, array('subscriptions', 'messages', 'logs', 'rentals', 'cabinets'), true);
+            $settingsOpenWifi = ($settingsActive && $active !== 'schedule') || $active === 'import_export';
+            $companyOpenWifi = in_array($active, array('company', 'billing'), true);
+            $navTid = $navTidEarly;
+            ?>
+            <?php if ($can('dashboard')): ?>
+            <a class="<?php echo $active === 'dashboard' ? 'active' : ''; ?>" href="index.php"><?php echo nav_side_ico('dashboard'); ?><?php echo e(t('dashboard')); ?></a>
             <?php endif; ?>
             <?php if ($can('subscribers')): ?>
-            <a class="<?php echo $active === 'import_export' ? 'active' : ''; ?>" href="import_export.php"><?php echo nav_side_ico('import_export'); ?><?php echo e($isEn ? 'Import & Export' : 'استيراد وتصدير'); ?></a>
+            <a class="<?php echo $active === 'sas' ? 'active' : ''; ?>" href="sas.php"><?php echo nav_side_ico('subscribers'); ?><?php echo e(t('sas')); ?></a>
             <?php endif; ?>
-            <?php if ($can('subscriptions')): ?>
-            <a class="<?php echo $active === 'subscriptions' ? 'active' : ''; ?>" href="subscriptions.php"><?php echo nav_side_ico('movements'); ?><?php echo e(t('movements')); ?></a>
+            <?php if ($showCardsNav): ?>
+            <a class="<?php echo $active === 'cards' ? 'active' : ''; ?>" href="cards.php"><?php echo nav_side_ico('cards'); ?><?php echo e($isEn ? 'Cards' : 'الكروت'); ?></a>
             <?php endif; ?>
-            <?php if ($can('messages')): ?>
-            <a class="<?php echo $active === 'messages' ? 'active' : ''; ?>" href="messages.php"><?php echo nav_side_ico('messages'); ?><?php echo e(t('messages')); ?></a>
+            <?php if ($showAgentsNav): ?>
+            <a class="<?php echo $active === 'agents' ? 'active' : ''; ?>" href="agents.php"><?php echo nav_side_ico('agents'); ?><?php echo e($isEn ? 'Agents' : 'الوكلاء'); ?></a>
             <?php endif; ?>
-            <?php if ($can('reports')): ?>
-            <a class="<?php echo $active === 'reports' ? 'active' : ''; ?>" href="reports.php"><?php echo nav_side_ico('reports'); ?><?php echo e(t('reports')); ?></a>
-            <a class="<?php echo $active === 'profit' ? 'active' : ''; ?>" href="profit_report.php"><?php echo nav_side_ico('profit'); ?><?php echo e($isEn ? 'Profits' : 'الأرباح'); ?></a>
-            <?php endif; ?>
-            <?php if ($can('logs')): ?>
-            <a class="<?php echo $active === 'logs' ? 'active' : ''; ?>" href="logs.php"><?php echo nav_side_ico('logs'); ?><?php echo e($isEn ? 'Log' : 'اللوك'); ?></a>
-            <?php endif; ?>
-            <?php if ($can('settings') || $can('users') || $can('plans') || $can('backup')):
-                $navSettingsHref = 'settings.php?tab=theme';
-                if (function_exists('current_tenant_id') && (int) current_tenant_id() > 1) {
-                    $navSettingsHref = 'settings.php?tab=sas';
-                } elseif (function_exists('is_super_admin_user') && is_super_admin_user()) {
-                    $navSettingsHref = 'settings.php?tab=general';
-                }
-            ?>
-            <a class="<?php echo $settingsActive && $active !== 'schedule' ? 'active' : ''; ?>" href="<?php echo e($navSettingsHref); ?>"><?php echo nav_side_ico('settings'); ?><?php echo e(t('settings')); ?></a>
-            <?php endif; ?>
-            <?php if (function_exists('current_tenant_id') && (int) current_tenant_id() > 1): ?>
+            <?php if ($showInvoicesNav): ?>
             <a class="<?php echo $active === 'invoices' ? 'active' : ''; ?>" href="settings.php?tab=invoices"><?php echo nav_side_ico('invoices'); ?><?php echo e($isEn ? 'Invoices' : 'الفواتير'); ?></a>
             <?php endif; ?>
-            <a class="<?php echo $active === 'company' ? 'active' : ''; ?>" href="company.php"><?php echo nav_side_ico('company'); ?><?php echo e($isEn ? 'Company' : 'عن الشركة'); ?></a>
-            <?php
-            $navTid = $navTidEarly;
-            if ($navTid > 1):
-            ?>
-            <a class="<?php echo $active === 'billing' ? 'active' : ''; ?>" href="billing.php"><?php echo nav_side_ico('billing'); ?><?php echo e($isEn ? 'Billing' : 'الاشتراك'); ?></a>
+            <?php if ($showMoneyNav): ?>
+            <details class="side-drop<?php echo $moneyOpen ? ' is-on' : ''; ?>"<?php echo $moneyOpen ? ' open' : ''; ?>>
+                <summary><?php echo nav_side_ico('reports'); ?><span><?php echo e($isEn ? 'Accounts' : 'الحسابات'); ?></span><i class="nav-caret" aria-hidden="true"></i></summary>
+                <div class="side-sub">
+                    <?php if ($showPlansNav): ?>
+                    <a class="<?php echo $active === 'plans' ? 'active' : ''; ?>" href="plans.php"><?php echo nav_side_ico('plans'); ?><?php echo e(t('plans')); ?></a>
+                    <?php endif; ?>
+                    <?php if ($showAccountantNav): ?>
+                    <a class="<?php echo $active === 'accountants' ? 'active' : ''; ?>" href="agents.php?view=accountant"><?php echo nav_side_ico('accountants'); ?><?php echo e($isEn ? 'Accountant' : 'المحاسب'); ?></a>
+                    <?php endif; ?>
+                    <?php if ($showReportsNav): ?>
+                    <a class="<?php echo $active === 'reports' ? 'active' : ''; ?>" href="reports.php"><?php echo nav_side_ico('reports'); ?><?php echo e(t('reports')); ?></a>
+                    <a class="<?php echo $active === 'profit' ? 'active' : ''; ?>" href="profit_report.php"><?php echo nav_side_ico('profit'); ?><?php echo e($isEn ? 'Profits' : 'الأرباح'); ?></a>
+                    <?php endif; ?>
+                    <?php if ($showDebtsNav): ?>
+                    <a class="<?php echo $active === 'debts' ? 'active' : ''; ?>" href="debts.php"><?php echo nav_side_ico('debts'); ?><?php echo e(t('debts')); ?></a>
+                    <?php endif; ?>
+                </div>
+            </details>
             <?php endif; ?>
+            <?php if ($showOpsNav): ?>
+            <details class="side-drop<?php echo $opsOpen ? ' is-on' : ''; ?>"<?php echo $opsOpen ? ' open' : ''; ?>>
+                <summary><?php echo nav_side_ico('movements'); ?><span><?php echo e($isEn ? 'Follow-up' : 'المتابعة'); ?></span><i class="nav-caret" aria-hidden="true"></i></summary>
+                <div class="side-sub">
+                    <?php if ($navCab && ($can('subscribers') || $can('dashboard'))): ?>
+                    <a class="<?php echo $active === 'cabinets' ? 'active' : ''; ?>" href="cabinets.php"><?php echo nav_side_ico('cabinets'); ?><?php echo e($isEn ? 'Cabinets' : 'الكابينات'); ?></a>
+                    <?php endif; ?>
+                    <?php if ($showMovesNav): ?>
+                    <a class="<?php echo $active === 'subscriptions' ? 'active' : ''; ?>" href="subscriptions.php"><?php echo nav_side_ico('movements'); ?><?php echo e(t('movements')); ?></a>
+                    <?php endif; ?>
+                    <?php if ($showMsgNav): ?>
+                    <a class="<?php echo $active === 'messages' ? 'active' : ''; ?>" href="messages.php"><?php echo nav_side_ico('messages'); ?><?php echo e(t('messages')); ?></a>
+                    <?php endif; ?>
+                    <?php if ($showLogsNav): ?>
+                    <a class="<?php echo $active === 'logs' ? 'active' : ''; ?>" href="logs.php"><?php echo nav_side_ico('logs'); ?><?php echo e($isEn ? 'Log' : 'اللوك'); ?></a>
+                    <?php endif; ?>
+                    <?php if ($showRentNav): ?>
+                    <a class="<?php echo $active === 'rentals' ? 'active' : ''; ?>" href="rentals.php"><?php echo nav_side_ico('rentals'); ?><?php echo e($isEn ? 'Rentals' : 'الإيجار'); ?></a>
+                    <?php endif; ?>
+                </div>
+            </details>
+            <?php endif; ?>
+            <?php if ($showSettingsDrop): ?>
+            <details class="side-drop<?php echo $settingsOpenWifi ? ' is-on' : ''; ?>"<?php echo $settingsOpenWifi ? ' open' : ''; ?>>
+                <summary><?php echo nav_side_ico('settings'); ?><span><?php echo e(t('settings')); ?></span><i class="nav-caret" aria-hidden="true"></i></summary>
+                <div class="side-sub">
+                    <?php if ($showSettingsNav): ?>
+                    <a class="<?php echo $settingsActive && $active !== 'schedule' ? 'active' : ''; ?>" href="<?php echo e($navSettingsHref); ?>"><?php echo nav_side_ico('settings'); ?><?php echo e(t('settings')); ?></a>
+                    <?php endif; ?>
+                    <?php if ($showImportNav): ?>
+                    <a class="<?php echo $active === 'import_export' ? 'active' : ''; ?>" href="import_export.php"><?php echo nav_side_ico('import_export'); ?><?php echo e($isEn ? 'Import & Export' : 'استيراد وتصدير'); ?></a>
+                    <?php endif; ?>
+                </div>
+            </details>
+            <?php endif; ?>
+            <details class="side-drop<?php echo $companyOpenWifi ? ' is-on' : ''; ?>"<?php echo $companyOpenWifi ? ' open' : ''; ?>>
+                <summary><?php echo nav_side_ico('company'); ?><span><?php echo e($isEn ? 'About company' : 'عن الشركة'); ?></span><i class="nav-caret" aria-hidden="true"></i></summary>
+                <div class="side-sub">
+                    <a class="<?php echo $active === 'company' ? 'active' : ''; ?>" href="company.php"><?php echo nav_side_ico('company'); ?><?php echo e($isEn ? 'About company' : 'عن الشركة'); ?></a>
+                    <?php if ($showBillingNav): ?>
+                    <a class="<?php echo $active === 'billing' ? 'active' : ''; ?>" href="billing.php"><?php echo nav_side_ico('billing'); ?><?php echo e($isEn ? 'Subscription' : 'الاشتراك'); ?></a>
+                    <?php endif; ?>
+                </div>
+            </details>
             <?php
             $hideSideLogout = (function_exists('is_agent_user') && is_agent_user()) || $navTid > 1;
             if (!$hideSideLogout):
@@ -1883,7 +1956,7 @@ window.placeCornerToast = function (el) {
     set('right', 'auto');
   }
 };
-window.showCornerToast = function (msg, kind) {
+window.showCornerToast = function (msg, kind, href) {
   var text = String(msg || '').replace(/^\s+|\s+$/g, '');
   if (!text) return;
   var old = document.getElementById('appCornerToast');
@@ -1895,6 +1968,16 @@ window.showCornerToast = function (msg, kind) {
   var span = document.createElement('span');
   span.className = 'sas-toast-text';
   span.textContent = text;
+  if (href) {
+    var link = document.createElement('a');
+    link.href = String(href);
+    link.textContent = <?php echo json_encode($isEn ? 'Open invoice' : 'فتح الفاتورة'); ?>;
+    link.style.color = 'inherit';
+    link.style.fontWeight = '800';
+    link.style.marginInlineStart = '8px';
+    link.addEventListener('click', function (ev) { ev.stopPropagation(); });
+    span.appendChild(link);
+  }
   el.appendChild(span);
   document.body.appendChild(el);
   if (window.placeCornerToast) window.placeCornerToast(el);
@@ -1908,8 +1991,31 @@ window.showCornerToast = function (msg, kind) {
     }, 820);
   };
   el.addEventListener('click', closeEl);
-  setTimeout(closeEl, 3000);
+  setTimeout(closeEl, href ? 8000 : 3000);
 };
+</script>
+<?php
+$actSlipHref = '';
+if (isset($_GET['activated']) && (string) $_GET['activated'] === '1' && isset($_GET['slip'])) {
+    $actSlipRaw = (string) $_GET['slip'];
+    if (preg_match('#^slip\\.php\\?k=[a-f0-9]{16,64}$#', $actSlipRaw)) {
+        $actSlipHref = $actSlipRaw;
+    }
+}
+if (isset($_GET['activated']) && (string) $_GET['activated'] === '1'):
+?>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  if (window.showCornerToast) {
+    window.showCornerToast(<?php echo json_encode($isEn ? 'Activated' : 'تم التفعيل'); ?>, 'ok', <?php echo json_encode($actSlipHref); ?>);
+  }
+  try {
+    if (window.history && history.replaceState) history.replaceState(null, '', 'index.php');
+  } catch (eAct) {}
+});
+</script>
+<?php endif; ?>
+<script>
 (function () {
   var wait = <?php echo !empty($_SESSION['wa_resend_wait']) ? 'true' : 'false'; ?>;
   try {

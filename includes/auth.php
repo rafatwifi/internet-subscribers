@@ -1513,13 +1513,17 @@ function apply_admin_work_prefs_to_config(&$config, &$settings, $pdo)
         }
     }
     if (isset($prefs['subscription_period_mode'])) {
-        $mode = ((string) $prefs['subscription_period_mode'] === 'calendar_month')
-            ? 'calendar_month'
+        $mode = function_exists('subscription_period_normalize')
+            ? subscription_period_normalize($prefs['subscription_period_mode'])
             : 'days_30';
         $config['subscription_period_mode'] = $mode;
         if (is_array($settings)) {
             $settings['subscription_period_mode'] = $mode;
         }
+    }
+    if (isset($prefs['activate_after'])) {
+        $after = ((string) $prefs['activate_after'] === 'stay') ? 'stay' : 'dashboard';
+        $config['activate_after'] = $after;
     }
     if (isset($prefs['language']) && ($prefs['language'] === 'en' || $prefs['language'] === 'ar')) {
         if (is_array($settings)) {
@@ -2001,6 +2005,12 @@ function portal_agency_reports_to_me($pdo, $theirRow)
             return true;
         }
         if ($pn !== '' && isset($myNames[$pn])) {
+            return true;
+        }
+    }
+    if ($myUser !== '' && strlen($myUser) >= 3) {
+        $childLogin = isset($theirRow['username']) ? strtolower(trim((string) $theirRow['username'])) : '';
+        if ($childLogin !== '' && strpos($childLogin, $myUser . '@') === 0) {
             return true;
         }
     }

@@ -1250,11 +1250,12 @@ function invoice_render_tab($tab, $tenantId, $isEn)
     ?>
     <script>document.body.classList.add('inv-fit');</script>
     <style>
-    body.inv-fit { overflow: hidden; }
-    body.inv-fit .app { height: 100vh; overflow: hidden; }
-    body.inv-fit .main { height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
+    body.inv-fit { overflow: auto; }
+    body.inv-fit .app { min-height: 100vh; height: auto; overflow: visible; }
+    body.inv-fit .main { min-height: 100vh; height: auto; overflow: visible; display: flex; flex-direction: column; }
     body.inv-fit .sidebar { max-height: 100vh; overflow: auto; }
-    body.inv-fit .container { flex: 1; min-height: 0; margin: 8px 12px 10px; overflow: hidden; display: flex; flex-direction: column; }
+    body.inv-fit .container { margin: 16px; overflow: visible; display: block; }
+    body.inv-fit .inv-app.is-edit { height: calc(100vh - 70px); overflow: hidden; }
     body.inv-fit .footer { display: none; }
     body.inv-fit [hidden] { display: none !important; }
     .inv-app { flex: 1; min-height: 0; width: 100%; display: flex; flex-direction: column; }
@@ -1266,7 +1267,56 @@ function invoice_render_tab($tab, $tenantId, $isEn)
     .inv-gbar-acts, .inv-top-acts { display: flex; gap: 6px; margin-inline-start: auto; }
     .inv-name { border: 0; background: rgba(255,255,255,.94); font: inherit; font-weight: 800; font-size: 16px; min-width: 0; flex: 1; color: inherit; border-radius: 12px; padding: 6px 10px; box-shadow: 0 6px 16px rgba(15,23,42,.06); }
     .inv-len { color: #0f766e; font-weight: 800; font-size: 12px; white-space: nowrap; background: rgba(255,255,255,.94); border-radius: 999px; padding: 6px 10px; box-shadow: 0 6px 16px rgba(15,23,42,.06); }
-    .inv-cards { flex: 1 1 auto; min-height: 240px; display: grid; grid-template-columns: repeat(auto-fill,minmax(190px,1fr)); gap: 12px; padding: 14px; overflow: auto; align-content: start; }
+    .inv-gallery { width: 100%; align-items: stretch; }
+    .inv-board { width: 100%; box-sizing: border-box; background: #fff; border: 1px solid #e7edf4; border-radius: 22px; box-shadow: 0 20px 50px rgba(15,23,42,.06); overflow: hidden; }
+    .inv-board-head { display: flex; align-items: center; gap: 12px; padding: 16px 18px; }
+    .inv-board-head h2 { margin: 0; font-size: 22px; font-weight: 800; letter-spacing: -.03em; color: #0f172a; }
+    .inv-count { color: #94a3b8; font-size: 13px; font-weight: 800; }
+    .inv-search { margin-inline-start: auto; width: min(340px, 48vw); height: 42px; border-radius: 999px; border: 1px solid #e6ebf2; background: #f8fafc; padding: 0 16px; font: inherit; font-weight: 700; color: #0f172a; outline: none; }
+    .inv-search:focus { border-color: #0f766e; background: #fff; box-shadow: 0 0 0 4px rgba(15,118,110,.12); }
+    .inv-table-wrap { overflow: auto; max-height: calc(100vh - 230px); }
+    .inv-ledger { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-size: 14px; }
+    .inv-ledger th:nth-child(1), .inv-ledger td:nth-child(1) { width: 12%; }
+    .inv-ledger th:nth-child(2), .inv-ledger td:nth-child(2) { width: 22%; }
+    .inv-ledger th:nth-child(3), .inv-ledger td:nth-child(3) { width: 14%; }
+    .inv-ledger th:nth-child(4), .inv-ledger td:nth-child(4) { width: 12%; }
+    .inv-ledger th:nth-child(5), .inv-ledger td:nth-child(5) { width: 16%; }
+    .inv-ledger th:nth-child(6), .inv-ledger td:nth-child(6) { width: 12%; }
+    .inv-ledger th:nth-child(7), .inv-ledger td:nth-child(7) { width: 22%; }
+    .inv-ledger td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .inv-ledger th { position: sticky; top: 0; z-index: 1; background: #f8fafc; color: #64748b; font-size: 11px; font-weight: 800; letter-spacing: .06em; text-align: start; padding: 11px 16px; border-bottom: 1px solid #e8edf3; }
+    .inv-ledger td { padding: 13px 16px; border-bottom: 1px solid #f3f6f9; color: #0f172a; vertical-align: middle; }
+    .inv-ledger tbody tr { cursor: pointer; transition: background .16s ease; }
+    .inv-ledger tbody tr:hover { background: #f8fafc; }
+    .inv-ledger tbody tr.is-on { background: #f0fdfa; }
+    .inv-ledger .num { font-weight: 800; letter-spacing: .01em; }
+    .inv-ledger .amt { font-weight: 800; font-variant-numeric: tabular-nums; }
+    .inv-ledger .muted { color: #64748b; font-weight: 700; }
+    .inv-mini-acts { display: flex; gap: 6px; justify-content: flex-end; }
+    .inv-mini-acts button, .inv-mini-acts a { height: 32px; padding: 0 12px; border-radius: 999px; border: 1px solid #e6ebf2; background: #fff; color: #0f172a; font: inherit; font-size: 12px; font-weight: 800; text-decoration: none; cursor: pointer; }
+    .inv-mini-acts .is-main { background: #0f172a; color: #fff; border-color: #0f172a; }
+    .inv-sheet { position: fixed; top: 0; left: 0; right: 0; bottom: 0; width: 100vw; height: 100vh; z-index: 100080; background: rgba(15,23,42,.45); display: flex; align-items: center; justify-content: center; padding: 20px; box-sizing: border-box; direction: ltr; }
+    .inv-sheet[hidden] { display: none !important; }
+    .inv-sheet-card { width: min(440px, calc(100vw - 32px)); height: min(90vh, 860px); margin: 0; background: #fff; display: flex; flex-direction: column; border-radius: 22px; overflow: hidden; box-shadow: 0 30px 80px rgba(15,23,42,.28); direction: rtl; }
+    .inv-sheet-bar { display: flex; align-items: center; gap: 8px; padding: 14px 16px; border-bottom: 1px solid #eef2f6; }
+    .inv-sheet-bar button { height: 32px; padding: 0 12px; border-radius: 999px; border: 1px solid #e6ebf2; background: #fff; color: #0f172a; font: inherit; font-size: 12px; font-weight: 800; cursor: pointer; }
+    .inv-sheet-bar form { margin: 0; }
+    .inv-sheet-bar form button { background: #0f172a; color: #fff; border-color: #0f172a; }
+    .inv-sheet-bar strong { font-size: 16px; }
+    .inv-sheet-bar .grow { flex: 1; }
+    .inv-sheet-card iframe { flex: 1; width: 100%; border: 0; background: #f4f7fb; }
+    .inv-sheet-bar form { margin: 0; }
+    .inv-x { width: 36px; height: 36px; border: 0; border-radius: 999px; background: #f1f5f9; font-size: 18px; cursor: pointer; }
+    .inv-empty-cell { text-align: center; color: #94a3b8; font-weight: 700; padding: 36px 16px !important; }
+    @media (max-width: 760px) {
+      .inv-board-head { flex-wrap: wrap; }
+      .inv-search { width: 100%; margin-inline-start: 0; }
+      .inv-col-phone, .inv-col-who { display: none; }
+      .inv-table-wrap { max-height: none; }
+      .inv-sheet-card { width: 100%; }
+      .inv-ledger td, .inv-ledger th { padding: 11px 10px; }
+    }
+    .inv-cards { flex: 0 0 auto; max-height: none; min-height: 0; display: grid; grid-template-columns: repeat(auto-fill,minmax(180px,1fr)); gap: 10px; padding: 12px; overflow: visible; align-content: start; }
     .inv-card { position: relative; overflow: hidden; background: #fff; border: 1px solid #e6ebf2; border-radius: 18px; padding: 10px; cursor: pointer; box-shadow: 0 10px 28px rgba(15,23,42,.05); text-align: center; }
     .inv-card:hover { border-color: #99f6e4; transform: translateY(-2px); }
     .inv-card strong { display: block; margin-top: 8px; }
@@ -1446,46 +1496,171 @@ function invoice_render_tab($tab, $tenantId, $isEn)
     </style>
     <div class="inv-app" id="invApp">
         <section class="inv-gallery" id="invGallery">
-            <?php $issued = function_exists('invoice_slips_visible') ? invoice_slips_visible($tenantId) : array(); ?>
+            <?php
+            $issued = function_exists('invoice_slips_visible') ? invoice_slips_visible($tenantId) : array();
+            $issuedN = 0;
+            if (is_array($issued)) {
+                foreach ($issued as $slipCountRow) {
+                    if (is_array($slipCountRow) && !empty($slipCountRow['token'])) {
+                        $issuedN++;
+                    }
+                }
+            }
+            ?>
+            <div class="inv-board" id="invBoard">
+                <div class="inv-board-head">
+                    <h2><?php echo e($isEn ? 'Invoices' : 'الفواتير'); ?></h2>
+                    <span class="inv-count" id="invSlipCount"><?php echo (int) $issuedN; ?></span>
+                    <input type="search" class="inv-search" id="invSlipQ" placeholder="<?php echo e($isEn ? 'Search name, number, phone' : 'بحث بالاسم أو الرقم أو الهاتف'); ?>" autocomplete="off">
+                </div>
+                <div class="inv-table-wrap">
+                    <table class="inv-ledger" id="invLedger">
+                        <thead>
+                            <tr>
+                                <th><?php echo e($isEn ? 'Number' : 'الرقم'); ?></th>
+                                <th><?php echo e($isEn ? 'Subscriber' : 'المشترك'); ?></th>
+                                <th class="inv-col-phone"><?php echo e($isEn ? 'Phone' : 'الهاتف'); ?></th>
+                                <th><?php echo e($isEn ? 'Amount' : 'المبلغ'); ?></th>
+                                <th><?php echo e($isEn ? 'Date' : 'التاريخ'); ?></th>
+                                <th class="inv-col-who"><?php echo e($isEn ? 'By' : 'بواسطة'); ?></th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="invSlipBody">
+                        <?php if (!$issuedN): ?>
+                            <tr class="inv-empty-row"><td class="inv-empty-cell" colspan="7"><?php echo e($isEn ? 'No invoices yet' : 'ماكو فواتير صادرة بعد'); ?></td></tr>
+                        <?php endif; ?>
+                        <?php foreach ($issued as $slipRow):
+                            if (!is_array($slipRow)) continue;
+                            $tok = isset($slipRow['token']) ? preg_replace('/[^a-f0-9]/', '', strtolower((string) $slipRow['token'])) : '';
+                            if ($tok === '') continue;
+                            $slipNo = isset($slipRow['number']) ? (string) $slipRow['number'] : '';
+                            $slipName = isset($slipRow['name']) ? (string) $slipRow['name'] : '';
+                            $slipAmt = isset($slipRow['amount']) ? trim((string) $slipRow['amount']) : '';
+                            $slipWhen = isset($slipRow['created_at']) ? (string) $slipRow['created_at'] : '';
+                            $slipAgent = isset($slipRow['issuer_name']) ? trim((string) $slipRow['issuer_name']) : '';
+                            $slipPhone = isset($slipRow['phone']) ? trim((string) $slipRow['phone']) : '';
+                            $hay = strtolower($slipNo . ' ' . $slipName . ' ' . $slipPhone . ' ' . $slipAmt . ' ' . $slipWhen . ' ' . $slipAgent);
+                            ?>
+                            <tr data-tok="<?php echo e($tok); ?>" data-no="<?php echo e($slipNo !== '' ? $slipNo : $tok); ?>" data-q="<?php echo e($hay); ?>">
+                                <td class="num ltr"><?php echo e($slipNo !== '' ? $slipNo : $tok); ?></td>
+                                <td><?php echo e($slipName !== '' ? $slipName : '—'); ?></td>
+                                <td class="inv-col-phone ltr muted"><?php echo e($slipPhone !== '' ? $slipPhone : '—'); ?></td>
+                                <td class="amt"><?php echo e($slipAmt !== '' ? $slipAmt : '—'); ?></td>
+                                <td class="muted ltr"><?php echo e($slipWhen !== '' ? $slipWhen : '—'); ?></td>
+                                <td class="inv-col-who muted"><?php echo e($slipAgent !== '' ? $slipAgent : '—'); ?></td>
+                                <td>
+                                    <div class="inv-mini-acts">
+                                        <button type="button" data-act="view"><?php echo e($isEn ? 'View' : 'عرض'); ?></button>
+                                        <button type="button" data-act="print"><?php echo e($isEn ? 'Print' : 'طباعة'); ?></button>
+                                        <button type="button" class="is-main" data-act="send"><?php echo e($isEn ? 'Send' : 'إرسال'); ?></button>
+                                    </div>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="inv-sheet" id="invSheet" hidden>
+                <div class="inv-sheet-card" role="dialog" aria-modal="true">
+                    <div class="inv-sheet-bar">
+                        <strong id="invSheetTitle"><?php echo e($isEn ? 'Invoice' : 'فاتورة'); ?></strong>
+                        <span class="grow"></span>
+                        <a class="inv-mini-acts" id="invSlipOpen" href="slip.php" target="_blank"><span style="display:inline-flex;align-items:center;height:32px;padding:0 12px;border-radius:999px;border:1px solid #e6ebf2;font-weight:800;font-size:12px;color:#0f172a;text-decoration:none"><?php echo e($isEn ? 'Open' : 'فتح'); ?></span></a>
+                        <button type="button" id="invSlipPrint"><?php echo e($isEn ? 'Print' : 'طباعة'); ?></button>
+                        <form method="post" action="settings.php?tab=invoices" id="invSlipSend">
+                            <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                            <input type="hidden" name="section" value="invoice_send">
+                            <input type="hidden" name="slip_token" id="invSlipToken" value="">
+                            <button class="is-main" type="submit"><?php echo e($isEn ? 'Send' : 'إرسال'); ?></button>
+                        </form>
+                        <button type="button" class="inv-x" id="invSheetClose" aria-label="<?php echo e($isEn ? 'Close' : 'إغلاق'); ?>">×</button>
+                    </div>
+                    <iframe id="invSlipFrame" title="<?php echo e($isEn ? 'Invoice preview' : 'استعراض الفاتورة'); ?>"></iframe>
+                </div>
+            </div>
+            <script>
+            (function () {
+              var body = document.getElementById('invSlipBody');
+              var frame = document.getElementById('invSlipFrame');
+              var sheet = document.getElementById('invSheet');
+              var q = document.getElementById('invSlipQ');
+              var openA = document.getElementById('invSlipOpen');
+              var printB = document.getElementById('invSlipPrint');
+              var token = document.getElementById('invSlipToken');
+              var title = document.getElementById('invSheetTitle');
+              var count = document.getElementById('invSlipCount');
+              if (!body || !frame || !sheet) return;
+              var current = '';
+              function rows() { return body.querySelectorAll('tr[data-tok]'); }
+              function openSheet(tok, no) {
+                if (sheet.parentNode !== document.body) document.body.appendChild(sheet);
+                current = tok || '';
+                var list = rows();
+                for (var i = 0; i < list.length; i++) {
+                  list[i].classList.toggle('is-on', list[i].getAttribute('data-tok') === current);
+                }
+                if (!current) return;
+                frame.src = 'slip.php?k=' + encodeURIComponent(current);
+                if (openA) openA.href = 'slip.php?k=' + encodeURIComponent(current);
+                if (token) token.value = current;
+                if (title) title.textContent = no || current;
+                sheet.hidden = false;
+              }
+              function closeSheet() { sheet.hidden = true; }
+              body.addEventListener('click', function (ev) {
+                var btn = ev.target && ev.target.closest ? ev.target.closest('[data-act]') : null;
+                var row = ev.target && ev.target.closest ? ev.target.closest('tr[data-tok]') : null;
+                if (!row) return;
+                var tok = row.getAttribute('data-tok') || '';
+                var no = row.getAttribute('data-no') || tok;
+                if (btn) {
+                  ev.stopPropagation();
+                  var act = btn.getAttribute('data-act');
+                  if (act === 'print') {
+                    openSheet(tok, no);
+                    setTimeout(function () {
+                      try { if (frame.contentWindow) frame.contentWindow.print(); } catch (e) {}
+                    }, 500);
+                    return;
+                  }
+                  if (act === 'send') {
+                    if (token) token.value = tok;
+                    var form = document.getElementById('invSlipSend');
+                    if (form) form.submit();
+                    return;
+                  }
+                }
+                openSheet(tok, no);
+              });
+              if (q) {
+                q.addEventListener('input', function () {
+                  var needle = (q.value || '').replace(/^\s+|\s+$/g, '').toLowerCase();
+                  var list = rows();
+                  var n = 0;
+                  for (var i = 0; i < list.length; i++) {
+                    var hay = (list[i].getAttribute('data-q') || '').toLowerCase();
+                    var hide = needle && hay.indexOf(needle) < 0;
+                    list[i].hidden = hide;
+                    if (!hide) n++;
+                  }
+                  if (count) count.textContent = String(n);
+                });
+              }
+              if (printB) {
+                printB.addEventListener('click', function () {
+                  if (!current) return;
+                  try { if (frame.contentWindow) frame.contentWindow.print(); } catch (e) {}
+                });
+              }
+              var closeB = document.getElementById('invSheetClose');
+              if (closeB) closeB.addEventListener('click', closeSheet);
+              sheet.addEventListener('click', function (ev) { if (ev.target === sheet) closeSheet(); });
+              document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') closeSheet(); });
+            })();
+            </script>
             <div class="inv-gbar">
-                <div>
-                    <h2><?php echo e($isEn ? 'Issued invoices' : 'الفواتير الصادرة'); ?></h2>
-                    <p><?php echo e($isEn ? 'Open, print, or send a saved invoice' : 'افتح الفاتورة أو اطبعها أو أرسلها للمشترك'); ?></p>
-                </div>
-            </div>
-            <?php if (!$issued): ?>
-                <p class="inv-empty"><?php echo e($isEn ? 'No invoices yet' : 'ماكو فواتير صادرة بعد'); ?></p>
-            <?php endif; ?>
-            <?php foreach ($issued as $slipRow):
-                if (!is_array($slipRow)) continue;
-                $tok = isset($slipRow['token']) ? preg_replace('/[^a-f0-9]/', '', strtolower((string) $slipRow['token'])) : '';
-                if ($tok === '') continue;
-                $slipNo = isset($slipRow['number']) ? (string) $slipRow['number'] : '';
-                $slipName = isset($slipRow['name']) ? (string) $slipRow['name'] : '';
-                $slipAmt = isset($slipRow['amount']) ? trim((string) $slipRow['amount']) : '';
-                $slipWhen = isset($slipRow['created_at']) ? (string) $slipRow['created_at'] : '';
-                $slipAgent = isset($slipRow['issuer_name']) ? trim((string) $slipRow['issuer_name']) : '';
-                $slipPhone = isset($slipRow['phone']) ? trim((string) $slipRow['phone']) : '';
-                ?>
-            <div class="inv-printer">
-                <div>
-                    <strong class="ltr"><?php echo e($slipNo !== '' ? $slipNo : $tok); ?></strong>
-                    <span><?php echo e($slipName); ?><?php echo $slipAmt !== '' ? e(' · ' . $slipAmt) : ''; ?></span>
-                    <em><?php echo e(trim($slipWhen . ($slipAgent !== '' ? ' · ' . $slipAgent : ''))); ?></em>
-                </div>
-                <div class="inv-acts">
-                    <a class="btn ghost sm" target="_blank" href="slip.php?k=<?php echo e($tok); ?>"><?php echo e($isEn ? 'Open' : 'فتح'); ?></a>
-                    <a class="btn ghost sm" target="_blank" href="slip.php?k=<?php echo e($tok); ?>&amp;print=1"><?php echo e($isEn ? 'Print' : 'طباعة'); ?></a>
-                    <form method="post" action="settings.php?tab=invoices">
-                        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
-                        <input type="hidden" name="section" value="invoice_send">
-                        <input type="hidden" name="slip_token" value="<?php echo e($tok); ?>">
-                        <button class="btn sm" type="submit"><?php echo e($isEn ? 'Send' : 'إرسال'); ?></button>
-                    </form>
-                </div>
-            </div>
-            <?php endforeach; ?>
-            <div class="inv-gbar" style="margin-top:18px">
                 <div>
                     <h2><?php echo e($payload['ui']['templates']); ?></h2>
                     <p><?php echo e($payload['ui']['pick']); ?></p>

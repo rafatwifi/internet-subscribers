@@ -15,11 +15,10 @@ function render_settings_tabs($current = 'general')
     $platformTabs = function_exists('is_super_admin_user') && is_super_admin_user();
     ?>
 <div class="tabs">
-    <a class="<?php echo $current === 'widgets' ? 'on' : ''; ?>" href="settings.php?tab=widgets"><?php echo e($isEn ? 'Widgets' : 'الوجدز'); ?></a>
+    <a class="<?php echo $current === 'general' ? 'on' : ''; ?>" href="settings.php?tab=general"><?php echo e($isEn ? 'General' : 'عام'); ?></a>
+    <a class="<?php echo $current === 'behavior' ? 'on' : ''; ?>" href="settings.php?tab=behavior"><?php echo e($isEn ? 'System behavior' : 'سلوك النظام'); ?></a>
     <a class="<?php echo $current === 'theme' ? 'on' : ''; ?>" href="settings.php?tab=theme"><?php echo e($isEn ? 'Theme' : 'الثيم'); ?></a>
-    <?php if ($platformTabs && $can('settings')): ?>
-    <a class="<?php echo $current === 'general' ? 'on' : ''; ?>" href="settings.php?tab=general"><?php echo e(t('settings_general')); ?></a>
-    <?php endif; ?>
+    <a class="<?php echo $current === 'widgets' ? 'on' : ''; ?>" href="settings.php?tab=widgets"><?php echo e($isEn ? 'Widgets' : 'الوجدز'); ?></a>
     <?php if ($platformTabs && $can('users')): ?>
     <a class="<?php echo $current === 'users' ? 'on' : ''; ?>" href="settings.php?tab=users"><?php echo e($isEn ? 'Roles' : 'الأدوار'); ?></a>
     <?php endif; ?>

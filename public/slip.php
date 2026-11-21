@@ -71,10 +71,10 @@ if (!$slip) {
     exit;
 }
 header('X-Content-Type-Options: nosniff');
-header('X-Frame-Options: DENY');
+header('X-Frame-Options: SAMEORIGIN');
 header('Referrer-Policy: no-referrer');
 header('X-Robots-Tag: noindex, nofollow');
-header('Content-Security-Policy: default-src \'none\'; img-src \'self\' data:; style-src \'self\' \'unsafe-inline\'; script-src \'self\' \'unsafe-inline\'; base-uri \'none\'; form-action \'none\'; frame-ancestors \'none\'');
+header('Content-Security-Policy: default-src \'none\'; img-src \'self\' data:; style-src \'self\' \'unsafe-inline\'; script-src \'self\' \'unsafe-inline\'; base-uri \'none\'; form-action \'none\'; frame-ancestors \'self\'');
 header('Cache-Control: private, no-store');
 $tokenShown = invoice_slip_token_clean($tokenIn);
 $slip['url'] = invoice_request_base() . 'slip.php?k=' . $tokenShown;
@@ -120,7 +120,8 @@ $designed = function_exists('invoice_slip_design_html') ? invoice_slip_design_ht
 <link rel="stylesheet" href="assets/style.css?v=ui26">
 <style>
   html, body { margin: 0; background: #e8eef5; }
-  body { min-height: 100vh; display: flex; justify-content: center; padding: 18px 10px 28px; }
+  body { min-height: 100vh; display: flex; justify-content: center; align-items: flex-start; padding: 12px; box-sizing: border-box; }
+  .slip, .slip-design { max-width: 100%; }
   .slip {
     width: <?php echo (int) $w; ?>mm;
     <?php if ($minH > 0): ?>min-height: <?php echo (float) $minH; ?>mm;<?php endif; ?>
@@ -202,6 +203,34 @@ $designed = function_exists('invoice_slip_design_html') ? invoice_slip_design_ht
 <script src="assets/qrcode.js"></script>
 <script>
 (function () {
+  var paper = document.querySelector('.slip, .slip-design');
+  function fitPaper() {
+    if (!paper || !window.frameElement) return;
+    var wrap = paper.parentNode;
+    if (!wrap || !wrap.classList || !wrap.classList.contains('slip-scale')) {
+      wrap = document.createElement('div');
+      wrap.className = 'slip-scale';
+      paper.parentNode.insertBefore(wrap, paper);
+      wrap.appendChild(paper);
+    }
+    paper.style.transform = 'none';
+    var avail = Math.max(40, document.documentElement.clientWidth - 28);
+    var w = paper.offsetWidth || paper.scrollWidth;
+    var h = paper.offsetHeight || paper.scrollHeight;
+    var scale = w > avail ? (avail / w) : 1;
+    paper.style.transformOrigin = 'top right';
+    paper.style.transform = 'scale(' + scale + ')';
+    paper.style.display = 'block';
+    wrap.style.width = Math.ceil(w * scale) + 'px';
+    wrap.style.height = Math.ceil(h * scale) + 'px';
+    wrap.style.margin = '12px auto';
+    wrap.style.overflow = 'hidden';
+    document.body.style.display = 'block';
+    document.body.style.padding = '0';
+    document.documentElement.style.overflow = 'auto';
+  }
+  fitPaper();
+  window.addEventListener('resize', fitPaper);
   var fits = document.querySelectorAll('.slip-fit');
   for (var i = 0; i < fits.length; i++) {
     var el = fits[i];

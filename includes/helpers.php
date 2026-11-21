@@ -62,7 +62,7 @@ function ui_glass_bg_url($pdo = null, $settings = null)
             return 'uploads/' . rawurlencode($file) . ($v ? ('?v=' . (int) $v) : '');
         }
     }
-    if (is_array($settings) && function_exists('login_bg_url')) {
+    if (is_array($settings) && function_exists('login_bg_url') && function_exists('app_bg_mode') && app_bg_mode($settings) === 'image') {
         $sys = login_bg_url($settings);
         if ($sys !== '') {
             return $sys;
@@ -452,8 +452,17 @@ function add_one_month($dateYmd)
 }
 
 /**
- * مدة الاشتراك الافتراضية: days_30 | calendar_month
+ * مدة الاشتراك: days_30 | calendar_month | sas
  */
+function subscription_period_normalize($mode)
+{
+    $mode = (string) $mode;
+    if ($mode === 'calendar_month' || $mode === 'sas') {
+        return $mode;
+    }
+    return 'days_30';
+}
+
 function subscription_period_mode($config = null)
 {
     if ($config === null && isset($GLOBALS['config'])) {
@@ -463,7 +472,7 @@ function subscription_period_mode($config = null)
     if (is_array($config) && isset($config['subscription_period_mode'])) {
         $mode = (string) $config['subscription_period_mode'];
     }
-    return ($mode === 'calendar_month') ? 'calendar_month' : 'days_30';
+    return subscription_period_normalize($mode);
 }
 
 /** تاريخ نهاية الاشتراك الافتراضي من تاريخ البداية */

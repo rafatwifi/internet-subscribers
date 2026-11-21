@@ -47,6 +47,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     $action = post('action');
 
+    if (!$isNew && $action === 'pause_user') {
+        $turnOn = post('enabled') === '1';
+        $ajaxPause = post('ajax') === '1';
+        $pauseOk = false;
+        $pauseMsg = $isEn ? 'Could not change the user' : 'تعذر تغيير حالة اليوزر';
+        try {
+            if (function_exists('sas_write_user')) {
+                list($pauseOk, $pauseMsg) = sas_write_user(
+                    $pdo,
+                    $config,
+                    'sas_enable',
+                    $username,
+                    array('enabled' => $turnOn ? '1' : '0')
+                );
+            }
+        } catch (Exception $ePause) {
+            $pauseOk = false;
+            $pauseMsg = $isEn ? 'Could not change the user' : 'تعذر تغيير حالة اليوزر';
+        }
+        if ($ajaxPause) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(array(
+                'ok' => (bool) $pauseOk,
+                'message' => (string) $pauseMsg,
+                'enabled' => $turnOn ? 1 : 0,
+            ));
+            exit;
+        }
+        flash($pauseOk ? 'success' : 'error', $pauseMsg);
+        redirect(sas_user_url($username));
+    }
+
     if (!$isNew && $action === 'update_rental') {
         $enabled = post('rental_enabled') === '1';
         $deviceId = trim((string) post('rental_device_id', ''));
@@ -1058,6 +1090,11 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
   <div class="su-hero-main">
     <?php if (!$isNew && $username !== ''): ?>
     <div class="su-hero-acts">
+        <button type="button" class="su-hero-day-btn" id="suPauseBtn" data-on="<?php echo $enabled ? '1' : '0'; ?>"><?php
+            echo e($enabled
+                ? ($isEn ? 'Pause user' : 'إيقاف اليوزر مؤقتاً')
+                : ($isEn ? 'Enable user' : 'تشغيل اليوزر'));
+        ?></button>
         <?php
         $suActBlocked = function_exists('app_maintenance_blocks') && app_maintenance_blocks('activate', $config);
         $suDayBlocked = function_exists('app_maintenance_blocks') && app_maintenance_blocks('give_test', $config);
@@ -1942,5 +1979,48 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
 })();
 </script>
 <?php endif; ?>
+<script>
+(function () {
+  var btn = document.getElementById('suPauseBtn');
+  if (!btn) return;
+  var csrf = <?php echo json_encode(csrf_token()); ?>;
+  var pauseLabel = <?php echo json_encode($isEn ? 'Pause user' : 'إيقاف اليوزر مؤقتاً'); ?>;
+  var onLabel = <?php echo json_encode($isEn ? 'Enable user' : 'تشغيل اليوزر'); ?>;
+  btn.addEventListener('click', function () {
+    if (btn.getAttribute('data-busy') === '1') return;
+    var on = btn.getAttribute('data-on') === '1';
+    var ask = on
+      ? <?php echo json_encode($isEn ? 'Pause this user?' : 'إيقاف هذا اليوزر مؤقتاً؟'); ?>
+      : <?php echo json_encode($isEn ? 'Enable this user?' : 'تشغيل هذا اليوزر؟'); ?>;
+    if (!window.confirm(ask)) return;
+    btn.setAttribute('data-busy', '1');
+    var body = new FormData();
+    body.append('csrf', csrf);
+    body.append('action', 'pause_user');
+    body.append('ajax', '1');
+    body.append('enabled', on ? '0' : '1');
+    fetch(window.location.href, { method: 'POST', credentials: 'same-origin', body: body })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        btn.removeAttribute('data-busy');
+        var ok = d && d.ok;
+        if (ok) {
+          var nowOn = d.enabled === 1 || d.enabled === '1';
+          btn.setAttribute('data-on', nowOn ? '1' : '0');
+          btn.textContent = nowOn ? pauseLabel : onLabel;
+        }
+        if (window.showCornerToast) {
+          window.showCornerToast((d && d.message) || (ok ? pauseLabel : onLabel), ok ? 'ok' : 'error');
+        }
+      })
+      .catch(function () {
+        btn.removeAttribute('data-busy');
+        if (window.showCornerToast) {
+          window.showCornerToast(<?php echo json_encode($isEn ? 'Network error' : 'فشل الاتصال'); ?>, 'error');
+        }
+      });
+  });
+})();
+</script>
 <?php
 render_footer();

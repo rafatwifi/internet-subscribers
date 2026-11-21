@@ -601,19 +601,33 @@ function add_immediate_rental_debt($pdo, $subscriberId, $deviceId = '', $setting
         return array(false, 'موجود مسبقاً');
     }
 
-    $ins = $pdo->prepare(
-        'INSERT INTO invoices
-            (subscription_id, subscriber_id, month_label, amount, cost_price, profit, due_date, status, notes)
-         VALUES
-            (NULL, :sid, :month, :amount, 0, 0, :due, "unpaid", :notes)'
-    );
-    $ins->execute(array(
+    $cols = 'subscription_id, subscriber_id, month_label, amount, cost_price, profit, due_date, status, notes';
+    $vals = 'NULL, :sid, :month, :amount, 0, 0, :due, "unpaid", :notes';
+    $bind = array(
         ':sid' => $subscriberId,
         ':month' => $month,
         ':amount' => $fee,
         ':due' => date('Y-m-d'),
         ':notes' => $note,
-    ));
+    );
+    try {
+        $hasTenant = (bool) $pdo->query("SHOW COLUMNS FROM invoices LIKE 'tenant_id'")->fetch();
+    } catch (Exception $eCol) {
+        $hasTenant = false;
+    }
+    if ($hasTenant) {
+        $cols .= ', tenant_id';
+        $vals .= ', :tid';
+        $bind[':tid'] = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+    }
+    try {
+        $ins = $pdo->prepare(
+            'INSERT INTO invoices (' . $cols . ') VALUES (' . $vals . ')'
+        );
+        $ins->execute($bind);
+    } catch (Exception $eIns) {
+        return array(false, 'تعذر إضافة دين الإيجار');
+    }
     $newId = (int) $pdo->lastInsertId();
     if (function_exists('activity_log')) {
         activity_log(

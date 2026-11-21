@@ -47,8 +47,14 @@ if ($tab === 'templates') {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'sas') {
     $tab = 'sas';
 }
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && (post('section') === 'ui_theme' || post('section') === 'user_prefs')) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'ui_theme') {
     $tab = 'theme';
+}
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'user_prefs') {
+    $tab = 'general';
+}
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'system_behavior') {
+    $tab = 'behavior';
 }
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'invoice_design') {
     $tab = 'invoices';
@@ -59,7 +65,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'invoice_printe
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'invoice_send') {
     $tab = 'invoices';
 }
-if (!in_array($tab, array('general', 'whatsapp', 'rental', 'users', 'plans', 'sas', 'saas', 'schedule', 'sensitive', 'update', 'maintenance', 'widgets', 'theme', 'invoices', 'printers'), true)) {
+if (!in_array($tab, array('general', 'behavior', 'whatsapp', 'rental', 'users', 'plans', 'sas', 'saas', 'schedule', 'sensitive', 'update', 'maintenance', 'widgets', 'theme', 'invoices', 'printers'), true)) {
     $tab = 'general';
 }
 // تبويبات محذوفة من إعدادات أدمن البوابة
@@ -96,7 +102,7 @@ if ($tab === 'users') {
         flash('error', $lang === 'en' ? 'Super admin only' : 'للمدير العام فقط');
         redirect('settings.php');
     }
-} elseif ($tab === 'widgets' || $tab === 'theme' || $isAgentWaOnly || $isAgencySasOnly || $isInvoiceTab) {
+} elseif ($tab === 'widgets' || $tab === 'theme' || $tab === 'behavior' || $tab === 'general' || $isAgentWaOnly || $isAgencySasOnly || $isInvoiceTab) {
     // وجدز وثيم لكل حساب، وواتساب للوكيل، وربط ساس للوكالة
 } else {
     // وكالة بدون صلاحية settings: وجّه مباشرة لربط الساس
@@ -106,8 +112,8 @@ if ($tab === 'users') {
     require_perm('settings');
 }
 
-if (!$isPlatformAdmin && ($tab === 'general' || $tab === 'users')) {
-    redirect('settings.php?tab=sas');
+if (!$isPlatformAdmin && $tab === 'users') {
+    redirect('settings.php?tab=general');
 }
 
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'sys_status') {
@@ -343,8 +349,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('settings.php?tab=sas');
     }
     if ($section === 'user_prefs') {
-        $periodMode = post('subscription_period_mode', 'days_30') === 'calendar_month'
-            ? 'calendar_month'
+        $periodMode = function_exists('subscription_period_normalize')
+            ? subscription_period_normalize(post('subscription_period_mode', 'days_30'))
             : 'days_30';
         $prefLang = post('language') === 'en' ? 'en' : 'ar';
         $prefCur = trim((string) post('currency', 'د.ع'));
@@ -362,7 +368,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             set_lang_preference($prefLang);
         }
         flash('success', $lang === 'en' ? 'Saved for your account only' : 'انحفظ لحسابك فقط');
-        redirect('settings.php?tab=theme');
+        redirect('settings.php?tab=general');
+    }
+    if ($section === 'system_behavior') {
+        $actAfter = post('activate_after') === 'stay' ? 'stay' : 'dashboard';
+        if (function_exists('admin_ui_prefs_save')) {
+            admin_ui_prefs_save($pdo, 'activate_after', $actAfter);
+        }
+        flash('success', $lang === 'en' ? 'Saved for your account only' : 'انحفظ لحسابك فقط');
+        redirect('settings.php?tab=behavior');
     }
     if ($section === 'ui_theme') {
         $themePick = function_exists('ui_theme_normalize')
@@ -373,13 +387,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         $meTheme = function_exists('current_admin') ? current_admin() : null;
         $meThemeId = $meTheme ? (int) $meTheme['id'] : 0;
-        if ($meThemeId > 0 && function_exists('ui_glass_bg_store_upload')) {
-            if (post('glass_bg_remove') === '1') {
+        if (post('bg_clear') === '1' || post('glass_bg_remove') === '1') {
+            if ($meThemeId > 0 && function_exists('ui_glass_bg_delete_files')) {
                 ui_glass_bg_delete_files($meThemeId);
-                if (function_exists('admin_ui_prefs_save')) {
-                    admin_ui_prefs_save($pdo, 'glass_bg', '');
+            }
+            if (function_exists('admin_ui_prefs_save')) {
+                admin_ui_prefs_save($pdo, 'glass_bg', '');
+                admin_ui_prefs_save($pdo, 'app_bg_off', 1);
+            }
+            if (function_exists('user_can') && user_can('settings') && function_exists('settings_save')) {
+                settings_save(array('bg_mode' => 'none', 'login_bg' => ''));
+                if (function_exists('login_bg_delete_files')) {
+                    login_bg_delete_files();
                 }
-            } elseif (!empty($_FILES['glass_bg_file']['tmp_name'])) {
+            }
+            flash('success', $lang === 'en' ? 'Background removed' : 'تم حذف الخلفية');
+            redirect('settings.php?tab=theme');
+        }
+        if ($meThemeId > 0 && function_exists('ui_glass_bg_store_upload')) {
+            if (!empty($_FILES['glass_bg_file']['tmp_name'])) {
                 $bgFail = '';
                 $savedBg = ui_glass_bg_store_upload($_FILES['glass_bg_file'], $meThemeId, $bgFail);
                 if ($savedBg === false) {
@@ -400,6 +426,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 if (function_exists('admin_ui_prefs_save')) {
                     admin_ui_prefs_save($pdo, 'glass_bg', $savedBg);
+                    admin_ui_prefs_save($pdo, 'app_bg_off', 0);
                 }
             }
         }
@@ -722,15 +749,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!preg_match('/^#[0-9A-Fa-f]{6}$/', $color)) {
             $color = '#1b2a38';
         }
-        $mode = post('bg_mode') === 'image' ? 'image' : 'color';
+        $modePosted = (string) post('bg_mode', 'color');
+        if ($modePosted !== 'image' && $modePosted !== 'none') {
+            $modePosted = 'color';
+        }
+        if (post('bg_clear') === '1') {
+            $modePosted = 'none';
+        }
         $data = array(
             'login_bg_color' => $color,
-            'bg_mode' => $mode,
+            'bg_mode' => $modePosted,
         );
-        if (post('login_bg_remove') === '1') {
+        if (function_exists('admin_ui_prefs_save')) {
+            admin_ui_prefs_save($pdo, 'app_bg_off', $modePosted === 'none' ? 1 : 0);
+        }
+        if (post('login_bg_remove') === '1' || post('bg_clear') === '1') {
             login_bg_delete_files();
             $data['login_bg'] = '';
-            $data['bg_mode'] = 'color';
+            $data['bg_mode'] = 'none';
         } elseif (!empty($_FILES['login_bg_file']['tmp_name'])) {
             $bgFail = '';
             $saved = login_bg_store_upload($_FILES['login_bg_file'], $bgFail);
@@ -1645,49 +1681,32 @@ $prefCurUi = isset($userWorkPrefs['currency']) && trim((string) $userWorkPrefs['
 $prefGraceUi = array_key_exists('grace_days', $userWorkPrefs)
     ? max(0, (int) $userWorkPrefs['grace_days'])
     : (int) (isset($s['grace_days']) ? $s['grace_days'] : 3);
-$prefPeriodUi = (isset($userWorkPrefs['subscription_period_mode']) && $userWorkPrefs['subscription_period_mode'] === 'calendar_month')
-    ? 'calendar_month'
-    : ((isset($s['subscription_period_mode']) && $s['subscription_period_mode'] === 'calendar_month')
-        ? 'calendar_month'
-        : 'days_30');
+$prefPeriodRaw = isset($userWorkPrefs['subscription_period_mode'])
+    ? $userWorkPrefs['subscription_period_mode']
+    : (isset($s['subscription_period_mode']) ? $s['subscription_period_mode'] : 'days_30');
+$prefPeriodUi = function_exists('subscription_period_normalize')
+    ? subscription_period_normalize($prefPeriodRaw)
+    : 'days_30';
+$prefActAfter = (isset($userWorkPrefs['activate_after']) && $userWorkPrefs['activate_after'] === 'stay')
+    ? 'stay'
+    : 'dashboard';
 ?>
 
-<?php if ($showThemePanel): ?>
-<div class="panel" id="userWorkPrefsPanel">
-    <h2><?php echo e($lang === 'en' ? 'My work preferences' : 'تفضيلات عملي'); ?></h2>
-    <p class="meta" style="margin-top:-6px">
-        <?php echo e($lang === 'en'
-            ? 'Saved for your login only. Other users keep their own values.'
-            : 'ينحفظ لحسابك فقط. كل مستخدم يخصص لنفسه بدون تأثير على غيره.'); ?>
-    </p>
-    <form method="post" action="settings.php?tab=theme">
+<?php if ($tab === 'behavior'): ?>
+<div class="panel" id="systemBehaviorPanel">
+    <h2><?php echo e($lang === 'en' ? 'System behavior' : 'سلوك النظام'); ?></h2>
+    <form method="post" action="settings.php?tab=behavior">
         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
-        <input type="hidden" name="section" value="user_prefs">
+        <input type="hidden" name="section" value="system_behavior">
         <div class="form-grid">
             <div>
-                <label><?php echo e(t('language')); ?></label>
-                <select name="language">
-                    <option value="ar" <?php echo $prefLangUi === 'ar' ? 'selected' : ''; ?>>العربية</option>
-                    <option value="en" <?php echo $prefLangUi === 'en' ? 'selected' : ''; ?>>English</option>
-                </select>
-            </div>
-            <div>
-                <label><?php echo e($lang === 'en' ? 'Currency' : 'العملة'); ?></label>
-                <input name="currency" value="<?php echo e($prefCurUi); ?>">
-            </div>
-            <div>
-                <label><?php echo e($lang === 'en' ? 'Default grace days' : 'أيام السماح الافتراضية'); ?></label>
-                <input type="number" min="0" name="grace_days" value="<?php echo (int) $prefGraceUi; ?>">
-                <small style="color:#6b7a88;font-weight:600"><?php echo e($lang === 'en' ? 'Default after activation. Can still change per subscriber.' : 'الافتراضي بعد التفعيل. يبقى قابل للتعديل لكل مشترك.'); ?></small>
-            </div>
-            <div>
-                <label><?php echo e($lang === 'en' ? 'Subscription period' : 'مدة الاشتراك'); ?></label>
-                <select name="subscription_period_mode">
-                    <option value="days_30" <?php echo $prefPeriodUi === 'days_30' ? 'selected' : ''; ?>>
-                        <?php echo e($lang === 'en' ? '30 days (30 Jul → 29 Aug)' : '30 يوم (30-7 → 29-8)'); ?>
+                <label><?php echo e($lang === 'en' ? 'After activating a subscriber' : 'عند تفعيل مشترك'); ?></label>
+                <select name="activate_after">
+                    <option value="stay" <?php echo $prefActAfter === 'stay' ? 'selected' : ''; ?>>
+                        <?php echo e($lang === 'en' ? 'Stay on the same page' : 'البقاء بنفس الصفحة'); ?>
                     </option>
-                    <option value="calendar_month" <?php echo $prefPeriodUi === 'calendar_month' ? 'selected' : ''; ?>>
-                        <?php echo e($lang === 'en' ? 'Calendar month (30 Jul → 30 Aug)' : 'شهر ميلادي (30-7 → 30-8)'); ?>
+                    <option value="dashboard" <?php echo $prefActAfter === 'dashboard' ? 'selected' : ''; ?>>
+                        <?php echo e($lang === 'en' ? 'Return to the dashboard' : 'رجوع للداشبورد'); ?>
                     </option>
                 </select>
             </div>
@@ -1697,6 +1716,9 @@ $prefPeriodUi = (isset($userWorkPrefs['subscription_period_mode']) && $userWorkP
         </div>
     </form>
 </div>
+<?php endif; ?>
+
+<?php if ($showThemePanel): ?>
 <div class="panel theme-pick-panel" id="themePickPanel">
     <h2><?php echo e($lang === 'en' ? 'Interface theme' : 'ثيم الواجهة'); ?></h2>
     <p class="meta" style="margin-top:-6px">
@@ -1750,9 +1772,7 @@ $prefPeriodUi = (isset($userWorkPrefs['subscription_period_mode']) && $userWorkP
         </div>
         <div class="actions" style="margin-top:12px">
             <button class="btn" type="submit"><?php echo e($lang === 'en' ? 'Save theme' : 'حفظ الثيم'); ?></button>
-            <?php if ($glassBgPersonal !== ''): ?>
-                <button class="btn ghost" type="submit" name="glass_bg_remove" value="1"><?php echo e($lang === 'en' ? 'Remove background image' : 'إزالة صورة الخلفية'); ?></button>
-            <?php endif; ?>
+            <button class="btn ghost" type="submit" name="bg_clear" value="1"><?php echo e($lang === 'en' ? 'Remove background' : 'حذف الخلفية'); ?></button>
         </div>
     </form>
 </div>
@@ -2269,6 +2289,54 @@ $prefPeriodUi = (isset($userWorkPrefs['subscription_period_mode']) && $userWorkP
 <?php endif; ?>
 
 <?php if ($tab === 'general'): ?>
+<div class="panel" id="userWorkPrefsPanel">
+    <h2><?php echo e($lang === 'en' ? 'General' : 'عام'); ?></h2>
+    <p class="meta" style="margin-top:-6px">
+        <?php echo e($lang === 'en'
+            ? 'Saved for your login only. Other users keep their own values.'
+            : 'ينحفظ لحسابك فقط. كل مستخدم يخصص لنفسه بدون تأثير على غيره.'); ?>
+    </p>
+    <form method="post" action="settings.php?tab=general">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="section" value="user_prefs">
+        <div class="form-grid">
+            <div>
+                <label><?php echo e(t('language')); ?></label>
+                <select name="language">
+                    <option value="ar" <?php echo $prefLangUi === 'ar' ? 'selected' : ''; ?>>العربية</option>
+                    <option value="en" <?php echo $prefLangUi === 'en' ? 'selected' : ''; ?>>English</option>
+                </select>
+            </div>
+            <div>
+                <label><?php echo e($lang === 'en' ? 'Currency' : 'العملة'); ?></label>
+                <input name="currency" value="<?php echo e($prefCurUi); ?>">
+            </div>
+            <div>
+                <label><?php echo e($lang === 'en' ? 'Default grace days' : 'أيام السماح الافتراضية'); ?></label>
+                <input type="number" min="0" name="grace_days" value="<?php echo (int) $prefGraceUi; ?>">
+                <small style="color:#6b7a88;font-weight:600"><?php echo e($lang === 'en' ? 'Default after activation. Can still change per subscriber.' : 'الافتراضي بعد التفعيل. يبقى قابل للتعديل لكل مشترك.'); ?></small>
+            </div>
+            <div>
+                <label><?php echo e($lang === 'en' ? 'Subscription period' : 'مدة الاشتراك'); ?></label>
+                <select name="subscription_period_mode">
+                    <option value="days_30" <?php echo $prefPeriodUi === 'days_30' ? 'selected' : ''; ?>>
+                        <?php echo e($lang === 'en' ? '30 days (30 Jul → 29 Aug)' : '30 يوم (30-7 → 29-8)'); ?>
+                    </option>
+                    <option value="calendar_month" <?php echo $prefPeriodUi === 'calendar_month' ? 'selected' : ''; ?>>
+                        <?php echo e($lang === 'en' ? 'Calendar month (30 Jul → 30 Aug)' : 'شهر ميلادي (30-7 → 30-8)'); ?>
+                    </option>
+                    <option value="sas" <?php echo $prefPeriodUi === 'sas' ? 'selected' : ''; ?>>
+                        <?php echo e($lang === 'en' ? 'Follow SAS expiry' : 'حسب الساس'); ?>
+                    </option>
+                </select>
+            </div>
+        </div>
+        <div class="actions">
+            <button class="btn" type="submit"><?php echo e(t('save')); ?></button>
+        </div>
+    </form>
+</div>
+<?php if ($isPlatformAdmin): ?>
 <?php
 $sys = collect_system_status($config);
 $waState = $sys['whatsapp']['state'];
@@ -2469,6 +2537,10 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
                 <input type="radio" name="bg_mode" value="image" <?php echo $bgMode === 'image' ? 'checked' : ''; ?>>
                 <span><?php echo e($lang === 'en' ? 'Image' : 'صورة'); ?></span>
             </label>
+            <label>
+                <input type="radio" name="bg_mode" value="none" <?php echo $bgMode === 'none' ? 'checked' : ''; ?>>
+                <span><?php echo e($lang === 'en' ? 'None' : 'بدون'); ?></span>
+            </label>
         </div>
         <div class="form-grid cols-2">
             <div class="bg-opt-image" data-bg-opt="image">
@@ -2493,9 +2565,7 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
         </div>
         <div class="actions">
             <button class="btn" type="submit"><?php echo e($lang === 'en' ? 'Save appearance' : 'حفظ المظهر'); ?></button>
-            <?php if ($loginBgUrl !== ''): ?>
-                <button class="btn ghost bg-opt-image" type="submit" name="login_bg_remove" value="1" data-bg-opt="image"><?php echo e($lang === 'en' ? 'Remove image' : 'حذف الصورة'); ?></button>
-            <?php endif; ?>
+            <button class="btn ghost" type="submit" name="bg_clear" value="1"><?php echo e($lang === 'en' ? 'Remove background' : 'حذف الخلفية'); ?></button>
             <?php if ($brandIconUrl !== ''): ?>
                 <button class="btn ghost" type="submit" name="brand_icon_remove" value="1"><?php echo e($lang === 'en' ? 'Remove icon' : 'حذف الأيقونة'); ?></button>
             <?php endif; ?>
@@ -2537,6 +2607,7 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
   syncBgMode();
 })();
 </script>
+<?php endif; ?>
 
 <?php endif; ?>
 

@@ -870,7 +870,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!function_exists('sas_save_user_rental')) {
             sas_json_out(false, 'ملف الإيجار غير مكتمل');
         }
-        list($ok, $msg, $extra) = sas_save_user_rental($pdo, $config, $username, $enabled, $deviceId, $opts);
+        try {
+            list($ok, $msg, $extra) = sas_save_user_rental($pdo, $config, $username, $enabled, $deviceId, $opts);
+        } catch (Exception $eRent) {
+            sas_json_out(false, 'تعذر حفظ جهاز الإيجار');
+        }
         sas_json_out($ok, $msg, is_array($extra) ? $extra : array());
     }
 
@@ -4164,6 +4168,7 @@ html.sas-ln-off .sas-radius-page #subsTable .sas-fn-rest,
   100% { opacity: 0; transform: translateX(28px) scale(.98); }
 }
 @keyframes subPingSpin { to { transform: rotate(360deg); } }
+@keyframes subActSpin { to { transform: rotate(360deg); } }
 .sas-radius-page #subsTable .sas-rent-mini .rent-badge {
   width: 22px;
   height: 22px;
@@ -6305,12 +6310,13 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
       }));
     } catch (e) {}
   }
-  function postSas(action, fields, timeoutMs) {
+  function postSas(action, fields, timeoutMs, keepalive) {
     var body = new FormData();
     body.append('csrf', csrf);
     body.append('action', action);
     Object.keys(fields || {}).forEach(function (k) { body.append(k, fields[k]); });
     var opts = { method: 'POST', body: body, credentials: 'same-origin' };
+    if (keepalive) opts.keepalive = true;
     var timer = null;
     if (timeoutMs && typeof AbortController !== 'undefined') {
       var ctrl = new AbortController();
@@ -7473,7 +7479,7 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
           send_whatsapp: waFields.send_whatsapp,
           send_old_debts: waFields.send_old_debts,
           pay_mode: waFields.pay_mode
-        }, 55000);
+        }, 55000, true);
       } else {
         var cardMeta = readActCardMeta();
         pin = cardMeta.pin;
@@ -7504,7 +7510,7 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
           send_old_debts: waFields.send_old_debts,
           pay_mode: waFields.pay_mode,
           ftth: (typeof isFtthActModal === 'function' && isFtthActModal()) ? '1' : '0'
-        }, (typeof isFtthActModal === 'function' && isFtthActModal()) ? 70000 : 35000);
+        }, (typeof isFtthActModal === 'function' && isFtthActModal()) ? 70000 : 35000, true);
       }
       req.then(function (d) {
         if (d && Array.isArray(d.cards)) {
@@ -7575,18 +7581,24 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
         }
         var fromIdentity = String(window.__sasActFromIdentity || '');
         var printBox = document.getElementById('sasActPrint');
-        function finishAct(slipBlocked) {
+        var goDash = <?php echo json_encode(!isset($config['activate_after']) || $config['activate_after'] !== 'stay'); ?>;
+        function goAfterAct(slipUrl) {
+          releaseActivatedRow(actName);
           if (fromIdentity && fromIdentity.toLowerCase() === String(actName || '').toLowerCase()) {
             window.__sasActFromIdentity = '';
             window.location.href = 'sas_user.php?u=' + encodeURIComponent(fromIdentity);
             return;
           }
-          releaseActivatedRow(actName);
-          if (window.showCornerToast) {
-            window.showCornerToast(slipBlocked
-              ? <?php echo json_encode($lang === 'en' ? 'Activated. The invoice is saved under Invoices' : 'تم التفعيل. الفاتورة محفوظة في الفواتير'); ?>
-              : <?php echo json_encode($lang === 'en' ? 'Activated' : 'تم التفعيل'); ?>, 'ok');
+          var msg = slipUrl
+            ? <?php echo json_encode($lang === 'en' ? 'Activated. Open the invoice from the notice.' : 'تم التفعيل'); ?>
+            : <?php echo json_encode($lang === 'en' ? 'Activated' : 'تم التفعيل'); ?>;
+          if (goDash) {
+            var dest = 'index.php?activated=1';
+            if (slipUrl) dest += '&slip=' + encodeURIComponent(slipUrl);
+            setTimeout(function () { window.location.href = dest; }, 700);
+            return;
           }
+          if (window.showCornerToast) window.showCornerToast(msg, 'ok', slipUrl || '');
         }
         var wantSlip = ftthOn || (printBox && printBox.checked);
         if (wantSlip) {
@@ -7600,15 +7612,13 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
           fd.append('amount', String(actAmountNow));
           fd.append('title', 'تفعيل');
           fetch('slip.php', { method: 'POST', credentials: 'same-origin', body: fd }).then(function (r) { return r.json(); }).then(function (j) {
-            var pop = null;
-            if (j && j.url) {
-              pop = window.open(j.url + ((printBox && printBox.checked) || ftthOn ? '&print=1' : ''), 'slip');
-            }
-            finishAct(!(pop && j && j.url));
-          }).catch(function () { finishAct(true); });
+            var slipUrl = (j && j.url) ? String(j.url) : '';
+            var slipMatch = slipUrl.match(/slip\.php\?k=[a-f0-9]{16,64}/);
+            goAfterAct(slipMatch ? slipMatch[0] : '');
+          }).catch(function () { goAfterAct(''); });
           return;
         }
-        finishAct();
+        goAfterAct('');
       }).catch(function () {
         paintActMark(actName, '');
         var manualPin2 = !!(document.getElementById('sasActCardBox') && document.getElementById('sasActCardBox').classList.contains('is-manual'));
@@ -8623,25 +8633,34 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
       });
     });
   }
+  var syncQuiet = false;
+  var autoSyncBusy = false;
   function runSync(reset) {
     var url = 'sas.php?ajax=pull&force=1' + (reset ? '&reset=1' : '');
     return fetch(url, { credentials: 'same-origin' }).then(parseSyncRes).then(function (d) {
       if (!d) return d;
       if (d.last_error && !d.ok) {
         setOfflineBanner(true);
-        showSyncNote(d.last_error);
+        if (!syncQuiet) showSyncNote(d.last_error);
         if (window.appBusyDone) window.appBusyDone('sync');
         return d;
       }
       if (d.mode === 'progress') {
-        var syncLabel = <?php echo json_encode($lang === 'en' ? 'Loading from SAS' : 'جاري الجلب من الساس'); ?>;
-        var syncCur = d.count || 0;
-        var syncAll = d.expected || 0;
-        showSyncNote(syncLabel + ' ' + syncCur + (syncAll ? (' / ' + syncAll) : ''));
+        if (!syncQuiet) {
+          var syncLabel = <?php echo json_encode($lang === 'en' ? 'Loading from SAS' : 'جاري الجلب من الساس'); ?>;
+          var syncCur = d.count || 0;
+          var syncAll = d.expected || 0;
+          showSyncNote(syncLabel + ' ' + syncCur + (syncAll ? (' / ' + syncAll) : ''));
+        }
         return runSync(false);
       }
       if (sasReadyJs && d.ok && (d.mode === 'synced' || d.mode === 'cache') && (d.count > 0 || d.mode === 'cache')) {
-        markSyncOkAndReload();
+        if (syncQuiet) {
+          showSyncNote('');
+          refreshTableLive();
+        } else {
+          markSyncOkAndReload();
+        }
       } else if (sasReadyJs && d.ok && d.mode === 'synced' && d.count === 0) {
         // متصل لكن القائمة فاضية — لا إشعار نجاح مضلل
         showSyncNote(<?php echo json_encode($lang === 'en' ? 'Connected — no users on this reseller' : 'متصل — ماكو يوزرات بهالحساب'); ?>);
@@ -8659,10 +8678,31 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
     return runSync(false);
   }
   var refreshBtn = document.getElementById('refreshTableBtn');
+  function autoSyncSubscribers() {
+    if (!sasReadyJs || autoSyncBusy) return;
+    autoSyncBusy = true;
+    syncQuiet = true;
+    runSync(false).then(function () {
+      syncQuiet = false;
+      autoSyncBusy = false;
+    }, function () {
+      syncQuiet = false;
+      autoSyncBusy = false;
+    });
+  }
+  setTimeout(autoSyncSubscribers, 700);
+  setInterval(autoSyncSubscribers, 90000);
   if (refreshBtn) {
     refreshBtn.addEventListener('click', function () {
+      if (refreshBtn.getAttribute('data-busy') === '1') return;
+      refreshBtn.setAttribute('data-busy', '1');
       refreshBtn.classList.add('is-on');
-      runQuickRefresh().then(function () { refreshBtn.classList.remove('is-on'); });
+      syncQuiet = false;
+      showSyncNote(<?php echo json_encode($lang === 'en' ? 'Loading subscribers from SAS…' : 'جاري جلب المشتركين من الساس…'); ?>);
+      runSync(true).then(function () {
+        refreshBtn.classList.remove('is-on');
+        refreshBtn.removeAttribute('data-busy');
+      });
     });
   }
 

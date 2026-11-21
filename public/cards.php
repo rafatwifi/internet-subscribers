@@ -2102,7 +2102,12 @@ render_header($isEn ? 'Cards' : 'الكارتات', 'cards');
             : ($isEn ? 'Each category goes back on its own to the parent of this page.' : 'كل فئة ترجع لحالها لأب هذه الصفحة.')); ?></p>
         <?php
         $xferOpt = function ($ag) use ($isEn) {
-            $opt = trim((string) $ag['display_name']) !== '' ? $ag['display_name'] : $ag['username'];
+            $name = trim((string) (isset($ag['display_name']) ? $ag['display_name'] : ''));
+            $user = trim((string) (isset($ag['username']) ? $ag['username'] : ''));
+            $opt = $name !== '' ? $name : $user;
+            if ($user !== '' && $name !== '' && strcasecmp($name, $user) !== 0) {
+                $opt .= ' (' . $user . ')';
+            }
             if (isset($ag['is_active']) && (int) $ag['is_active'] !== 1) {
                 $opt .= $isEn ? ' (stopped)' : ' (موقوف)';
             }

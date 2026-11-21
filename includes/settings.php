@@ -241,7 +241,10 @@ function login_bg_store_upload($fileInfo, &$failReason = null)
 function app_bg_mode($settings)
 {
     $m = isset($settings['bg_mode']) ? (string) $settings['bg_mode'] : 'color';
-    return $m === 'image' ? 'image' : 'color';
+    if ($m === 'image' || $m === 'none') {
+        return $m;
+    }
+    return 'color';
 }
 
 function brand_icon_filename($settings)
@@ -554,9 +557,8 @@ function apply_settings_to_config($config, $settings)
     $config['site_name'] = $settings['site_name'];
     $config['currency'] = $settings['currency'];
     $config['grace_days'] = (int) $settings['grace_days'];
-    $config['subscription_period_mode'] = (isset($settings['subscription_period_mode'])
-        && $settings['subscription_period_mode'] === 'calendar_month')
-        ? 'calendar_month'
+    $config['subscription_period_mode'] = function_exists('subscription_period_normalize')
+        ? subscription_period_normalize(isset($settings['subscription_period_mode']) ? $settings['subscription_period_mode'] : 'days_30')
         : 'days_30';
     if (!isset($config['whatsapp']) || !is_array($config['whatsapp'])) {
         $config['whatsapp'] = array();
