@@ -1177,6 +1177,18 @@ body.theme-glass .sas-box-ico {
     <?php
     $en = $isEn;
     // وجدز البوابة فقط — بنك الشركات يبقى في صفحة الشركات
+    $platSubs = isset($pad['subscribers_total']) ? (int) $pad['subscribers_total'] : 0;
+    dash_sas_box(
+        'companies.php',
+        'tone-aqua',
+        $en ? 'Portal subscribers' : 'مشتركين البوابة',
+        $en ? 'All agencies & SAS' : 'كل الوكالات والساسات',
+        (string) $platSubs,
+        'users',
+        'dashPlatSubs',
+        '',
+        'plat_subscribers'
+    );
     dash_sas_box('saas_agents.php', 'tone-blue', $en ? 'Users' : 'عدد المستخدمين', '', (string) (int) $pad['users_total'], 'users', '', '', 'plat_users');
     dash_sas_box('saas_agents.php?view=pending', 'tone-yellow', $en ? 'Registration requests' : 'طلبات التسجيل', '', (string) (int) $pad['users_pending'], 'inbox', '', '', 'plat_pending');
     dash_sas_box('saas_agents.php?view=active', 'tone-green', $en ? 'Active' : 'الفعالين', '', (string) (int) $pad['users_active'], 'active', '', '', 'plat_active');

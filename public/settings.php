@@ -146,6 +146,13 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'sys_status') {
     $fmtMs = function ($ms) {
         return function_exists('system_format_ms') ? system_format_ms($ms) : (($ms !== null) ? (number_format((float) $ms, 1) . ' ms') : '—');
     };
+    $portalSubs = 0;
+    if (function_exists('is_super_admin_user') && is_super_admin_user()
+        && !(function_exists('is_impersonating') && is_impersonating())
+        && function_exists('platform_portal_subscribers_total') && isset($pdo)
+    ) {
+        $portalSubs = (int) platform_portal_subscribers_total($pdo);
+    }
     echo json_encode(array(
         'ok' => true,
         'cpu' => isset($sys['cpu']['label']) ? $sys['cpu']['label'] : '—',
@@ -165,6 +172,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'sys_status') {
         'disk_pct' => isset($sys['disk']['pct_used']) ? (int) $sys['disk']['pct_used'] : 0,
         'whatsapp' => $sys['whatsapp']['label'],
         'server_time' => $sys['server_time'],
+        'portal_subscribers' => $portalSubs,
     ));
     exit;
 }
@@ -2421,6 +2429,16 @@ $gLatTone = ($gMs === null || !$gOk) ? 'bad' : (($gMs >= 200) ? 'bad' : (($gMs >
             <div class="sys-card-v" id="sysCpuVal"><?php echo e(isset($sys['cpu']['label']) ? $sys['cpu']['label'] : '—'); ?></div>
             <div class="sys-card-s"><?php echo e($lang === 'en' ? 'Usage' : 'الاستخدام'); ?></div>
         </div>
+        <?php
+        $portalSubsSys = function_exists('platform_portal_subscribers_total')
+            ? (int) platform_portal_subscribers_total($pdo)
+            : 0;
+        ?>
+        <div class="sys-card tone-ok" id="sysPortalSubsCard">
+            <div class="sys-card-k"><?php echo e($lang === 'en' ? 'Portal subscribers' : 'مشتركين البوابة'); ?></div>
+            <div class="sys-card-v" id="sysPortalSubsVal"><?php echo (int) $portalSubsSys; ?></div>
+            <div class="sys-card-s"><?php echo e($lang === 'en' ? 'All agencies & SAS (unique)' : 'كل الوكالات والساسات (بدون تكرار)'); ?></div>
+        </div>
         <div class="sys-card tone-<?php echo e($waTone); ?>">
             <div class="sys-card-k"><?php echo e($lang === 'en' ? 'WhatsApp' : 'واتساب'); ?></div>
             <div class="sys-card-v"><?php echo e($sys['whatsapp']['label']); ?></div>
@@ -2495,6 +2513,10 @@ $gLatTone = ($gMs === null || !$gOk) ? 'bad' : (($gMs >= 200) ? 'bad' : (($gMs >
     var rs = document.getElementById('sysRamSub');
     if (rs && d.ram_pct !== undefined && d.ram_pct !== null) {
       rs.textContent = <?php echo json_encode($lang === 'en' ? 'Used ' : 'مستخدم '); ?> + d.ram_pct + '%';
+    }
+    var ps = document.getElementById('sysPortalSubsVal');
+    if (ps && d.portal_subscribers !== undefined && d.portal_subscribers !== null) {
+      ps.textContent = String(d.portal_subscribers);
     }
   }
   function loadSys(force) {

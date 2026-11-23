@@ -1,6 +1,33 @@
 <?php
 
 /**
+ * مجموع المشتركين الفريدين بكل البوابة (كل الوكالات وحسابات الساس) — بدون تكرار اليوزرنيم.
+ */
+function platform_portal_subscribers_total($pdo)
+{
+    if (!$pdo) {
+        return 0;
+    }
+    try {
+        $n = $pdo->query(
+            "SELECT COUNT(DISTINCT LOWER(username)) FROM sas_users_cache
+             WHERE tenant_id > 1
+               AND username IS NOT NULL AND username <> ''
+               AND (sas_missing = 0 OR sas_missing IS NULL)"
+        )->fetchColumn();
+        return (int) $n;
+    } catch (Exception $e) {
+        try {
+            return (int) $pdo->query(
+                'SELECT COUNT(*) FROM subscribers WHERE tenant_id > 1'
+            )->fetchColumn();
+        } catch (Exception $e2) {
+            return 0;
+        }
+    }
+}
+
+/**
  * إحصائيات لوحة أدمن المنصة (مو لوحة مشتركين الوكالة)
  */
 function platform_admin_dashboard_stats($pdo, $config)
@@ -11,6 +38,7 @@ function platform_admin_dashboard_stats($pdo, $config)
         'users_expired' => 0,
         'users_trial' => 0,
         'users_pending' => 0,
+        'subscribers_total' => 0,
         'version' => function_exists('app_version') ? app_version() : '—',
         'google_ms' => null,
         'google_ok' => false,
@@ -40,6 +68,7 @@ function platform_admin_dashboard_stats($pdo, $config)
         )->fetchColumn();
     } catch (Exception $e) {
     }
+    $out['subscribers_total'] = platform_portal_subscribers_total($pdo);
     if (function_exists('system_latency_to_host')) {
         $g = system_latency_to_host('www.google.com', 2.5);
         if (is_array($g)) {

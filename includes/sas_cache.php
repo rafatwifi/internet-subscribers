@@ -6742,24 +6742,34 @@ function sas_cache_touch_owner_row($pdo, $viewerTenant, $username, $parentName, 
         return false;
     }
     $idx = sas_ownership_index($pdo, (int) $viewerTenant);
-    if (!$idx || empty($idx['logins']) || !is_array($idx['logins'])) {
+    if (!$idx || (empty($idx['logins']) && empty($idx['siblings']))) {
         return false;
     }
     $hid = 0;
-    $names = array(strtolower(trim((string) $parentName)), strtolower(trim((string) $username)));
-    foreach ($names as $name) {
-        if ($name === '') {
-            continue;
+    $parentName = strtolower(trim((string) $parentName));
+    $username = strtolower(trim((string) $username));
+    if ($parentName !== '' && function_exists('sas_ownership_parent_owner_id')) {
+        $hid = (int) sas_ownership_parent_owner_id($idx, $parentName);
+    }
+    if ($hid <= 0 && !empty($idx['logins']) && is_array($idx['logins'])) {
+        $names = array($parentName, $username);
+        foreach ($names as $name) {
+            if ($name === '') {
+                continue;
+            }
+            if (isset($idx['logins'][$name])) {
+                $hid = (int) $idx['logins'][$name];
+                break;
+            }
+            $flat = str_replace('@', '', $name);
+            if ($flat !== '' && isset($idx['logins'][$flat])) {
+                $hid = (int) $idx['logins'][$flat];
+                break;
+            }
         }
-        if (isset($idx['logins'][$name])) {
-            $hid = (int) $idx['logins'][$name];
-            break;
-        }
-        $flat = str_replace('@', '', $name);
-        if ($flat !== '' && isset($idx['logins'][$flat])) {
-            $hid = (int) $idx['logins'][$flat];
-            break;
-        }
+    }
+    if ($hid <= 0 && function_exists('sas_ownership_existing_owner_id')) {
+        $hid = (int) sas_ownership_existing_owner_id($pdo, $idx, $username);
     }
     if ($hid <= 0 || $hid === (int) $viewerTenant) {
         return false;

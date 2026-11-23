@@ -20,6 +20,7 @@ function dash_layout_platform_catalog()
     global $lang;
     $en = (isset($lang) && $lang === 'en');
     $rows = array(
+        'plat_subscribers' => array('ar' => 'مشتركين البوابة', 'en' => 'Portal subscribers', 'tone' => 'tone-aqua', 'perm' => ''),
         'plat_users' => array('ar' => 'عدد المستخدمين', 'en' => 'Users', 'tone' => 'tone-blue', 'perm' => ''),
         'plat_pending' => array('ar' => 'طلبات التسجيل', 'en' => 'Registration requests', 'tone' => 'tone-yellow', 'perm' => ''),
         'plat_active' => array('ar' => 'الفعالين', 'en' => 'Active', 'tone' => 'tone-green', 'perm' => ''),
@@ -318,6 +319,7 @@ function dash_widget_icon($key)
     $key = strtolower(trim((string) $key));
     $alias = array(
         'subscribers' => 'users',
+        'plat_subscribers' => 'users',
         'plat_users' => 'users',
         'plat_pending' => 'inbox',
         'plat_active' => 'active',

@@ -87,11 +87,91 @@ function sas_ownership_index($pdo, $tenantId)
                 }
             }
         }
-        $cache[$tenantId] = array('names' => array(), 'logins' => $logins, 'ready' => $ready, 'me' => $myUser);
+        $cache[$tenantId] = array(
+            'names' => array(),
+            'logins' => $logins,
+            'ready' => $ready,
+            'siblings' => $sameIds,
+            'me' => $myUser,
+        );
     } catch (Exception $e) {
         $cache[$tenantId] = $empty;
     }
     return $cache[$tenantId];
+}
+
+/**
+ * صاحب الوكالة من اسم الأب بالساس: wifi@ob4 → وكالة wifi إن كانت مسجّلة بالبوابة.
+ */
+function sas_ownership_parent_owner_id($idx, $parentName)
+{
+    $parentName = strtolower(trim((string) $parentName));
+    if ($parentName === '' || empty($idx['logins']) || !is_array($idx['logins'])) {
+        return 0;
+    }
+    if (isset($idx['logins'][$parentName])) {
+        return (int) $idx['logins'][$parentName];
+    }
+    $flat = str_replace('@', '', $parentName);
+    if ($flat !== '' && isset($idx['logins'][$flat])) {
+        return (int) $idx['logins'][$flat];
+    }
+    // أطول مطابقة أولاً حتى wifi@office يفوز على wifi
+    $keys = array_keys($idx['logins']);
+    usort($keys, function ($a, $b) {
+        return strlen((string) $b) - strlen((string) $a);
+    });
+    foreach ($keys as $login) {
+        $login = strtolower(trim((string) $login));
+        if ($login === '' || strpos($login, '@') !== false) {
+            // login فيه @ — طابق بادئة login@ أو تطابق تام (فوق)
+            if ($parentName === $login || strpos($parentName, $login . '@') === 0) {
+                return (int) $idx['logins'][$login];
+            }
+            continue;
+        }
+        if (strpos($parentName, $login . '@') === 0 || strpos($parentName, $login . '_') === 0) {
+            return (int) $idx['logins'][$login];
+        }
+    }
+    return 0;
+}
+
+/**
+ * إن كان اليوزر أصلاً بكاش وكالة ثانية على نفس الهوست — لا تنسخه للحساب الحالي.
+ */
+function sas_ownership_existing_owner_id($pdo, $idx, $username)
+{
+    $username = strtolower(trim((string) $username));
+    if ($username === '' || !$pdo || empty($idx['siblings']) || !is_array($idx['siblings'])) {
+        return 0;
+    }
+    $ids = array();
+    foreach ($idx['siblings'] as $sid) {
+        $sid = (int) $sid;
+        if ($sid > 1) {
+            $ids[$sid] = $sid;
+        }
+    }
+    if (!$ids) {
+        return 0;
+    }
+    $in = implode(',', array_map('intval', $ids));
+    try {
+        $st = $pdo->prepare(
+            'SELECT tenant_id FROM sas_users_cache
+             WHERE tenant_id IN (' . $in . ')
+               AND LOWER(username) = :u
+               AND (sas_missing = 0 OR sas_missing IS NULL)
+             ORDER BY synced_at DESC, tenant_id ASC
+             LIMIT 1'
+        );
+        $st->execute(array(':u' => $username));
+        $hid = (int) $st->fetchColumn();
+        return $hid > 1 ? $hid : 0;
+    } catch (Exception $e) {
+        return 0;
+    }
 }
 
 function sas_cache_skip_owned_elsewhere($pdo, $tenantId, $username, $parentName)
@@ -112,7 +192,14 @@ function sas_cache_skip_owned_elsewhere($pdo, $tenantId, $username, $parentName)
     if ($parentName !== '' && sas_ownership_login_hit($idx['logins'], $parentName)) {
         return true;
     }
+    if ($parentName !== '' && sas_ownership_parent_owner_id($idx, $parentName) > 0) {
+        return true;
+    }
     if (sas_ownership_login_hit($idx['logins'], $username)) {
+        return true;
+    }
+    // أهم حماية ضد تكرار البوابة: اليوزر موجود أصلاً عند وكالة ثانية
+    if (sas_ownership_existing_owner_id($pdo, $idx, $username) > 0) {
         return true;
     }
     return false;
