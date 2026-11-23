@@ -350,6 +350,129 @@ function invoice_probe_printer($ip, $port)
     return true;
 }
 
+function invoice_printer_default($tenantId)
+{
+    $rows = invoice_printers_load($tenantId);
+    $fallback = null;
+    foreach ($rows as $r) {
+        if (!is_array($r) || empty($r['ip'])) {
+            continue;
+        }
+        if ($fallback === null) {
+            $fallback = $r;
+        }
+        if (!empty($r['is_default'])) {
+            return $r;
+        }
+    }
+    return $fallback;
+}
+
+function invoice_slip_escpos_line($text)
+{
+    $text = trim(preg_replace("/[\\r\\n]+/", ' ', (string) $text));
+    if ($text === '') {
+        return '';
+    }
+    if (function_exists('iconv')) {
+        $enc = @iconv('UTF-8', 'Windows-1256//TRANSLIT//IGNORE', $text);
+        if ($enc !== false && $enc !== '') {
+            return $enc;
+        }
+    }
+    return $text;
+}
+
+function invoice_slip_escpos_bytes($slip)
+{
+    if (!is_array($slip)) {
+        return '';
+    }
+    $ESC = "\x1B";
+    $GS = "\x1D";
+    $buf = $ESC . '@';
+    $buf .= $ESC . 't' . chr(22);
+    $buf .= $ESC . 'a' . chr(1);
+    $company = isset($slip['company_name']) ? trim((string) $slip['company_name']) : '';
+    if ($company === '') {
+        $company = function_exists('invoice_system_footer') ? invoice_system_footer() : 'الوصل';
+    }
+    $buf .= invoice_slip_escpos_line($company) . "\n";
+    $number = isset($slip['number']) ? trim((string) $slip['number']) : '';
+    if ($number !== '') {
+        $buf .= invoice_slip_escpos_line($number) . "\n";
+    }
+    $when = isset($slip['created_at']) ? trim((string) $slip['created_at']) : '';
+    if ($when !== '') {
+        $buf .= invoice_slip_escpos_line($when) . "\n";
+    }
+    $buf .= "--------------------------------\n";
+    $buf .= $ESC . 'a' . chr(0);
+    $pairs = array(
+        array('المشترك', isset($slip['name']) ? $slip['name'] : ''),
+        array('اليوزر', isset($slip['username']) ? $slip['username'] : ''),
+        array('الهاتف', isset($slip['phone']) ? $slip['phone'] : ''),
+        array('الباقة', isset($slip['package']) ? $slip['package'] : ''),
+        array('من', isset($slip['start']) ? $slip['start'] : ''),
+        array('إلى', isset($slip['end']) ? $slip['end'] : ''),
+        array('المبلغ', isset($slip['amount']) ? $slip['amount'] : ''),
+    );
+    foreach ($pairs as $pair) {
+        $val = trim((string) $pair[1]);
+        if ($val === '') {
+            continue;
+        }
+        $buf .= invoice_slip_escpos_line($pair[0] . ': ' . $val) . "\n";
+    }
+    $buf .= "--------------------------------\n";
+    $buf .= $ESC . 'a' . chr(1);
+    $buf .= invoice_slip_escpos_line(function_exists('invoice_system_footer') ? invoice_system_footer() : '') . "\n";
+    $buf .= "\n\n\n";
+    $buf .= $GS . 'V' . chr(0);
+    return $buf;
+}
+
+/**
+ * طباعة مرة واحدة للطابعة الافتراضية (TCP 9100) — مثل الكاشير.
+ * @return array{ok:bool,via:string,message:string}
+ */
+function invoice_slip_print_default($tenantId, $slip)
+{
+    $printer = invoice_printer_default($tenantId);
+    if (!$printer || empty($printer['ip'])) {
+        return array('ok' => false, 'via' => '', 'message' => 'ماكو طابعة افتراضية');
+    }
+    $ip = trim((string) $printer['ip']);
+    $port = isset($printer['port']) ? (int) $printer['port'] : 9100;
+    if ($port <= 0) {
+        $port = 9100;
+    }
+    $payload = invoice_slip_escpos_bytes($slip);
+    if ($payload === '') {
+        return array('ok' => false, 'via' => '', 'message' => 'محتوى الفاتورة فاضي');
+    }
+    $errno = 0;
+    $err = '';
+    $fp = @fsockopen($ip, $port, $errno, $err, 0.9);
+    if (!$fp) {
+        return array(
+            'ok' => false,
+            'via' => '',
+            'message' => 'الطابعة الافتراضية ما ردت (' . $ip . ':' . $port . ')',
+        );
+    }
+    stream_set_timeout($fp, 2);
+    $wrote = @fwrite($fp, $payload);
+    @fclose($fp);
+    if ($wrote === false || (int) $wrote < 1) {
+        return array('ok' => false, 'via' => '', 'message' => 'فشل إرسال الطباعة للطابعة');
+    }
+    $label = isset($printer['name']) && trim((string) $printer['name']) !== ''
+        ? trim((string) $printer['name'])
+        : ($ip . ':' . $port);
+    return array('ok' => true, 'via' => 'network', 'message' => 'انطبعت على ' . $label);
+}
+
 function invoice_system_footer()
 {
     $name = 'البوابة';
@@ -443,6 +566,11 @@ function invoice_sheet_mm($design)
 function invoice_apply_post($tenantId)
 {
     $section = function_exists('post') ? (string) post('section') : '';
+    if ($section === 'invoice_seq') {
+        $mode = function_exists('post') ? (string) post('seq_mode', 'continuous') : 'continuous';
+        invoice_slip_seq_set_mode($tenantId, $mode === 'month' ? 'month' : 'continuous');
+        return 'seq';
+    }
     if ($section === 'invoice_printer') {
         $rows = invoice_printers_load($tenantId);
         $act = function_exists('post') ? (string) post('printer_act') : '';
@@ -676,19 +804,108 @@ function invoice_slip_load($token)
     return is_array($j) ? $j : null;
 }
 
-function invoice_slips_for_user($tenantId, $username)
+function invoice_slips_for_user($tenantId, $username, $phone = '')
 {
     $username = strtolower(trim((string) $username));
+    $phoneNorm = '';
+    if (function_exists('normalize_phone')) {
+        $phoneNorm = normalize_phone($phone);
+    } else {
+        $phoneNorm = preg_replace('/\D+/', '', (string) $phone);
+    }
     $out = array();
+    $seen = array();
     foreach (invoice_slip_index_load($tenantId) as $row) {
         if (!is_array($row)) {
             continue;
         }
-        if (strtolower(trim((string) (isset($row['username']) ? $row['username'] : ''))) === $username) {
+        $tok = isset($row['token']) ? invoice_slip_token_clean($row['token']) : '';
+        if ($tok === '' || isset($seen[$tok])) {
+            continue;
+        }
+        $hit = false;
+        if ($username !== ''
+            && strtolower(trim((string) (isset($row['username']) ? $row['username'] : ''))) === $username) {
+            $hit = true;
+        }
+        if (!$hit && $phoneNorm !== '') {
+            $rowPhone = isset($row['phone']) ? (string) $row['phone'] : '';
+            $rowNorm = function_exists('normalize_phone')
+                ? normalize_phone($rowPhone)
+                : preg_replace('/\D+/', '', $rowPhone);
+            if ($rowNorm !== '' && $rowNorm === $phoneNorm) {
+                $hit = true;
+            }
+        }
+        if ($hit) {
+            $seen[$tok] = 1;
             $out[] = $row;
         }
     }
     return $out;
+}
+
+/**
+ * هاتف المشترك للفاتورة: من المُدخل، وإلا من كاش الساس / المشترك المحلي
+ */
+function invoice_slip_resolve_phone($tenantId, $username, $phone = '')
+{
+    global $pdo;
+    $phone = trim((string) $phone);
+    if ($phone !== '' && $phone !== '0'
+        && (!function_exists('phone_is_placeholder') || !phone_is_placeholder($phone))
+    ) {
+        return $phone;
+    }
+    $username = trim((string) $username);
+    if ($username === '' || !isset($pdo) || !$pdo) {
+        return '';
+    }
+    $cache = function_exists('sas_cache_get') ? sas_cache_get($pdo, $username) : null;
+    if (is_array($cache)) {
+        foreach (array('phone', 'local_phone') as $pk) {
+            if (empty($cache[$pk])) {
+                continue;
+            }
+            $p = trim((string) $cache[$pk]);
+            if ($p === '' || $p === '0') {
+                continue;
+            }
+            if (function_exists('phone_is_placeholder') && phone_is_placeholder($p)) {
+                continue;
+            }
+            return $p;
+        }
+        $localId = !empty($cache['local_subscriber_id']) ? (int) $cache['local_subscriber_id'] : 0;
+        if ($localId > 0) {
+            try {
+                $st = $pdo->prepare('SELECT phone FROM subscribers WHERE id = :id LIMIT 1');
+                $st->execute(array(':id' => $localId));
+                $p = trim((string) $st->fetchColumn());
+                if ($p !== '' && $p !== '0'
+                    && (!function_exists('phone_is_placeholder') || !phone_is_placeholder($p))
+                ) {
+                    return $p;
+                }
+            } catch (Exception $e) {
+            }
+        }
+    }
+    try {
+        $tid = (int) $tenantId;
+        $st2 = $pdo->prepare(
+            'SELECT phone FROM subscribers WHERE tenant_id = :t AND username = :u LIMIT 1'
+        );
+        $st2->execute(array(':t' => $tid, ':u' => $username));
+        $p2 = trim((string) $st2->fetchColumn());
+        if ($p2 !== '' && $p2 !== '0'
+            && (!function_exists('phone_is_placeholder') || !phone_is_placeholder($p2))
+        ) {
+            return $p2;
+        }
+    } catch (Exception $e2) {
+    }
+    return '';
 }
 
 function invoice_slip_issue($tenantId, $meta, $design)
@@ -729,13 +946,15 @@ function invoice_slip_issue($tenantId, $meta, $design)
     if ($name === '') {
         $name = $username;
     }
+    $phoneIn = trim((string) (isset($meta['phone']) ? $meta['phone'] : ''));
+    $phoneResolved = invoice_slip_resolve_phone($tenantId, $username, $phoneIn);
     $slip = array(
         'token' => $token,
         'url' => $url,
         'tenant_id' => $tenantId,
         'username' => $username,
         'name' => $name,
-        'phone' => trim((string) (isset($meta['phone']) ? $meta['phone'] : '')),
+        'phone' => $phoneResolved,
         'package' => trim((string) (isset($meta['package']) ? $meta['package'] : '')),
         'amount' => trim((string) (isset($meta['amount']) ? $meta['amount'] : '')),
         'start' => trim((string) (isset($meta['start']) ? $meta['start'] : date('Y-m-d'))),
@@ -799,7 +1018,7 @@ function invoice_slip_issue($tenantId, $meta, $design)
     return $slip;
 }
 
-function invoice_slips_visible($tenantId)
+function invoice_slips_visible($tenantId, $limit = 0, $offset = 0, &$totalOut = null)
 {
     $agent = function_exists('is_agent_user') && is_agent_user();
     $myId = 0;
@@ -807,7 +1026,7 @@ function invoice_slips_visible($tenantId)
         $me = current_admin();
         $myId = (is_array($me) && isset($me['id'])) ? (int) $me['id'] : 0;
     }
-    $out = array();
+    $all = array();
     foreach (invoice_slip_index_load($tenantId) as $row) {
         if (!is_array($row) || empty($row['token'])) {
             continue;
@@ -816,12 +1035,17 @@ function invoice_slips_visible($tenantId)
         if ($agent && $issuer > 0 && $issuer !== $myId) {
             continue;
         }
-        $out[] = $row;
-        if (count($out) >= 80) {
-            break;
-        }
+        $all[] = $row;
     }
-    return $out;
+    if (func_num_args() >= 4) {
+        $totalOut = count($all);
+    }
+    $limit = (int) $limit;
+    $offset = max(0, (int) $offset);
+    if ($limit > 0) {
+        return array_slice($all, $offset, $limit);
+    }
+    return $all;
 }
 
 function invoice_slip_agent_may($tenantId, $token)
@@ -883,26 +1107,142 @@ function invoice_slip_send_whatsapp($config, $slip)
     return array(false, $why);
 }
 
+function invoice_slip_seq_path($tenantId)
+{
+    return invoice_studio_dir() . '/slip_seq_t' . (int) $tenantId . '.json';
+}
+
+function invoice_slip_seq_read($tenantId)
+{
+    $state = array(
+        'mode' => 'continuous',
+        'n' => 0,
+        'letter' => '',
+        'month' => date('Y-m'),
+        'month_n' => 0,
+    );
+    $path = invoice_slip_seq_path($tenantId);
+    if (is_file($path)) {
+        $j = json_decode((string) @file_get_contents($path), true);
+        if (is_array($j)) {
+            if (isset($j['mode']) && $j['mode'] === 'month') {
+                $state['mode'] = 'month';
+            }
+            $state['n'] = isset($j['n']) ? (int) $j['n'] : 0;
+            $state['letter'] = invoice_slip_seq_letter(isset($j['letter']) ? $j['letter'] : '');
+            $state['month'] = isset($j['month']) ? (string) $j['month'] : date('Y-m');
+            $state['month_n'] = isset($j['month_n']) ? (int) $j['month_n'] : 0;
+            return $state;
+        }
+    }
+    $legacy = invoice_studio_dir() . '/slip_seq_t' . (int) $tenantId . '.txt';
+    if (is_file($legacy)) {
+        $state['n'] = (int) trim((string) @file_get_contents($legacy));
+    }
+    return $state;
+}
+
+function invoice_slip_seq_write($tenantId, $state)
+{
+    $path = invoice_slip_seq_path($tenantId);
+    $json = json_encode(array(
+        'mode' => (isset($state['mode']) && $state['mode'] === 'month') ? 'month' : 'continuous',
+        'n' => isset($state['n']) ? (int) $state['n'] : 0,
+        'letter' => invoice_slip_seq_letter(isset($state['letter']) ? $state['letter'] : ''),
+        'month' => isset($state['month']) ? (string) $state['month'] : date('Y-m'),
+        'month_n' => isset($state['month_n']) ? (int) $state['month_n'] : 0,
+    ));
+    return $json !== false && @file_put_contents($path, $json, LOCK_EX) !== false;
+}
+
+function invoice_slip_seq_letter($letter)
+{
+    $letter = strtoupper(trim((string) $letter));
+    if ($letter !== '' && preg_match('/^[A-Z]$/', $letter)) {
+        return $letter;
+    }
+    return '';
+}
+
+function invoice_slip_seq_mode($tenantId)
+{
+    $state = invoice_slip_seq_read($tenantId);
+    return $state['mode'] === 'month' ? 'month' : 'continuous';
+}
+
+function invoice_slip_seq_set_mode($tenantId, $mode)
+{
+    $state = invoice_slip_seq_read($tenantId);
+    $state['mode'] = ($mode === 'month') ? 'month' : 'continuous';
+    if ($state['month'] === '') {
+        $state['month'] = date('Y-m');
+    }
+    invoice_slip_seq_write($tenantId, $state);
+    return $state['mode'];
+}
+
 function invoice_slip_next_number($tenantId)
 {
-    $path = invoice_studio_dir() . '/slip_seq_t' . (int) $tenantId . '.txt';
+    $path = invoice_slip_seq_path($tenantId);
     $fh = @fopen($path, 'c+');
     if (!$fh) {
         return 'AS_' . strtoupper(substr(md5(uniqid('as', true)), 0, 6));
     }
     @flock($fh, LOCK_EX);
     $raw = stream_get_contents($fh);
-    $n = (int) $raw + 1;
-    if ($n > 999999) {
-        $n = 1;
+    $state = invoice_slip_seq_read($tenantId);
+    if ($raw !== false && trim($raw) !== '') {
+        $j = json_decode($raw, true);
+        if (is_array($j)) {
+            $state = array(
+                'mode' => (isset($j['mode']) && $j['mode'] === 'month') ? 'month' : 'continuous',
+                'n' => isset($j['n']) ? (int) $j['n'] : (int) $state['n'],
+                'letter' => invoice_slip_seq_letter(isset($j['letter']) ? $j['letter'] : (isset($state['letter']) ? $state['letter'] : '')),
+                'month' => isset($j['month']) ? (string) $j['month'] : date('Y-m'),
+                'month_n' => isset($j['month_n']) ? (int) $j['month_n'] : 0,
+            );
+        }
+    }
+    if (!isset($state['letter'])) {
+        $state['letter'] = '';
+    }
+    $ym = date('Y-m');
+    if ($state['mode'] === 'month') {
+        if ($state['month'] !== $ym) {
+            $state['month'] = $ym;
+            $state['month_n'] = 0;
+        }
+        $state['month_n'] = (int) $state['month_n'] + 1;
+        if ($state['month_n'] > 9999) {
+            $state['month_n'] = 1;
+        }
+        $label = 'AS_' . date('ym') . '_' . str_pad((string) $state['month_n'], 4, '0', STR_PAD_LEFT);
+    } else {
+        $state['n'] = (int) $state['n'] + 1;
+        if ($state['n'] > 999999) {
+            $state['n'] = 1;
+            $cur = invoice_slip_seq_letter($state['letter']);
+            if ($cur === '') {
+                $state['letter'] = 'A';
+            } elseif ($cur !== 'Z') {
+                $state['letter'] = chr(ord($cur) + 1);
+            } else {
+                $state['letter'] = 'Z';
+                $state['n'] = 999999;
+            }
+        }
+        $state['month'] = $ym;
+        $pad = str_pad((string) $state['n'], 6, '0', STR_PAD_LEFT);
+        $let = invoice_slip_seq_letter($state['letter']);
+        $label = ($let !== '') ? ($let . $pad) : ('AS_' . $pad);
     }
     rewind($fh);
     ftruncate($fh, 0);
-    fwrite($fh, (string) $n);
+    fwrite($fh, json_encode($state));
     fflush($fh);
     flock($fh, LOCK_UN);
     fclose($fh);
-    return 'AS_' . str_pad((string) $n, 6, '0', STR_PAD_LEFT);
+    return $label;
 }
 
 function invoice_h($value)
@@ -931,7 +1271,7 @@ function invoice_slip_safe_asset($url)
     return $url;
 }
 
-function invoice_slip_design_html($slip)
+function invoice_slip_design_html($slip, &$outH = null)
 {
     $blocks = (isset($slip['blocks']) && is_array($slip['blocks'])) ? $slip['blocks'] : array();
     if (!$blocks) {
@@ -968,13 +1308,48 @@ function invoice_slip_design_html($slip)
     $fh = (float) $frame['h'] >= 8 ? (float) $frame['h'] : max(10, $h - ($fy * 2));
     $styleMap = array('line' => 'solid', 'double' => 'double', 'dashed' => 'dashed', 'round' => 'solid');
     $footY = isset($slip['footer_y']) ? (float) $slip['footer_y'] : -1;
+    // احسب أقصى أسفل للمحتوى حتى ما ينقص كلام أو يتزاحف
+    $contentBottom = 0;
+    foreach ($blocks as $bEst) {
+        if (!is_array($bEst) || (isset($bEst['on']) && !$bEst['on'])) {
+            continue;
+        }
+        $kEst = isset($bEst['kind']) ? (string) $bEst['kind'] : '';
+        $yEst = isset($bEst['y']) ? (float) $bEst['y'] : 0;
+        $szEst = isset($bEst['size']) ? (float) $bEst['size'] : 13;
+        if ($kEst === 'logo' || $kEst === 'qr') {
+            $bhEst = isset($bEst['w']) && (float) $bEst['w'] > 0 ? (float) $bEst['w'] : 18;
+        } elseif ($kEst === 'table' && !empty($bEst['rows']) && is_array($bEst['rows'])) {
+            $rhEst = isset($bEst['rowH']) ? (float) $bEst['rowH'] : 7;
+            $bhEst = max(4, $rhEst) * count($bEst['rows']);
+        } elseif ($kEst === 'rule') {
+            $bhEst = 1;
+        } else {
+            $bhEst = max(4, ($szEst * 0.3528) + 1.2);
+        }
+        $botEst = $yEst + $bhEst;
+        if ($botEst > $contentBottom) {
+            $contentBottom = $botEst;
+        }
+    }
+    if ($footY >= 0 && ($footY + 7) > $contentBottom) {
+        $contentBottom = $footY + 7;
+    }
+    if ($contentBottom + 2 > $h) {
+        $h = $contentBottom + 2;
+    }
     if ($footY >= 0 && ($footY + 7) > $h) {
         $h = $footY + 8;
     }
     if (($fy + $fh + 1.6) > $h) {
         $h = $fy + $fh + 1.6;
     }
-    $html = '<article class="slip slip-design" style="width:' . invoice_h($w) . 'mm;height:' . invoice_h($h) . 'mm;padding:0;position:relative;overflow:hidden;font-family:Tajawal,\'Segoe UI\',Tahoma,Arial,sans-serif;font-weight:400;color:#444;">';
+    // الإطار يتبع ارتفاع الورقة حتى ما يقصّ الحد الكلام من تحت
+    $needFh = max(10, $h - $fy - 0.8);
+    if ($fh < $needFh) {
+        $fh = $needFh;
+    }
+    $html = '<article class="slip slip-design" style="width:' . invoice_h($w) . 'mm;height:' . invoice_h($h) . 'mm;padding:0;position:relative;overflow:visible;background:#fff;box-sizing:border-box;font-family:Tajawal,\'Segoe UI\',Tahoma,Arial,sans-serif;font-weight:400;color:#444;">';
     if ($frame['style'] !== 'none' && isset($styleMap[$frame['style']])) {
         $html .= '<div style="position:absolute;left:' . invoice_h($fx) . 'mm;top:' . invoice_h($fy) . 'mm;width:' . invoice_h($fw) . 'mm;height:' . invoice_h($fh) . 'mm;box-sizing:border-box;border:' . invoice_h($thick) . 'mm ' . $styleMap[$frame['style']] . ' ' . invoice_h($frame['color']) . ';border-radius:' . invoice_h($frame['radius']) . 'mm;"></div>';
     }
@@ -998,8 +1373,9 @@ function invoice_slip_design_html($slip)
         }
         if ($kind === 'rule') {
             $rw = $bw > 0 ? $bw : max(20, $w - 8);
-            $border = !empty($b['dash']) ? 'dashed' : 'solid';
-            $html .= '<div style="' . $pos . 'width:' . invoice_h($rw) . 'mm;border-top:0.4mm ' . $border . ' ' . invoice_h($color) . ';height:0;"></div>';
+            $border = !empty($b['dash']) ? '0.35mm dashed ' : '0.45mm solid ';
+            // نفس إزاحة المحرر حتى الخط يطلع تحت الكلام مو يقطعه
+            $html .= '<div style="' . $pos . 'width:' . invoice_h($rw) . 'mm;margin-top:1.4mm;border-top:' . $border . invoice_h($color) . ';height:0;"></div>';
             continue;
         }
         if ($kind === 'table' && !empty($b['rows']) && is_array($b['rows'])) {
@@ -1016,7 +1392,8 @@ function invoice_slip_design_html($slip)
             foreach ($cols as $cw) {
                 $colSum += ((float) $cw > 0) ? (float) $cw : 0;
             }
-            $table = '<table dir="rtl" style="width:100%;table-layout:fixed;border-collapse:collapse;border:0.4mm solid #0f172a;box-sizing:border-box;font-size:' . invoice_h($size) . 'px;color:' . invoice_h($color) . ';background:#fff;">';
+            $sizeMmTbl = round(max(2.2, $size * 0.264583), 3);
+            $table = '<table dir="rtl" style="width:100%;table-layout:fixed;border-collapse:collapse;border:0.4mm solid #0f172a;box-sizing:border-box;font-size:' . invoice_h($sizeMmTbl) . 'mm;color:' . invoice_h($color) . ';background:#fff;">';
             if ($colSum > 0) {
                 $cellN = 0;
                 foreach ($b['rows'] as $_r0) {
@@ -1088,10 +1465,11 @@ function invoice_slip_design_html($slip)
         if ($kind !== 'custom' && $label === '' && $text !== '') {
             $value = $text;
         }
-        if ($label === '' && ($kind === 'name' || $kind === 'address') && $align === 'center') {
-            $align = 'right';
-        }
+        // لفّ العنوان فقط، مثل المحرر. باقي الأسطر سطر واحد حتى ما تتداخل
         $wrapLine = ($kind === 'address');
+        if ($kind === 'custom' && (strpos($text, "\n") !== false || mb_strlen($text, 'UTF-8') > 42)) {
+            $wrapLine = true;
+        }
         $fw = (isset($b['weight']) && $b['weight'] === 'normal') ? '400' : '500';
         $fst = !empty($b['italic']) ? 'italic' : 'normal';
         $td = !empty($b['under']) ? 'underline' : 'none';
@@ -1100,38 +1478,32 @@ function invoice_slip_design_html($slip)
         if ($kind !== 'custom' && $label !== '') {
             if (!empty($b['stack'])) {
                 $flow = 'flex-direction:column;align-items:stretch;';
-                $valStyle = 'flex:1 1 auto;min-width:0;overflow:hidden;white-space:nowrap;';
-            } elseif ($align === 'center') {
-                $flow = 'justify-content:space-between;align-items:baseline;';
+                $valStyle = 'flex:1 1 auto;min-width:0;white-space:normal;word-break:break-word;';
+            } elseif ($align === 'center' || $bw > 0) {
+                $flow = 'justify-content:space-between;align-items:center;';
                 $valStyle = 'flex:0 1 auto;min-width:0;white-space:nowrap;text-align:left;direction:ltr;';
-            } elseif ($bw > 0) {
-                $flow = 'justify-content:space-between;align-items:baseline;';
-                $valStyle = 'flex:1 1 auto;min-width:0;overflow:hidden;white-space:nowrap;text-align:left;';
             } else {
-                $flow = 'justify-content:flex-start;align-items:baseline;';
+                $flow = 'justify-content:flex-start;align-items:center;';
                 $valStyle = 'flex:0 1 auto;min-width:0;white-space:nowrap;';
             }
-            $inner = '<span class="slip-pair" style="display:flex;' . $flow . 'gap:2mm;width:100%;min-width:0;' . $type . '">'
-                . '<span style="flex:0 0 auto;">' . invoice_h($label) . '</span>'
-                . '<span class="slip-fit" style="' . $valStyle . '">' . invoice_h($value) . '</span></span>';
+            $pairW = ($bw > 0 || $align === 'center') ? 'width:100%;' : 'width:max-content;max-width:100%;';
+            $inner = '<span class="slip-pair" style="display:flex;' . $flow . 'gap:1.5mm;' . $pairW . 'box-sizing:border-box;' . $type . '">'
+                . '<span style="flex:0 0 auto;white-space:nowrap;">' . invoice_h($label) . '</span>'
+                . '<span style="' . $valStyle . '">' . invoice_h($value) . '</span></span>';
         } else {
             $inner = invoice_h($value);
         }
-        $lineStyle = $pos . 'font-family:Tajawal,\'Segoe UI\',Tahoma,Arial,sans-serif;font-size:' . invoice_h($size) . 'px;color:' . invoice_h($color) . ';text-align:' . invoice_h($align) . ';direction:' . invoice_h($dir) . ';line-height:' . ($wrapLine ? '1.35' : '1.25') . ';white-space:' . ($wrapLine ? 'normal' : 'nowrap') . ';' . $type;
-        $lineClass = 'slip-line';
-        $frameRight = (isset($frame['x']) ? (float) $frame['x'] : 0) + (isset($frame['w']) ? (float) $frame['w'] : $w);
-        $fitW = $bw > 0 ? $bw : max(12, $frameRight - $x - 1.5);
-        if ($x + $fitW > $frameRight - 0.8) {
-            $fitW = max(12, $frameRight - $x - 0.8);
-        }
-        if ($bw > 0 || $label !== '') {
-            $lineStyle .= 'width:' . invoice_h($fitW) . 'mm;max-width:' . invoice_h($fitW) . 'mm;';
-            if (!$wrapLine) {
-                $lineStyle .= 'overflow:hidden;';
-            }
-        } elseif (!$wrapLine) {
-            $lineClass .= ' slip-fit';
-            $lineStyle .= 'max-width:' . invoice_h($fitW) . 'mm;overflow:hidden;';
+        $sizeMm = round(max(2.2, $size * 0.264583), 3);
+        $lineStyle = $pos . 'margin:0;padding:0;font-family:Tajawal,\'Segoe UI\',Tahoma,Arial,sans-serif;font-size:' . invoice_h($sizeMm) . 'mm;color:' . invoice_h($color) . ';text-align:' . invoice_h($align) . ';direction:' . invoice_h($dir) . ';line-height:' . ($wrapLine ? '1.35' : '1.15') . ';white-space:' . ($wrapLine ? 'normal' : 'nowrap') . ';word-break:' . ($wrapLine ? 'break-word' : 'normal') . ';overflow:visible;box-sizing:border-box;' . $type;
+        $lineClass = 'slip-line' . ($wrapLine ? ' is-wrap' : '');
+        if ($bw > 0) {
+            $lineStyle .= 'width:' . invoice_h($bw) . 'mm;';
+        } elseif ($label !== '' && $align === 'center') {
+            $frameRight = (isset($frame['x']) ? (float) $frame['x'] : 0) + (isset($frame['w']) ? (float) $frame['w'] : $w);
+            $fitW = max(12, $frameRight - $x - 1.2);
+            $lineStyle .= 'width:' . invoice_h($fitW) . 'mm;';
+        } else {
+            $lineStyle .= 'width:max-content;max-width:' . invoice_h(max(20, $w - $x)) . 'mm;';
         }
         $html .= '<div class="' . $lineClass . '" style="' . $lineStyle . '">' . $inner . '</div>';
     }
@@ -1142,15 +1514,18 @@ function invoice_slip_design_html($slip)
     $footY = isset($slip['footer_y']) ? (float) $slip['footer_y'] : -1;
     $footX = isset($slip['footer_x']) ? (float) $slip['footer_x'] : -1;
     $fa = (isset($slip['footer_align']) && in_array($slip['footer_align'], array('left', 'center', 'right'), true)) ? $slip['footer_align'] : 'center';
-    $fstyle = 'position:absolute;z-index:5;background:transparent;font-family:inherit;font-size:11px;line-height:1.35;font-weight:400;color:#64748b;padding:0.4mm 1.6mm;text-align:' . invoice_h($fa) . ';';
+    $fstyle = 'position:absolute;z-index:5;background:transparent;font-family:inherit;font-size:2.9mm;line-height:1.35;font-weight:400;color:#64748b;padding:0.4mm 1.6mm;text-align:' . invoice_h($fa) . ';overflow:visible;white-space:normal;word-break:break-word;box-sizing:border-box;';
     if ($footX >= 0 && $footY >= 0) {
-        $fstyle .= 'left:' . invoice_h($footX) . 'mm;top:' . invoice_h($footY) . 'mm;max-width:' . invoice_h(max(10, $w - $footX - 1)) . 'mm;';
+        $fstyle .= 'left:' . invoice_h($footX) . 'mm;top:' . invoice_h($footY) . 'mm;width:' . invoice_h(max(10, $w - $footX - 1)) . 'mm;';
     } elseif ($footY >= 0) {
         $fstyle .= 'left:1mm;right:1mm;top:' . invoice_h($footY) . 'mm;';
     } else {
         $fstyle .= 'left:1mm;right:1mm;bottom:1.2mm;';
     }
-    $html .= '<div style="' . $fstyle . '">' . invoice_h($footer) . '</div>';
+    $html .= '<div class="slip-foot" style="' . $fstyle . '">' . invoice_h($footer) . '</div>';
+    if (func_num_args() >= 2) {
+        $outH = $h;
+    }
     $html .= '</article>';
     return $html;
 }
@@ -1199,8 +1574,10 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         'frames' => $frames,
         'ui' => array(
             'templates' => $isEn ? 'Templates' : 'القوالب',
+            'viewTpl' => $isEn ? 'View templates' : 'عرض القوالب',
             'pick' => $isEn ? 'Choose a template to preview' : 'اختر قالباً للاستعراض',
             'new' => $isEn ? 'New template' : 'قالب جديد',
+            'backInvoices' => $isEn ? 'Back to invoices' : 'رجوع للفواتير',
             'edit' => $isEn ? 'Edit' : 'تعديل',
             'save' => $isEn ? 'Save' : 'حفظ',
             'cancel' => $isEn ? 'Cancel' : 'إلغاء',
@@ -1269,36 +1646,55 @@ function invoice_render_tab($tab, $tenantId, $isEn)
     .inv-len { color: #0f766e; font-weight: 800; font-size: 12px; white-space: nowrap; background: rgba(255,255,255,.94); border-radius: 999px; padding: 6px 10px; box-shadow: 0 6px 16px rgba(15,23,42,.06); }
     .inv-gallery { width: 100%; align-items: stretch; }
     .inv-board { width: 100%; box-sizing: border-box; background: #fff; border: 1px solid #e7edf4; border-radius: 22px; box-shadow: 0 20px 50px rgba(15,23,42,.06); overflow: hidden; }
-    .inv-board-head { display: flex; align-items: center; gap: 12px; padding: 16px 18px; }
-    .inv-board-head h2 { margin: 0; font-size: 22px; font-weight: 800; letter-spacing: -.03em; color: #0f172a; }
-    .inv-count { color: #94a3b8; font-size: 13px; font-weight: 800; }
-    .inv-search { margin-inline-start: auto; width: min(340px, 48vw); height: 42px; border-radius: 999px; border: 1px solid #e6ebf2; background: #f8fafc; padding: 0 16px; font: inherit; font-weight: 700; color: #0f172a; outline: none; }
-    .inv-search:focus { border-color: #0f766e; background: #fff; box-shadow: 0 0 0 4px rgba(15,118,110,.12); }
-    .inv-table-wrap { overflow: auto; max-height: calc(100vh - 230px); }
-    .inv-ledger { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-size: 14px; }
-    .inv-ledger th:nth-child(1), .inv-ledger td:nth-child(1) { width: 12%; }
-    .inv-ledger th:nth-child(2), .inv-ledger td:nth-child(2) { width: 22%; }
-    .inv-ledger th:nth-child(3), .inv-ledger td:nth-child(3) { width: 14%; }
-    .inv-ledger th:nth-child(4), .inv-ledger td:nth-child(4) { width: 12%; }
-    .inv-ledger th:nth-child(5), .inv-ledger td:nth-child(5) { width: 16%; }
-    .inv-ledger th:nth-child(6), .inv-ledger td:nth-child(6) { width: 12%; }
-    .inv-ledger th:nth-child(7), .inv-ledger td:nth-child(7) { width: 22%; }
+    .inv-board-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; flex-wrap: wrap; }
+    .inv-board-head h2 { margin: 0; font-size: 18px; font-weight: 800; letter-spacing: -.03em; color: #0f172a; }
+    .inv-count { color: #94a3b8; font-size: 12px; font-weight: 800; }
+    .inv-head-acts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .inv-head-acts .btn { height: 32px; padding: 0 12px; border-radius: 999px; font-weight: 800; }
+    .inv-search { margin-inline-start: auto; width: min(280px, 42vw); height: 34px; border-radius: 999px; border: 1px solid #e6ebf2; background: #f8fafc; padding: 0 12px; font: inherit; font-weight: 700; color: #0f172a; outline: none; }
+    .inv-search:focus { border-color: #0f766e; background: #fff; box-shadow: 0 0 0 3px rgba(15,118,110,.12); }
+    .inv-tpl-panel { display: none; flex-direction: column; flex: 1; min-height: 0; width: 100%; background: linear-gradient(180deg,#f8fafc,#eef2f6); border: 1px solid #e6ebf2; border-radius: 22px; overflow: hidden; }
+    .inv-tpl-panel.is-on { display: flex; }
+    .inv-board.is-away { display: none; }
+    .inv-table-wrap { overflow: auto; max-height: calc(100vh - 200px); }
+    .inv-ledger { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+    .inv-ledger th:nth-child(1), .inv-ledger td:nth-child(1) { width: 11%; }
+    .inv-ledger th:nth-child(2), .inv-ledger td:nth-child(2) { width: 24%; }
+    .inv-ledger th:nth-child(3), .inv-ledger td:nth-child(3) { width: 13%; }
+    .inv-ledger th:nth-child(4), .inv-ledger td:nth-child(4) { width: 11%; }
+    .inv-ledger th:nth-child(5), .inv-ledger td:nth-child(5) { width: 15%; }
+    .inv-ledger th:nth-child(6), .inv-ledger td:nth-child(6) { width: 10%; }
+    .inv-ledger th:nth-child(7), .inv-ledger td:nth-child(7) { width: 16%; }
     .inv-ledger td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .inv-ledger th { position: sticky; top: 0; z-index: 1; background: #f8fafc; color: #64748b; font-size: 11px; font-weight: 800; letter-spacing: .06em; text-align: start; padding: 11px 16px; border-bottom: 1px solid #e8edf3; }
-    .inv-ledger td { padding: 13px 16px; border-bottom: 1px solid #f3f6f9; color: #0f172a; vertical-align: middle; }
-    .inv-ledger tbody tr { cursor: pointer; transition: background .16s ease; }
+    .inv-ledger th { position: sticky; top: 0; z-index: 1; background: #f8fafc; color: #64748b; font-size: 10px; font-weight: 800; letter-spacing: .04em; text-align: start; padding: 6px 8px; border-bottom: 1px solid #e8edf3; }
+    .inv-ledger td { padding: 5px 8px; border-bottom: 1px solid #f3f6f9; color: #0f172a; vertical-align: middle; line-height: 1.25; }
+    .inv-ledger tbody tr { cursor: pointer; transition: background .12s ease; }
     .inv-ledger tbody tr:hover { background: #f8fafc; }
     .inv-ledger tbody tr.is-on { background: #f0fdfa; }
     .inv-ledger .num { font-weight: 800; letter-spacing: .01em; }
     .inv-ledger .amt { font-weight: 800; font-variant-numeric: tabular-nums; }
     .inv-ledger .muted { color: #64748b; font-weight: 700; }
-    .inv-mini-acts { display: flex; gap: 6px; justify-content: flex-end; }
-    .inv-mini-acts button, .inv-mini-acts a { height: 32px; padding: 0 12px; border-radius: 999px; border: 1px solid #e6ebf2; background: #fff; color: #0f172a; font: inherit; font-size: 12px; font-weight: 800; text-decoration: none; cursor: pointer; }
+    .inv-mini-acts { display: flex; gap: 4px; justify-content: flex-end; }
+    .inv-mini-acts button, .inv-mini-acts a { height: 26px; padding: 0 8px; border-radius: 999px; border: 1px solid #e6ebf2; background: #fff; color: #0f172a; font: inherit; font-size: 11px; font-weight: 800; text-decoration: none; cursor: pointer; }
     .inv-mini-acts .is-main { background: #0f172a; color: #fff; border-color: #0f172a; }
+    .inv-pager { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 8px 12px 10px; border-top: 1px solid #eef2f6; background: #fbfcfe; }
+    .inv-pager-sizes, .inv-pager-pages { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+    .inv-pager .pager-n {
+      display: inline-flex; align-items: center; justify-content: center; min-width: 28px; height: 28px;
+      padding: 0 8px; border-radius: 999px; border: 0; background: transparent; color: #64748b;
+      font: inherit; font-size: 12px; font-weight: 800; text-decoration: none; cursor: pointer;
+    }
+    .inv-pager .pager-n:hover { color: #334155; background: rgba(255,255,255,.85); }
+    .inv-pager .pager-n.is-on { color: #0f766e; background: #ecfdf5; }
+    .inv-pager .pager-n.is-off { opacity: .28; pointer-events: none; }
     .inv-sheet { position: fixed; top: 0; left: 0; right: 0; bottom: 0; width: 100vw; height: 100vh; z-index: 100080; background: rgba(15,23,42,.45); display: flex; align-items: center; justify-content: center; padding: 20px; box-sizing: border-box; direction: ltr; }
     .inv-sheet[hidden] { display: none !important; }
     .inv-sheet-card { width: min(440px, calc(100vw - 32px)); height: min(90vh, 860px); margin: 0; background: #fff; display: flex; flex-direction: column; border-radius: 22px; overflow: hidden; box-shadow: 0 30px 80px rgba(15,23,42,.28); direction: rtl; }
-    .inv-sheet-bar { display: flex; align-items: center; gap: 8px; padding: 14px 16px; border-bottom: 1px solid #eef2f6; }
+    .inv-seq { display: inline-flex; align-items: center; gap: 4px; background: #f1f5f9; border-radius: 999px; padding: 3px; }
+    .inv-seq button { height: 28px; padding: 0 10px; border: 0; border-radius: 999px; background: transparent; color: #475569; font: inherit; font-size: 12px; font-weight: 800; cursor: pointer; }
+    .inv-seq button.is-on { background: #0f172a; color: #fff; }
+    .inv-sheet-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 14px 16px; border-bottom: 1px solid #eef2f6; }
+    .inv-sheet-acts { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
     .inv-sheet-bar button { height: 32px; padding: 0 12px; border-radius: 999px; border: 1px solid #e6ebf2; background: #fff; color: #0f172a; font: inherit; font-size: 12px; font-weight: 800; cursor: pointer; }
     .inv-sheet-bar form { margin: 0; }
     .inv-sheet-bar form button { background: #0f172a; color: #fff; border-color: #0f172a; }
@@ -1313,8 +1709,17 @@ function invoice_render_tab($tab, $tenantId, $isEn)
       .inv-search { width: 100%; margin-inline-start: 0; }
       .inv-col-phone, .inv-col-who { display: none; }
       .inv-table-wrap { max-height: none; }
-      .inv-sheet-card { width: 100%; }
-      .inv-ledger td, .inv-ledger th { padding: 11px 10px; }
+      .inv-sheet { padding: 0; align-items: stretch; }
+      .inv-sheet-card { width: 100%; height: 100%; border-radius: 0; }
+      .inv-sheet-bar { padding: 10px; gap: 6px; }
+      .inv-sheet-bar strong { order: 1; flex: 1 1 auto; font-size: 14px; }
+      .inv-sheet-bar .inv-x { order: 2; }
+      .inv-sheet-bar .grow { display: none; }
+      .inv-sheet-acts { order: 3; width: 100%; }
+      .inv-sheet-acts button, .inv-sheet-acts a, .inv-sheet-acts form { flex: 1 1 auto; }
+      .inv-sheet-acts form button, .inv-sheet-acts > button, .inv-sheet-acts a span { width: 100%; justify-content: center; }
+      .inv-ledger td, .inv-ledger th { padding: 5px 6px; }
+      .inv-pager { justify-content: center; }
     }
     .inv-cards { flex: 0 0 auto; max-height: none; min-height: 0; display: grid; grid-template-columns: repeat(auto-fill,minmax(180px,1fr)); gap: 10px; padding: 12px; overflow: visible; align-content: start; }
     .inv-card { position: relative; overflow: hidden; background: #fff; border: 1px solid #e6ebf2; border-radius: 18px; padding: 10px; cursor: pointer; box-shadow: 0 10px 28px rgba(15,23,42,.05); text-align: center; }
@@ -1385,7 +1790,7 @@ function invoice_render_tab($tab, $tenantId, $isEn)
     .inv-fr-h[data-h="e"] { right: -5px; top: 50%; margin-top: -4px; cursor: ew-resize; }
     .inv-fr-h[data-h="w"] { left: -5px; top: 50%; margin-top: -4px; cursor: ew-resize; }
     .inv-block { position: absolute; margin: 0; padding: 0; line-height: 1.15; letter-spacing: 0; background: transparent; border: 0; white-space: nowrap; box-sizing: border-box; user-select: none; z-index: 5; touch-action: none; }
-    .inv-pair { display: flex; align-items: baseline; justify-content: flex-start; gap: 1.5mm; width: max-content; max-width: 100%; }
+    .inv-pair { display: flex; align-items: center; justify-content: flex-start; gap: 1.5mm; width: max-content; max-width: 100%; }
     .inv-block:not(.is-hug) .inv-pair { width: 100%; justify-content: space-between; }
     .inv-block.is-center .inv-pair { width: 100%; justify-content: space-between; }
     .inv-block.is-center .inv-var { direction: ltr; text-align: left; }
@@ -1422,7 +1827,7 @@ function invoice_render_tab($tab, $tenantId, $isEn)
     .inv-app.is-edit .inv-block.is-pick .inv-resize { display: block; }
     .inv-block img { width: 100%; height: auto; display: block; }
     .inv-logo-ph { display: flex; align-items: center; justify-content: center; width: 100%; height: 12mm; background: #f8fafc; color: #94a3b8; font-size: 10px; }
-    .inv-foot { position: absolute; z-index: 4; margin: 0; background: transparent; text-align: center; font-size: 11px; line-height: 1.35; font-weight: 400; color: #64748b; padding: 0.4mm 1.6mm; box-sizing: border-box; max-width: calc(100% - 2mm); overflow: visible; white-space: nowrap; user-select: none; font-family: "Tajawal", "Segoe UI", Tahoma, Arial, sans-serif; }
+    .inv-foot { position: absolute; z-index: 4; margin: 0; background: transparent; text-align: center; font-size: 2.9mm; line-height: 1.35; font-weight: 400; color: #64748b; padding: 0.4mm 1.6mm; box-sizing: border-box; max-width: calc(100% - 2mm); overflow: visible; white-space: normal; word-break: break-word; user-select: none; font-family: "Tajawal", "Segoe UI", Tahoma, Arial, sans-serif; }
     .inv-app.is-edit .inv-foot { cursor: grab; }
     .inv-foot.is-pick { outline: 1.5px solid #0f766e; outline-offset: 1px; }
     #pDel { width: 32px; min-width: 32px; height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
@@ -1482,10 +1887,19 @@ function invoice_render_tab($tab, $tenantId, $isEn)
     .inv-add { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
     .inv-add input { height: 40px; border-radius: 12px; border: 1px solid #e2e8f0; padding: 0 10px; }
     .inv-printer { display: flex; justify-content: space-between; gap: 10px; align-items: center; border: 1px solid #e6ebf2; border-radius: 14px; padding: 10px 12px; margin-bottom: 8px; }
-    .inv-printer.is-def { border-color: #99f6e4; }
+    .inv-printer.is-def { border-color: #86efac; background: #f0fdf4; box-shadow: 0 0 0 1px rgba(22,163,74,.12); }
     .inv-printer span, .inv-printer em { display: block; color: #64748b; font-size: 12px; font-style: normal; font-weight: 700; }
     .inv-acts { display: flex; gap: 6px; align-items: center; }
-    .inv-def { background: #ccfbf1; color: #0f766e; font-weight: 800; border-radius: 999px; padding: 4px 10px; }
+    .inv-def {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: #dcfce7; color: #166534; font-weight: 800; border-radius: 999px; padding: 5px 12px;
+    }
+    .inv-def::before {
+      content: ''; width: 16px; height: 16px; border-radius: 50%; background: #16a34a;
+      box-shadow: inset 0 0 0 2px #fff;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'><polyline points='20 6 9 17 4 12'/></svg>");
+      background-size: 10px 10px; background-repeat: no-repeat; background-position: center;
+    }
     @media (max-width: 760px) {
       .inv-desk:not([hidden]) { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto auto; }
       .inv-rail { grid-column: 1; grid-row: 1; flex-direction: row; width: auto; justify-content: center; border-left: 0; border-bottom: 1px solid #e6ebf2; }
@@ -1497,21 +1911,94 @@ function invoice_render_tab($tab, $tenantId, $isEn)
     <div class="inv-app" id="invApp">
         <section class="inv-gallery" id="invGallery">
             <?php
-            $issued = function_exists('invoice_slips_visible') ? invoice_slips_visible($tenantId) : array();
-            $issuedN = 0;
-            if (is_array($issued)) {
-                foreach ($issued as $slipCountRow) {
-                    if (is_array($slipCountRow) && !empty($slipCountRow['token'])) {
-                        $issuedN++;
+            $invPerRaw = isset($_GET['inv_per']) ? (string) $_GET['inv_per'] : '20';
+            $invAllowed = array(5, 10, 20, 50, 100);
+            $invShowAll = ($invPerRaw === 'all');
+            if ($invShowAll) {
+                $invPer = 0;
+            } else {
+                $invPer = (int) $invPerRaw;
+                if (!in_array($invPer, $invAllowed, true)) {
+                    $invPer = 20;
+                    $invPerRaw = '20';
+                }
+            }
+            $invPage = isset($_GET['inv_page']) ? max(1, (int) $_GET['inv_page']) : 1;
+            $invQ = isset($_GET['inv_q']) ? trim((string) $_GET['inv_q']) : '';
+            $issuedTotal = 0;
+            $issuedAll = function_exists('invoice_slips_visible')
+                ? invoice_slips_visible($tenantId, 0, 0, $issuedTotal)
+                : array();
+            if (!is_array($issuedAll)) {
+                $issuedAll = array();
+                $issuedTotal = 0;
+            }
+            if ($invQ !== '') {
+                $invNeedle = function_exists('mb_strtolower') ? mb_strtolower($invQ, 'UTF-8') : strtolower($invQ);
+                $filtered = array();
+                foreach ($issuedAll as $slipFilterRow) {
+                    if (!is_array($slipFilterRow)) {
+                        continue;
+                    }
+                    $hay = strtolower(
+                        (isset($slipFilterRow['number']) ? (string) $slipFilterRow['number'] : '') . ' '
+                        . (isset($slipFilterRow['name']) ? (string) $slipFilterRow['name'] : '') . ' '
+                        . (isset($slipFilterRow['phone']) ? (string) $slipFilterRow['phone'] : '') . ' '
+                        . (isset($slipFilterRow['amount']) ? (string) $slipFilterRow['amount'] : '') . ' '
+                        . (isset($slipFilterRow['created_at']) ? (string) $slipFilterRow['created_at'] : '') . ' '
+                        . (isset($slipFilterRow['issuer_name']) ? (string) $slipFilterRow['issuer_name'] : '') . ' '
+                        . (isset($slipFilterRow['username']) ? (string) $slipFilterRow['username'] : '')
+                    );
+                    if ($hay !== '' && strpos($hay, $invNeedle) !== false) {
+                        $filtered[] = $slipFilterRow;
                     }
                 }
+                $issuedAll = $filtered;
+                $issuedTotal = count($issuedAll);
+            }
+            if ($invShowAll) {
+                $invPerPage = $issuedTotal > 0 ? $issuedTotal : 1;
+                $invPages = 1;
+                $invPage = 1;
+                $invOffset = 0;
+                $issued = $issuedAll;
+            } else {
+                $invPages = max(1, (int) ceil(($issuedTotal > 0 ? $issuedTotal : 1) / max(1, $invPer)));
+                if ($invPage > $invPages) {
+                    $invPage = $invPages;
+                }
+                $invOffset = ($invPage - 1) * $invPer;
+                $issued = array_slice($issuedAll, $invOffset, $invPer);
+                $invPerPage = $invPer;
+            }
+            $issuedN = count($issued);
+            $invKeep = array('tab=invoices');
+            if ($invQ !== '') {
+                $invKeep[] = 'inv_q=' . rawurlencode($invQ);
+            }
+            if ($invPerRaw !== '20') {
+                $invKeep[] = 'inv_per=' . rawurlencode($invPerRaw);
+            }
+            $invKeepStr = implode('&', $invKeep);
+            $invWaOn = true;
+            if (function_exists('whatsapp_notifications_enabled')) {
+                global $pdo;
+                $invWaOn = isset($pdo) && $pdo ? (bool) whatsapp_notifications_enabled($pdo) : false;
             }
             ?>
             <div class="inv-board" id="invBoard">
                 <div class="inv-board-head">
                     <h2><?php echo e($isEn ? 'Invoices' : 'الفواتير'); ?></h2>
-                    <span class="inv-count" id="invSlipCount"><?php echo (int) $issuedN; ?></span>
-                    <input type="search" class="inv-search" id="invSlipQ" placeholder="<?php echo e($isEn ? 'Search name, number, phone' : 'بحث بالاسم أو الرقم أو الهاتف'); ?>" autocomplete="off">
+                    <span class="inv-count" id="invSlipCount"><?php echo (int) $issuedTotal; ?></span>
+                    <div class="inv-head-acts">
+                        <button class="btn ghost sm" type="button" id="invShowTpl"><?php echo e($payload['ui']['viewTpl']); ?></button>
+                        <button class="btn ghost sm" type="button" id="invPrintOpen"><?php echo e($payload['ui']['printers']); ?></button>
+                    </div>
+                    <form method="get" action="settings.php" class="inv-search-form" style="margin-inline-start:auto;display:flex;gap:6px;align-items:center;min-width:min(280px,42vw);flex:1 1 200px">
+                        <input type="hidden" name="tab" value="invoices">
+                        <?php if ($invPerRaw !== '20'): ?><input type="hidden" name="inv_per" value="<?php echo e($invPerRaw); ?>"><?php endif; ?>
+                        <input type="search" class="inv-search" name="inv_q" id="invSlipQ" value="<?php echo e($invQ); ?>" placeholder="<?php echo e($isEn ? 'Search name, number, phone' : 'بحث بالاسم أو الرقم أو الهاتف'); ?>" autocomplete="off" style="margin:0;width:100%;flex:1">
+                    </form>
                 </div>
                 <div class="inv-table-wrap">
                     <table class="inv-ledger" id="invLedger">
@@ -1540,6 +2027,29 @@ function invoice_render_tab($tab, $tenantId, $isEn)
                             $slipWhen = isset($slipRow['created_at']) ? (string) $slipRow['created_at'] : '';
                             $slipAgent = isset($slipRow['issuer_name']) ? trim((string) $slipRow['issuer_name']) : '';
                             $slipPhone = isset($slipRow['phone']) ? trim((string) $slipRow['phone']) : '';
+                            $slipUser = isset($slipRow['username']) ? trim((string) $slipRow['username']) : '';
+                            if (($slipPhone === '' || $slipPhone === '0' || $slipPhone === '—')
+                                && $slipUser !== ''
+                                && function_exists('invoice_slip_resolve_phone')
+                            ) {
+                                $slipPhone = invoice_slip_resolve_phone($tenantId, $slipUser, '');
+                            }
+                            if (($slipPhone === '' || $slipPhone === '0') && !empty($tok) && function_exists('invoice_slip_load')) {
+                                $slipFull = invoice_slip_load($tok);
+                                if (is_array($slipFull)) {
+                                    $pFull = isset($slipFull['phone']) ? trim((string) $slipFull['phone']) : '';
+                                    if ($pFull === '' && !empty($slipFull['username'])) {
+                                        $pFull = invoice_slip_resolve_phone(
+                                            $tenantId,
+                                            (string) $slipFull['username'],
+                                            ''
+                                        );
+                                    }
+                                    if ($pFull !== '' && $pFull !== '0') {
+                                        $slipPhone = $pFull;
+                                    }
+                                }
+                            }
                             $hay = strtolower($slipNo . ' ' . $slipName . ' ' . $slipPhone . ' ' . $slipAmt . ' ' . $slipWhen . ' ' . $slipAgent);
                             ?>
                             <tr data-tok="<?php echo e($tok); ?>" data-no="<?php echo e($slipNo !== '' ? $slipNo : $tok); ?>" data-q="<?php echo e($hay); ?>">
@@ -1553,7 +2063,9 @@ function invoice_render_tab($tab, $tenantId, $isEn)
                                     <div class="inv-mini-acts">
                                         <button type="button" data-act="view"><?php echo e($isEn ? 'View' : 'عرض'); ?></button>
                                         <button type="button" data-act="print"><?php echo e($isEn ? 'Print' : 'طباعة'); ?></button>
+                                        <?php if ($invWaOn): ?>
                                         <button type="button" class="is-main" data-act="send"><?php echo e($isEn ? 'Send' : 'إرسال'); ?></button>
+                                        <?php endif; ?>
                                     </div>
                                 </td>
                             </tr>
@@ -1561,21 +2073,64 @@ function invoice_render_tab($tab, $tenantId, $isEn)
                         </tbody>
                     </table>
                 </div>
+                <?php if ($issuedTotal > 0 && ($invPages > 1 || !$invShowAll || $invPerRaw !== '20')): ?>
+                <div class="inv-pager" id="invPager">
+                    <div class="inv-pager-sizes">
+                        <?php foreach ($invAllowed as $invChoice): ?>
+                        <a class="pager-n<?php echo (!$invShowAll && (int) $invPerRaw === (int) $invChoice) ? ' is-on' : ''; ?>" href="settings.php?tab=invoices&amp;inv_per=<?php echo (int) $invChoice; ?><?php echo $invQ !== '' ? '&amp;inv_q=' . rawurlencode($invQ) : ''; ?>"><?php echo (int) $invChoice; ?></a>
+                        <?php endforeach; ?>
+                        <?php if (!$invShowAll): ?>
+                        <a class="pager-n" href="settings.php?tab=invoices&amp;inv_per=all<?php echo $invQ !== '' ? '&amp;inv_q=' . rawurlencode($invQ) : ''; ?>"><?php echo e($isEn ? 'Show all' : t('show_all')); ?></a>
+                        <?php else: ?>
+                        <a class="pager-n is-on" href="settings.php?tab=invoices&amp;inv_per=20<?php echo $invQ !== '' ? '&amp;inv_q=' . rawurlencode($invQ) : ''; ?>">20</a>
+                        <?php endif; ?>
+                    </div>
+                    <?php if ($invPages > 1 && !$invShowAll):
+                        $invPrev = max(1, $invPage - 1);
+                        $invNext = min($invPages, $invPage + 1);
+                        $invBase = 'settings.php?' . $invKeepStr;
+                        ?>
+                    <div class="inv-pager-pages">
+                        <a class="pager-n pager-arrow<?php echo $invPage <= 1 ? ' is-off' : ''; ?>" href="<?php echo e($invBase . '&inv_page=1'); ?>">&laquo;</a>
+                        <a class="pager-n pager-arrow<?php echo $invPage <= 1 ? ' is-off' : ''; ?>" href="<?php echo e($invBase . '&inv_page=' . $invPrev); ?>">&lsaquo;</a>
+                        <?php
+                        $iw = 3;
+                        $iStart = max(1, $invPage - 1);
+                        $iEnd = min($invPages, $iStart + $iw - 1);
+                        if ($iEnd - $iStart + 1 < $iw) {
+                            $iStart = max(1, $iEnd - $iw + 1);
+                        }
+                        for ($ip = $iStart; $ip <= $iEnd; $ip++):
+                        ?>
+                        <a class="pager-n<?php echo $ip === $invPage ? ' is-on' : ''; ?>" href="<?php echo e($invBase . '&inv_page=' . $ip); ?>"><?php echo (int) $ip; ?></a>
+                        <?php endfor; ?>
+                        <a class="pager-n pager-arrow<?php echo $invPage >= $invPages ? ' is-off' : ''; ?>" href="<?php echo e($invBase . '&inv_page=' . $invNext); ?>">&rsaquo;</a>
+                        <a class="pager-n pager-arrow<?php echo $invPage >= $invPages ? ' is-off' : ''; ?>" href="<?php echo e($invBase . '&inv_page=' . $invPages); ?>">&raquo;</a>
+                    </div>
+                    <?php endif; ?>
+                </div>
+                <?php endif; ?>
             </div>
             <div class="inv-sheet" id="invSheet" hidden>
                 <div class="inv-sheet-card" role="dialog" aria-modal="true">
                     <div class="inv-sheet-bar">
                         <strong id="invSheetTitle"><?php echo e($isEn ? 'Invoice' : 'فاتورة'); ?></strong>
                         <span class="grow"></span>
+                        <button type="button" class="inv-x" id="invSheetClose" aria-label="<?php echo e($isEn ? 'Close' : 'إغلاق'); ?>">×</button>
+                        <div class="inv-sheet-acts">
                         <a class="inv-mini-acts" id="invSlipOpen" href="slip.php" target="_blank"><span style="display:inline-flex;align-items:center;height:32px;padding:0 12px;border-radius:999px;border:1px solid #e6ebf2;font-weight:800;font-size:12px;color:#0f172a;text-decoration:none"><?php echo e($isEn ? 'Open' : 'فتح'); ?></span></a>
                         <button type="button" id="invSlipPrint"><?php echo e($isEn ? 'Print' : 'طباعة'); ?></button>
+                        <?php if ($invWaOn): ?>
                         <form method="post" action="settings.php?tab=invoices" id="invSlipSend">
                             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
                             <input type="hidden" name="section" value="invoice_send">
                             <input type="hidden" name="slip_token" id="invSlipToken" value="">
                             <button class="is-main" type="submit"><?php echo e($isEn ? 'Send' : 'إرسال'); ?></button>
                         </form>
-                        <button type="button" class="inv-x" id="invSheetClose" aria-label="<?php echo e($isEn ? 'Close' : 'إغلاق'); ?>">×</button>
+                        <?php else: ?>
+                        <input type="hidden" id="invSlipToken" value="">
+                        <?php endif; ?>
+                        </div>
                     </div>
                     <iframe id="invSlipFrame" title="<?php echo e($isEn ? 'Invoice preview' : 'استعراض الفاتورة'); ?>"></iframe>
                 </div>
@@ -1635,17 +2190,11 @@ function invoice_render_tab($tab, $tenantId, $isEn)
                 openSheet(tok, no);
               });
               if (q) {
-                q.addEventListener('input', function () {
-                  var needle = (q.value || '').replace(/^\s+|\s+$/g, '').toLowerCase();
-                  var list = rows();
-                  var n = 0;
-                  for (var i = 0; i < list.length; i++) {
-                    var hay = (list[i].getAttribute('data-q') || '').toLowerCase();
-                    var hide = needle && hay.indexOf(needle) < 0;
-                    list[i].hidden = hide;
-                    if (!hide) n++;
+                q.addEventListener('keydown', function (ev) {
+                  if (ev.key === 'Enter') {
+                    ev.preventDefault();
+                    if (q.form) q.form.submit();
                   }
-                  if (count) count.textContent = String(n);
                 });
               }
               if (printB) {
@@ -1660,23 +2209,25 @@ function invoice_render_tab($tab, $tenantId, $isEn)
               document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') closeSheet(); });
             })();
             </script>
-            <div class="inv-gbar">
-                <div>
-                    <h2><?php echo e($payload['ui']['templates']); ?></h2>
-                    <p><?php echo e($payload['ui']['pick']); ?></p>
+            <div class="inv-tpl-panel" id="invTplPanel">
+                <div class="inv-gbar">
+                    <div>
+                        <h2><?php echo e($payload['ui']['templates']); ?></h2>
+                        <p><?php echo e($payload['ui']['pick']); ?></p>
+                    </div>
+                    <div class="inv-gbar-acts">
+                        <button class="btn ghost sm" type="button" id="invBackInvoices"><?php echo e($payload['ui']['backInvoices']); ?></button>
+                        <button class="btn sm" type="button" id="invNew"><?php echo e($payload['ui']['new']); ?></button>
+                    </div>
                 </div>
-                <div class="inv-gbar-acts">
-                    <button class="btn ghost sm" type="button" id="invPrintOpen"><?php echo e($payload['ui']['printers']); ?></button>
-                    <button class="btn sm" type="button" id="invNew"><?php echo e($payload['ui']['new']); ?></button>
+                <div class="inv-cards" id="invCards">
+                    <?php foreach ($lib['templates'] as $tplCard): if (!is_array($tplCard)) continue; ?>
+                    <div class="inv-card" role="button" tabindex="0" data-tpl="<?php echo e(isset($tplCard['id']) ? $tplCard['id'] : ''); ?>">
+                        <strong><?php echo e(isset($tplCard['name']) ? $tplCard['name'] : 'قالب'); ?></strong>
+                        <em><?php echo e(isset($tplCard['paper']) ? $tplCard['paper'] : ''); ?></em>
+                    </div>
+                    <?php endforeach; ?>
                 </div>
-            </div>
-            <div class="inv-cards" id="invCards">
-                <?php foreach ($lib['templates'] as $tplCard): if (!is_array($tplCard)) continue; ?>
-                <div class="inv-card" role="button" tabindex="0" data-tpl="<?php echo e(isset($tplCard['id']) ? $tplCard['id'] : ''); ?>">
-                    <strong><?php echo e(isset($tplCard['name']) ? $tplCard['name'] : 'قالب'); ?></strong>
-                    <em><?php echo e(isset($tplCard['paper']) ? $tplCard['paper'] : ''); ?></em>
-                </div>
-                <?php endforeach; ?>
             </div>
         </section>
         <form method="post" action="settings.php?tab=invoices" enctype="multipart/form-data" id="invDesignForm" class="inv-desk" hidden>
@@ -1810,7 +2361,7 @@ function invoice_render_tab($tab, $tenantId, $isEn)
                 <div>
                     <strong><?php echo e($r['name']); ?></strong>
                     <span class="ltr"><?php echo e($r['ip'] . ':' . $r['port']); ?></span>
-                    <em><?php echo !empty($r['online']) ? ($isEn ? 'Online' : 'متصلة') : ($isEn ? 'Offline' : 'غير متصلة'); ?></em>
+                    <em><?php echo !empty($r['online']) ? ($isEn ? 'Portal can reach it' : 'البوابة توصلها') : ($isEn ? 'Prints from this computer' : 'الطباعة من هذا الجهاز'); ?></em>
                 </div>
                 <div class="inv-acts">
                     <?php if (empty($r['is_default'])): ?>
@@ -1822,7 +2373,7 @@ function invoice_render_tab($tab, $tenantId, $isEn)
                         <button class="btn ghost sm" type="submit"><?php echo e($isEn ? 'Default' : 'افتراضية'); ?></button>
                     </form>
                     <?php else: ?>
-                    <span class="inv-def"><?php echo e($isEn ? 'Default' : 'الافتراضية'); ?></span>
+                    <span class="inv-def"><?php echo e($isEn ? 'Default printer' : 'طابعة افتراضية'); ?></span>
                     <?php endif; ?>
                     <form method="post" action="settings.php?tab=invoices" onsubmit="return confirm('<?php echo e($isEn ? 'Delete?' : 'حذف؟'); ?>');">
                         <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
@@ -1845,6 +2396,8 @@ function invoice_render_tab($tab, $tenantId, $isEn)
       var UI = DATA.ui || {};
       var app = document.getElementById('invApp');
       var gallery = document.getElementById('invGallery');
+      var board = document.getElementById('invBoard');
+      var tplPanel = document.getElementById('invTplPanel');
       var cards = document.getElementById('invCards');
       var form = document.getElementById('invDesignForm');
       var paper = document.getElementById('invPaperBox');
@@ -2297,6 +2850,7 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         if (b.kind === 'table') {
           el.classList.remove('is-hug');
           el.classList.add('is-table');
+          el.style.fontSize = Math.max(2.2, (b.size || 13) * 0.264583) + 'mm';
           paintType(el, b);
           paintTable(el, b, design);
           addResizeHandles(el, true);
@@ -2330,7 +2884,7 @@ function invoice_render_tab($tab, $tenantId, $isEn)
           el.appendChild(qimg);
         } else {
           if (b.w > 0) el.style.width = b.w + 'mm';
-          el.style.fontSize = (b.size || 13) + 'px';
+          el.style.fontSize = Math.max(2.2, (b.size || 13) * 0.264583) + 'mm';
           el.style.color = b.color || '#111827';
           el.style.textAlign = b.align || 'right';
           el.classList.toggle('is-center', (b.align || 'right') === 'center');
@@ -2546,6 +3100,7 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         if (b.kind === 'table') {
           el.classList.remove('is-hug');
           el.classList.add('is-table');
+          el.style.fontSize = Math.max(2.2, (b.size || 13) * 0.264583) + 'mm';
           paintType(el, b);
           paintTable(el, b, current);
           if (!el.querySelector('.inv-resize[data-h="se"]')) addResizeHandles(el, true);
@@ -2563,7 +3118,7 @@ function invoice_render_tab($tab, $tenantId, $isEn)
           if (qimg) qimg.src = qrDataUrl(receiptCopy(current));
           return;
         }
-        el.style.fontSize = (b.size || 13) + 'px';
+        el.style.fontSize = Math.max(2.2, (b.size || 13) * 0.264583) + 'mm';
         el.style.color = b.color || '#111827';
         el.style.textAlign = b.align || 'right';
         el.style.direction = b.dir || 'rtl';
@@ -2587,16 +3142,27 @@ function invoice_render_tab($tab, $tenantId, $isEn)
           fitInto(mini, p, Math.max(40, thumbs[i].clientWidth - 12), Math.max(40, thumbs[i].clientHeight - 12), 1);
         }
       }
+      function showLedger() {
+        mode = 'ledger';
+        if (app) app.classList.remove('is-edit');
+        if (gallery) gallery.hidden = false;
+        if (form) form.hidden = true;
+        if (board) board.classList.remove('is-away');
+        if (tplPanel) tplPanel.classList.remove('is-on');
+        closePop();
+        picked = null;
+      }
       function showGallery() {
         mode = 'gallery';
         if (app) app.classList.remove('is-edit');
         if (gallery) gallery.hidden = false;
         if (form) form.hidden = true;
+        if (board) board.classList.add('is-away');
+        if (tplPanel) tplPanel.classList.add('is-on');
         closePop();
         picked = null;
         if (!cards) return;
         var list = DATA.templates || [];
-        if (!list.length) return;
         var frag = document.createDocumentFragment();
         for (var i = 0; i < list.length; i++) {
           try {
@@ -4154,7 +4720,12 @@ function invoice_render_tab($tab, $tenantId, $isEn)
       });
       document.getElementById('invEditBtn').addEventListener('click', function () { if (current) openEdit(current, false); });
       document.getElementById('invCancel').addEventListener('click', cancelEdit);
-      document.getElementById('invNew').addEventListener('click', function () { openEdit(DATA.blank, true); });
+      var invNewBtn = document.getElementById('invNew');
+      if (invNewBtn) invNewBtn.addEventListener('click', function () { openEdit(DATA.blank, true); });
+      var invShowTpl = document.getElementById('invShowTpl');
+      if (invShowTpl) invShowTpl.addEventListener('click', function () { showGallery(); });
+      var invBackInv = document.getElementById('invBackInvoices');
+      if (invBackInv) invBackInv.addEventListener('click', function () { showLedger(); });
       nameInput.addEventListener('input', function () { if (current && mode === 'edit') current.name = nameInput.value; });
       document.getElementById('invLogo').addEventListener('change', function () {
         var f = this.files && this.files[0];
@@ -4478,8 +5049,10 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         });
       });
       function openPrinters() { document.getElementById('invPrintModal').hidden = false; }
-      document.getElementById('invPrintOpen').addEventListener('click', openPrinters);
-      document.getElementById('invPrintOpen2').addEventListener('click', openPrinters);
+      var invPrint1 = document.getElementById('invPrintOpen');
+      if (invPrint1) invPrint1.addEventListener('click', openPrinters);
+      var invPrint2 = document.getElementById('invPrintOpen2');
+      if (invPrint2) invPrint2.addEventListener('click', openPrinters);
       document.getElementById('invPrintClose').addEventListener('click', function () { document.getElementById('invPrintModal').hidden = true; });
       document.getElementById('invPrintModal').addEventListener('click', function (e) {
         if (e.target.id === 'invPrintModal') e.currentTarget.hidden = true;
@@ -4573,7 +5146,7 @@ function invoice_render_tab($tab, $tenantId, $isEn)
         stageWatch.observe(stage);
       }
       try { bindProp(); } catch (err) {}
-      try { showGallery(); } catch (err) {}
+      try { showLedger(); } catch (err) {}
       if (cards) cards.addEventListener('click', function (e) {
         var card = e.target && e.target.closest ? e.target.closest('[data-tpl]') : null;
         if (!card || (e.target.closest && e.target.closest('.inv-card-del'))) return;

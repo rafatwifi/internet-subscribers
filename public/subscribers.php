@@ -1920,6 +1920,7 @@ window.DEBT_ENTRY = {
   var countLabel = <?php echo json_encode($lang === 'en' ? 'selected' : 'محدد'); ?>;
   var confirmDel = <?php echo json_encode(t('confirm_delete')); ?>;
   var confirmTest = <?php echo json_encode(t('confirm_give_test')); ?>;
+  var actWaDefaultOn = <?php echo (function_exists('whatsapp_notifications_enabled') && isset($pdo) && whatsapp_notifications_enabled($pdo)) ? 'true' : 'false'; ?>;
 
   function visibleChecks() {
     return tbody ? Array.prototype.slice.call(tbody.querySelectorAll('input.sub-check')) : [];
@@ -1991,14 +1992,15 @@ window.DEBT_ENTRY = {
     var n = rows.length;
     var one = n === 1 ? rows[0] : null;
     var anyDebt = rows.some(function (r) { return r.debt || (r.debtAmount > 0); });
+    var waOn = !!actWaDefaultOn;
     showEl(document.getElementById('opsSep'), n > 0);
     showEl(document.getElementById('opsItemOpen'), !!one);
     showEl(document.getElementById('opsItemPay'), anyDebt);
     showEl(document.getElementById('opsItemActivate'), !!one);
     showEl(document.getElementById('opsItemGiveTest'), !!one);
     showEl(document.getElementById('opsItemBulkActivate'), n > 1);
-    showEl(document.getElementById('opsItemRemind'), anyDebt);
-    showEl(document.getElementById('opsItemDays'), !!(one && one.hasDays));
+    showEl(document.getElementById('opsItemRemind'), !!(waOn && anyDebt));
+    showEl(document.getElementById('opsItemDays'), !!(waOn && one && one.hasDays));
     showEl(document.getElementById('opsItemRetry'), !!(one && one.msgFail));
     showEl(document.getElementById('opsItemDelete'), !!one);
   }

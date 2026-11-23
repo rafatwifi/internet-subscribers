@@ -65,7 +65,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'invoice_printe
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'invoice_send') {
     $tab = 'invoices';
 }
-if (!in_array($tab, array('general', 'behavior', 'whatsapp', 'rental', 'users', 'plans', 'sas', 'saas', 'schedule', 'sensitive', 'update', 'maintenance', 'widgets', 'theme', 'invoices', 'printers'), true)) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'invoice_seq') {
+    $tab = 'invoices';
+}
+if (!in_array($tab, array('general', 'behavior', 'whatsapp', 'templates', 'rental', 'users', 'plans', 'sas', 'saas', 'schedule', 'sensitive', 'update', 'maintenance', 'widgets', 'theme', 'invoices', 'printers'), true)) {
     $tab = 'general';
 }
 // تبويبات محذوفة من إعدادات أدمن البوابة
@@ -288,7 +291,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         redirect('settings.php?tab=invoices');
     }
-    if (in_array((string) post('section'), array('invoice_design', 'invoice_printer'), true)) {
+    if (in_array((string) post('section'), array('invoice_design', 'invoice_printer', 'invoice_seq'), true)) {
         require_once __DIR__ . '/../includes/invoice_studio.php';
         $invTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
         $invRes = invoice_apply_post($invTid);
@@ -333,7 +336,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     if ($section === 'sub_ping') {
         $pingMode = function_exists('sas_ping_mode_normalize')
-            ? sas_ping_mode_normalize(post('sub_ping_mode', 'off'))
+            ? sas_ping_mode_normalize(post('sub_ping_mode', 'sas'))
             : 'off';
         $pingAccId = (int) post('account_id', 0);
         $pingTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
@@ -375,7 +378,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (function_exists('admin_ui_prefs_save')) {
             admin_ui_prefs_save($pdo, 'activate_after', $actAfter);
         }
-        flash('success', $lang === 'en' ? 'Saved for your account only' : 'انحفظ لحسابك فقط');
+        require_once __DIR__ . '/../includes/invoice_studio.php';
+        $seqTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        $seqMode = post('invoice_seq_mode') === 'month' ? 'month' : 'continuous';
+        if (function_exists('invoice_slip_seq_set_mode')) {
+            invoice_slip_seq_set_mode($seqTid, $seqMode);
+        }
+        flash('success', $lang === 'en' ? 'Saved' : 'تم الحفظ');
         redirect('settings.php?tab=behavior');
     }
     if ($section === 'ui_theme') {
@@ -1700,6 +1709,26 @@ $prefActAfter = (isset($userWorkPrefs['activate_after']) && $userWorkPrefs['acti
         <input type="hidden" name="section" value="system_behavior">
         <div class="form-grid">
             <div>
+                <?php
+                $invSeqModeNow = 'continuous';
+                if (!function_exists('invoice_slip_seq_mode')) {
+                    require_once __DIR__ . '/../includes/invoice_studio.php';
+                }
+                if (function_exists('invoice_slip_seq_mode')) {
+                    $invSeqModeNow = invoice_slip_seq_mode(function_exists('current_tenant_id') ? (int) current_tenant_id() : 1);
+                }
+                ?>
+                <label><?php echo e($lang === 'en' ? 'Invoice counter' : 'عداد الفواتير'); ?></label>
+                <select name="invoice_seq_mode">
+                    <option value="continuous" <?php echo $invSeqModeNow !== 'month' ? 'selected' : ''; ?>>
+                        <?php echo e($lang === 'en' ? 'Continuous' : 'مستمر'); ?>
+                    </option>
+                    <option value="month" <?php echo $invSeqModeNow === 'month' ? 'selected' : ''; ?>>
+                        <?php echo e($lang === 'en' ? 'Reset every month' : 'يصفر كل شهر'); ?>
+                    </option>
+                </select>
+            </div>
+            <div>
                 <label><?php echo e($lang === 'en' ? 'After activating a subscriber' : 'عند تفعيل مشترك'); ?></label>
                 <select name="activate_after">
                     <option value="stay" <?php echo $prefActAfter === 'stay' ? 'selected' : ''; ?>>
@@ -2731,8 +2760,9 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
 .rent-dev-meta { display:flex; align-items:center; gap:10px; min-width:0; }
 .rent-dev-badge {
   width:36px; height:36px; border-radius:10px; display:inline-flex; align-items:center; justify-content:center;
-  color:#fff; font-weight:800; font-size:12px; flex:0 0 auto;
+  color:#0f172a; font-weight:800; font-size:12px; flex:0 0 auto;
 }
+.rent-dev-badge .rent-glyph { width:18px; height:18px; display:block; }
 .rent-dev-name { font-weight:800; color:#0f172a; }
 .rent-dev-id { color:#64748b; font-size:12px; font-weight:700; direction:ltr; unicode-bidi:isolate; }
 .rent-dev-actions { display:flex; gap:8px; flex-wrap:wrap; }
@@ -2838,7 +2868,10 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
         <?php foreach ($rentalDevices as $d): ?>
         <div class="rent-dev-row">
             <div class="rent-dev-meta">
-                <span class="rent-dev-badge" style="background:<?php echo e($d['color']); ?>"><?php echo e($d['icon']); ?></span>
+                <span class="rent-dev-badge" style="background:<?php echo e($d['color']); ?>;color:#0f172a"><?php
+                    $g = function_exists('rental_device_glyph_html') ? rental_device_glyph_html($d['id']) : '';
+                    echo $g !== '' ? $g : e($d['icon']);
+                ?></span>
                 <div>
                     <div class="rent-dev-name"><?php echo e($d['name']); ?></div>
                     <div class="rent-dev-id"><?php echo e($d['id']); ?></div>
@@ -3475,17 +3508,11 @@ if ($sasTenantIdUi > 1) {
 ?>
 <div class="panel">
     <h2><?php echo e($sasTitle); ?></h2>
-    <div style="margin:0 0 14px">
-        <div style="font-weight:800;margin-bottom:6px"><?php echo e($isEn ? 'Subscriber ping' : 'بينغ المشتركين'); ?></div>
-        <p style="color:#64748b;font-weight:600;margin:0 0 8px;font-size:13px"><?php echo e($isEn
-            ? 'Per reseller below. Disabled until you add at least one reseller. Middle is off.'
-            : 'لكل رسلر من البطاقة أدناه. ما ينفع قبل ما تضيف رسلر واحد على الأقل. الوسط طافي.'); ?></p>
-        <?php
-        if (function_exists('sas_ping_mode_style')) {
-            echo sas_ping_mode_style();
-        }
-        ?>
-    </div>
+    <?php
+    if (function_exists('sas_ping_mode_style')) {
+        echo sas_ping_mode_style();
+    }
+    ?>
     <?php if ($sasTenantIdUi <= 1): ?>
     <p style="color:#6b7a88;font-weight:600;margin-top:0">
         <?php echo e($isEn
@@ -3538,7 +3565,7 @@ if ($sasTenantIdUi > 1) {
             <div class="sas-acc-meta" style="margin-bottom:4px"><?php echo e($isEn ? 'Subscriber ping (locked)' : 'بينغ المشتركين (مقفل)'); ?></div>
             <?php
             if (function_exists('sas_ping_mode_buttons')) {
-                echo sas_ping_mode_buttons($isEn, 'off', 'subPingModeLocked', 0, true);
+                echo sas_ping_mode_buttons($isEn, 'sas', 'subPingModeLocked', 0, true);
             }
             ?>
         </div>
@@ -3595,8 +3622,8 @@ if ($sasTenantIdUi > 1) {
                     <?php if (isset($acc['act_via']) && $acc['act_via'] === 'user'): ?>
                     <div class="sas-acc-meta" style="color:#9a3412;font-weight:700;margin-top:4px">
                         <?php echo e($isEn
-                            ? 'Activation permission is off. Cards are redeemed from the subscriber portal, then the session is logged out.'
-                            : 'هذا الريسيلر حاول التفعيل وصلاحية التفعيل معطلة. تم توجيه التفعيل عن طريق المشترك، وبعدها تسجيل الخروج.'); ?>
+                            ? 'Activation was found disabled by reseller management; a second activation method will be used.'
+                            : 'تم الكشف عن وجود تعطيل في خاصية التفعيل من قبل ادارة الرسلر , سيتم اعتماد طريقة تفعيل ثانية'); ?>
                     </div>
                     <?php endif; ?>
                     <?php

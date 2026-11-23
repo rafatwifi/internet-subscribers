@@ -682,12 +682,21 @@ try {
         list($newThis, $newLast) = dash_subscriber_growth_pair($pdo);
     }
     if ($newLast > 0) {
-        $pct = (int) round((($newThis - $newLast) / $newLast) * 100);
+        $pctFloat = (($newThis - $newLast) / $newLast) * 100;
+        // أقل من 1٪ فرق = ثبات (مثال 1434 مقابل 1447 ما يصير −1٪ مضللة)
+        if (abs($pctFloat) < 1) {
+            $pct = 0;
+        } else {
+            $pct = (int) round($pctFloat);
+        }
         $dashGrowth = ($pct > 0 ? '+' : '') . $pct . '%';
     } elseif ($newThis > 0) {
         $dashGrowth = '+' . (int) $newThis;
+    } else {
+        $dashGrowth = '0%';
     }
-    $dashGrowthSub = (string) $newThis . ' / ' . (string) $yNow;
+    // هذا العام حتى اليوم / نفس الفترة من العام الماضي
+    $dashGrowthSub = (string) (int) $newThis . ' / ' . (string) (int) $newLast;
 } catch (Exception $e) {
 }
 $dashVersion = function_exists('app_version') ? (string) app_version() : '1.4.0';

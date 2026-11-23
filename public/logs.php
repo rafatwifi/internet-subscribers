@@ -21,10 +21,35 @@ $isPlatform = function_exists('is_super_admin_user') && is_super_admin_user()
 if ($scope === 'system' && !$isPlatform) {
     redirect('logs.php');
 }
+
+$perPageRaw = isset($_GET['per_page']) ? (string) $_GET['per_page'] : '15';
+$showAll = ($perPageRaw === 'all');
+$perPage = $showAll ? 400 : max(1, (int) $perPageRaw);
+if (!$showAll && $perPage < 1) {
+    $perPage = 15;
+}
+$page = isset($_GET['page']) ? (int) $_GET['page'] : 1;
+if ($page < 1) {
+    $page = 1;
+}
+$actScope = ($scope === 'system') ? 'system' : '';
+$totalRows = function_exists('count_activity_filtered')
+    ? count_activity_filtered($pdo, $q, $actScope)
+    : 0;
+$totalPages = $showAll ? 1 : max(1, (int) ceil($totalRows / max(1, $perPage)));
+if ($totalRows <= 0) {
+    $totalPages = 1;
+}
+if ($page > $totalPages) {
+    $page = $totalPages;
+}
+$offset = $showAll ? 0 : (($page - 1) * $perPage);
+$fetchLimit = $showAll ? 400 : $perPage;
+
 if ($scope === 'system' && function_exists('fetch_system_activity')) {
-    $rows = fetch_system_activity($pdo, 400, $q);
+    $rows = fetch_system_activity($pdo, $fetchLimit, $q, $offset);
 } else {
-    $rows = fetch_global_activity($pdo, 400, $q);
+    $rows = fetch_global_activity($pdo, $fetchLimit, $q, $offset);
 }
 $title = ($scope === 'system')
     ? ($isEn ? 'System activity' : 'حركات النظام')
@@ -41,6 +66,9 @@ render_header($title, $navActive);
                 <input type="hidden" name="scope" value="system">
             <?php else: ?>
                 <input type="hidden" name="scope" value="audit">
+            <?php endif; ?>
+            <?php if ($perPageRaw !== '15'): ?>
+                <input type="hidden" name="per_page" value="<?php echo e($perPageRaw); ?>">
             <?php endif; ?>
             <input name="q" value="<?php echo e($q); ?>" placeholder="<?php echo e($isEn ? 'Search action or user…' : 'بحث بالحركة أو المستخدم…'); ?>" style="max-width:320px">
             <button class="btn secondary sm" type="submit"><?php echo e($isEn ? 'Search' : 'بحث'); ?></button>
@@ -107,5 +135,48 @@ render_header($title, $navActive);
             </tbody>
         </table>
     </div>
+    <?php if ($totalRows > 15 || $perPageRaw !== '15'): ?>
+    <div class="actions" style="margin-top:12px;flex-wrap:wrap">
+        <?php
+        $logQs = array();
+        if ($scope === 'system') {
+            $logQs[] = 'scope=system';
+        } else {
+            $logQs[] = 'scope=audit';
+        }
+        if ($q !== '') {
+            $logQs[] = 'q=' . rawurlencode($q);
+        }
+        if ($perPageRaw !== '15') {
+            $logQs[] = 'per_page=' . rawurlencode($perPageRaw);
+        }
+        $logBase = $logQs ? ('&' . implode('&', $logQs)) : '';
+        $logExtra = '';
+        if ($scope === 'system') {
+            $logExtra .= '&scope=system';
+        } else {
+            $logExtra .= '&scope=audit';
+        }
+        if ($q !== '') {
+            $logExtra .= '&q=' . rawurlencode($q);
+        }
+        if (!$showAll && $totalPages > 1):
+            for ($p = 1; $p <= $totalPages && $p <= 20; $p++):
+        ?>
+            <a class="btn <?php echo $p === $page ? '' : 'ghost'; ?> sm" href="?page=<?php echo $p . $logBase; ?>"><?php echo $p; ?></a>
+        <?php
+            endfor;
+        endif;
+        if (!$showAll):
+        ?>
+            <a class="btn ghost sm" href="?per_page=all<?php echo $logExtra; ?>"><?php echo e(t('show_all')); ?></a>
+        <?php else: ?>
+            <a class="btn ghost sm" href="?per_page=15<?php echo $logExtra; ?>">15</a>
+        <?php endif; ?>
+        <span class="muted" style="font-weight:700;font-size:12px;align-self:center">
+            <?php echo e(($isEn ? 'Total: ' : 'المجموع: ') . (int) $totalRows); ?>
+        </span>
+    </div>
+    <?php endif; ?>
 </div>
 <?php render_footer(); ?>

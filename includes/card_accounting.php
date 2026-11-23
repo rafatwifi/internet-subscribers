@@ -2924,6 +2924,110 @@ function account_plan_money($pdo, $plan)
 }
 
 /** سعر المشترك النهائي فقط. لا يرجع سعر الجملة ولا سعر الوكيل. */
+/**
+ * سعر بيع الباقة للعرض في التقارير/الحركات — من تسعير الوكيل ثم service_plans.
+ */
+function report_resolve_sell_price($pdo, $serviceName, $sasProfileId = 0)
+{
+    $serviceName = trim((string) $serviceName);
+    $sasProfileId = (int) $sasProfileId;
+    if ($pdo && function_exists('account_customer_sell_price')) {
+        $sell = (float) account_customer_sell_price($pdo, $serviceName, $sasProfileId);
+        if ($sell > 0) {
+            return $sell;
+        }
+    }
+    if (!$pdo || $serviceName === '') {
+        return 0.0;
+    }
+    $want = strtolower($serviceName);
+    $softWant = function_exists('card_price_soft_key') ? card_price_soft_key($serviceName) : '';
+    // تسعير الوكالة من agent_card_prices (مثل Bronze = 35000)
+    try {
+        $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+        $sql = 'SELECT profile_name, profile_id, retail_price, agent_price FROM agent_card_prices WHERE retail_price > 0';
+        if ($tid > 1) {
+            $sql .= ' AND tenant_id = ' . $tid;
+        }
+        $sql .= ' ORDER BY updated_at DESC';
+        $st = $pdo->query($sql);
+        $exact = 0.0;
+        $soft = 0.0;
+        $byPid = 0.0;
+        if ($st) {
+            while ($row = $st->fetch(PDO::FETCH_ASSOC)) {
+                $retail = isset($row['retail_price']) ? (float) $row['retail_price'] : 0;
+                if ($retail <= 0 && isset($row['agent_price'])) {
+                    $retail = (float) $row['agent_price'];
+                }
+                if ($retail <= 0) {
+                    continue;
+                }
+                $rowName = isset($row['profile_name']) ? (string) $row['profile_name'] : '';
+                if ($want !== '' && strtolower(trim($rowName)) === $want) {
+                    $exact = $retail;
+                    break;
+                }
+                if ($soft <= 0 && $softWant !== '' && function_exists('card_price_soft_key')
+                    && card_price_soft_key($rowName) === $softWant) {
+                    $soft = $retail;
+                }
+                if ($byPid <= 0 && $sasProfileId > 0 && (int) $row['profile_id'] === $sasProfileId) {
+                    $byPid = $retail;
+                }
+            }
+        }
+        if ($exact > 0) {
+            return $exact;
+        }
+        if ($soft > 0) {
+            return $soft;
+        }
+        if ($byPid > 0) {
+            return $byPid;
+        }
+    } catch (Exception $e) {
+    }
+    try {
+        $st = $pdo->query(
+            'SELECT monthly_price, sas_profile_id, name FROM service_plans
+             WHERE is_active = 1 OR is_active IS NULL OR is_active = "1"'
+        );
+        $byName = 0.0;
+        $bySoft = 0.0;
+        $byPid = 0.0;
+        if ($st) {
+            while ($pl = $st->fetch(PDO::FETCH_ASSOC)) {
+                $price = isset($pl['monthly_price']) ? (float) $pl['monthly_price'] : 0;
+                if ($price <= 0) {
+                    continue;
+                }
+                $nm = strtolower(trim((string) $pl['name']));
+                if ($nm === $want) {
+                    $byName = $price;
+                } elseif ($softWant !== '' && function_exists('card_price_soft_key')
+                    && card_price_soft_key($pl['name']) === $softWant && $bySoft <= 0) {
+                    $bySoft = $price;
+                }
+                if ($sasProfileId > 0 && (int) $pl['sas_profile_id'] === $sasProfileId && $byPid <= 0) {
+                    $byPid = $price;
+                }
+            }
+        }
+        if ($byName > 0) {
+            return $byName;
+        }
+        if ($bySoft > 0) {
+            return $bySoft;
+        }
+        if ($byPid > 0) {
+            return $byPid;
+        }
+    } catch (Exception $e) {
+    }
+    return 0.0;
+}
+
 function account_customer_sell_price($pdo, $serviceName, $sasProfileId = 0, $userId = 0)
 {
     $userId = (int) $userId;

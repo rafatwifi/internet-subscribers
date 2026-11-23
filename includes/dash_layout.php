@@ -437,7 +437,13 @@ function dash_portal_slips_between($fromTs, $toTs)
 
 function dash_subscriber_growth_pair($pdo)
 {
+    // مقارنة نفس الفترة من السنة: من 1/1 إلى اليوم، مقابل نفس الأيام من السنة الماضية
     $yNow = (int) date('Y');
+    $md = date('-m-d');
+    $thisFrom = $yNow . '-01-01 00:00:00';
+    $thisTo = date('Y-m-d') . ' 23:59:59';
+    $lastFrom = ($yNow - 1) . '-01-01 00:00:00';
+    $lastTo = ($yNow - 1) . $md . ' 23:59:59';
     $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
     $where = 'tenant_id = ' . (int) $tid;
     if (!empty($_SESSION['admin_sas_shadow']) || (function_exists('is_agent_user') && is_agent_user())) {
@@ -453,10 +459,14 @@ function dash_subscriber_growth_pair($pdo)
         )->fetchColumn();
         if ($has > 0) {
             $newThis = (int) $pdo->query(
-                'SELECT COUNT(*) FROM sas_users_cache WHERE ' . $where . ' AND YEAR(sas_created_at) = ' . $yNow
+                'SELECT COUNT(*) FROM sas_users_cache WHERE ' . $where
+                . ' AND sas_created_at >= ' . $pdo->quote($thisFrom)
+                . ' AND sas_created_at <= ' . $pdo->quote($thisTo)
             )->fetchColumn();
             $newLast = (int) $pdo->query(
-                'SELECT COUNT(*) FROM sas_users_cache WHERE ' . $where . ' AND YEAR(sas_created_at) = ' . ($yNow - 1)
+                'SELECT COUNT(*) FROM sas_users_cache WHERE ' . $where
+                . ' AND sas_created_at >= ' . $pdo->quote($lastFrom)
+                . ' AND sas_created_at <= ' . $pdo->quote($lastTo)
             )->fetchColumn();
             return array($newThis, $newLast);
         }
@@ -465,10 +475,12 @@ function dash_subscriber_growth_pair($pdo)
     $agentScope = function_exists('subscriber_agent_scope_sql') ? subscriber_agent_scope_sql('s') : '';
     try {
         $newThis = (int) $pdo->query(
-            'SELECT COUNT(*) FROM subscribers s WHERE YEAR(s.created_at) = ' . $yNow . $agentScope
+            'SELECT COUNT(*) FROM subscribers s WHERE s.created_at >= ' . $pdo->quote($thisFrom)
+            . ' AND s.created_at <= ' . $pdo->quote($thisTo) . $agentScope
         )->fetchColumn();
         $newLast = (int) $pdo->query(
-            'SELECT COUNT(*) FROM subscribers s WHERE YEAR(s.created_at) = ' . ($yNow - 1) . $agentScope
+            'SELECT COUNT(*) FROM subscribers s WHERE s.created_at >= ' . $pdo->quote($lastFrom)
+            . ' AND s.created_at <= ' . $pdo->quote($lastTo) . $agentScope
         )->fetchColumn();
         return array($newThis, $newLast);
     } catch (Exception $e) {

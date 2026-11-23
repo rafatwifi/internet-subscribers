@@ -190,7 +190,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             flash('error', 'دالة التمديد غير موجودة');
             redirect(sas_user_url($username));
         }
-        list($okD, $msgD) = sas_extend_one_day($pdo, $config, $username);
+        $extPidPost = (int) post('profile_id', '0');
+        list($okD, $msgD) = sas_extend_one_day($pdo, $config, $username, true, $extPidPost);
         flash($okD ? 'success' : 'error', $msgD);
         redirect(sas_user_url($username));
     }
@@ -864,7 +865,23 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
   box-shadow: 0 6px 14px rgba(2, 6, 23, 0.18);
 }
 .su-hero-day-btn:hover { background: rgba(255,255,255,.22); color: #fff; }
-.su-hero-act-btn:disabled, .su-hero-day-btn:disabled { opacity: .55; cursor: not-allowed; filter: none; animation: none; }
+.su-hero-pause-btn {
+  background: linear-gradient(135deg, #ea580c 0%, #f97316 55%, #fb923c 100%);
+  border: 0 !important;
+  box-shadow: 0 10px 22px rgba(234, 88, 12, 0.35);
+  gap: 8px;
+}
+.su-hero-pause-btn:hover { filter: brightness(1.06); color: #fff; background: linear-gradient(135deg, #c2410c 0%, #ea580c 55%, #f97316 100%); }
+.su-hero-pause-btn.is-off {
+  background: linear-gradient(135deg, #16a34a 0%, #22c55e 55%, #4ade80 100%);
+  box-shadow: 0 10px 22px rgba(22, 163, 74, 0.35);
+}
+.su-hero-pause-btn.is-off:hover { background: linear-gradient(135deg, #15803d 0%, #16a34a 55%, #22c55e 100%); }
+.su-hero-ico {
+  width: 16px; height: 16px; display: inline-block; flex: 0 0 auto;
+  fill: currentColor;
+}
+.su-hero-act-btn:disabled, .su-hero-day-btn:disabled, .su-hero-pause-btn:disabled { opacity: .55; cursor: not-allowed; filter: none; animation: none; }
 @keyframes suHeroPulse {
   0%, 100% { box-shadow: 0 10px 22px rgba(22, 163, 74, 0.35), 0 0 0 0 rgba(74, 222, 128, 0.35); }
   50% { box-shadow: 0 12px 26px rgba(22, 163, 74, 0.42), 0 0 0 10px rgba(74, 222, 128, 0); }
@@ -924,11 +941,83 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
 }
 .su-card-h { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
 .su-card .meta { margin: 0; color: #64748b; font-size: 12px; font-weight: 700; }
-.su-slip-list { list-style: none; margin: 0; padding: 0; }
-.su-slip-list a { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 0; border-bottom: 1px solid #e2e8f0; color: inherit; text-decoration: none; }
-.su-slip-list span { color: #64748b; font-size: 12px; font-weight: 700; }
-.su-slip-list em { font-style: normal; font-weight: 800; }
-.su-slip-list strong { font-weight: 800; }
+.su-inv-board { margin-top: 4px; border: 1px solid #e8edf3; border-radius: 16px; overflow: hidden; background: #fff; }
+.su-inv-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 12px; border-bottom: 1px solid #eef2f6; background: #f8fafc; }
+.su-inv-tools .su-inv-q {
+  flex: 1 1 160px; min-width: 0; height: 38px; border-radius: 999px; border: 1px solid #e2e8f0;
+  background: #fff; padding: 0 14px; font: inherit; font-weight: 700; outline: none;
+}
+.su-inv-tools .su-inv-q:focus { border-color: #0f766e; box-shadow: 0 0 0 3px rgba(15,118,110,.12); }
+.su-inv-count { color: #94a3b8; font-size: 12px; font-weight: 800; white-space: nowrap; }
+.su-inv-wrap { overflow: auto; -webkit-overflow-scrolling: touch; max-height: min(60vh, 520px); }
+.su-inv-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+.su-inv-table th {
+  position: sticky; top: 0; z-index: 1; background: #f8fafc; color: #64748b;
+  font-size: 11px; font-weight: 800; letter-spacing: .04em; text-align: start;
+  padding: 10px 12px; border-bottom: 1px solid #e8edf3; white-space: nowrap;
+}
+.su-inv-table td {
+  padding: 12px; border-bottom: 1px solid #f1f5f9; color: #0f172a; vertical-align: middle;
+}
+.su-inv-table tbody tr { cursor: pointer; transition: background .14s ease; }
+.su-inv-table tbody tr:hover { background: #f8fafc; }
+.su-inv-table tbody tr.is-on { background: #f0fdfa; }
+.su-inv-table .num { font-weight: 800; letter-spacing: .01em; }
+.su-inv-table .amt { font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.su-inv-table .muted { color: #64748b; font-weight: 700; }
+.su-inv-acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.su-inv-acts button, .su-inv-acts a {
+  height: 32px; padding: 0 12px; border-radius: 999px; border: 1px solid #e6ebf2;
+  background: #fff; color: #0f172a; font: inherit; font-size: 12px; font-weight: 800;
+  text-decoration: none; cursor: pointer; display: inline-flex; align-items: center;
+}
+.su-inv-acts .is-main { background: #0f172a; color: #fff; border-color: #0f172a; }
+.su-inv-acts .is-send { background: #0f766e; color: #fff; border-color: #0f766e; }
+.su-inv-empty { text-align: center; color: #94a3b8; font-weight: 700; padding: 28px 12px !important; }
+.su-inv-sheet {
+  position: fixed; inset: 0; z-index: 100080; background: rgba(15,23,42,.45);
+  display: flex; align-items: center; justify-content: center; padding: 16px; box-sizing: border-box; direction: ltr;
+}
+.su-inv-sheet[hidden] { display: none !important; }
+.su-inv-sheet-card {
+  width: min(440px, calc(100vw - 24px)); height: min(88vh, 820px); margin: 0; background: #fff;
+  display: flex; flex-direction: column; border-radius: 20px; overflow: hidden;
+  box-shadow: 0 28px 70px rgba(15,23,42,.28); direction: rtl;
+}
+.su-inv-sheet-bar {
+  display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid #eef2f6; flex-wrap: wrap;
+}
+.su-inv-sheet-bar strong { font-size: 15px; }
+.su-inv-sheet-bar .grow { flex: 1; min-width: 8px; }
+.su-inv-sheet-bar button, .su-inv-sheet-bar a {
+  height: 34px; padding: 0 12px; border-radius: 999px; border: 1px solid #e6ebf2;
+  background: #fff; color: #0f172a; font: inherit; font-size: 12px; font-weight: 800;
+  text-decoration: none; cursor: pointer; display: inline-flex; align-items: center;
+}
+.su-inv-sheet-bar .is-main { background: #0f172a; color: #fff; border-color: #0f172a; }
+.su-inv-sheet-bar .is-send { background: #0f766e; color: #fff; border-color: #0f766e; }
+.su-inv-sheet-card iframe { flex: 1; width: 100%; border: 0; background: #f4f7fb; }
+.su-inv-x { width: 34px; height: 34px; border: 0; border-radius: 999px; background: #f1f5f9; font-size: 18px; cursor: pointer; }
+@media (max-width: 720px) {
+  .su-inv-table thead { display: none; }
+  .su-inv-table, .su-inv-table tbody, .su-inv-table tr, .su-inv-table td { display: block; width: 100%; }
+  .su-inv-table tr {
+    padding: 12px; border-bottom: 1px solid #eef2f6; box-sizing: border-box;
+  }
+  .su-inv-table td {
+    padding: 4px 0; border: 0; display: flex; justify-content: space-between; gap: 10px; align-items: center;
+  }
+  .su-inv-table td::before {
+    content: attr(data-label); color: #94a3b8; font-size: 11px; font-weight: 800; flex: 0 0 auto;
+  }
+  .su-inv-table td.su-inv-acts-cell {
+    display: block; padding-top: 10px; margin-top: 6px; border-top: 1px dashed #e2e8f0;
+  }
+  .su-inv-table td.su-inv-acts-cell::before { display: none; }
+  .su-inv-acts { justify-content: stretch; }
+  .su-inv-acts button, .su-inv-acts a { flex: 1; justify-content: center; }
+  .su-inv-sheet-card { width: 100%; height: min(92vh, 900px); border-radius: 16px; }
+}
 .su-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .su-fact {
   padding: 10px 12px; border-radius: 12px; background: #f8fafc; border: 1px solid #eef2f7;
@@ -1043,8 +1132,9 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
   .su-hero-acts { justify-content: center; width: 100%; }
   .su-stats { width: 100%; text-align: center; }
   .su-hero-side { flex-direction: row; width: 100%; justify-content: center; }
-  .su-nav { display: grid; grid-template-columns: 1fr 1fr; }
+  .su-nav { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .su-nav a, .su-nav button { width: 100%; }
+  .su-nav a[href="#su-slips"] { grid-column: 1 / -1; }
 }
 @media (max-width: 520px) {
   .su-page { margin-bottom: 18px; padding-inline: 0; }
@@ -1090,11 +1180,6 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
   <div class="su-hero-main">
     <?php if (!$isNew && $username !== ''): ?>
     <div class="su-hero-acts">
-        <button type="button" class="su-hero-day-btn" id="suPauseBtn" data-on="<?php echo $enabled ? '1' : '0'; ?>"><?php
-            echo e($enabled
-                ? ($isEn ? 'Pause user' : 'إيقاف اليوزر مؤقتاً')
-                : ($isEn ? 'Enable user' : 'تشغيل اليوزر'));
-        ?></button>
         <?php
         $suActBlocked = function_exists('app_maintenance_blocks') && app_maintenance_blocks('activate', $config);
         $suDayBlocked = function_exists('app_maintenance_blocks') && app_maintenance_blocks('give_test', $config);
@@ -1110,22 +1195,50 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
             'nm' => !empty($cache['display_name']) ? (string) $cache['display_name'] : '',
         );
         $suActHref = 'sas.php?' . http_build_query($suActQs);
+        $suPauseIco = '<svg class="su-hero-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>';
+        $suPlayIco = '<svg class="su-hero-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>';
         ?>
         <a class="su-hero-act-btn<?php echo $suActBlocked ? ' is-off' : ''; ?>"
            href="<?php echo e($suActHref); ?>"
            <?php echo $suActBlocked ? ' aria-disabled="true" onclick="return false;"' : ''; ?>><?php
             echo e($isEn ? 'Activate' : 'تفعيل');
         ?></a>
-        <?php if (empty($isEarthlinkUser)): ?>
+        <?php if (empty($isEarthlinkUser)):
+            $suExtOpts = function_exists('sas_extensions_for_username')
+                ? sas_extensions_for_username($pdo, $config, $username, $isEn)
+                : array();
+            foreach ($suExtOpts as $suExt):
+                $suExtId = isset($suExt['id']) ? (int) $suExt['id'] : 0;
+                $suExtDays = isset($suExt['days']) ? (int) $suExt['days'] : 0;
+                $suExtLab = isset($suExt['label']) ? (string) $suExt['label'] : ($isEn ? 'Extend' : 'تمديد');
+                $suExtConfirm = ($suExtDays > 1)
+                    ? ($isEn ? ('Extend ' . $suExtDays . ' days for this subscriber?') : ('تمديد ' . $suExtDays . ' يوم لهذا المشترك؟'))
+                    : ($isEn ? 'Add +1 day to this subscriber?' : 'إضافة +1 يوم لهذا المشترك؟');
+                ?>
         <form method="post" class="su-quick-form" data-no-wait="1"
-              onsubmit="return confirm(<?php echo json_encode($isEn ? 'Add +1 day to this subscriber?' : 'إضافة +1 يوم لهذا المشترك؟'); ?>);">
+              onsubmit="return confirm(<?php echo json_encode($suExtConfirm); ?>);">
             <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
             <input type="hidden" name="action" value="su_give_day">
+            <?php if ($suExtId > 0): ?>
+            <input type="hidden" name="profile_id" value="<?php echo (int) $suExtId; ?>">
+            <?php endif; ?>
             <button class="su-hero-day-btn" type="submit"<?php echo $suDayBlocked ? ' disabled' : ''; ?>><?php
-                echo e($isEn ? '+1 day' : 'إضافة +1 يوم');
+                echo e($suExtLab);
             ?></button>
         </form>
+            <?php endforeach; ?>
         <?php endif; ?>
+        <button type="button"
+                class="su-hero-day-btn su-hero-pause-btn<?php echo $enabled ? '' : ' is-off'; ?>"
+                id="suPauseBtn"
+                data-on="<?php echo $enabled ? '1' : '0'; ?>">
+            <span class="su-pause-ico" aria-hidden="true"><?php echo $enabled ? $suPauseIco : $suPlayIco; ?></span>
+            <span class="su-pause-txt"><?php
+                echo e($enabled
+                    ? ($isEn ? 'Pause user' : 'إيقاف مؤقت')
+                    : ($isEn ? 'Enable user' : 'تشغيل اليوزر'));
+            ?></span>
+        </button>
     </div>
     <?php endif; ?>
     <div class="su-hero-who">
@@ -1203,6 +1316,7 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
 <?php if (!$isNew): ?>
 <nav class="su-nav">
     <a href="#su-info"><?php echo e($isEn ? 'Subscriber' : 'بيانات المشترك'); ?></a>
+    <a href="#su-slips"><?php echo e($isEn ? 'Invoices' : 'الفواتير'); ?></a>
     <button type="button" data-su-toggle="su-edit"><?php echo e($isEn ? 'Edit' : 'تعديل البيانات'); ?></button>
     <button type="button" id="sasSessionsBtn"><?php echo e($isEn ? 'Sessions' : 'الجلسات'); ?></button>
     <button type="button" data-su-toggle="rental"><?php echo e($isEn ? 'Rental' : 'الإيجار'); ?></button>
@@ -1295,51 +1409,250 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
     $suSlips = array();
     if (!$isNew && $username !== '') {
         require_once __DIR__ . '/../includes/invoice_studio.php';
-        $suSlips = invoice_slips_for_user(function_exists('current_tenant_id') ? (int) current_tenant_id() : 1, $username);
+        $suSlips = invoice_slips_for_user(
+            function_exists('current_tenant_id') ? (int) current_tenant_id() : 1,
+            $username,
+            isset($phoneShow) ? $phoneShow : ''
+        );
     }
+    $suSlipN = is_array($suSlips) ? count($suSlips) : 0;
     ?>
     <section class="su-card" id="su-slips">
         <div class="su-card-h">
-            <h2><?php echo e($isEn ? 'Receipts' : 'الوصولات'); ?></h2>
-            <button class="btn sm" type="button" id="suSlipNew"><?php echo e($isEn ? 'New receipt' : 'وصل جديد'); ?></button>
+            <h2><?php echo e($isEn ? 'Invoice history' : 'سجل الفواتير'); ?></h2>
+            <button class="btn sm" type="button" id="suSlipNew"><?php echo e($isEn ? 'New invoice' : 'فاتورة جديدة'); ?></button>
         </div>
-        <?php if (!$suSlips): ?>
-            <p class="meta"><?php echo e($isEn ? 'No receipts yet.' : 'ماكو وصولات بعد.'); ?></p>
-        <?php else: ?>
-            <ul class="su-slip-list">
-                <?php foreach ($suSlips as $srow): ?>
-                    <li>
-                        <a href="slip.php?k=<?php echo e(isset($srow['token']) ? $srow['token'] : ''); ?>">
-                            <span dir="ltr"><?php echo e(isset($srow['number']) && $srow['number'] !== '' ? $srow['number'] : 'وصل'); ?></span>
-                            <em dir="ltr"><?php echo e(isset($srow['created_at']) ? $srow['created_at'] : ''); ?></em>
-                            <strong dir="ltr"><?php echo e(isset($srow['amount']) && $srow['amount'] !== '' ? $srow['amount'] : '—'); ?></strong>
-                        </a>
-                    </li>
-                <?php endforeach; ?>
-            </ul>
-        <?php endif; ?>
+        <div class="su-inv-board">
+            <div class="su-inv-tools">
+                <input type="search" class="su-inv-q" id="suInvQ" placeholder="<?php echo e($isEn ? 'Search number, amount, date…' : 'بحث بالرقم أو المبلغ أو التاريخ…'); ?>" autocomplete="off">
+                <span class="su-inv-count" id="suInvCount"><?php echo (int) $suSlipN; ?></span>
+            </div>
+            <div class="su-inv-wrap">
+                <table class="su-inv-table" id="suInvTable">
+                    <thead>
+                        <tr>
+                            <th><?php echo e($isEn ? 'Number' : 'الرقم'); ?></th>
+                            <th><?php echo e($isEn ? 'Amount' : 'المبلغ'); ?></th>
+                            <th><?php echo e($isEn ? 'Date' : 'التاريخ'); ?></th>
+                            <th><?php echo e($isEn ? 'By' : 'بواسطة'); ?></th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="suInvBody">
+                    <?php if (!$suSlipN): ?>
+                        <tr class="su-inv-empty-row"><td class="su-inv-empty" colspan="5"><?php echo e($isEn ? 'No invoices yet' : 'ماكو فواتير بعد'); ?></td></tr>
+                    <?php endif; ?>
+                    <?php foreach ($suSlips as $srow):
+                        if (!is_array($srow)) {
+                            continue;
+                        }
+                        $tok = isset($srow['token']) ? preg_replace('/[^a-f0-9]/', '', strtolower((string) $srow['token'])) : '';
+                        if ($tok === '') {
+                            continue;
+                        }
+                        $no = isset($srow['number']) ? (string) $srow['number'] : '';
+                        $amt = isset($srow['amount']) ? trim((string) $srow['amount']) : '';
+                        $when = isset($srow['created_at']) ? (string) $srow['created_at'] : '';
+                        $who = isset($srow['issuer_name']) ? trim((string) $srow['issuer_name']) : '';
+                        $hay = strtolower($no . ' ' . $amt . ' ' . $when . ' ' . $who);
+                        ?>
+                        <tr data-tok="<?php echo e($tok); ?>" data-no="<?php echo e($no !== '' ? $no : $tok); ?>" data-q="<?php echo e($hay); ?>">
+                            <td class="num ltr" data-label="<?php echo e($isEn ? 'Number' : 'الرقم'); ?>"><?php echo e($no !== '' ? $no : $tok); ?></td>
+                            <td class="amt" data-label="<?php echo e($isEn ? 'Amount' : 'المبلغ'); ?>"><?php echo e($amt !== '' ? $amt : '—'); ?></td>
+                            <td class="muted ltr" data-label="<?php echo e($isEn ? 'Date' : 'التاريخ'); ?>"><?php echo e($when !== '' ? $when : '—'); ?></td>
+                            <td class="muted" data-label="<?php echo e($isEn ? 'By' : 'بواسطة'); ?>"><?php echo e($who !== '' ? $who : '—'); ?></td>
+                            <td class="su-inv-acts-cell">
+                                <div class="su-inv-acts">
+                                    <button type="button" data-act="view"><?php echo e($isEn ? 'View' : 'عرض'); ?></button>
+                                    <button type="button" data-act="print"><?php echo e($isEn ? 'Print' : 'طباعة'); ?></button>
+                                    <button type="button" class="is-send" data-act="send"><?php echo e($isEn ? 'Send' : 'إرسال'); ?></button>
+                                </div>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
     </section>
+    <div class="su-inv-sheet" id="suInvSheet" hidden>
+        <div class="su-inv-sheet-card" role="dialog" aria-modal="true">
+            <div class="su-inv-sheet-bar">
+                <strong id="suInvSheetTitle"><?php echo e($isEn ? 'Invoice' : 'فاتورة'); ?></strong>
+                <span class="grow"></span>
+                <a id="suInvOpen" href="slip.php" target="_blank"><?php echo e($isEn ? 'Open' : 'فتح'); ?></a>
+                <button type="button" id="suInvPrint"><?php echo e($isEn ? 'Print' : 'طباعة'); ?></button>
+                <button type="button" class="is-send" id="suInvSend"><?php echo e($isEn ? 'Send' : 'إرسال'); ?></button>
+                <button type="button" class="su-inv-x" id="suInvClose" aria-label="<?php echo e($isEn ? 'Close' : 'إغلاق'); ?>">×</button>
+            </div>
+            <iframe id="suInvFrame" title="<?php echo e($isEn ? 'Invoice preview' : 'استعراض الفاتورة'); ?>"></iframe>
+        </div>
+    </div>
     <script>
     (function () {
+      var csrf = <?php echo json_encode(csrf_token()); ?>;
+      var username = <?php echo json_encode($username); ?>;
+      var dispName = <?php echo json_encode($dispName); ?>;
+      var phoneShow = <?php echo json_encode(isset($phoneShow) ? $phoneShow : ''); ?>;
+      var profileLabel = <?php echo json_encode($profileLabel); ?>;
+      var expireShow = <?php echo json_encode(isset($expireShow) ? $expireShow : ''); ?>;
+      var body = document.getElementById('suInvBody');
+      var frame = document.getElementById('suInvFrame');
+      var sheet = document.getElementById('suInvSheet');
+      var q = document.getElementById('suInvQ');
+      var count = document.getElementById('suInvCount');
+      var openA = document.getElementById('suInvOpen');
+      var printB = document.getElementById('suInvPrint');
+      var sendB = document.getElementById('suInvSend');
+      var title = document.getElementById('suInvSheetTitle');
+      var current = '';
+      function toast(msg, ok) {
+        var t = document.createElement('div');
+        t.className = 'sas-toast ' + (ok ? 'sas-toast-success' : 'sas-toast-error') + ' sas-toast-mid';
+        t.setAttribute('role', 'status');
+        t.innerHTML = '<span class="sas-toast-text"></span>';
+        t.querySelector('.sas-toast-text').textContent = msg || '';
+        document.body.appendChild(t);
+        if (window.placeCornerToast) window.placeCornerToast(t);
+        setTimeout(function () {
+          t.classList.add('is-out');
+          setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 320);
+        }, 2800);
+      }
+      function rows() { return body ? body.querySelectorAll('tr[data-tok]') : []; }
+      function openSheet(tok, no) {
+        if (!sheet || !frame) return;
+        if (sheet.parentNode !== document.body) document.body.appendChild(sheet);
+        current = tok || '';
+        var list = rows();
+        for (var i = 0; i < list.length; i++) {
+          list[i].classList.toggle('is-on', list[i].getAttribute('data-tok') === current);
+        }
+        if (!current) return;
+        frame.src = 'slip.php?k=' + encodeURIComponent(current);
+        if (openA) openA.href = 'slip.php?k=' + encodeURIComponent(current);
+        if (title) title.textContent = no || current;
+        sheet.hidden = false;
+      }
+      function closeSheet() { if (sheet) sheet.hidden = true; }
+      function sendTok(tok, btn) {
+        if (!tok) return;
+        if (btn) btn.disabled = true;
+        var fd = new FormData();
+        fd.append('csrf', csrf);
+        fd.append('action', 'send');
+        fd.append('token', tok);
+        fd.append('phone', phoneShow || '');
+        fetch('slip.php', { method: 'POST', credentials: 'same-origin', body: fd })
+          .then(function (r) { return r.json(); })
+          .then(function (j) {
+            if (btn) btn.disabled = false;
+            toast((j && j.message) || (j && j.ok ? 'تم الإرسال' : 'فشل الإرسال'), !!(j && j.ok));
+          })
+          .catch(function () {
+            if (btn) btn.disabled = false;
+            toast(<?php echo json_encode($isEn ? 'Send failed' : 'فشل الإرسال'); ?>, false);
+          });
+      }
+      if (body) {
+        body.addEventListener('click', function (ev) {
+          var btn = ev.target && ev.target.closest ? ev.target.closest('[data-act]') : null;
+          var row = ev.target && ev.target.closest ? ev.target.closest('tr[data-tok]') : null;
+          if (!row) return;
+          var tok = row.getAttribute('data-tok') || '';
+          var no = row.getAttribute('data-no') || tok;
+          if (btn) {
+            ev.stopPropagation();
+            var act = btn.getAttribute('data-act');
+            if (act === 'print') {
+              var fdP = new FormData();
+              fdP.append('csrf', csrf);
+              fdP.append('action', 'print');
+              fdP.append('token', tok);
+              fetch('slip.php', { method: 'POST', credentials: 'same-origin', body: fdP })
+                .then(function (r) { return r.json(); })
+                .then(function (pj) {
+                  if (pj && pj.printed) {
+                    toast(pj.message || <?php echo json_encode($isEn ? 'Printed' : 'انطبعت'); ?>, true);
+                    return;
+                  }
+                  openSheet(tok, no);
+                  setTimeout(function () {
+                    try { if (frame && frame.contentWindow) frame.contentWindow.print(); } catch (e) {}
+                  }, 450);
+                })
+                .catch(function () {
+                  openSheet(tok, no);
+                  setTimeout(function () {
+                    try { if (frame && frame.contentWindow) frame.contentWindow.print(); } catch (e) {}
+                  }, 450);
+                });
+              return;
+            }
+            if (act === 'send') {
+              sendTok(tok, btn);
+              return;
+            }
+          }
+          openSheet(tok, no);
+        });
+      }
+      if (q && body) {
+        q.addEventListener('input', function () {
+          var needle = (q.value || '').replace(/^\s+|\s+$/g, '').toLowerCase();
+          var list = rows();
+          var n = 0;
+          for (var i = 0; i < list.length; i++) {
+            var hay = (list[i].getAttribute('data-q') || '').toLowerCase();
+            var hide = needle && hay.indexOf(needle) < 0;
+            list[i].hidden = hide;
+            if (!hide) n++;
+          }
+          if (count) count.textContent = String(n);
+        });
+      }
+      if (printB) {
+        printB.addEventListener('click', function () {
+          if (!current) return;
+          try { if (frame.contentWindow) frame.contentWindow.print(); } catch (e) {}
+        });
+      }
+      if (sendB) {
+        sendB.addEventListener('click', function () { sendTok(current, sendB); });
+      }
+      var closeB = document.getElementById('suInvClose');
+      if (closeB) closeB.addEventListener('click', closeSheet);
+      if (sheet) sheet.addEventListener('click', function (ev) { if (ev.target === sheet) closeSheet(); });
+      document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') closeSheet(); });
+
       var btn = document.getElementById('suSlipNew');
       if (!btn) return;
       btn.addEventListener('click', function () {
         btn.disabled = true;
         var fd = new FormData();
-        fd.append('csrf', <?php echo json_encode(csrf_token()); ?>);
+        fd.append('csrf', csrf);
         fd.append('action', 'issue');
-        fd.append('username', <?php echo json_encode($username); ?>);
-        fd.append('name', <?php echo json_encode($dispName); ?>);
-        fd.append('phone', <?php echo json_encode(isset($phoneShow) ? $phoneShow : ''); ?>);
-        fd.append('package', <?php echo json_encode($profileLabel); ?>);
-        fd.append('end', <?php echo json_encode(isset($expireShow) ? $expireShow : ''); ?>);
+        fd.append('username', username);
+        fd.append('name', dispName);
+        fd.append('phone', phoneShow || '');
+        fd.append('package', profileLabel || '');
+        fd.append('end', expireShow || '');
         fd.append('title', 'وصل');
         fetch('slip.php', { method: 'POST', credentials: 'same-origin', body: fd }).then(function (r) { return r.json(); }).then(function (j) {
           btn.disabled = false;
-          if (!j || !j.ok || !j.url) return;
-          window.open(j.url + '&print=1', 'slip');
-          window.location.reload();
-        }).catch(function () { btn.disabled = false; });
+          if (!j || !j.ok || !j.token) {
+            toast((j && j.message) || <?php echo json_encode($isEn ? 'Failed' : 'تعذر الإنشاء'); ?>, false);
+            return;
+          }
+          openSheet(j.token, j.token);
+          setTimeout(function () {
+            try { if (frame.contentWindow) frame.contentWindow.print(); } catch (e) {}
+          }, 600);
+          setTimeout(function () { window.location.reload(); }, 1200);
+        }).catch(function () {
+          btn.disabled = false;
+          toast(<?php echo json_encode($isEn ? 'Failed' : 'تعذر الإنشاء'); ?>, false);
+        });
       });
     })();
     </script>
@@ -1984,8 +2297,18 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
   var btn = document.getElementById('suPauseBtn');
   if (!btn) return;
   var csrf = <?php echo json_encode(csrf_token()); ?>;
-  var pauseLabel = <?php echo json_encode($isEn ? 'Pause user' : 'إيقاف اليوزر مؤقتاً'); ?>;
+  var pauseLabel = <?php echo json_encode($isEn ? 'Pause user' : 'إيقاف مؤقت'); ?>;
   var onLabel = <?php echo json_encode($isEn ? 'Enable user' : 'تشغيل اليوزر'); ?>;
+  var pauseIco = <?php echo json_encode('<svg class="su-hero-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>'); ?>;
+  var playIco = <?php echo json_encode('<svg class="su-hero-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>'); ?>;
+  function paint(nowOn) {
+    btn.setAttribute('data-on', nowOn ? '1' : '0');
+    btn.classList.toggle('is-off', !nowOn);
+    var ico = btn.querySelector('.su-pause-ico');
+    var txt = btn.querySelector('.su-pause-txt');
+    if (ico) ico.innerHTML = nowOn ? pauseIco : playIco;
+    if (txt) txt.textContent = nowOn ? pauseLabel : onLabel;
+  }
   btn.addEventListener('click', function () {
     if (btn.getAttribute('data-busy') === '1') return;
     var on = btn.getAttribute('data-on') === '1';
@@ -2006,8 +2329,7 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
         var ok = d && d.ok;
         if (ok) {
           var nowOn = d.enabled === 1 || d.enabled === '1';
-          btn.setAttribute('data-on', nowOn ? '1' : '0');
-          btn.textContent = nowOn ? pauseLabel : onLabel;
+          paint(nowOn);
         }
         if (window.showCornerToast) {
           window.showCornerToast((d && d.message) || (ok ? pauseLabel : onLabel), ok ? 'ok' : 'error');

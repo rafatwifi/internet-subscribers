@@ -111,6 +111,28 @@ foreach ($rows as $rChk) {
     }
 }
 
+$perPageRaw = isset($_GET['per_page']) ? (string) $_GET['per_page'] : '15';
+$showAll = ($perPageRaw === 'all');
+$perPage = $showAll ? max(1, $totalRent) : max(1, (int) $perPageRaw);
+if (!$showAll && $perPage < 1) {
+    $perPage = 15;
+}
+$page = isset($_GET['page']) ? (int) $_GET['page'] : 1;
+if ($page < 1) {
+    $page = 1;
+}
+$totalPages = $showAll ? 1 : max(1, (int) ceil($totalRent / max(1, $perPage)));
+if ($totalRent <= 0) {
+    $totalPages = 1;
+}
+if ($page > $totalPages) {
+    $page = $totalPages;
+}
+if (!$showAll && $totalRent > 0) {
+    $offset = ($page - 1) * $perPage;
+    $rows = array_slice($rows, $offset, $perPage);
+}
+
 render_header($lang === 'en' ? 'Rentals' : 'الإيجار', 'rentals');
 ?>
 <div class="panel" style="margin-bottom:12px">
@@ -221,10 +243,13 @@ render_header($lang === 'en' ? 'Rentals' : 'الإيجار', 'rentals');
     </div>
     <div class="actions no-print" style="margin-top:0;margin-bottom:12px">
         <form method="get" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <?php if ($perPageRaw !== '15'): ?>
+                <input type="hidden" name="per_page" value="<?php echo e($perPageRaw); ?>">
+            <?php endif; ?>
             <input name="q" value="<?php echo e($q); ?>" placeholder="<?php echo e($lang === 'en' ? 'Search name or phone…' : 'بحث بالاسم أو الرقم…'); ?>" style="max-width:280px">
             <button class="btn secondary sm" type="submit"><?php echo e($lang === 'en' ? 'Search' : 'بحث'); ?></button>
             <?php if ($q !== ''): ?>
-                <a class="btn ghost sm" href="rentals.php"><?php echo e(t('show_all')); ?></a>
+                <a class="btn ghost sm" href="rentals.php<?php echo $perPageRaw !== '15' ? ('?per_page=' . rawurlencode($perPageRaw)) : ''; ?>"><?php echo e(t('show_all')); ?></a>
             <?php endif; ?>
         </form>
     </div>
@@ -247,7 +272,9 @@ render_header($lang === 'en' ? 'Rentals' : 'الإيجار', 'rentals');
             <?php if (!$rows): ?>
                 <tr><td colspan="9"><?php echo e($lang === 'en' ? 'No rental subscribers' : 'ماكو مشتركين بإيجار'); ?></td></tr>
             <?php endif; ?>
-            <?php $n = 1; foreach ($rows as $row):
+            <?php
+            $n = $showAll ? 1 : (($page - 1) * $perPage + 1);
+            foreach ($rows as $row):
                 $dev = rental_device_by_id($row['rental_device_id'], $settingsRental);
                 $isActive = !empty($row['is_rent_active']) || !empty($row['active_end']);
                 $endShow = !empty($row['active_end']) ? $row['active_end'] : (!empty($row['sas_expire_at']) ? $row['sas_expire_at'] : (!empty($row['last_end']) ? $row['last_end'] : '-'));
@@ -308,5 +335,38 @@ render_header($lang === 'en' ? 'Rentals' : 'الإيجار', 'rentals');
             </tbody>
         </table>
     </div>
+    <?php if ($totalRent > 15 || $perPageRaw !== '15'): ?>
+    <div class="actions no-print" style="margin-top:12px;flex-wrap:wrap">
+        <?php
+        $rentQs = array();
+        if ($q !== '') {
+            $rentQs[] = 'q=' . rawurlencode($q);
+        }
+        if ($perPageRaw !== '15') {
+            $rentQs[] = 'per_page=' . rawurlencode($perPageRaw);
+        }
+        $rentBase = $rentQs ? ('&' . implode('&', $rentQs)) : '';
+        $rentExtra = '';
+        if ($q !== '') {
+            $rentExtra .= '&q=' . rawurlencode($q);
+        }
+        if (!$showAll && $totalPages > 1):
+            for ($p = 1; $p <= $totalPages && $p <= 20; $p++):
+        ?>
+            <a class="btn <?php echo $p === $page ? '' : 'ghost'; ?> sm" href="?page=<?php echo $p . $rentBase; ?>"><?php echo $p; ?></a>
+        <?php
+            endfor;
+        endif;
+        if (!$showAll):
+        ?>
+            <a class="btn ghost sm" href="?per_page=all<?php echo $rentExtra; ?>"><?php echo e(t('show_all')); ?></a>
+        <?php else: ?>
+            <a class="btn ghost sm" href="?per_page=15<?php echo $rentExtra; ?>">15</a>
+        <?php endif; ?>
+        <span class="muted" style="font-weight:700;font-size:12px;align-self:center">
+            <?php echo e(($lang === 'en' ? 'Total: ' : 'المجموع: ') . (int) $totalRent); ?>
+        </span>
+    </div>
+    <?php endif; ?>
 </div>
 <?php render_footer(); ?>

@@ -1105,6 +1105,9 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             $showImport = $can('subscribers');
             $showSettingsDrop = $showSettings || $showImport;
             $showBilling = $navTidEarly > 1;
+            $showMsgNavFtth = $can('messages')
+                && (!function_exists('whatsapp_notifications_enabled') || !isset($pdo) || whatsapp_notifications_enabled($pdo));
+            $msgOpenFtth = ($active === 'messages');
             $accountsOpen = in_array($active, array('cards', 'plans', 'accountants', 'reports', 'invoices'), true);
             $settingsOpen = ($settingsActive && $active !== 'schedule') || $active === 'import_export';
             $companyOpen = in_array($active, array('company', 'billing'), true);
@@ -1120,6 +1123,15 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             <?php endif; ?>
             <?php if ($can('subscriptions')): ?>
             <a class="<?php echo $active === 'subscriptions' ? 'active' : ''; ?>" href="subscriptions.php"><?php echo nav_side_ico('movements'); ?><?php echo e(t('movements')); ?></a>
+            <?php endif; ?>
+            <?php if ($showMsgNavFtth): ?>
+            <details class="side-drop<?php echo $msgOpenFtth ? ' is-on' : ''; ?>"<?php echo $msgOpenFtth ? ' open' : ''; ?>>
+                <summary><?php echo nav_side_ico('messages'); ?><span><?php echo e(t('messages')); ?></span><i class="nav-caret" aria-hidden="true"></i></summary>
+                <div class="side-sub">
+                    <a class="<?php echo ($active === 'messages' && (!isset($_GET['mode']) || (string) $_GET['mode'] !== 'templates')) ? 'active' : ''; ?>" href="messages.php"><?php echo nav_side_ico('messages'); ?><?php echo e($isEn ? 'Send' : 'الإرسال'); ?></a>
+                    <a class="<?php echo ($active === 'messages' && isset($_GET['mode']) && (string) $_GET['mode'] === 'templates') ? 'active' : ''; ?>" href="messages.php?mode=templates"><?php echo nav_side_ico('messages'); ?><?php echo e($isEn ? 'Templates' : 'القوالب'); ?></a>
+                </div>
+            </details>
             <?php endif; ?>
             <?php if ($showAccounts): ?>
             <details class="side-drop<?php echo $accountsOpen ? ' is-on' : ''; ?>"<?php echo $accountsOpen ? ' open' : ''; ?>>
@@ -1187,18 +1199,19 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             $showPlansNav = $can('plans');
             $showReportsNav = $can('reports');
             $showMovesNav = $can('subscriptions');
-            $showMsgNav = $can('messages');
+            $showMsgNav = $can('messages')
+                && (!function_exists('whatsapp_notifications_enabled') || !isset($pdo) || whatsapp_notifications_enabled($pdo));
             $showLogsNav = $can('logs');
             $showImportNav = $can('subscribers');
             $showSettingsNav = $can('settings') || $can('users') || $can('plans') || $can('backup');
             $showInvoicesNav = $navTidEarly > 1;
             $showBillingNav = $navTidEarly > 1;
             $showMoneyNav = $showPlansNav || $showAccountantNav || $showReportsNav || $showDebtsNav;
-            $showOpsNav = $showMovesNav || $showMsgNav || $showLogsNav || $showRentNav || ($navCab && ($can('subscribers') || $can('dashboard')));
+            $showOpsNav = $showMovesNav || $showLogsNav || $showRentNav || ($navCab && ($can('subscribers') || $can('dashboard')));
             $showSettingsDrop = $showSettingsNav || $showImportNav;
             $navSettingsHref = 'settings.php?tab=general';
             $moneyOpen = in_array($active, array('plans', 'accountants', 'reports', 'profit', 'debts'), true);
-            $opsOpen = in_array($active, array('subscriptions', 'messages', 'logs', 'rentals', 'cabinets'), true);
+            $opsOpen = in_array($active, array('subscriptions', 'logs', 'rentals', 'cabinets'), true);
             $settingsOpenWifi = ($settingsActive && $active !== 'schedule') || $active === 'import_export';
             $companyOpenWifi = in_array($active, array('company', 'billing'), true);
             $navTid = $navTidEarly;
@@ -1248,15 +1261,21 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
                     <?php if ($showMovesNav): ?>
                     <a class="<?php echo $active === 'subscriptions' ? 'active' : ''; ?>" href="subscriptions.php"><?php echo nav_side_ico('movements'); ?><?php echo e(t('movements')); ?></a>
                     <?php endif; ?>
-                    <?php if ($showMsgNav): ?>
-                    <a class="<?php echo $active === 'messages' ? 'active' : ''; ?>" href="messages.php"><?php echo nav_side_ico('messages'); ?><?php echo e(t('messages')); ?></a>
-                    <?php endif; ?>
                     <?php if ($showLogsNav): ?>
                     <a class="<?php echo $active === 'logs' ? 'active' : ''; ?>" href="logs.php"><?php echo nav_side_ico('logs'); ?><?php echo e($isEn ? 'Log' : 'اللوك'); ?></a>
                     <?php endif; ?>
                     <?php if ($showRentNav): ?>
                     <a class="<?php echo $active === 'rentals' ? 'active' : ''; ?>" href="rentals.php"><?php echo nav_side_ico('rentals'); ?><?php echo e($isEn ? 'Rentals' : 'الإيجار'); ?></a>
                     <?php endif; ?>
+                </div>
+            </details>
+            <?php endif; ?>
+            <?php if ($showMsgNav): ?>
+            <details class="side-drop<?php echo ($active === 'messages') ? ' is-on' : ''; ?>"<?php echo ($active === 'messages') ? ' open' : ''; ?>>
+                <summary><?php echo nav_side_ico('messages'); ?><span><?php echo e(t('messages')); ?></span><i class="nav-caret" aria-hidden="true"></i></summary>
+                <div class="side-sub">
+                    <a class="<?php echo ($active === 'messages' && (!isset($_GET['mode']) || (string) $_GET['mode'] !== 'templates')) ? 'active' : ''; ?>" href="messages.php"><?php echo nav_side_ico('messages'); ?><?php echo e($isEn ? 'Send' : 'الإرسال'); ?></a>
+                    <a class="<?php echo ($active === 'messages' && isset($_GET['mode']) && (string) $_GET['mode'] === 'templates') ? 'active' : ''; ?>" href="messages.php?mode=templates"><?php echo nav_side_ico('messages'); ?><?php echo e($isEn ? 'Templates' : 'القوالب'); ?></a>
                 </div>
             </details>
             <?php endif; ?>

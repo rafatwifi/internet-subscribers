@@ -1784,11 +1784,6 @@ foreach ($picker as $downOpt) {
         echo e($agName);
         ?>
     </h3>
-    <?php if ($openSheet): ?>
-        <p class="meta"><?php echo e($isEn
-            ? 'This account has no parent. Prices start at 0. Set them and save before adding or activating a subscriber.'
-            : 'هالحساب ما عنده أب. الأسعار صفر، ولازم تسعّرها وتحفظها قبل ما تضيف مشترك أو تفعّله.'); ?></p>
-    <?php endif; ?>
     <?php if (!$isSelf && !$isAccPrice): ?>
         <p class="meta"><?php echo e($isEn
             ? 'The package price is shown. Set the agent sale at that price or higher.'

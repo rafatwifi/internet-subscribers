@@ -204,6 +204,21 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'act_wallet') {
     sas_json_out(true, '', $out);
 }
 
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'extensions') {
+    $extUser = isset($_GET['u']) ? trim((string) $_GET['u']) : '';
+    if ($extUser === '') {
+        sas_json_out(false, 'ماكو يوزر');
+    }
+    if (function_exists('user_can_access_sas_username') && !user_can_access_sas_username($pdo, $extUser)) {
+        sas_json_out(false, $lang === 'en' ? 'No access' : 'ما عندك صلاحية');
+    }
+    $extIsEn = (isset($lang) && $lang === 'en');
+    $extRows = function_exists('sas_extensions_for_username')
+        ? sas_extensions_for_username($pdo, $config, $extUser, $extIsEn)
+        : array();
+    sas_json_out(true, '', array('extensions' => $extRows));
+}
+
 if (isset($_GET['ajax']) && ($_GET['ajax'] === 'profiles' || $_GET['ajax'] === 'cards' || $_GET['ajax'] === 'managers')) {
     $ajaxKind = (string) $_GET['ajax'];
     $forceCards = isset($_GET['refresh']) && $_GET['refresh'] === '1';
@@ -565,6 +580,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     $action = post('action');
 
+    if ($action === 'sas_missing_drop') {
+        $tidDrop = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+        if (function_exists('sas_drop_missing_users')) {
+            sas_drop_missing_users($pdo, $tidDrop);
+        }
+        sas_page_redirect();
+    }
+
     if ($action === 'sas_save_cols') {
         $decoded = json_decode((string) post('cols', '{}'), true);
         if (!is_array($decoded)) {
@@ -592,7 +615,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if ($action === 'sas_ping_mode') {
         $mode = function_exists('sas_ping_mode_normalize')
-            ? sas_ping_mode_normalize(post('sub_ping_mode', 'off'))
+            ? sas_ping_mode_normalize(post('sub_ping_mode', 'sas'))
             : 'off';
         $pingAccId = (int) post('account_id', 0);
         $pingTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
@@ -641,10 +664,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 sas_json_out(false, app_maintenance_message('give_test', $lang));
             }
             $username = trim((string) post('id', ''));
+            $extPid = (int) post('profile_id', '0');
             if (!function_exists('sas_extend_one_day')) {
                 sas_json_out(false, 'ملف SAS غير مكتمل');
             }
-            list($ok, $msg) = sas_extend_one_day($pdo, $config, $username);
+            list($ok, $msg) = sas_extend_one_day($pdo, $config, $username, true, $extPid);
             sas_json_out($ok, $msg);
         }
         if (in_array($action, array('sas_activate_card', 'sas_activate_credit', 'sas_activate_reward'), true)
@@ -1497,6 +1521,12 @@ if ($xferTid > 0 && function_exists('tenant_sas_accounts_list')) {
         );
     }
 }
+$missingOnly = isset($_GET['missing']) && (string) $_GET['missing'] === '1';
+if ($missingOnly) {
+    $where .= ' AND c.sas_missing = 1';
+} else {
+    $where .= ' AND (c.sas_missing = 0 OR c.sas_missing IS NULL)';
+}
 if ($companyFilter > 0) {
     $hasCoCol = false;
     try {
@@ -1702,15 +1732,15 @@ if (isset($_GET['live']) && $_GET['live'] === '1') {
 }
 
 $page = isset($_GET['page']) ? max(1, (int) $_GET['page']) : 1;
-$perAllowed = array(5, 10, 50, 100, 500);
-$perPageRaw = isset($_GET['per_page']) ? (string) $_GET['per_page'] : '10';
+$perAllowed = array(5, 15, 50, 100);
+$perPageRaw = isset($_GET['per_page']) ? (string) $_GET['per_page'] : '15';
 if ($perPageRaw === 'all') {
     $showAll = true;
     $perPage = 0;
 } else {
     $perNum = (int) $perPageRaw;
     if (!in_array($perNum, $perAllowed, true)) {
-        $perNum = 10;
+        $perNum = 15;
     }
     $perPageRaw = (string) $perNum;
     $showAll = false;
@@ -1774,7 +1804,8 @@ $fromSql = function_exists('sas_cache_list_from_sql')
 
 $canExportExcel = function_exists('sas_may_export_excel') && sas_may_export_excel($pdo);
 if (isset($_GET['export']) && (string) $_GET['export'] === 'excel') {
-    if (!$canExportExcel) {
+    $missingExport = isset($_GET['missing']) && (string) $_GET['missing'] === '1';
+    if (!$canExportExcel && !$missingExport) {
         flash('error', $lang === 'en' ? 'Excel export is not available for this account' : 'تصدير الإكسل غير متاح لهذا الحساب');
         redirect('sas.php');
     }
@@ -2126,7 +2157,7 @@ function sas_sort_link($key, $label, $currentKey, $currentDir, $q, $perPageRaw, 
     if ($q !== '') {
         $qs[] = 'q=' . urlencode($q);
     }
-    if ($perPageRaw !== '10') {
+    if ($perPageRaw !== '15') {
         $qs[] = 'per_page=' . urlencode($perPageRaw);
     }
     if ($subFilter !== '') {
@@ -2275,7 +2306,7 @@ function sas_filter_href($sub, $parent, $q, $perPageRaw)
     if ($q !== '') {
         $qs[] = 'q=' . urlencode($q);
     }
-    if ($perPageRaw !== '10') {
+    if ($perPageRaw !== '15') {
         $qs[] = 'per_page=' . urlencode($perPageRaw);
     }
     if (isset($GLOBALS['sasWithSubs']) && $GLOBALS['sasWithSubs'] === false) {
@@ -4170,17 +4201,22 @@ html.sas-ln-off .sas-radius-page #subsTable .sas-fn-rest,
 @keyframes subPingSpin { to { transform: rotate(360deg); } }
 @keyframes subActSpin { to { transform: rotate(360deg); } }
 .sas-radius-page #subsTable .sas-rent-mini .rent-badge {
-  width: 22px;
-  height: 22px;
-  min-width: 22px;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
   font-size: 10px;
-  line-height: 22px;
-  border-radius: 6px;
+  line-height: 1;
+  border-radius: 7px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   margin: 0;
   flex: 0 0 auto;
+  color: #0f172a;
+}
+.sas-radius-page #subsTable .sas-rent-mini .rent-badge .rent-glyph {
+  width: 16px;
+  height: 16px;
 }
 .sas-radius-page #subsTable th.col-rent.col-off,
 .sas-radius-page #subsTable td.col-rent.col-off { display: none !important; }
@@ -4632,7 +4668,7 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
             </div>
             </div>
             <form method="get" action="sas.php" id="subsSearchForm" class="sas-search-wrap" autocomplete="off">
-                <?php if ($perPageRaw !== '10'): ?>
+                <?php if ($perPageRaw !== '15'): ?>
                     <input type="hidden" name="per_page" value="<?php echo e($perPageRaw); ?>">
                 <?php endif; ?>
                 <?php if ($subFilter !== ''): ?>
@@ -4691,6 +4727,36 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
             </div>
         </div>
         <div class="sas-refresh-hint" id="sasRefreshHint"></div>
+        <?php
+        $missingN = 0;
+        try {
+            $missTid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 1;
+            $missScope = function_exists('sas_agent_scope_sql') ? sas_agent_scope_sql('c', false) : '';
+            $missingN = (int) $pdo->query(
+                'SELECT COUNT(*) FROM sas_users_cache c WHERE c.tenant_id = ' . (int) $missTid
+                . ' AND c.sas_missing = 1' . $missScope
+            )->fetchColumn();
+        } catch (Exception $eMiss) {
+            $missingN = 0;
+        }
+        if ($missingN > 0):
+            $missExcel = 'sas.php?export=excel&missing=1';
+        ?>
+        <div class="sas-missing-bar">
+            <b><?php echo (int) $missingN; ?></b>
+            <a class="btn ghost sm" href="<?php echo e($missExcel); ?>">Excel</a>
+            <form method="post" action="sas.php">
+                <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+                <input type="hidden" name="action" value="sas_missing_drop">
+                <button class="btn danger sm" type="submit"><?php echo e($lang === 'en' ? 'Delete' : 'مسح'); ?></button>
+            </form>
+        </div>
+        <style>
+        .sas-missing-bar { display:flex; align-items:center; gap:8px; margin:8px 0; }
+        .sas-missing-bar form { margin:0; }
+        .sas-missing-bar b { font-size:16px; }
+        </style>
+        <?php endif; ?>
 
     <div class="table-wrap">
         <table id="subsTable" class="data-table">
@@ -4774,7 +4840,7 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
             }
             $keepStr = count($keepQs) ? '&' . implode('&', $keepQs) : '';
             $baseQs = $keepQs;
-            if ($perPageRaw !== '10') {
+            if ($perPageRaw !== '15') {
                 $baseQs[] = 'per_page=' . urlencode($perPageRaw);
             }
             $baseStr = count($baseQs) ? '&' . implode('&', $baseQs) : '';
@@ -4804,9 +4870,14 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
             }
             ?>
             <div class="subs-pager-sizes">
-            <?php foreach (array(5, 10, 50, 100) as $perChoice): ?>
+            <?php foreach (array(5, 15, 50, 100) as $perChoice): ?>
                 <a class="pager-n<?php echo (!$showAll && (int) $perPageRaw === $perChoice) ? ' is-on' : ''; ?>" href="?per_page=<?php echo (int) $perChoice . $extraQs; ?>"><?php echo (int) $perChoice; ?></a>
             <?php endforeach; ?>
+            <?php if (!$showAll): ?>
+                <a class="pager-n" href="?per_page=all<?php echo $extraQs; ?>"><?php echo e(t('show_all')); ?></a>
+            <?php else: ?>
+                <a class="pager-n is-on" href="?per_page=15<?php echo $extraQs; ?>">15</a>
+            <?php endif; ?>
             </div>
             <?php if ($totalPages > 1): ?>
             <div class="subs-pager-pages">
@@ -4841,7 +4912,8 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
     <button type="button" class="ops-item" data-ops="open" id="opsItemOpen" hidden><?php echo e($lang === 'en' ? 'Edit' : 'تعديل'); ?></button>
     <button type="button" class="ops-item" data-ops="pay" id="opsItemPay" hidden><?php echo e(t('pay_debts')); ?></button>
     <button type="button" class="ops-item" data-ops="activate" id="opsItemActivate" hidden><?php echo e(t('activate')); ?></button>
-    <button type="button" class="ops-item" data-ops="give_test" id="opsItemGiveTest" hidden><?php echo e(t('give_test')); ?></button>
+    <button type="button" class="ops-item" data-ops="give_test" id="opsItemGiveTest" hidden data-profile-id="0"><?php echo e(t('give_test')); ?></button>
+    <div id="opsExtendMore"></div>
     <button type="button" class="ops-item" data-ops="disable" id="opsItemDisable" hidden><?php echo e($lang === 'en' ? 'Disable' : 'تعطيل'); ?></button>
     <button type="button" class="ops-item" data-ops="enable" id="opsItemEnable" hidden><?php echo e($lang === 'en' ? 'Enable' : 'تشغيل'); ?></button>
     <button type="button" class="ops-item" data-ops="disconnect" id="opsItemDisconnect" hidden><?php echo e($lang === 'en' ? 'Disconnect' : 'قطع الاتصال'); ?></button>
@@ -4967,7 +5039,7 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
 <div class="ops-dropdown hidden" id="filterDropdown">
     <form method="get" action="sas.php" class="sas-adv-filter" id="sasAdvFilter">
         <?php if ($q !== ''): ?><input type="hidden" name="q" value="<?php echo e($q); ?>"><?php endif; ?>
-        <?php if ($perPageRaw !== '10'): ?><input type="hidden" name="per_page" value="<?php echo e($perPageRaw); ?>"><?php endif; ?>
+        <?php if ($perPageRaw !== '15'): ?><input type="hidden" name="per_page" value="<?php echo e($perPageRaw); ?>"><?php endif; ?>
         <label><?php echo e($lang === 'en' ? 'Status' : 'الحالة'); ?>
             <select name="sub">
                 <option value=""><?php echo e($lang === 'en' ? 'Any' : 'الكل'); ?></option>
@@ -5671,6 +5743,7 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
         name: tr.getAttribute('data-name') || '',
         firstname: tr.getAttribute('data-firstname') || '',
         lastname: tr.getAttribute('data-lastname') || '',
+        phone: tr.getAttribute('data-phone') || '',
         username: tr.getAttribute('data-username') || tr.getAttribute('data-id') || '',
         debt: tr.getAttribute('data-debt') === '1',
         hasDays: tr.getAttribute('data-has-days') === '1',
@@ -5964,11 +6037,91 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
     placeMenuAt(opsDrop, clientX, clientY, opsBtn);
     if (opsBtn) opsBtn.setAttribute('aria-expanded', 'true');
   }
+  var extCache = {};
+  var extLoadSeq = 0;
+  function clearExtendExtras() {
+    var more = document.getElementById('opsExtendMore');
+    if (more) more.innerHTML = '';
+    var gt = document.getElementById('opsItemGiveTest');
+    if (gt) {
+      gt.setAttribute('data-profile-id', '0');
+      gt.setAttribute('data-ext-days', '0');
+      gt.textContent = <?php echo json_encode(t('give_test')); ?>;
+    }
+  }
+  function paintExtendItems(list) {
+    var gt = document.getElementById('opsItemGiveTest');
+    var more = document.getElementById('opsExtendMore');
+    clearExtendExtras();
+    if (!list || !list.length || !gt) {
+      showEl(gt, false);
+      return;
+    }
+    var first = list[0];
+    gt.setAttribute('data-profile-id', String(first.id || 0));
+    gt.setAttribute('data-ext-days', String(first.days || 0));
+    gt.textContent = first.label || <?php echo json_encode(t('give_test')); ?>;
+    showEl(gt, true);
+    if (!more || list.length < 2) return;
+    for (var i = 1; i < list.length; i++) {
+      var ex = list[i];
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'ops-item';
+      btn.setAttribute('data-ops', 'give_test');
+      btn.setAttribute('data-profile-id', String(ex.id || 0));
+      btn.setAttribute('data-ext-days', String(ex.days || 0));
+      btn.textContent = ex.label || ('#' + (ex.id || ''));
+      more.appendChild(btn);
+    }
+  }
+  function loadExtendOptions(one) {
+    if (!one || maintBlockGiveTest) {
+      clearExtendExtras();
+      showEl(document.getElementById('opsItemGiveTest'), false);
+      return;
+    }
+    if (one.provider === 'earthlink') {
+      clearExtendExtras();
+      showEl(document.getElementById('opsItemGiveTest'), false);
+      return;
+    }
+    var key = String(one.username || one.id || '') + '|' + String(one.profileId || '0');
+    if (extCache[key]) {
+      paintExtendItems(extCache[key]);
+      return;
+    }
+    var gt = document.getElementById('opsItemGiveTest');
+    clearExtendExtras();
+    if (gt) {
+      gt.textContent = <?php echo json_encode($lang === 'en' ? 'Loading extensions…' : 'جاري تحميل التمديد…'); ?>;
+      showEl(gt, true);
+    }
+    var seq = ++extLoadSeq;
+    var url = 'sas.php?ajax=extensions&u=' + encodeURIComponent(one.username || one.id || '');
+    fetch(url, { credentials: 'same-origin', headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (seq !== extLoadSeq) return;
+        var list = (d && d.ok && d.extensions && d.extensions.length) ? d.extensions : [];
+        extCache[key] = list;
+        var cur = selectedRows();
+        var still = cur.length === 1 && (cur[0].username || cur[0].id) === (one.username || one.id);
+        if (!still) return;
+        paintExtendItems(list);
+      })
+      .catch(function () {
+        if (seq !== extLoadSeq) return;
+        clearExtendExtras();
+        showEl(document.getElementById('opsItemGiveTest'), false);
+      });
+  }
   function updateOps() {
     var rows = selectedRows();
     var n = rows.length;
     var one = n === 1 ? rows[0] : null;
     var anyDebt = rows.some(function (r) { return r.debt; });
+    var waOn = !!actWaDefaultOn;
     showEl(document.getElementById('opsSep'), n > 0);
     showEl(document.getElementById('opsItemHint'), n === 0);
     showEl(document.getElementById('opsItemOpen'), !!one);
@@ -5977,14 +6130,18 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
     showEl(document.getElementById('opsItemEnable'), !!(one && !one.enabled));
     showEl(document.getElementById('opsItemDisable'), !!(one && one.enabled));
     showEl(document.getElementById('opsItemDisconnect'), !!(one && one.online));
-    showEl(document.getElementById('opsItemGiveTest'), !!one && !maintBlockGiveTest);
     showEl(document.getElementById('opsItemBulkActivate'), n > 1 && !maintBlockActivate);
     showEl(document.getElementById('opsItemBulkDisconnect'), n > 1 && rows.some(function (r) { return r.online; }));
     showEl(document.getElementById('opsItemAddDebt'), !!(one && canEditDebts));
-    showEl(document.getElementById('opsItemRemind'), !!one);
-    showEl(document.getElementById('opsItemDays'), !!(one && one.hasDays));
+    showEl(document.getElementById('opsItemRemind'), !!(waOn && one && one.debt));
+    showEl(document.getElementById('opsItemDays'), !!(waOn && one && one.hasDays));
     showEl(document.getElementById('opsItemRetry'), !!(one && one.msgFail));
     showEl(document.getElementById('opsItemTransferCo'), !!(one && canTransferCo));
+    if (one && !maintBlockGiveTest) loadExtendOptions(one);
+    else {
+      clearExtendExtras();
+      showEl(document.getElementById('opsItemGiveTest'), false);
+    }
   }
   var askRun = null;
   function closeAsk() {
@@ -6112,15 +6269,32 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
     }
     if (action === 'give_test' && one) {
       var who = one.name || one.username || one.id || '';
+      var srcBtn = (window._opsClickEl && window._opsClickEl.getAttribute)
+        ? window._opsClickEl
+        : document.getElementById('opsItemGiveTest');
+      var extPid = srcBtn ? parseInt(srcBtn.getAttribute('data-profile-id') || '0', 10) : 0;
+      var extDays = srcBtn ? parseInt(srcBtn.getAttribute('data-ext-days') || '0', 10) : 0;
+      var extTitle = (srcBtn && srcBtn.textContent) ? String(srcBtn.textContent).trim() : <?php echo json_encode(t('give_test')); ?>;
+      var extConfirm = confirmTest;
+      if (extDays > 1) {
+        extConfirm = <?php echo json_encode($lang === 'en' ? 'Extend this subscriber using reward points?' : 'تمديد هذا المشترك عبر النقاط التشجيعية؟'); ?>;
+      } else if (extDays === 1) {
+        extConfirm = confirmTest;
+      }
+      var yesLab = extDays > 1
+        ? (<?php echo json_encode($lang === 'en' ? 'Extend ' : 'تمديد '); ?> + extDays + <?php echo json_encode($lang === 'en' ? ' days' : ' يوم'); ?>)
+        : <?php echo json_encode($lang === 'en' ? 'Add the day' : 'إضافة اليوم'); ?>;
       openAsk(
-        <?php echo json_encode(t('give_test')); ?>,
-        (who ? who + ' — ' : '') + confirmTest,
+        extTitle || <?php echo json_encode(t('give_test')); ?>,
+        (who ? who + ' — ' : '') + extConfirm,
         function () {
           if (window.appBusySet) window.appBusySet({ force: true });
-          postSas('give_test', { id: one.id }).then(function (d) {
+          var payload = { id: one.id };
+          if (extPid > 0) payload.profile_id = String(extPid);
+          postSas('give_test', payload).then(function (d) {
             if (window.appBusyDone) window.appBusyDone();
             if (d && d.ok) {
-              rememberActFlash((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Test given' : 'تم إعطاء التست'); ?>, 'ok');
+              rememberActFlash((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Extended' : 'تم التمديد'); ?>, 'ok');
               window.location.reload();
             } else {
               showAppToast((d && d.message) || <?php echo json_encode($lang === 'en' ? 'Request failed' : 'فشل الطلب'); ?>, 'error');
@@ -6130,7 +6304,7 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
             showAppToast(<?php echo json_encode($lang === 'en' ? 'Network error' : 'فشل الاتصال'); ?>, 'error');
           });
         },
-        <?php echo json_encode($lang === 'en' ? 'Add the day' : 'إضافة اليوم'); ?>,
+        yesLab,
         true
       );
       return;
@@ -6272,7 +6446,11 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
   if (opsDrop) {
     opsDrop.addEventListener('click', function (e) {
       var btn = e.target.closest('[data-ops]');
-      if (btn) runOps(btn.getAttribute('data-ops'));
+      if (btn) {
+        window._opsClickEl = btn;
+        runOps(btn.getAttribute('data-ops'));
+        window._opsClickEl = null;
+      }
     });
   }
   var bulkClose = document.getElementById('opsBulkModalClose');
@@ -6565,6 +6743,38 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
     inp.disabled = !on;
     if (!on) inp.checked = false;
     else if (!inp.dataset.userTouched) inp.checked = true;
+  }
+  /** مفتاح تخزين منفصل لكل صفحة (مسار + شركة) لزر طباعة الفاتورة */
+  function actPrintStorageKey() {
+    var path = '';
+    try {
+      path = String(location.pathname || '').split('/').pop() || 'sas.php';
+    } catch (ePath) {
+      path = 'sas.php';
+    }
+    var co = '';
+    try {
+      if (liveQs && liveQs.company) co = String(liveQs.company);
+    } catch (eCo) {}
+    return 'sas_act_print_v1:' + path + (co ? (':c' + co) : '');
+  }
+  function loadActPrintPref() {
+    try {
+      var v = localStorage.getItem(actPrintStorageKey());
+      if (v === '0' || v === 'off' || v === 'false') return false;
+      if (v === '1' || v === 'on' || v === 'true') return true;
+    } catch (eLoad) {}
+    return true;
+  }
+  function saveActPrintPref(on) {
+    try {
+      localStorage.setItem(actPrintStorageKey(), on ? '1' : '0');
+    } catch (eSave) {}
+  }
+  function applyActPrintPref() {
+    var prEl = document.getElementById('sasActPrint');
+    if (!prEl) return;
+    prEl.checked = !!loadActPrintPref();
   }
   function isFtthActModal() {
     var modal = document.getElementById('sasActModal');
@@ -6909,8 +7119,7 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
       setActMode('card');
       var waEl = document.getElementById('sasActSendWa');
       if (waEl && !waEl.dataset.userTouched) waEl.checked = !!actWaDefaultOn;
-      var prEl = document.getElementById('sasActPrint');
-      if (prEl && !prEl.dataset.userTouched) prEl.checked = true;
+      applyActPrintPref();
       requestAnimationFrame(function () {
         fitFtthActName();
         requestAnimationFrame(fitFtthActName);
@@ -7250,7 +7459,13 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
     });
   }
   var actPrint = document.getElementById('sasActPrint');
-  if (actPrint) actPrint.addEventListener('change', function () { actPrint.dataset.userTouched = '1'; });
+  if (actPrint) {
+    applyActPrintPref();
+    actPrint.addEventListener('change', function () {
+      actPrint.dataset.userTouched = '1';
+      saveActPrintPref(!!actPrint.checked);
+    });
+  }
   var actOld = document.getElementById('sasActOldDebts');
   if (actOld) {
     actOld.addEventListener('change', function () { actOld.dataset.userTouched = '1'; });
@@ -7582,25 +7797,77 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
         var fromIdentity = String(window.__sasActFromIdentity || '');
         var printBox = document.getElementById('sasActPrint');
         var goDash = <?php echo json_encode(!isset($config['activate_after']) || $config['activate_after'] !== 'stay'); ?>;
-        function goAfterAct(slipUrl) {
+        function absSlipUrl(url) {
+          var s = String(url || '');
+          if (/^https?:\/\//i.test(s)) return s;
+          var base = location.href.replace(/[^\/]*$/, '');
+          return base + s.replace(/^\//, '');
+        }
+        function silentPrintOnce(url) {
+          if (!url || window.__slipPrinting) return;
+          window.__slipPrinting = true;
+          var iframe = document.createElement('iframe');
+          iframe.setAttribute('aria-hidden', 'true');
+          iframe.style.cssText = 'position:fixed;width:90mm;height:220mm;border:0;opacity:0.01;pointer-events:none;left:-4000px;top:0;background:#fff';
+          var src = String(url);
+          src += (src.indexOf('?') >= 0 ? '&' : '?') + 'print=1&once=1';
+          iframe.src = src;
+          document.body.appendChild(iframe);
+          setTimeout(function () {
+            try { if (iframe.parentNode) iframe.parentNode.removeChild(iframe); } catch (eRm) {}
+            window.__slipPrinting = false;
+          }, 12000);
+        }
+        function printSlipOnce(token, url) {
+          if (!token && !url) return Promise.resolve('none');
+          var rel = url || ('slip.php?k=' + encodeURIComponent(token || ''));
+          var abs = absSlipUrl(rel);
+          if (abs.indexOf('print=') < 0) {
+            abs += (abs.indexOf('?') >= 0 ? '&' : '?') + 'print=1&agent=1';
+          } else if (abs.indexOf('agent=1') < 0) {
+            abs += '&agent=1';
+          }
+          return fetch('http://127.0.0.1:9240/print', {
+            method: 'POST',
+            mode: 'cors',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: abs })
+          }).then(function (r) { return r.json(); }).then(function (j) {
+            if (j && j.ok) {
+              if (window.showCornerToast) {
+                window.showCornerToast(<?php echo json_encode($lang === 'en' ? 'Printing on this computer' : 'تنطبع على طابعة هذا الجهاز'); ?>, 'ok');
+              }
+              return 'agent';
+            }
+            silentPrintOnce(rel);
+            return 'browser';
+          }).catch(function () {
+            silentPrintOnce(rel);
+            return 'browser';
+          });
+        }
+        function goAfterAct(slipUrl, alreadyPrinted) {
           releaseActivatedRow(actName);
           if (fromIdentity && fromIdentity.toLowerCase() === String(actName || '').toLowerCase()) {
             window.__sasActFromIdentity = '';
             window.location.href = 'sas_user.php?u=' + encodeURIComponent(fromIdentity);
             return;
           }
-          var msg = slipUrl
-            ? <?php echo json_encode($lang === 'en' ? 'Activated. Open the invoice from the notice.' : 'تم التفعيل'); ?>
-            : <?php echo json_encode($lang === 'en' ? 'Activated' : 'تم التفعيل'); ?>;
+          var msg = alreadyPrinted
+            ? <?php echo json_encode($lang === 'en' ? 'Activated' : 'تم التفعيل'); ?>
+            : (slipUrl
+              ? <?php echo json_encode($lang === 'en' ? 'Activated' : 'تم التفعيل'); ?>
+              : <?php echo json_encode($lang === 'en' ? 'Activated' : 'تم التفعيل'); ?>);
           if (goDash) {
             var dest = 'index.php?activated=1';
-            if (slipUrl) dest += '&slip=' + encodeURIComponent(slipUrl);
+            if (slipUrl && !alreadyPrinted) dest += '&slip=' + encodeURIComponent(slipUrl);
             setTimeout(function () { window.location.href = dest; }, 700);
             return;
           }
-          if (window.showCornerToast) window.showCornerToast(msg, 'ok', slipUrl || '');
+          if (window.showCornerToast) window.showCornerToast(msg, 'ok', (!alreadyPrinted && slipUrl) ? slipUrl : '');
         }
-        var wantSlip = ftthOn || (printBox && printBox.checked);
+        var wantPrint = !!(printBox && printBox.checked);
+        var wantSlip = ftthOn || wantPrint;
         if (wantSlip) {
           var fd = new FormData();
           fd.append('csrf', csrf);
@@ -7614,7 +7881,19 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
           fetch('slip.php', { method: 'POST', credentials: 'same-origin', body: fd }).then(function (r) { return r.json(); }).then(function (j) {
             var slipUrl = (j && j.url) ? String(j.url) : '';
             var slipMatch = slipUrl.match(/slip\.php\?k=[a-f0-9]{16,64}/);
-            goAfterAct(slipMatch ? slipMatch[0] : '');
+            var token = (j && j.token) ? String(j.token) : '';
+            var href = slipMatch ? slipMatch[0] : '';
+            if (wantPrint && (token || href)) {
+              printSlipOnce(token, href).then(function (how) {
+                if (how === 'browser') {
+                  setTimeout(function () { goAfterAct(href, true); }, 2800);
+                  return;
+                }
+                goAfterAct(href, true);
+              });
+              return;
+            }
+            goAfterAct(href, false);
           }).catch(function () { goAfterAct(''); });
           return;
         }
@@ -7956,7 +8235,7 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
       + '&sort=' + encodeURIComponent(p.sort || 'name')
       + '&dir=' + encodeURIComponent(p.dir || 'asc')
       + '&page=' + encodeURIComponent(p.page || '1')
-      + '&per_page=' + encodeURIComponent(p.per_page || '10');
+      + '&per_page=' + encodeURIComponent(p.per_page || '15');
     if (p.company) url += '&company=' + encodeURIComponent(p.company);
     return url;
   }

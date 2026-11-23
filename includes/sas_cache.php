@@ -32,6 +32,20 @@ function ensure_sas_users_cache_table($pdo)
     } catch (Exception $e) {
     }
     try {
+        $missCol = $pdo->query("SHOW COLUMNS FROM sas_users_cache LIKE 'sas_missing'")->fetch();
+        if (!$missCol) {
+            $pdo->exec('ALTER TABLE sas_users_cache ADD COLUMN sas_missing TINYINT(1) NOT NULL DEFAULT 0');
+        }
+    } catch (Exception $e) {
+    }
+    try {
+        $creCol = $pdo->query("SHOW COLUMNS FROM sas_users_cache LIKE 'sas_created_at'")->fetch();
+        if (!$creCol) {
+            $pdo->exec('ALTER TABLE sas_users_cache ADD COLUMN sas_created_at DATETIME NULL DEFAULT NULL');
+        }
+    } catch (Exception $e) {
+    }
+    try {
         $pdo->exec(
             'CREATE TABLE IF NOT EXISTS sas_user_sessions (
                 tenant_id INT UNSIGNED NOT NULL,
@@ -132,6 +146,7 @@ function ensure_sas_users_cache_table($pdo)
         'framed_ip' => 'VARCHAR(45) NULL DEFAULT NULL',
         'online_ping' => 'SMALLINT UNSIGNED NULL DEFAULT NULL',
         'mac_address' => 'VARCHAR(32) NULL DEFAULT NULL',
+        'sas_missing' => 'TINYINT(1) NOT NULL DEFAULT 0',
     );
     foreach ($extraCols as $cName => $cSql) {
         try {
@@ -935,7 +950,7 @@ function sas_ping_mode_ensure_column($pdo)
                 $pdo,
                 'tenant_sas_accounts',
                 'ping_mode',
-                "VARCHAR(16) NOT NULL DEFAULT 'off'"
+                "VARCHAR(16) NOT NULL DEFAULT 'sas'"
             );
         } catch (Exception $e) {
         }
@@ -949,10 +964,23 @@ function sas_ping_mode_ensure_column($pdo)
                 $legacy = sas_ping_mode_normalize($prefs['sub_ping_mode']);
             }
         }
-        if ($legacy !== 'off') {
+        if ($legacy === 'portal' || $legacy === 'sas') {
             $pdo->exec(
                 "UPDATE tenant_sas_accounts SET ping_mode = " . $pdo->quote($legacy)
                 . " WHERE ping_mode = 'off' OR ping_mode = '' OR ping_mode IS NULL"
+            );
+        }
+    } catch (Exception $e) {
+    }
+    // التوكل الافتراضي: بنك المشتركين عبر الساس (مرة واحدة عند تغيير DEFAULT)
+    try {
+        $col = $pdo->query("SHOW COLUMNS FROM tenant_sas_accounts LIKE 'ping_mode'")->fetch(PDO::FETCH_ASSOC);
+        $def = (is_array($col) && isset($col['Default'])) ? (string) $col['Default'] : '';
+        if ($def !== 'sas') {
+            $pdo->exec("ALTER TABLE tenant_sas_accounts MODIFY COLUMN ping_mode VARCHAR(16) NOT NULL DEFAULT 'sas'");
+            $pdo->exec(
+                "UPDATE tenant_sas_accounts SET ping_mode = 'sas'
+                 WHERE ping_mode = 'off' OR ping_mode = '' OR ping_mode IS NULL"
             );
         }
     } catch (Exception $e) {
@@ -1116,9 +1144,6 @@ function sas_ping_mode_style()
 function sas_ping_mode_buttons($en, $mode, $domId = 'subPingMode', $accountId = 0, $disabled = false)
 {
     $mode = sas_ping_mode_normalize($mode);
-    if ($disabled) {
-        $mode = 'off';
-    }
     $opts = array(
         array('portal', $en ? 'Portal ping' : 'البنك من خلال البوابة', $en ? 'Portal' : 'البوابة'),
         array('off', $en ? 'Off' : 'طافي', $en ? 'Off' : 'طافي'),
@@ -6590,7 +6615,7 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
                     sas_ftth_save_channel($pdo, $ftthAcc['id'], 'api', 0, 'رجعت صلاحية التفعيل من الوكالة');
                     $ftthAcc['act_via'] = 'api';
                 } else {
-                    sas_ftth_save_channel($pdo, $ftthAcc['id'], 'user', isset($ftthAcc['act_denied_count']) ? $ftthAcc['act_denied_count'] : 2, isset($ftthAcc['act_note']) ? $ftthAcc['act_note'] : 'صلاحية تفعيل الوكالة مقفلة. التفعيل يتم من بوابة المشترك ثم تسجيل الخروج.');
+                    sas_ftth_save_channel($pdo, $ftthAcc['id'], 'user', isset($ftthAcc['act_denied_count']) ? $ftthAcc['act_denied_count'] : 2, isset($ftthAcc['act_note']) ? $ftthAcc['act_note'] : 'تم الكشف عن وجود تعطيل في خاصية التفعيل من قبل ادارة الرسلر , سيتم اعتماد طريقة تفعيل ثانية');
                 }
             }
         }
@@ -6624,7 +6649,7 @@ function sas_write_user($pdo, $config, $action, $username, $fields)
             $denied = (strpos($low, '403') !== false || strpos($failMsg, 'صلاحية') !== false || strpos($failMsg, 'مدير') !== false);
             if ($denied && $ftthAcc) {
                 $hits = (isset($ftthAcc['act_denied_count']) ? (int) $ftthAcc['act_denied_count'] : 0) + 1;
-                $note = 'صلاحية تفعيل الوكالة مقفلة. التفعيل يتم من بوابة المشترك ثم تسجيل الخروج.';
+                $note = 'تم الكشف عن وجود تعطيل في خاصية التفعيل من قبل ادارة الرسلر , سيتم اعتماد طريقة تفعيل ثانية';
                 if ($hits >= 2) {
                     sas_ftth_save_channel($pdo, $ftthAcc['id'], 'user', $hits, $note);
                     return sas_ftth_user_portal_activate($pdo, $config, $ftthAcc, $username, $pin, $fields, $cache, $api, $sasUserId, $beforeTs);
@@ -6817,6 +6842,31 @@ function sas_cache_touch_owner_row($pdo, $viewerTenant, $username, $parentName, 
     }
 }
 
+function sas_cache_store_created_at($pdo, $tenantId, $username, $row)
+{
+    if (!is_array($row) || $username === '') {
+        return;
+    }
+    $created = '';
+    if (isset($row['created_at']) && !is_array($row['created_at'])) {
+        $created = trim((string) $row['created_at']);
+    }
+    if ($created === '' || !strtotime($created)) {
+        return;
+    }
+    try {
+        $pdo->prepare(
+            'UPDATE sas_users_cache SET sas_created_at = :c
+             WHERE tenant_id = :t AND username = :u AND sas_created_at IS NULL'
+        )->execute(array(
+            ':c' => $created,
+            ':t' => (int) $tenantId,
+            ':u' => $username,
+        ));
+    } catch (Exception $e) {
+    }
+}
+
 function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
 {
     if (!is_array($row)) {
@@ -6925,7 +6975,8 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
                     framed_ip = IF(:framed_ip_chk IS NULL OR :framed_ip_chk = "", framed_ip, :framed_ip2),
                     mac_address = IF(:mac_chk IS NULL OR :mac_chk = "", mac_address, :mac2),
                     daily_traffic = IF(:daily_traffic_chk IS NULL, daily_traffic, :daily_traffic2),
-                    synced_at = :synced_at' . $accSet . '
+                    synced_at = :synced_at,
+                    sas_missing = 0' . $accSet . '
                  WHERE tenant_id = :tenant_id AND username = :username'
             );
             $updParams = $params;
@@ -6946,6 +6997,7 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
                 $updParams[':daily_traffic']
             );
             $upd->execute($updParams);
+            sas_cache_store_created_at($pdo, $tenantId, $username, $row);
             return true;
         }
         if ($ins === false) {
@@ -6972,6 +7024,7 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
             );
         }
         $insSql->execute($params);
+        sas_cache_store_created_at($pdo, $tenantId, $username, $row);
         return true;
     } catch (Exception $e) {
         // إن تعارض username بسبب PK قديم: حدّث فقط إن كان نفس الشركة، وإلا تجاهل السرقة
@@ -7163,6 +7216,156 @@ function sas_cache_pull_search($pdo, $config, $q)
  * يرجع array($ok, $count, $mode, $meta)
  * $mode: cache | progress | synced | busy | error
  */
+function sas_mark_missing_users($pdo, $tenantId, $startedAt, $accountId = 0)
+{
+    $tenantId = (int) $tenantId;
+    $accountId = (int) $accountId;
+    $startedAt = trim((string) $startedAt);
+    if ($tenantId <= 0 || $startedAt === '') {
+        return 0;
+    }
+    ensure_sas_users_cache_table($pdo);
+    $acc = $accountId > 0 ? (' AND sas_account_id = ' . $accountId) : '';
+    $prov = " AND (provider IS NULL OR provider = '' OR provider = 'sas')";
+    try {
+        $hasProv = (bool) $pdo->query("SHOW COLUMNS FROM sas_users_cache LIKE 'provider'")->fetch();
+    } catch (Exception $e) {
+        $hasProv = false;
+    }
+    if (!$hasProv) {
+        $prov = '';
+    }
+    try {
+        $total = (int) $pdo->query(
+            'SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = ' . $tenantId . $acc . $prov
+        )->fetchColumn();
+        $stF = $pdo->prepare(
+            'SELECT COUNT(*) FROM sas_users_cache WHERE tenant_id = :t AND synced_at >= :s' . $acc . $prov
+        );
+        $stF->execute(array(':t' => $tenantId, ':s' => $startedAt));
+        $fresh = (int) $stF->fetchColumn();
+        if ($fresh <= 0 && $total > 0) {
+            return 0;
+        }
+        $pdo->prepare(
+            'UPDATE sas_users_cache SET sas_missing = 0 WHERE tenant_id = :t AND synced_at >= :s' . $acc
+        )->execute(array(':t' => $tenantId, ':s' => $startedAt));
+        $mark = $pdo->prepare(
+            'UPDATE sas_users_cache SET sas_missing = 1 WHERE tenant_id = :t AND (synced_at IS NULL OR synced_at < :s)' . $acc . $prov
+        );
+        $mark->execute(array(':t' => $tenantId, ':s' => $startedAt));
+        $flagged = (int) $mark->rowCount();
+        if ($flagged > 0 && function_exists('sas_drop_missing_users')) {
+            sas_drop_missing_users($pdo, $tenantId);
+        }
+        return $flagged;
+    } catch (Exception $e) {
+        return 0;
+    }
+}
+
+function sas_drop_missing_users($pdo, $tenantId)
+{
+    $tenantId = (int) $tenantId;
+    if ($tenantId <= 0) {
+        return 0;
+    }
+    $st = $pdo->prepare(
+        'SELECT username, display_name, parent_name, local_subscriber_id FROM sas_users_cache WHERE tenant_id = :t AND sas_missing = 1'
+    );
+    $st->execute(array(':t' => $tenantId));
+    $rows = $st->fetchAll();
+    if (!is_array($rows)) {
+        return 0;
+    }
+    $n = 0;
+    $other = $pdo->prepare(
+        'SELECT COUNT(*) FROM sas_users_cache WHERE username = :u AND tenant_id <> :t'
+    );
+    $del = $pdo->prepare(
+        'DELETE FROM sas_users_cache WHERE tenant_id = :t AND username = :u AND sas_missing = 1'
+    );
+    $delSub = $pdo->prepare(
+        'DELETE FROM subscribers WHERE tenant_id = :t AND sas_username = :u'
+    );
+    foreach ($rows as $row) {
+        $u = isset($row['username']) ? trim((string) $row['username']) : '';
+        if ($u === '') {
+            continue;
+        }
+        $keepElsewhere = 0;
+        $destName = '';
+        try {
+            $other->execute(array(':u' => $u, ':t' => $tenantId));
+            $keepElsewhere = (int) $other->fetchColumn();
+        } catch (Exception $e) {
+            $keepElsewhere = 0;
+        }
+        if ($keepElsewhere > 0) {
+            try {
+                $dn = $pdo->prepare(
+                    'SELECT parent_name FROM sas_users_cache WHERE username = :u AND tenant_id <> :t AND parent_name IS NOT NULL AND parent_name <> "" LIMIT 1'
+                );
+                $dn->execute(array(':u' => $u, ':t' => $tenantId));
+                $destName = trim((string) $dn->fetchColumn());
+            } catch (Exception $e) {
+                $destName = '';
+            }
+        }
+        $who = isset($row['display_name']) ? trim((string) $row['display_name']) : '';
+        if ($who === '' || strcasecmp($who, $u) === 0) {
+            $who = $u;
+        }
+        if ($keepElsewhere > 0) {
+            $dest = $destName !== '' ? $destName : 'وكالة أخرى';
+            $summary = 'سُحب المشترك ' . $who . ' من هذه الوكالة إلى وكالة ' . $dest . ' بقرار المدير، وبقي قيده لدى الوكالة المستلمة.';
+        } else {
+            $summary = 'حُذف المشترك ' . $who . ' من نظام الساس، ولم يعد له قيد في البوابة.';
+        }
+        if (function_exists('mb_strlen') && mb_strlen($summary, 'UTF-8') > 240) {
+            $summary = mb_substr($summary, 0, 237, 'UTF-8') . '...';
+        } elseif (strlen($summary) > 240) {
+            $summary = substr($summary, 0, 237) . '...';
+        }
+        if (function_exists('activity_log')) {
+            if (function_exists('current_admin')) {
+                $actorNow = current_admin();
+            } else {
+                $actorNow = null;
+            }
+            if (!$actorNow) {
+                try {
+                    $ad = $pdo->prepare('SELECT id, display_name, username FROM admin_users WHERE tenant_id = :t AND role = "admin" ORDER BY id ASC LIMIT 1');
+                    $ad->execute(array(':t' => $tenantId));
+                    $adRow = $ad->fetch();
+                    if ($adRow) {
+                        $GLOBALS['activity_force_actor'] = array(
+                            'id' => (int) $adRow['id'],
+                            'name' => 'النظام',
+                        );
+                    }
+                } catch (Exception $e) {
+                }
+            }
+            activity_log($pdo, null, 'subscriber', 0, 'sas_withdrawn', $summary, $u);
+            unset($GLOBALS['activity_force_actor']);
+        }
+        try {
+            $del->execute(array(':t' => $tenantId, ':u' => $u));
+            $n++;
+        } catch (Exception $e) {
+        }
+        if ($keepElsewhere > 0) {
+            continue;
+        }
+        try {
+            $delSub->execute(array(':t' => $tenantId, ':u' => $u));
+        } catch (Exception $e) {
+        }
+    }
+    return $n;
+}
+
 function sas_sync_submanager_users($pdo, $api, $nowSql)
 {
     if (!$api || !method_exists($api, 'getManagers') || !method_exists($api, 'listUsersPage')) {
@@ -7253,6 +7456,7 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
         if (count($readyAcc) > 1 || ($hasEarthlinkAcc && count($readyAcc) >= 1)) {
             $GLOBALS['sas_sync_multi_lock'] = true;
             $GLOBALS['sas_sync_skip_purge'] = true;
+            $multiMarkFrom = date('Y-m-d H:i:s');
             $anyOk = false;
             $sum = 0;
             $lastMode = 'error';
@@ -7315,6 +7519,9 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
                 }
             }
             unset($GLOBALS['sas_force_account'], $GLOBALS['sas_sync_multi_lock'], $GLOBALS['sas_sync_skip_purge']);
+            if ($anyOk && function_exists('sas_mark_missing_users')) {
+                sas_mark_missing_users($pdo, $tenantIdEarly, $multiMarkFrom, 0);
+            }
             if ($anyOk) {
                 $totalNow = 0;
                 try {
@@ -7546,24 +7753,11 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
                     $freshCnt = (int) $freshSt->fetchColumn();
                     $need = ($expected > 0) ? max(1, (int) ceil($expected * 0.5)) : 1;
                     if ($freshCnt >= $need && empty($GLOBALS['sas_sync_skip_purge'])) {
-                        // امسح كاش الساس القديم فقط — لا تمسح مشتركي Earthlink
-                        $hasProv = false;
-                        try {
-                            $hasProv = (bool) $pdo->query("SHOW COLUMNS FROM sas_users_cache LIKE 'provider'")->fetch();
-                        } catch (Exception $eProv) {
+                        $accMark = 0;
+                        if (!empty($GLOBALS['sas_force_account']['id'])) {
+                            $accMark = (int) $GLOBALS['sas_force_account']['id'];
                         }
-                        if ($hasProv) {
-                            $del = $pdo->prepare(
-                                "DELETE FROM sas_users_cache
-                                 WHERE tenant_id = :tid AND synced_at < :t
-                                   AND (provider IS NULL OR provider = '' OR provider = 'sas')"
-                            );
-                        } else {
-                            $del = $pdo->prepare(
-                                'DELETE FROM sas_users_cache WHERE tenant_id = :tid AND synced_at < :t'
-                            );
-                        }
-                        $del->execute(array(':tid' => $tenantId, ':t' => $started));
+                        sas_mark_missing_users($pdo, $tenantId, $started, $accMark);
                     }
                 } catch (Exception $e) {
                 }
@@ -7999,6 +8193,8 @@ function sas_render_table_row($row, $n, $config, $lang)
         . ' data-local-id="' . $localId . '"'
         . ' data-name="' . e($name) . '"'
         . ' data-firstname="' . e($fnText !== '' ? $fnText : $fn) . '"'
+        . ' data-lastname="' . e($ln) . '"'
+        . ' data-phone="' . e($phone) . '"'
         . ' data-username="' . e($username) . '"'
         . ' data-debt="' . ($debt > 0 ? '1' : '0') . '"'
         . ' data-active="' . ($isActive ? '1' : '0') . '"'

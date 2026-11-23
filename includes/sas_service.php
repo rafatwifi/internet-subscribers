@@ -582,6 +582,223 @@ function sas_profile_is_extension($row)
     return false;
 }
 
+function sas_extension_days_from_row($row)
+{
+    if (!is_array($row)) {
+        return 0;
+    }
+    $name = sas_row_name($row);
+    if (preg_match('/(\d+)\s*day/i', $name, $m)) {
+        return max(1, (int) $m[1]);
+    }
+    if (preg_match('/(\d+)\s*يوم/u', $name, $m)) {
+        return max(1, (int) $m[1]);
+    }
+    if (preg_match('/extension\s*[_\-\s]*(\d+)/i', $name, $m)) {
+        return max(1, (int) $m[1]);
+    }
+    $amt = 0;
+    if (isset($row['expiration_amount']) && is_numeric($row['expiration_amount'])) {
+        $amt = (int) $row['expiration_amount'];
+    } elseif (isset($row['expiration']) && is_numeric($row['expiration'])) {
+        $amt = (int) $row['expiration'];
+    }
+    if ($amt <= 0) {
+        return 0;
+    }
+    $unit = isset($row['expiration_unit']) ? $row['expiration_unit'] : (isset($row['expire_unit']) ? $row['expire_unit'] : '');
+    $unitS = is_numeric($unit) ? (int) $unit : strtolower((string) $unit);
+    if ($unitS === 2 || $unitS === 'days' || $unitS === 'day' || $unitS === 'd') {
+        return max(1, $amt);
+    }
+    if ($unitS === 1 || $unitS === 'hours' || $unitS === 'hour' || $unitS === 'h') {
+        return max(1, (int) ceil($amt / 24));
+    }
+    return 0;
+}
+
+function sas_extension_action_label($row, $isEn = false)
+{
+    $days = sas_extension_days_from_row($row);
+    if ($days === 1) {
+        return $isEn ? 'Add 1 day' : 'إضافة 1 يوم';
+    }
+    if ($days > 1) {
+        return $isEn ? ('Extend ' . $days . ' days') : ('تمديد ' . $days . ' يوم');
+    }
+    $name = trim(ltrim(sas_row_name($row), '_'));
+    if ($name === '') {
+        return $isEn ? 'Extend' : 'تمديد';
+    }
+    return $isEn ? ('Extend: ' . $name) : ('تمديد: ' . $name);
+}
+
+/**
+ * قائمة أكستينشن المسموحة لباقة المشترك من الساس
+ * @return array list of array(id,name,days,label)
+ */
+function sas_normalize_extension_options($rows, $isEn = false)
+{
+    $out = array();
+    $seen = array();
+    if (!is_array($rows)) {
+        return $out;
+    }
+    foreach ($rows as $p) {
+        if (!is_array($p)) {
+            continue;
+        }
+        $id = (int) sas_row_id($p);
+        if ($id <= 0 || isset($seen[$id])) {
+            continue;
+        }
+        $name = sas_row_name($p);
+        if ($name === '' && !sas_profile_is_extension($p)) {
+            continue;
+        }
+        $lname = strtolower($name);
+        if (!sas_profile_is_extension($p)
+            && strpos($lname, 'exten') === false
+            && strpos($lname, 'extend') === false
+            && strpos($name, 'تمديد') === false
+            && strpos($lname, 'test') === false
+            && strpos($name, 'تست') === false
+        ) {
+            continue;
+        }
+        $seen[$id] = 1;
+        $days = sas_extension_days_from_row($p);
+        $out[] = array(
+            'id' => $id,
+            'name' => $name !== '' ? $name : ('#' . $id),
+            'days' => $days,
+            'label' => sas_extension_action_label($p, $isEn),
+        );
+    }
+    usort($out, function ($a, $b) {
+        $da = isset($a['days']) ? (int) $a['days'] : 0;
+        $db = isset($b['days']) ? (int) $b['days'] : 0;
+        if ($da === $db) {
+            return ((int) $a['id']) - ((int) $b['id']);
+        }
+        if ($da <= 0) {
+            return 1;
+        }
+        if ($db <= 0) {
+            return -1;
+        }
+        return $da - $db;
+    });
+    return $out;
+}
+
+function sas_connector_for_username($pdo, $config, $username)
+{
+    $username = trim((string) $username);
+    $cache = ($username !== '' && function_exists('sas_cache_get')) ? sas_cache_get($pdo, $username) : null;
+    $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+    $acc = null;
+    if ($cache && !empty($cache['sas_account_id']) && function_exists('tenant_sas_account_row')) {
+        $acc = tenant_sas_account_row($pdo, (int) $cache['sas_account_id'], $tid > 0 ? $tid : null);
+    }
+    if (!$acc && $cache && !empty($cache['company_id']) && function_exists('tenant_sas_accounts_list') && $tid > 0) {
+        $co = (int) $cache['company_id'];
+        foreach (tenant_sas_accounts_list($pdo, $tid) as $r) {
+            if (!empty($r['company_id']) && (int) $r['company_id'] === $co) {
+                $acc = $r;
+                break;
+            }
+        }
+    }
+    if ($acc && function_exists('sas_make_connector_from_account')
+        && (!function_exists('tenant_sas_account_is_earthlink') || !tenant_sas_account_is_earthlink($pdo, $acc))
+    ) {
+        $api = sas_make_connector_from_account($acc);
+        if ($api) {
+            return $api;
+        }
+    }
+    return sas_make_connector($config);
+}
+
+function sas_extensions_for_username($pdo, $config, $username, $isEn = false)
+{
+    $username = trim((string) $username);
+    if ($username === '') {
+        return array();
+    }
+    $cache = function_exists('sas_cache_get') ? sas_cache_get($pdo, $username) : null;
+    if ($cache && !empty($cache['provider']) && strtolower((string) $cache['provider']) === 'earthlink') {
+        return array();
+    }
+    $profileId = ($cache && !empty($cache['profile_id'])) ? (int) $cache['profile_id'] : 0;
+    $userId = ($cache && !empty($cache['sas_user_id'])) ? (int) $cache['sas_user_id'] : 0;
+    $cacheKey = '';
+    if ($profileId > 0) {
+        $hostHint = '';
+        if ($cache && !empty($cache['sas_account_id']) && function_exists('tenant_sas_account_row')) {
+            $accTmp = tenant_sas_account_row($pdo, (int) $cache['sas_account_id']);
+            if ($accTmp && !empty($accTmp['sas_host'])) {
+                $hostHint = strtolower(trim((string) $accTmp['sas_host']));
+            }
+        }
+        $tid = function_exists('current_tenant_id') ? (int) current_tenant_id() : 0;
+        $cacheKey = 'ext:' . $tid . ':' . $hostHint . ':' . $profileId;
+        if (!empty($_SESSION['sas_ext_opts']) && is_array($_SESSION['sas_ext_opts'])
+            && isset($_SESSION['sas_ext_opts'][$cacheKey])
+            && is_array($_SESSION['sas_ext_opts'][$cacheKey])
+            && !empty($_SESSION['sas_ext_opts'][$cacheKey]['at'])
+            && (time() - (int) $_SESSION['sas_ext_opts'][$cacheKey]['at']) < 600
+            && isset($_SESSION['sas_ext_opts'][$cacheKey]['rows'])
+            && is_array($_SESSION['sas_ext_opts'][$cacheKey]['rows'])
+        ) {
+            return $_SESSION['sas_ext_opts'][$cacheKey]['rows'];
+        }
+    }
+    try {
+        $api = sas_connector_for_username($pdo, $config, $username);
+        if (!$api || !$api->login()) {
+            return array();
+        }
+        if ($userId <= 0 && method_exists($api, 'findUserByUsername')) {
+            $found = $api->findUserByUsername($username);
+            if (is_array($found)) {
+                $userId = (int) sas_extract_user_id($found);
+                if ($profileId <= 0 && !empty($found['profile_id'])) {
+                    $profileId = (int) $found['profile_id'];
+                }
+            }
+        }
+        $allowed = ($profileId > 0 && method_exists($api, 'getAllowedExtensions'))
+            ? $api->getAllowedExtensions($profileId)
+            : array();
+        if ($userId > 0 && method_exists($api, 'getExtensionData')) {
+            $extData = $api->getExtensionData($userId);
+            if (is_array($extData)) {
+                foreach (array('allowedExtensions', 'extensions', 'profiles', 'data') as $ek) {
+                    if (isset($extData[$ek]) && is_array($extData[$ek]) && isset($extData[$ek][0])) {
+                        $allowed = $extData[$ek];
+                        break;
+                    }
+                }
+            }
+        }
+        $rows = sas_normalize_extension_options($allowed, $isEn);
+        if (!$rows && method_exists($api, 'getProfiles')) {
+            $rows = sas_normalize_extension_options($api->getProfiles(), $isEn);
+        }
+        if ($cacheKey !== '') {
+            if (!isset($_SESSION['sas_ext_opts']) || !is_array($_SESSION['sas_ext_opts'])) {
+                $_SESSION['sas_ext_opts'] = array();
+            }
+            $_SESSION['sas_ext_opts'][$cacheKey] = array('at' => time(), 'rows' => $rows);
+        }
+        return $rows;
+    } catch (Exception $e) {
+        return array();
+    }
+}
+
 function sas_pick_extend_profile($allowed, $configured, $allProfiles = array(), $excludeId = 0)
 {
     $configured = (int) $configured;
@@ -700,9 +917,10 @@ function sas_extend_days($pdo, $config, $username, $days, $sendWa = false)
     return array(true, $out);
 }
 
-function sas_extend_one_day($pdo, $config, $username, $sendWa = true)
+function sas_extend_one_day($pdo, $config, $username, $sendWa = true, $forceProfileId = 0)
 {
     $username = trim((string) $username);
+    $forceProfileId = (int) $forceProfileId;
     if ($username === '') {
         return array(false, 'ماكو يوزرنيم');
     }
@@ -710,7 +928,9 @@ function sas_extend_one_day($pdo, $config, $username, $sendWa = true)
         return array(false, 'فعّل ربط SAS من الإعدادات أولاً');
     }
     try {
-        $api = sas_make_connector($config);
+        $api = function_exists('sas_connector_for_username')
+            ? sas_connector_for_username($pdo, $config, $username)
+            : sas_make_connector($config);
         if (!$api || !$api->login()) {
             return array(false, 'SAS: فشل تسجيل الدخول');
         }
@@ -750,9 +970,43 @@ function sas_extend_one_day($pdo, $config, $username, $sendWa = true)
                 }
             }
         }
-        $extendProfile = sas_pick_extend_profile($allowed, $s['extend_profile_id'], $api->getProfiles(), $userProfileId);
+        $extendProfile = 0;
+        $pickedRow = null;
+        if ($forceProfileId > 0) {
+            $okForce = !is_array($allowed) || !$allowed;
+            if (is_array($allowed)) {
+                foreach ($allowed as $ap) {
+                    if (!is_array($ap)) {
+                        continue;
+                    }
+                    if ((int) sas_row_id($ap) === $forceProfileId) {
+                        $okForce = true;
+                        $pickedRow = $ap;
+                        break;
+                    }
+                }
+            }
+            if ($okForce) {
+                $extendProfile = $forceProfileId;
+            }
+        }
         if ($extendProfile <= 0) {
-            return array(false, 'SAS: ماكو بروفايل تست/تمديد يوم واحد مرتبط بهذه الباقة');
+            $extendProfile = sas_pick_extend_profile($allowed, $s['extend_profile_id'], $api->getProfiles(), $userProfileId);
+        }
+        if ($extendProfile <= 0) {
+            return array(false, 'SAS: ماكو بروفايل تمديد/تست متاح لهذه الباقة');
+        }
+        if ($pickedRow === null && is_array($allowed)) {
+            foreach ($allowed as $ap) {
+                if (is_array($ap) && (int) sas_row_id($ap) === $extendProfile) {
+                    $pickedRow = $ap;
+                    break;
+                }
+            }
+        }
+        $extDays = $pickedRow ? sas_extension_days_from_row($pickedRow) : 0;
+        if ($extDays <= 0) {
+            $extDays = 1;
         }
         list($ptsOk, $ptsVal) = function_exists('sas_manager_reward_points')
             ? sas_manager_reward_points($config, $pdo)
@@ -811,7 +1065,11 @@ function sas_extend_one_day($pdo, $config, $username, $sendWa = true)
         }
         unset($_SESSION['sas_points_val']);
         unset($_SESSION['sas_points_at']);
-        $okMsg = 'تم إضافة +1 يوم للمشترك (' . $username . ')';
+        if ($extDays === 1) {
+            $okMsg = 'تم إضافة +1 يوم للمشترك (' . $username . ')';
+        } else {
+            $okMsg = 'تم تمديد ' . $extDays . ' يوم للمشترك (' . $username . ')';
+        }
         if ($sendWa && function_exists('sas_notify_plus_day_whatsapp')) {
             $waErr = sas_notify_plus_day_whatsapp($pdo, $config, $username, $afterTs);
             if ($waErr === '') {

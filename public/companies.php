@@ -164,8 +164,8 @@ render_header($isEn ? 'Companies' : 'الشركات', 'companies');
                         <?php if (!empty($actNotes[$cid])): ?>
                             <div style="color:#9a3412;font-size:12px;font-weight:700;margin-top:4px">
                                 <?php echo e($isEn
-                                    ? 'Activation permission is off. Activation goes through the subscriber portal.'
-                                    : 'هذا الريسيلر حاول التفعيل وصلاحية التفعيل معطلة. تم توجيه التفعيل عن طريق المشترك.'); ?>
+                                    ? 'Activation was found disabled by reseller management; a second activation method will be used.'
+                                    : 'تم الكشف عن وجود تعطيل في خاصية التفعيل من قبل ادارة الرسلر , سيتم اعتماد طريقة تفعيل ثانية'); ?>
                             </div>
                         <?php endif; ?>
                     </td>

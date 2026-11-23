@@ -145,6 +145,10 @@ function activity_log($pdo, $subscriberId, $entityType, $entityId, $action, $sum
                 $actorName = current_admin_label();
             }
         }
+        if ((!$actorId) && !empty($GLOBALS['activity_force_actor']) && is_array($GLOBALS['activity_force_actor'])) {
+            $actorId = !empty($GLOBALS['activity_force_actor']['id']) ? (int) $GLOBALS['activity_force_actor']['id'] : null;
+            $actorName = !empty($GLOBALS['activity_force_actor']['name']) ? (string) $GLOBALS['activity_force_actor']['name'] : 'النظام';
+        }
         $ipMeta = activity_ip_meta();
         $actorIp = $ipMeta['ip'] !== '' ? $ipMeta['ip'] : null;
         $actorIpKind = $ipMeta['kind'] !== 'unknown' ? $ipMeta['kind'] : ($actorIp ? $ipMeta['kind'] : null);
@@ -339,23 +343,18 @@ function fetch_subscriber_activity($pdo, $subscriberId, $limit = 100)
     return $stmt->fetchAll();
 }
 
-function fetch_global_activity($pdo, $limit = 300, $q = '')
+function fetch_global_activity($pdo, $limit = 300, $q = '', $offset = 0)
 {
-    return fetch_activity_filtered($pdo, $limit, $q, '');
+    return fetch_activity_filtered($pdo, $limit, $q, '', $offset);
 }
 
-function fetch_system_activity($pdo, $limit = 300, $q = '')
+function fetch_system_activity($pdo, $limit = 300, $q = '', $offset = 0)
 {
-    return fetch_activity_filtered($pdo, $limit, $q, 'system');
+    return fetch_activity_filtered($pdo, $limit, $q, 'system', $offset);
 }
 
-function fetch_activity_filtered($pdo, $limit, $q, $scope)
+function activity_list_where($q, $scope)
 {
-    ensure_activity_logs_table($pdo);
-    $limit = (int) $limit;
-    if ($limit < 1) {
-        $limit = 300;
-    }
     $params = array();
     $where = '1=1';
     if ($scope === 'system') {
@@ -404,12 +403,39 @@ function fetch_activity_filtered($pdo, $limit, $q, $scope)
         $where .= ' AND (a.summary LIKE :q OR a.details LIKE :q OR a.actor_name LIKE :q OR a.action LIKE :q OR s.name LIKE :q)';
         $params[':q'] = '%' . $q . '%';
     }
+    return array($where, $params);
+}
+
+function count_activity_filtered($pdo, $q = '', $scope = '')
+{
+    ensure_activity_logs_table($pdo);
+    list($where, $params) = activity_list_where($q, $scope);
+    $sql = 'SELECT COUNT(*) FROM activity_logs a
+            LEFT JOIN subscribers s ON s.id = a.subscriber_id
+            WHERE ' . $where;
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    return (int) $stmt->fetchColumn();
+}
+
+function fetch_activity_filtered($pdo, $limit, $q, $scope, $offset = 0)
+{
+    ensure_activity_logs_table($pdo);
+    $limit = (int) $limit;
+    if ($limit < 1) {
+        $limit = 300;
+    }
+    $offset = (int) $offset;
+    if ($offset < 0) {
+        $offset = 0;
+    }
+    list($where, $params) = activity_list_where($q, $scope);
     $sql = 'SELECT a.*, s.name AS subscriber_name
             FROM activity_logs a
             LEFT JOIN subscribers s ON s.id = a.subscriber_id
             WHERE ' . $where . '
             ORDER BY a.id DESC
-            LIMIT ' . $limit;
+            LIMIT ' . $offset . ', ' . $limit;
     $stmt = $pdo->prepare($sql);
     $stmt->execute($params);
     return $stmt->fetchAll();

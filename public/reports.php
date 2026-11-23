@@ -148,17 +148,30 @@ if (!$activationRows && isset($pdo)) {
                  ORDER BY sas_created_at DESC'
             );
             if ($sasList) {
+                $salesSumSas = 0.0;
                 foreach ($sasList->fetchAll(PDO::FETCH_ASSOC) as $sr) {
+                    $prof = isset($sr['profile_name']) ? (string) $sr['profile_name'] : '';
+                    $pid = isset($sr['profile_id']) ? (int) $sr['profile_id'] : 0;
+                    $sell = function_exists('report_resolve_sell_price')
+                        ? (float) report_resolve_sell_price($pdo, $prof, $pid)
+                        : 0.0;
+                    $salesSumSas += $sell;
                     $activationRows[] = array(
                         'subscriber_id' => !empty($sr['local_subscriber_id']) ? (int) $sr['local_subscriber_id'] : 0,
                         'name' => trim((string) $sr['display_name']) !== '' ? $sr['display_name'] : $sr['username'],
                         'phone' => isset($sr['phone']) ? $sr['phone'] : '',
-                        'service_name' => isset($sr['profile_name']) ? $sr['profile_name'] : '',
-                        'monthly_price' => 0,
+                        'service_name' => $prof,
+                        'monthly_price' => $sell,
                         'start_date' => substr((string) $sr['sas_created_at'], 0, 10),
                         'end_date' => !empty($sr['expire_at']) ? substr((string) $sr['expire_at'], 0, 10) : '',
                         'created_at' => $sr['sas_created_at'],
                     );
+                }
+                if ($sales <= 0 && $salesSumSas > 0) {
+                    $sales = $salesSumSas;
+                }
+                if ($activated <= 0 && $activationRows) {
+                    $activated = count($activationRows);
                 }
             }
         }
@@ -210,6 +223,23 @@ try {
     }
 } catch (Exception $e) {
 } catch (Throwable $e) {
+}
+
+// عبّي سعر البيع من تسعير الباقات إذا كان 0 (تفعيلات ساس بدون صف اشتراك محلي)
+if ($activationRows && function_exists('report_resolve_sell_price')) {
+    $salesFix = 0.0;
+    foreach ($activationRows as $idx => $row) {
+        $sell = isset($row['monthly_price']) ? (float) $row['monthly_price'] : 0;
+        if ($sell <= 0) {
+            $nm = isset($row['service_name']) ? (string) $row['service_name'] : '';
+            $sell = (float) report_resolve_sell_price($pdo, $nm, 0);
+            $activationRows[$idx]['monthly_price'] = $sell;
+        }
+        $salesFix += $sell;
+    }
+    if ($sales <= 0 && $salesFix > 0) {
+        $sales = $salesFix;
+    }
 }
 
 $reportLeaf = function_exists('account_viewer_is_leaf_child') && account_viewer_is_leaf_child($pdo);

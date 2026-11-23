@@ -93,21 +93,103 @@ $pdo->exec(
 
 $filterSid = isset($_GET['subscriber_id']) ? (int) $_GET['subscriber_id'] : 0;
 $filterName = '';
-$listSql = "SELECT sub.*, s.name, s.phone
-     FROM subscriptions sub
-     JOIN subscribers s ON s.id = sub.subscriber_id
-     WHERE 1=1" . $movScope;
+$perPageRaw = isset($_GET['per_page']) ? (string) $_GET['per_page'] : '15';
+$showAll = ($perPageRaw === 'all');
+$perPage = $showAll ? 500 : max(1, (int) $perPageRaw);
+if (!$showAll && $perPage < 1) {
+    $perPage = 15;
+}
+$page = isset($_GET['page']) ? (int) $_GET['page'] : 1;
+if ($page < 1) {
+    $page = 1;
+}
+$listWhere = '1=1' . $movScope;
 $listParams = array();
 if ($filterSid > 0) {
-    $listSql .= ' AND sub.subscriber_id = :sid';
+    $listWhere .= ' AND sub.subscriber_id = :sid';
     $listParams[':sid'] = $filterSid;
 }
-$listSql .= ' ORDER BY sub.id DESC LIMIT 500';
+$countSql = 'SELECT COUNT(*) FROM subscriptions sub
+     JOIN subscribers s ON s.id = sub.subscriber_id
+     WHERE ' . $listWhere;
+$cst = $pdo->prepare($countSql);
+$cst->execute($listParams);
+$totalRows = (int) $cst->fetchColumn();
+$totalPages = $showAll ? 1 : max(1, (int) ceil($totalRows / $perPage));
+if ($page > $totalPages) {
+    $page = $totalPages;
+}
+$offset = $showAll ? 0 : (($page - 1) * $perPage);
+$listSql = 'SELECT sub.*, s.name, s.phone
+     FROM subscriptions sub
+     JOIN subscribers s ON s.id = sub.subscriber_id
+     WHERE ' . $listWhere . '
+     ORDER BY sub.id DESC
+     LIMIT ' . (int) $offset . ', ' . (int) $perPage;
 $st = $pdo->prepare($listSql);
 $st->execute($listParams);
 $list = $st->fetchAll();
-if ($filterSid > 0 && $list) {
-    $filterName = $list[0]['name'];
+if ($filterSid > 0) {
+    if ($list) {
+        $filterName = $list[0]['name'];
+    } else {
+        $nm = $pdo->prepare('SELECT name FROM subscribers s WHERE s.id = :id' . $movScope . ' LIMIT 1');
+        $nm->execute(array(':id' => $filterSid));
+        $filterName = (string) $nm->fetchColumn();
+    }
+}
+// تفعيلات الساس بدون صفوف subscriptions محلية — اعرضها كحركات
+if ($totalRows <= 0 && $filterSid <= 0 && isset($pdo)) {
+    try {
+        $where = function_exists('dash_cache_owner_where') ? dash_cache_owner_where() : '';
+        if ($where !== '') {
+            $cntSas = $pdo->query(
+                'SELECT COUNT(*) FROM sas_users_cache WHERE ' . $where . '
+                   AND (sas_missing = 0 OR sas_missing IS NULL)'
+            );
+            $totalRows = $cntSas ? (int) $cntSas->fetchColumn() : 0;
+            $totalPages = $showAll ? 1 : max(1, (int) ceil($totalRows / max(1, $perPage)));
+            if ($totalRows <= 0) {
+                $totalPages = 1;
+            }
+            if ($page > $totalPages) {
+                $page = $totalPages;
+            }
+            $offset = $showAll ? 0 : (($page - 1) * $perPage);
+            $lim = $showAll ? 500 : (int) $perPage;
+            $sasList = $pdo->query(
+                'SELECT display_name, username, phone, profile_name, profile_id,
+                        COALESCE(sas_created_at, synced_at) AS sas_created_at, expire_at, local_subscriber_id
+                 FROM sas_users_cache WHERE ' . $where . '
+                   AND (sas_missing = 0 OR sas_missing IS NULL)
+                 ORDER BY COALESCE(sas_created_at, synced_at) DESC
+                 LIMIT ' . (int) $offset . ', ' . (int) $lim
+            );
+            if ($sasList) {
+                foreach ($sasList->fetchAll(PDO::FETCH_ASSOC) as $sr) {
+                    $prof = isset($sr['profile_name']) ? (string) $sr['profile_name'] : '';
+                    $pid = isset($sr['profile_id']) ? (int) $sr['profile_id'] : 0;
+                    $sell = function_exists('report_resolve_sell_price')
+                        ? (float) report_resolve_sell_price($pdo, $prof, $pid)
+                        : 0.0;
+                    $list[] = array(
+                        'id' => 0,
+                        'subscriber_id' => !empty($sr['local_subscriber_id']) ? (int) $sr['local_subscriber_id'] : 0,
+                        'name' => trim((string) $sr['display_name']) !== '' ? $sr['display_name'] : $sr['username'],
+                        'phone' => isset($sr['phone']) ? $sr['phone'] : '',
+                        'service_name' => $prof,
+                        'monthly_price' => $sell,
+                        'start_date' => substr((string) $sr['sas_created_at'], 0, 10),
+                        'end_date' => !empty($sr['expire_at']) ? substr((string) $sr['expire_at'], 0, 10) : '',
+                        'status' => 'active',
+                        'activation_msg_sent' => 0,
+                        '_sas_only' => 1,
+                    );
+                }
+            }
+        }
+    } catch (Exception $e) {
+    }
 }
 
 render_header(t('movements'), 'subscriptions');
@@ -144,9 +226,13 @@ render_header(t('movements'), 'subscriptions');
                 </tr>
                 </thead>
                 <tbody>
-                <?php $i = 1; foreach ($list as $row): ?>
+                <?php
+                $i = $showAll ? 1 : (($page - 1) * $perPage + 1);
+                foreach ($list as $row):
+                    $sasOnly = !empty($row['_sas_only']) || (int) $row['id'] <= 0;
+                    ?>
                     <tr>
-                        <td class="chk-col"><input type="checkbox" class="row-check chk-sm" name="ids[]" value="<?php echo (int) $row['id']; ?>"></td>
+                        <td class="chk-col"><?php if (!$sasOnly): ?><input type="checkbox" class="row-check chk-sm" name="ids[]" value="<?php echo (int) $row['id']; ?>"><?php endif; ?></td>
                         <td><?php echo $i++; ?></td>
                         <td><?php echo e($row['name']); ?> <small><?php echo e(format_phone_display($row['phone'])); ?></small></td>
                         <td><?php echo e($row['service_name']); ?></td>
@@ -155,7 +241,9 @@ render_header(t('movements'), 'subscriptions');
                         <td><?php echo e($row['end_date']); ?></td>
                         <td><?php echo ((int) $row['activation_msg_sent'] === 1) ? 'OK' : '-'; ?></td>
                         <td>
-                            <?php if ($row['status'] === 'active'): ?>
+                            <?php if ($sasOnly): ?>
+                                <span class="badge active"><?php echo e($lang === 'en' ? 'SAS' : 'ساس'); ?></span>
+                            <?php elseif ($row['status'] === 'active'): ?>
                                 <button class="btn sm danger" type="button"
                                         onclick="expireOne(<?php echo (int) $row['id']; ?>)"><?php echo e(t('expire')); ?></button>
                             <?php else: ?>
@@ -164,9 +252,45 @@ render_header(t('movements'), 'subscriptions');
                         </td>
                     </tr>
                 <?php endforeach; ?>
+                <?php if (!$list): ?>
+                    <tr><td colspan="9"><?php echo e($lang === 'en' ? 'No movements yet' : 'ماكو حركات بعد'); ?></td></tr>
+                <?php endif; ?>
                 </tbody>
             </table>
         </div>
+        <?php if ($totalRows > 15 || $perPageRaw !== '15'): ?>
+        <div class="actions" style="margin-top:12px;flex-wrap:wrap">
+            <?php
+            $movQs = array();
+            if ($filterSid > 0) {
+                $movQs[] = 'subscriber_id=' . (int) $filterSid;
+            }
+            if ($perPageRaw !== '15') {
+                $movQs[] = 'per_page=' . rawurlencode($perPageRaw);
+            }
+            $movBase = $movQs ? ('&' . implode('&', $movQs)) : '';
+            $movExtra = '';
+            if ($filterSid > 0) {
+                $movExtra .= '&subscriber_id=' . (int) $filterSid;
+            }
+            if (!$showAll && $totalPages > 1):
+                for ($p = 1; $p <= $totalPages && $p <= 20; $p++):
+            ?>
+                <a class="btn <?php echo $p === $page ? '' : 'ghost'; ?> sm" href="?page=<?php echo $p . $movBase; ?>"><?php echo $p; ?></a>
+            <?php
+                endfor;
+            endif;
+            if (!$showAll):
+            ?>
+                <a class="btn ghost sm" href="?per_page=all<?php echo $movExtra; ?>"><?php echo e(t('show_all')); ?></a>
+            <?php else: ?>
+                <a class="btn ghost sm" href="?per_page=15<?php echo $movExtra; ?>">15</a>
+            <?php endif; ?>
+            <span class="muted" style="font-weight:700;font-size:12px;align-self:center">
+                <?php echo e(($lang === 'en' ? 'Total: ' : 'المجموع: ') . (int) $totalRows); ?>
+            </span>
+        </div>
+        <?php endif; ?>
     </form>
 </div>
 <script>

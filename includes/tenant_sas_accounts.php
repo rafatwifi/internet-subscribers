@@ -44,7 +44,7 @@ function ensure_tenant_sas_accounts_schema($pdo)
             tenants_ensure_column($pdo, 'sas_users_cache', 'sas_account_id', 'INT UNSIGNED NULL DEFAULT NULL');
             tenants_ensure_column($pdo, 'tenant_sas_accounts', 'last_ok_at', 'DATETIME NULL DEFAULT NULL');
             tenants_ensure_column($pdo, 'tenant_sas_accounts', 'last_error', 'VARCHAR(255) NULL DEFAULT NULL');
-            tenants_ensure_column($pdo, 'tenant_sas_accounts', 'ping_mode', "VARCHAR(16) NOT NULL DEFAULT 'off'");
+            tenants_ensure_column($pdo, 'tenant_sas_accounts', 'ping_mode', "VARCHAR(16) NOT NULL DEFAULT 'sas'");
             tenants_ensure_column($pdo, 'tenant_sas_accounts', 'login_fail_count', 'INT UNSIGNED NOT NULL DEFAULT 0');
             tenants_ensure_column($pdo, 'tenant_sas_accounts', 'login_next_retry_at', 'DATETIME NULL DEFAULT NULL');
             tenants_ensure_column($pdo, 'tenant_sas_accounts', 'service_kind', "VARCHAR(16) NOT NULL DEFAULT 'wireless'");
@@ -58,7 +58,7 @@ function ensure_tenant_sas_accounts_schema($pdo)
     }
         try {
             $pdo->exec("UPDATE tenant_sas_accounts SET service_kind = 'ftth' WHERE service_kind = 'wireless' AND (label LIKE '%FTTH%' OR label LIKE '%ftth%')");
-            $pdo->exec("UPDATE tenant_sas_accounts SET service_kind = 'ftth', ucp_pin = '2211', act_via = 'user', act_denied_count = 2, act_note = 'صلاحية تفعيل الوكالة مقفلة. التفعيل يتم من بوابة المشترك ثم تسجيل الخروج.' WHERE company_id = 3 AND (act_note IS NULL OR act_note = '')");
+            $pdo->exec("UPDATE tenant_sas_accounts SET service_kind = 'ftth', ucp_pin = '2211', act_via = 'user', act_denied_count = 2, act_note = 'تم الكشف عن وجود تعطيل في خاصية التفعيل من قبل ادارة الرسلر , سيتم اعتماد طريقة تفعيل ثانية' WHERE company_id = 3 AND (act_note IS NULL OR act_note = '')");
         } catch (Exception $eFtthSeed) {
         }
         // ترحيل بيانات الساس القديمة من صف الـ tenant إن ماكو حسابات
@@ -521,9 +521,9 @@ function tenant_sas_account_save($pdo, $tenantId, $fields, $accountId = 0)
                 'INSERT INTO tenant_sas_accounts
                  (tenant_id, label, company_id, sas_enabled, sas_host, sas_username, sas_password,
                   sas_parent_id, sas_default_password, sas_activate_units, sas_extend_method,
-                  sas_extend_profile_id, sas_on_failure, is_default)
+                  sas_extend_profile_id, sas_on_failure, is_default, ping_mode)
                  VALUES
-                 (:t, :l, :c, :en, :h, :u, :p, :pid, :dp, :au, :em, :ep, :of, :def)'
+                 (:t, :l, :c, :en, :h, :u, :p, :pid, :dp, :au, :em, :ep, :of, :def, :pm)'
             )->execute(array(
                 ':t' => $tenantId,
                 ':l' => $label,
@@ -539,6 +539,7 @@ function tenant_sas_account_save($pdo, $tenantId, $fields, $accountId = 0)
                 ':ep' => $extProf,
                 ':of' => $onFail,
                 ':def' => $makeDefault ? 1 : 0,
+                ':pm' => 'sas',
             ));
             $id = (int) $pdo->lastInsertId();
         }

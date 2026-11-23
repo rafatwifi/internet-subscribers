@@ -1211,8 +1211,8 @@ if ($mode === 'log') {
     }
 }
 
-render_header(t('messages'), 'messages');
 $isEnMsg = ($lang === 'en');
+render_header(t('messages'), 'messages');
 $msgModes = array(
     'send' => array('label' => $isEnMsg ? 'Send' : 'الإرسال', 'hint' => $isEnMsg ? 'Filter & WhatsApp' : 'فلترة وواتساب'),
     'templates' => array('label' => t('templates'), 'hint' => $isEnMsg ? 'Edit & assign' : 'تعديل وتخصيص'),

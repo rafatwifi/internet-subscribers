@@ -740,6 +740,54 @@ function remove_immediate_rental_debt($pdo, $subscriberId, $settings = null)
     return array(true, $removed);
 }
 
+/**
+ * أيقونة SVG بشكل الجهاز الحقيقي (أبيض على خلفية اللون):
+ * PowerBeam = طبق دائري، LiteBeam = طبق مستطيل بشبكة، NanoStation = عمود نحيف.
+ */
+function rental_device_glyph_html($deviceId)
+{
+    $id = strtolower(trim((string) $deviceId));
+    $common = ' class="rent-glyph" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false"';
+    if ($id === 'powerbeam' || $id === 'pb') {
+        // وجه PowerBeam: طبق دائري أبيض + بوق تغذية بالوسط
+        return '<svg' . $common . '>'
+            . '<circle cx="12" cy="12" r="9.2" fill="#f4f7fb"/>'
+            . '<circle cx="12" cy="12" r="9.2" fill="none" stroke="rgba(15,23,42,.22)" stroke-width="1"/>'
+            . '<circle cx="12" cy="12" r="5.6" fill="none" stroke="rgba(15,23,42,.14)" stroke-width="1.2"/>'
+            . '<circle cx="12" cy="12" r="2.55" fill="#e8eef5"/>'
+            . '<circle cx="12" cy="12" r="2.55" fill="none" stroke="rgba(15,23,42,.28)" stroke-width="1"/>'
+            . '<circle cx="12" cy="12" r="1.05" fill="#3b82f6"/>'
+            . '</svg>';
+    }
+    if ($id === 'litebeam' || $id === 'lb') {
+        // LiteBeam: عاكس مستطيل بشبكة جانبية + ذراع تغذية بالوسط
+        return '<svg' . $common . '>'
+            . '<rect x="3.2" y="4.2" width="17.6" height="15.6" rx="2.4" fill="#f4f7fb"/>'
+            . '<rect x="3.2" y="4.2" width="17.6" height="15.6" rx="2.4" fill="none" stroke="rgba(15,23,42,.22)" stroke-width="1"/>'
+            . '<path d="M5.2 6.2h4.2v11.6H5.2zM14.6 6.2h4.2v11.6h-4.2z" fill="rgba(15,23,42,.08)"/>'
+            . '<path d="M5.8 7.1h3M5.8 9h3M5.8 10.9h3M5.8 12.8h3M5.8 14.7h3M5.8 16.6h3'
+            . 'M15.2 7.1h3M15.2 9h3M15.2 10.9h3M15.2 12.8h3M15.2 14.7h3M15.2 16.6h3"'
+            . ' stroke="rgba(15,23,42,.28)" stroke-width=".85" stroke-linecap="round"/>'
+            . '<rect x="10.35" y="5.6" width="3.3" height="12.8" rx="1" fill="#e8eef5"/>'
+            . '<ellipse cx="12" cy="11.2" rx="1.55" ry="1.9" fill="#dbe4ee"/>'
+            . '<ellipse cx="12" cy="11.2" rx="1.55" ry="1.9" fill="none" stroke="rgba(15,23,42,.3)" stroke-width=".9"/>'
+            . '<circle cx="12" cy="17.55" r=".7" fill="rgba(15,23,42,.35)"/>'
+            . '</svg>';
+    }
+    if ($id === 'nanostation' || $id === 'ns' || $id === 'nano') {
+        // NanoStation: جسم عمودي نحيف مستدير الزوايا (بدون هوائيات خارجية)
+        return '<svg' . $common . '>'
+            . '<rect x="8.1" y="2.2" width="7.8" height="19.6" rx="2.1" fill="#f4f7fb"/>'
+            . '<rect x="8.1" y="2.2" width="7.8" height="19.6" rx="2.1" fill="none" stroke="rgba(15,23,42,.22)" stroke-width="1"/>'
+            . '<path d="M10.2 5.4h3.6c.35 0 .6.28.5.6l-.55 1.7c-.08.24-.3.4-.55.4h-1.9c-.25 0-.47-.16-.55-.4L9.7 6c-.1-.32.15-.6.5-.6z" fill="rgba(15,23,42,.18)"/>'
+            . '<circle cx="12" cy="6.55" r=".55" fill="rgba(15,23,42,.4)"/>'
+            . '<path d="M9.5 11.2h5M9.5 13.2h5M9.5 15.2h3.4" stroke="rgba(15,23,42,.16)" stroke-width=".9" stroke-linecap="round"/>'
+            . '<rect x="9.4" y="18.4" width="5.2" height="1.7" rx=".5" fill="rgba(15,23,42,.12)"/>'
+            . '</svg>';
+    }
+    return '';
+}
+
 function rental_badge_html($sub, $settings = null)
 {
     if (!subscriber_has_rental($sub)) {
@@ -750,9 +798,13 @@ function rental_badge_html($sub, $settings = null)
         return '';
     }
     $title = e($dev['name']);
-    $icon = e($dev['icon']);
     $color = e($dev['color']);
-    return '<span class="rent-badge" title="' . $title . '" style="background:' . $color . '">' . $icon . '</span>';
+    $glyph = rental_device_glyph_html(isset($dev['id']) ? $dev['id'] : '');
+    if ($glyph === '') {
+        $glyph = '<span class="rent-glyph-txt">' . e($dev['icon']) . '</span>';
+    }
+    $slug = preg_replace('/[^a-z0-9_-]/i', '', (string) $dev['id']);
+    return '<span class="rent-badge rent-badge--' . e($slug) . '" title="' . $title . '" style="background:' . $color . '">' . $glyph . '</span>';
 }
 
 function rental_only_message($sub, $config, $settings = null)
