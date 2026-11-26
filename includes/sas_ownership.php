@@ -1,8 +1,8 @@
 <?php
 
 /**
- * مشترك الوكيل المرخّص يبقى عند وكالته بعد ما يدخل رسلره.
- * الوكالة الأعلى ما تعيد نسخته، والوكالة الصغيرة ما تستلم مشتركين غيرها.
+ * مشترك الوكيل المرخّص يُحدَّث أيضاً في كاش وكالته بعد مزامنة الرسلر الأعلى.
+ * الوكالة الأعلى تبقي نسختها (جدولها = لوحة الساس)، والوكالة الصغيرة لا تُسرق مشتركين غيرها.
  */
 
 function sas_ownership_host_key($host)
@@ -419,75 +419,14 @@ function portal_drop_duplicate_agents($pdo)
 
 function sas_ownership_drop_copied_cache($pdo, $tenantId)
 {
-    $tenantId = (int) $tenantId;
-    if (!$pdo || $tenantId <= 0) {
-        return;
-    }
-    $idx = sas_ownership_index($pdo, $tenantId);
-    if (!$idx || empty($idx['logins']) || empty($idx['ready'])) {
-        return;
-    }
-    $names = array();
-    foreach ($idx['logins'] as $login => $hid) {
-        if (empty($idx['ready'][(int) $hid])) {
-            continue;
-        }
-        $login = strtolower(trim((string) $login));
-        if ($login !== '') {
-            $names[$login] = true;
-        }
-    }
-    if (!$names) {
-        return;
-    }
-    $del = $pdo->prepare(
-        'DELETE FROM sas_users_cache WHERE tenant_id = :t AND (LOWER(parent_name) = :n OR LOWER(username) = :n2)'
-    );
-    foreach (array_keys($names) as $name) {
-        try {
-            $del->execute(array(':t' => $tenantId, ':n' => $name, ':n2' => $name));
-        } catch (Exception $e) {
-        }
-    }
+    // معطّل: جدول الوكالة الأعلى يبقى بنفس عدد لوحة الساس (لا نحذف مشتركي الفروع من كاش الأب).
+    return;
 }
 
-/** أخفِ من قائمة الوكالة الأعلى المشتركين اللي صاروا عند وكالة مرخّصة وعندها بيانات */
+/** سابقاً أخفى مشتركي الفروع من قائمة الأب — أوقفناه ليطابق العدد لوحة الساس */
 function sas_ownership_hide_sql($alias)
 {
-    if (!empty($_SESSION['admin_sas_shadow'])) {
-        return '';
-    }
-    $a = preg_replace('/[^a-zA-Z0-9_]/', '', (string) $alias);
-    if ($a === '') {
-        $a = 'c';
-    }
-    global $pdo;
-    if (!$pdo || !function_exists('current_tenant_id')) {
-        return '';
-    }
-    $idx = sas_ownership_index($pdo, (int) current_tenant_id());
-    if (!$idx || empty($idx['logins']) || empty($idx['ready'])) {
-        return '';
-    }
-    $names = array();
-    foreach ($idx['logins'] as $login => $hid) {
-        if (empty($idx['ready'][(int) $hid])) {
-            continue;
-        }
-        $login = strtolower(trim((string) $login));
-        if ($login === '' || !preg_match('/^[a-z0-9@._-]{2,80}$/', $login)) {
-            continue;
-        }
-        $names[$login] = true;
-    }
-    if (!$names) {
-        return '';
-    }
-    $quoted = array();
-    foreach (array_keys($names) as $login) {
-        $quoted[] = "'" . str_replace("'", '', $login) . "'";
-    }
-    return ' AND (' . $a . '.parent_name IS NULL OR LOWER(' . $a . '.parent_name) NOT IN (' . implode(',', $quoted) . '))';
+    return '';
 }
 
 /** صفحات الوكالات المرخّصة على نفس الساس، للبحث فقط */

@@ -5096,7 +5096,8 @@ function sas_dash_live_refresh($pdo, $config, $force = false, $withSoon = null)
                 }
                 $live = $api->dashboardCounts($withSoon ? true : false);
                 if (is_array($live) && !empty($live['total'])) {
-                    foreach (array('active', 'expired', 'online', 'today') as $k) {
+                    // نفس أرقام لوحة الساس — بما فيها «كل المشتركين»
+                    foreach (array('total', 'active', 'expired', 'online', 'today', 'soon') as $k) {
                         if (isset($live[$k]) && (int) $live[$k] >= 0) {
                             $out[$k] = (int) $live[$k];
                         }
@@ -5135,8 +5136,8 @@ function sas_dash_user_counts($pdo)
         $live = sas_dash_live_read($tid, 45);
         if (is_array($live)) {
             $src = isset($live['source']) ? (string) $live['source'] : '';
-            if ($src === 'sas') {
-                foreach (array('active', 'online', 'expired', 'soon', 'today') as $key) {
+            if ($src === 'sas' || strpos($src, 'sas') !== false) {
+                foreach (array('total', 'active', 'online', 'expired', 'soon', 'today') as $key) {
                     if (isset($live[$key]) && (int) $live[$key] >= 0) {
                         $out[$key] = (int) $live[$key];
                     }
@@ -6942,6 +6943,8 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
         $ex = $pdo->prepare('SELECT 1 FROM sas_users_cache WHERE tenant_id = :t AND username = :u LIMIT 1');
         $ex->execute(array(':t' => $tenantId, ':u' => $username));
         $exists = (bool) $ex->fetchColumn();
+        // وكالة فرعية مطابقة: حدّث كاشها أيضاً — لكن لا تحذف من كاش الوكالة الحالية
+        // حتى يبقى جدول الأب بنفس عدد لوحة الساس (كل المشتركين).
         if (function_exists('sas_cache_skip_owned_elsewhere')
             && sas_cache_skip_owned_elsewhere($pdo, $tenantId, $username, isset($params[':parent_name']) ? $params[':parent_name'] : '')
         ) {
@@ -6952,14 +6955,7 @@ function sas_cache_upsert_row($pdo, $row, $nowSql = null, $ins = null)
                 isset($params[':parent_name']) ? (string) $params[':parent_name'] : '',
                 $params
             );
-            if ($exists) {
-                try {
-                    $pdo->prepare('DELETE FROM sas_users_cache WHERE tenant_id = :t AND username = :u')
-                        ->execute(array(':t' => $tenantId, ':u' => $username));
-                } catch (Exception $eDel) {
-                }
-            }
-            return true;
+            // تابع الإدراج/التحديث للوكالة الحالية (لا return)
         }
         if ($exists) {
             // تحديث صف هذه الشركة فقط — لا تلمس tenant آخر حتى لو PK قديم على username فقط
@@ -7703,8 +7699,12 @@ function sas_sync_users_from_api($pdo, $config, $force = false, $reset = false)
             ));
             return array(false, $saved, 'error', sas_sync_meta($pdo));
         }
-        if ($expected <= 0) {
-            $expected = isset($page['filtered']) ? (int) $page['filtered'] : (int) $page['total'];
+        // أول صفحة لكل دورة: أعد قراءة العدد من الساس (ما نتجمّد على رقم قديم أصغر)
+        if ($expected <= 0 || $pageNum <= 1) {
+            $apiTotal = isset($page['filtered']) ? (int) $page['filtered'] : (int) $page['total'];
+            if ($apiTotal > 0) {
+                $expected = $apiTotal;
+            }
         }
         $rows = isset($page['rows']) ? $page['rows'] : array();
         foreach ($rows as $row) {
