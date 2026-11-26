@@ -2324,10 +2324,6 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
   btn.addEventListener('click', function () {
     if (btn.getAttribute('data-busy') === '1') return;
     var on = btn.getAttribute('data-on') === '1';
-    var ask = on
-      ? <?php echo json_encode($isEn ? 'Pause this user?' : 'إيقاف هذا اليوزر مؤقتاً؟'); ?>
-      : <?php echo json_encode($isEn ? 'Enable this user?' : 'تشغيل هذا اليوزر؟'); ?>;
-    if (!window.confirm(ask)) return;
     btn.setAttribute('data-busy', '1');
     var body = new FormData();
     body.append('csrf', csrf);

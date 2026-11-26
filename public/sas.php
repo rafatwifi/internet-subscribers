@@ -2564,6 +2564,29 @@ $maintBlockGiveTest = function_exists('app_maintenance_blocks') && app_maintenan
   font-weight: 600; opacity: 1; color: #64748b;
   font-size: 11px; line-height: 1.2; white-space: nowrap;
 }
+.sas-table-headbar .sas-found.is-syncing {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: #1d4ed8; font-weight: 800; font-variant-numeric: tabular-nums;
+}
+.sas-found-ring {
+  width: 18px; height: 18px; flex: 0 0 auto;
+}
+.sas-found-ring svg {
+  width: 18px; height: 18px; display: block; transform: rotate(-90deg);
+}
+.sas-found-ring .fr-track { fill: none; stroke: #dbe4f0; stroke-width: 3.5; }
+.sas-found-ring .fr-fill {
+  fill: none; stroke: #2563eb; stroke-width: 3.5; stroke-linecap: round;
+  stroke-dasharray: 100; stroke-dashoffset: 72;
+  animation: sasFoundSpin 1.1s linear infinite;
+}
+.sas-found.is-syncing .fr-fill.is-prog {
+  animation: none;
+  transition: stroke-dashoffset .35s ease;
+}
+@keyframes sasFoundSpin {
+  to { stroke-dashoffset: -28; }
+}
 .sas-headbar-lead {
   display: flex; align-items: center; gap: 10px;
   flex: 0 1 auto; min-width: 0;
@@ -4656,9 +4679,15 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
             <div class="sas-headbar-title">
                 <span class="sas-headbar-name"><?php echo e($lang === 'en' ? 'Subscribers' : 'المشتركين'); ?></span>
                 <span class="sas-found" id="sasFoundLabel">
-                    <?php echo $lang === 'en'
+                    <span class="sas-found-ring" id="sasFoundRing" hidden aria-hidden="true">
+                        <svg viewBox="0 0 36 36">
+                            <circle class="fr-track" cx="18" cy="18" r="15" pathLength="100"></circle>
+                            <circle class="fr-fill" id="sasFoundRingFill" cx="18" cy="18" r="15" pathLength="100"></circle>
+                        </svg>
+                    </span>
+                    <span class="sas-found-txt" id="sasFoundTxt"><?php echo $lang === 'en'
                         ? ('Found ' . (int) $totalRows . ' record(s)')
-                        : ('عُثر على ' . (int) $totalRows . ' قيد'); ?>
+                        : ('عُثر على ' . (int) $totalRows . ' قيد'); ?></span>
                 </span>
             </div>
             <div class="subs-ops-side" style="display:flex;align-items:center;gap:8px">
@@ -5503,10 +5532,14 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
   var liveSearchBusy = false;
   var originalHtml = tbody ? tbody.innerHTML : '';
   var foundLabel = document.getElementById('sasFoundLabel');
-  var foundLabelBase = foundLabel ? foundLabel.textContent : '';
+  var foundTxt = document.getElementById('sasFoundTxt');
+  var foundRing = document.getElementById('sasFoundRing');
+  var foundRingFill = document.getElementById('sasFoundRingFill');
+  var foundLabelBase = foundTxt ? foundTxt.textContent : (foundLabel ? foundLabel.textContent : '');
   var foundLabelTpl = <?php echo json_encode($lang === 'en' ? 'Found {n} record(s)' : 'عُثر على {n} قيد'); ?>;
   var searchingLabel = <?php echo json_encode($lang === 'en' ? 'Searching…' : 'جاري البحث…'); ?>;
   var noMatchLabel = <?php echo json_encode($lang === 'en' ? 'No matches' : 'ماكو نتيجة'); ?>;
+  var syncUiOn = false;
   var actBill = { old_sum: 0, old_lines: [], charge: 0, currency: <?php echo json_encode(isset($config['currency']) ? $config['currency'] : 'د.ع'); ?> };
   var checkAll = document.getElementById('subCheckAll');
   var opsBtn = document.getElementById('openOpsBtn');
@@ -8622,16 +8655,51 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
   setInterval(pingVisibleNow, 3000);
 
   function setFoundCount(n, searching) {
-    if (!foundLabel) return;
+    if (!foundLabel || !foundTxt) return;
+    if (syncUiOn) return;
+    if (foundRing) foundRing.hidden = true;
+    foundLabel.classList.remove('is-syncing');
     if (searching) {
-      foundLabel.textContent = searchingLabel;
+      foundTxt.textContent = searchingLabel;
       return;
     }
     if (n === null || n === undefined) {
-      foundLabel.textContent = foundLabelBase;
+      foundTxt.textContent = foundLabelBase;
       return;
     }
-    foundLabel.textContent = String(foundLabelTpl).replace('{n}', String(n));
+    foundTxt.textContent = String(foundLabelTpl).replace('{n}', String(n));
+    foundLabelBase = foundTxt.textContent;
+    totalCount = parseInt(n, 10) || totalCount;
+  }
+  function showSyncRing(cur, all) {
+    syncUiOn = true;
+    if (foundLabel) foundLabel.classList.add('is-syncing');
+    if (foundRing) foundRing.hidden = false;
+    if (foundTxt) foundTxt.textContent = String(cur || 0);
+    if (foundRingFill) {
+      var pct = (all > 0) ? Math.max(4, Math.min(96, Math.round((cur / all) * 100))) : 0;
+      if (all > 0) {
+        foundRingFill.classList.add('is-prog');
+        foundRingFill.style.strokeDashoffset = String(100 - pct);
+      } else {
+        foundRingFill.classList.remove('is-prog');
+        foundRingFill.style.strokeDashoffset = '';
+      }
+    }
+  }
+  function hideSyncRing(finalCount) {
+    syncUiOn = false;
+    if (foundLabel) foundLabel.classList.remove('is-syncing');
+    if (foundRing) foundRing.hidden = true;
+    if (foundRingFill) {
+      foundRingFill.classList.remove('is-prog');
+      foundRingFill.style.strokeDashoffset = '';
+    }
+    if (finalCount != null && finalCount !== '') {
+      setFoundCount(finalCount, false);
+    } else if (foundTxt) {
+      foundTxt.textContent = foundLabelBase || String(foundLabelTpl).replace('{n}', String(totalCount || 0));
+    }
   }
 
   var actMarks = {};
@@ -8797,7 +8865,11 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
     var btn = document.getElementById('refreshTableBtn');
     var hint = document.getElementById('sasRefreshHint');
     if (btn && text) btn.title = text;
-    if (hint) hint.textContent = text || '';
+    if (hint) hint.textContent = '';
+    if (text && !syncUiOn && window.showCornerToast) {
+      var isProg = text.indexOf('جاري') === 0 || text.indexOf('Loading') === 0;
+      if (!isProg) window.showCornerToast(text, 'error');
+    }
   }
   var offlineBannerText = <?php echo json_encode($lang === 'en'
       ? 'No connection to SAS — showing stored offline snapshot. Sync will resume automatically when SAS is back.'
@@ -8920,34 +8992,33 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
       if (!d) return d;
       if (d.last_error && !d.ok) {
         setOfflineBanner(true);
+        hideSyncRing(null);
         if (!syncQuiet) showSyncNote(d.last_error);
         if (window.appBusyDone) window.appBusyDone('sync');
         return d;
       }
       if (d.mode === 'progress') {
-        if (!syncQuiet) {
-          var syncLabel = <?php echo json_encode($lang === 'en' ? 'Loading from SAS' : 'جاري الجلب من الساس'); ?>;
-          var syncCur = d.count || 0;
-          var syncAll = d.expected || 0;
-          showSyncNote(syncLabel + ' ' + syncCur + (syncAll ? (' / ' + syncAll) : ''));
-        }
+        showSyncRing(d.count || 0, d.expected || 0);
         return runSync(false);
       }
       if (sasReadyJs && d.ok && (d.mode === 'synced' || d.mode === 'cache') && (d.count > 0 || d.mode === 'cache')) {
+        hideSyncRing(d.count || totalCount);
         if (syncQuiet) {
-          showSyncNote('');
           refreshTableLive();
         } else {
           markSyncOkAndReload();
         }
       } else if (sasReadyJs && d.ok && d.mode === 'synced' && d.count === 0) {
-        // متصل لكن القائمة فاضية — لا إشعار نجاح مضلل
+        hideSyncRing(0);
         showSyncNote(<?php echo json_encode($lang === 'en' ? 'Connected — no users on this reseller' : 'متصل — ماكو يوزرات بهالحساب'); ?>);
         refreshTableLive();
+      } else {
+        hideSyncRing(d && d.count ? d.count : null);
       }
       return d;
     }).catch(function (err) {
       setOfflineBanner(true);
+      hideSyncRing(null);
       showSyncNote(err && err.message ? err.message : 'فشل الاتصال بالصفحة');
       if (window.appBusyDone) window.appBusyDone('sync');
       return null;
@@ -8960,24 +9031,22 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
   function autoSyncSubscribers() {
     if (!sasReadyJs || autoSyncBusy) return;
     autoSyncBusy = true;
-    syncQuiet = true;
+    syncQuiet = false;
     runSync(false).then(function () {
-      syncQuiet = false;
       autoSyncBusy = false;
     }, function () {
-      syncQuiet = false;
       autoSyncBusy = false;
     });
   }
   setTimeout(autoSyncSubscribers, 700);
-  setInterval(autoSyncSubscribers, 90000);
+  setInterval(autoSyncSubscribers, 60000);
   if (refreshBtn) {
     refreshBtn.addEventListener('click', function () {
       if (refreshBtn.getAttribute('data-busy') === '1') return;
       refreshBtn.setAttribute('data-busy', '1');
       refreshBtn.classList.add('is-on');
       syncQuiet = false;
-      showSyncNote(<?php echo json_encode($lang === 'en' ? 'Loading subscribers from SAS…' : 'جاري جلب المشتركين من الساس…'); ?>);
+      showSyncRing(0, 0);
       runSync(true).then(function () {
         refreshBtn.classList.remove('is-on');
         refreshBtn.removeAttribute('data-busy');
