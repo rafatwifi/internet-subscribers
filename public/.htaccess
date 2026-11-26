@@ -1,9 +1,18 @@
 # الرابط الظاهر بلا .php والملف نفسه يبقى PHP
+# المسار الرسمي: /albawaba/... (بدون /public)
 <IfModule mod_rewrite.c>
     RewriteEngine On
 
-    RewriteCond %{THE_REQUEST} \s/internet-subscribers/public/([^\s?]*) [NC]
-    RewriteRule ^ /albawaba/public/%1 [R=302,L,QSA,NE]
+    # روابط قديمة ما زالت فيها /public
+    RewriteCond %{THE_REQUEST} \s/+albawaba/public/([^\s?]*) [NC]
+    RewriteRule ^ /albawaba/%1 [R=302,L,QSA,NE]
+    RewriteCond %{THE_REQUEST} \s/+albawaba/public/?[\s?] [NC]
+    RewriteRule ^ /albawaba/ [R=302,L,QSA]
+
+    RewriteCond %{THE_REQUEST} \s/+internet-subscribers/public/([^\s?]*) [NC]
+    RewriteRule ^ /albawaba/%1 [R=302,L,QSA,NE]
+    RewriteCond %{THE_REQUEST} \s/+internet-subscribers/public/?[\s?] [NC]
+    RewriteRule ^ /albawaba/ [R=302,L,QSA]
 
     RewriteCond %{REQUEST_FILENAME} !-d
     RewriteCond %{REQUEST_FILENAME}.php -f
@@ -13,10 +22,10 @@
     RewriteCond %{HTTP_ACCEPT} text/html
     RewriteCond %{QUERY_STRING} !(^|&)ajax=
     RewriteCond %{THE_REQUEST} \s[^\s]*\.php[?\s] [NC]
-    RewriteRule ^index\.php$ /albawaba/public/ [R=302,L,QSA]
+    RewriteRule ^index\.php$ /albawaba/ [R=302,L,QSA]
     RewriteCond %{REQUEST_METHOD} =GET
     RewriteCond %{HTTP_ACCEPT} text/html
     RewriteCond %{QUERY_STRING} !(^|&)ajax=
     RewriteCond %{THE_REQUEST} \s[^\s]*\.php[?\s] [NC]
-    RewriteRule ^(.+)\.php$ /albawaba/public/$1 [R=302,L,QSA,NE]
+    RewriteRule ^(.+)\.php$ /albawaba/$1 [R=302,L,QSA,NE]
 </IfModule>
