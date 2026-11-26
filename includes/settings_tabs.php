@@ -25,6 +25,9 @@ function render_settings_tabs($current = 'general')
     <?php if (!$platformTabs && ($can('cards') || $can('agents') || (function_exists('is_agent_user') && is_agent_user()) || (function_exists('is_group_manager_user') && is_group_manager_user()))): ?>
     <a class="<?php echo $current === 'prices' ? 'on' : ''; ?>" href="agent_prices.php"><?php echo e($isEn ? 'Package prices' : 'تسعير الباقات'); ?></a>
     <?php endif; ?>
+    <?php if ($can('settings') || $can('devices')): ?>
+    <a class="<?php echo $current === 'devices' ? 'on' : ''; ?>" href="settings.php?tab=devices"><?php echo e($isEn ? 'Network devices' : 'أجهزة الشبكة'); ?></a>
+    <?php endif; ?>
     <?php if ($can('settings')): ?>
     <a class="<?php echo $current === 'whatsapp' ? 'on' : ''; ?>" href="settings.php?tab=whatsapp"><?php echo e(t('settings_whatsapp')); ?></a>
     <?php if (function_exists('is_super_admin_user') && is_super_admin_user()): ?>

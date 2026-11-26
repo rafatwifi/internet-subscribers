@@ -1334,7 +1334,19 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
             <div class="su-fact"><span><?php echo e($isEn ? 'Belongs to' : 'تابع الى'); ?></span><strong><?php echo e($parentLabel !== '' ? $parentLabel : '—'); ?></strong></div>
             <div class="su-fact"><span><?php echo e($isEn ? 'Expires' : 'الانتهاء'); ?></span><strong dir="ltr"><?php echo e($expireShow !== '' ? $expireShow : '—'); ?><?php if ($daysLeft !== ''): ?> · <?php echo e($daysLeft . ($isEn ? ' d' : ' يوم')); ?><?php endif; ?></strong></div>
             <div class="su-fact"><span>IP</span><strong dir="ltr"><?php echo e($ipShow !== '' ? $ipShow : '—'); ?></strong></div>
-            <div class="su-fact"><span>MAC</span><strong dir="ltr"><?php echo e($macShow !== '' ? $macShow : '—'); ?></strong></div>
+            <div class="su-fact"><span>MAC</span><strong dir="ltr"><?php
+                echo e($macShow !== '' ? $macShow : '—');
+                $apDev = null;
+                if ($macShow !== '' && function_exists('devices_system_is_on') && devices_system_is_on()
+                    && function_exists('devices_find_by_subscriber_mac') && isset($pdo)
+                    && function_exists('user_can') && user_can('devices')
+                ) {
+                    $apDev = devices_find_by_subscriber_mac($pdo, $macShow);
+                }
+                if ($apDev):
+                    ?> · <a href="devices.php?id=<?php echo (int) $apDev['id']; ?>"><?php echo e($isEn ? 'AP' : 'المرسلة'); ?>: <?php echo e($apDev['name']); ?></a><?php
+                endif;
+            ?></strong></div>
             <?php if ($localAddress !== ''): ?>
             <div class="su-fact"><span><?php echo e($isEn ? 'Address' : 'العنوان'); ?></span><strong><?php echo e($localAddress); ?></strong></div>
             <?php endif; ?>

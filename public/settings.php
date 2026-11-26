@@ -68,7 +68,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'invoice_send')
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && post('section') === 'invoice_seq') {
     $tab = 'invoices';
 }
-if (!in_array($tab, array('general', 'behavior', 'whatsapp', 'templates', 'rental', 'users', 'plans', 'sas', 'saas', 'schedule', 'sensitive', 'update', 'maintenance', 'widgets', 'theme', 'invoices', 'printers'), true)) {
+if (!in_array($tab, array('general', 'behavior', 'whatsapp', 'templates', 'rental', 'devices', 'users', 'plans', 'sas', 'saas', 'schedule', 'sensitive', 'update', 'maintenance', 'widgets', 'theme', 'invoices', 'printers'), true)) {
     $tab = 'general';
 }
 // تبويبات محذوفة من إعدادات أدمن البوابة
@@ -105,8 +105,11 @@ if ($tab === 'users') {
         flash('error', $lang === 'en' ? 'Super admin only' : 'للمدير العام فقط');
         redirect('settings.php');
     }
-} elseif ($tab === 'widgets' || $tab === 'theme' || $tab === 'behavior' || $tab === 'general' || $isAgentWaOnly || $isAgencySasOnly || $isInvoiceTab) {
-    // وجدز وثيم لكل حساب، وواتساب للوكيل، وربط ساس للوكالة
+} elseif ($tab === 'widgets' || $tab === 'theme' || $tab === 'behavior' || $tab === 'general' || $tab === 'devices' || $isAgentWaOnly || $isAgencySasOnly || $isInvoiceTab) {
+    // وجدز وثيم لكل حساب، وواتساب للوكيل، وربط ساس للوكالة، وأجهزة الشبكة
+    if ($tab === 'devices' && !user_can('settings') && !user_can('devices')) {
+        require_perm('devices');
+    }
 } else {
     // وكالة بدون صلاحية settings: وجّه مباشرة لربط الساس
     if ($agencyTid > 1 && !user_can('settings') && $tab === 'general') {
@@ -835,6 +838,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'rental_system_enabled' => post('rental_system_enabled') === '1',
         );
         $tab = 'rental';
+    } elseif ($section === 'devices_system') {
+        $data = array(
+            'devices_system_enabled' => post('devices_system_enabled') === '1',
+        );
+        $tab = 'devices';
     } elseif ($section === 'rental_fee') {
         $fee = (float) post('rental_fee', '5000');
         if ($fee < 0) {
@@ -2762,6 +2770,39 @@ $brandIconUrl = function_exists('brand_icon_url') ? brand_icon_url($s) : '';
             </div>
         </form>
     </div>
+</div>
+<?php endif; ?>
+
+<?php if ($tab === 'devices'):
+    $devicesSystemOn = function_exists('devices_system_is_on') ? devices_system_is_on($s) : true;
+?>
+<div class="panel glass-panel">
+    <form method="post" class="rent-toggle-card" id="devicesSystemForm" style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:16px 18px;border-radius:16px;border:1px solid #e2e8f0;background:#fff;box-shadow:0 10px 24px rgba(15,23,42,.04);margin-bottom:14px">
+        <input type="hidden" name="csrf" value="<?php echo e(csrf_token()); ?>">
+        <input type="hidden" name="section" value="devices_system">
+        <div>
+            <h2 style="margin:0"><?php echo e($lang === 'en' ? 'Network devices' : 'أجهزة الشبكة'); ?></h2>
+            <p style="margin:4px 0 0;color:#64748b;font-weight:650;font-size:13px"><?php echo e($lang === 'en'
+                ? ($devicesSystemOn ? 'On — agents can inventory and monitor radios.' : 'Off — devices menu is hidden.')
+                : ($devicesSystemOn ? 'تشغيل — قائمة الأجهزة والمراقبة متاحة.' : 'إيقاف — قائمة الأجهزة مخفية.')); ?></p>
+        </div>
+        <label class="toggle" style="display:flex;align-items:center;gap:10px;margin:0">
+            <input type="checkbox" name="devices_system_enabled" value="1" <?php echo $devicesSystemOn ? 'checked' : ''; ?> onchange="this.form.submit()">
+            <span class="toggle-ui"></span>
+            <span style="font-weight:800"><?php echo e($devicesSystemOn
+                ? ($lang === 'en' ? 'Enabled' : 'تشغيل')
+                : ($lang === 'en' ? 'Disabled' : 'إيقاف')); ?></span>
+        </label>
+    </form>
+    <?php if ($devicesSystemOn): ?>
+    <p class="meta" style="font-weight:700">
+        <a href="devices.php"><?php echo e($lang === 'en' ? 'Open devices page' : 'افتح صفحة الأجهزة'); ?></a>
+        —
+        <?php echo e($lang === 'en'
+            ? 'PowerBeam, LiteBeam, NanoStation, Mimosa, MikroTik — switches, APs and links.'
+            : 'بور بيم، لايت بيم، نانو، ميموسا، مايكروتك — سويتشات ومرسلات ولنكات.'); ?>
+    </p>
+    <?php endif; ?>
 </div>
 <?php endif; ?>
 

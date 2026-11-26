@@ -100,20 +100,20 @@ function role_permissions($role)
     $role = normalize_admin_role($role);
     if ($role === 'admin') {
         return array(
-            'dashboard', 'subscribers', 'activate', 'debts', 'edit_debts', 'messages', 'rentals',
+            'dashboard', 'subscribers', 'activate', 'debts', 'edit_debts', 'messages', 'rentals', 'devices',
             'subscriptions', 'reports', 'logs', 'plans', 'cards', 'card_accounting',
             'settings', 'users', 'agents', 'backup', 'clear_data',
         );
     }
     if ($role === 'group_manager') {
         return array(
-            'dashboard', 'subscribers', 'activate', 'debts', 'edit_debts', 'messages', 'rentals',
+            'dashboard', 'subscribers', 'activate', 'debts', 'edit_debts', 'messages', 'rentals', 'devices',
             'subscriptions', 'reports', 'agents', 'cards', 'card_accounting', 'plans', 'users',
         );
     }
     if ($role === 'manager') {
         return array(
-            'dashboard', 'subscribers', 'activate', 'debts', 'messages', 'rentals',
+            'dashboard', 'subscribers', 'activate', 'debts', 'messages', 'rentals', 'devices',
             'subscriptions', 'reports', 'logs', 'agents', 'cards', 'card_accounting',
         );
     }
@@ -124,12 +124,12 @@ function role_permissions($role)
     }
     if ($role === 'agent') {
         return array(
-            'dashboard', 'subscribers', 'activate', 'debts', 'messages', 'rentals',
+            'dashboard', 'subscribers', 'activate', 'debts', 'messages', 'rentals', 'devices',
             'cards',
         );
     }
     return array(
-        'dashboard', 'subscribers', 'activate', 'debts', 'messages', 'rentals',
+        'dashboard', 'subscribers', 'activate', 'debts', 'messages', 'rentals', 'devices',
     );
 }
 
@@ -779,7 +779,7 @@ function user_can($perm, $role = null)
         return true;
     }
     if ($role === 'accountant') {
-        if (in_array($perm, array('subscriptions', 'cards', 'messages', 'reports', 'rentals'), true)) {
+        if (in_array($perm, array('subscriptions', 'cards', 'messages', 'reports', 'rentals', 'devices'), true)) {
             return true;
         }
         if ($perm === 'activate') {

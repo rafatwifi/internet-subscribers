@@ -59,6 +59,7 @@ function settings_defaults()
         'schedule_cut_enabled' => false,
         'schedule_cut_send_wa' => true,
         'rental_system_enabled' => true,
+        'devices_system_enabled' => true,
         'rental_fee' => 5000,
         'rental_devices' => array(
             array('id' => 'powerbeam', 'name' => 'بور بيم', 'icon' => 'PB', 'color' => '#3b82f6'),

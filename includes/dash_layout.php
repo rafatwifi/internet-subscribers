@@ -70,6 +70,7 @@ function dash_layout_catalog($pdo = null)
         'sales' => array('ar' => 'المبيعات', 'en' => 'Sales', 'tone' => 'tone-purple', 'perm' => 'subscriptions'),
         'activations' => array('ar' => 'التفعيلات', 'en' => 'Activations', 'tone' => 'tone-aqua', 'perm' => 'subscriptions'),
         'rentals' => array('ar' => 'الإيجار', 'en' => 'Rentals', 'tone' => 'tone-navy', 'perm' => 'rentals'),
+        'devices' => array('ar' => 'أجهزة الشبكة', 'en' => 'Network devices', 'tone' => 'tone-aqua', 'perm' => 'devices'),
         'points' => array('ar' => 'نقاط تشجيعية', 'en' => 'Reward points', 'tone' => 'tone-lime', 'perm' => ''),
         'balance' => array('ar' => 'رصيد الريسلر', 'en' => 'Reseller balance', 'tone' => 'tone-teal', 'perm' => ''),
         'latency' => array('ar' => 'بنك الريسلر', 'en' => 'Reseller ping', 'tone' => 'tone-navy', 'perm' => ''),
@@ -86,6 +87,9 @@ function dash_layout_catalog($pdo = null)
             continue;
         }
         if ($id === 'rentals' && function_exists('rental_system_is_on') && !rental_system_is_on()) {
+            continue;
+        }
+        if ($id === 'devices' && function_exists('devices_system_is_on') && !devices_system_is_on()) {
             continue;
         }
         if (!$ftth && $id === 'cabinets') {
@@ -121,6 +125,9 @@ function dash_layout_catalog($pdo = null)
                 continue;
             }
             if ($id === 'rentals' && function_exists('rental_system_is_on') && !rental_system_is_on()) {
+                continue;
+            }
+            if ($id === 'devices' && function_exists('devices_system_is_on') && !devices_system_is_on()) {
                 continue;
             }
             $meta['label'] = $en
@@ -285,6 +292,9 @@ function dash_layout_apply(&$tone, &$attrs, $dashKey)
             return false;
         }
     }
+    if ($dashKey === 'devices' && function_exists('devices_system_is_on') && !devices_system_is_on()) {
+        return false;
+    }
     if ($dashKey === 'rentals' && function_exists('rental_system_is_on') && !rental_system_is_on()) {
         return false;
     }
@@ -330,6 +340,7 @@ function dash_widget_icon($key)
         'plat_sales' => 'sales',
         'plat_received' => 'collected',
         'plat_debt' => 'debts',
+        'devices' => 'signal',
         'latency' => 'signal',
         'stock' => 'stock',
         'xfers' => 'transfer',

@@ -13,6 +13,7 @@ function nav_side_ico($key)
         'accountants' => '<rect x="4" y="2" width="16" height="20" rx="2"/><line x1="8" y1="6" x2="16" y2="6"/><line x1="8" y1="10" x2="16" y2="10"/><line x1="8" y1="14" x2="12" y2="14"/><circle cx="16" cy="17" r="1.2"/>',
         'cabinets' => '<rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><circle cx="7" cy="6" r="1"/><circle cx="7" cy="12" r="1"/><circle cx="7" cy="18" r="1"/>',
         'rentals' => '<path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1.2"/>',
+        'devices' => '<rect x="2" y="7" width="20" height="10" rx="2"/><path d="M6 7V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v2"/><circle cx="8" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="16" cy="12" r="1.2"/>',
         'debts' => '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="13" y2="17"/>',
         'import_export' => '<path d="M12 3v12"/><polyline points="8 7 12 3 16 7"/><path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/>',
         'movements' => '<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>',
@@ -1195,6 +1196,8 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             $navCab = isset($pdo) && function_exists('tenant_is_ftth') && tenant_is_ftth($pdo);
             $navRentOn = !function_exists('rental_system_is_on') || rental_system_is_on();
             $showRentNav = $can('rentals') && !$navCab && $navRentOn;
+            $navDevOn = !function_exists('devices_system_is_on') || devices_system_is_on();
+            $showDevicesNav = $can('devices') && $navDevOn;
             $showDebtsNav = $can('debts') && !$navCab;
             $showPlansNav = $can('plans');
             $showReportsNav = $can('reports');
@@ -1207,11 +1210,11 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
             $showInvoicesNav = $navTidEarly > 1;
             $showBillingNav = $navTidEarly > 1;
             $showMoneyNav = $showPlansNav || $showAccountantNav || $showReportsNav || $showDebtsNav;
-            $showOpsNav = $showMovesNav || $showLogsNav || $showRentNav || ($navCab && ($can('subscribers') || $can('dashboard')));
+            $showOpsNav = $showMovesNav || $showLogsNav || $showRentNav || $showDevicesNav || ($navCab && ($can('subscribers') || $can('dashboard')));
             $showSettingsDrop = $showSettingsNav || $showImportNav;
             $navSettingsHref = 'settings.php?tab=general';
             $moneyOpen = in_array($active, array('plans', 'accountants', 'reports', 'profit', 'debts'), true);
-            $opsOpen = in_array($active, array('subscriptions', 'logs', 'rentals', 'cabinets'), true);
+            $opsOpen = in_array($active, array('subscriptions', 'logs', 'rentals', 'cabinets', 'devices'), true);
             $settingsOpenWifi = ($settingsActive && $active !== 'schedule') || $active === 'import_export';
             $companyOpenWifi = in_array($active, array('company', 'billing'), true);
             $navTid = $navTidEarly;
@@ -1266,6 +1269,9 @@ function render_header($title, $active = '', $subtitle = '', $titleAfter = '', $
                     <?php endif; ?>
                     <?php if ($showRentNav): ?>
                     <a class="<?php echo $active === 'rentals' ? 'active' : ''; ?>" href="rentals.php"><?php echo nav_side_ico('rentals'); ?><?php echo e($isEn ? 'Rentals' : 'الإيجار'); ?></a>
+                    <?php endif; ?>
+                    <?php if ($showDevicesNav): ?>
+                    <a class="<?php echo $active === 'devices' ? 'active' : ''; ?>" href="devices.php"><?php echo nav_side_ico('devices'); ?><?php echo e($isEn ? 'Network devices' : 'أجهزة الشبكة'); ?></a>
                     <?php endif; ?>
                 </div>
             </details>
