@@ -4123,8 +4123,19 @@ body:has(#sasActModal:not(.hidden)) .sidebar-toggle-bar {
   clip: rect(0, 0, 0, 0);
   border: 0;
 }
-.sas-radius-page #subsTable th.status-cell .status-sq {
-  opacity: .9;
+.sas-radius-page #subsTable th.status-cell .status-col-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: #64748b;
+  vertical-align: middle;
+}
+.sas-radius-page #subsTable th.status-cell .status-col-ico svg {
+  display: block;
+  width: 14px;
+  height: 14px;
 }
 .sas-radius-page .table-wrap { width: 100%; overflow: auto; max-width: 100%; overflow-anchor: none; }
 .sas-radius-page #subsTable {
@@ -5036,7 +5047,7 @@ $pingModeNow = ($pingHasReseller && function_exists('sas_ping_mode_for_account')
             <tr>
                 <th class="sub-check-cell"><label class="th-check-only"><input type="checkbox" id="subCheckAll"></label></th>
                 <th class="col-num">#</th>
-                <th class="status-cell col-status" title="<?php echo e($lang === 'en' ? 'Status' : 'الحالة'); ?>"><i class="status-sq status-online" aria-hidden="true"></i><span class="sr-only"><?php echo e($lang === 'en' ? 'Status' : 'الحالة'); ?></span></th>
+                <th class="status-cell col-status" title="<?php echo e($lang === 'en' ? 'Status' : 'الحالة'); ?>"><span class="status-col-ico" aria-hidden="true"><svg viewBox="0 0 16 16" focusable="false"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="8" cy="8" r="3.4" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="8" cy="8" r="1.35" fill="currentColor"/></svg></span><span class="sr-only"><?php echo e($lang === 'en' ? 'Status' : 'الحالة'); ?></span></th>
                 <th class="col-ping" title="<?php echo e($lang === 'en' ? 'Ping while online, last connection while offline' : 'البنك للمتصل، وآخر اتصال للفاصل'); ?>">ms</th>
                 <th class="col-user"><?php echo sas_sort_link('username', $lang === 'en' ? 'Username' : 'اسم الدخول', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
                 <th class="col-ip"><?php echo sas_sort_link('ip', 'IP Address', $sortKey, $sortDir, $q, $perPageRaw, $subFilter); ?></th>
