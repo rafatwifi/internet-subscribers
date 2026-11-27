@@ -210,7 +210,11 @@ function tenants_sas_cache_pk_is_ok($pdo)
         foreach ($pk as $r) {
             $cols[] = isset($r['Column_name']) ? $r['Column_name'] : '';
         }
-        return in_array('tenant_id', $cols, true) && in_array('username', $cols, true) && count($cols) >= 2;
+        // مفتاح ثلاثي: نفس اليوزر يُسمح به لأكثر من رسلر/مزود (ساس + إيرث)
+        return in_array('tenant_id', $cols, true)
+            && in_array('username', $cols, true)
+            && in_array('sas_account_id', $cols, true)
+            && count($cols) >= 3;
     } catch (Exception $e) {
         return false;
     }
@@ -230,8 +234,13 @@ function tenants_migrate_sas_cache_pk($pdo)
         }
     }
     tenants_ensure_column($pdo, 'sas_users_cache', 'tenant_id', 'INT UNSIGNED NOT NULL DEFAULT 1');
+    tenants_ensure_column($pdo, 'sas_users_cache', 'sas_account_id', 'INT UNSIGNED NOT NULL DEFAULT 0');
     try {
         $pdo->exec('UPDATE sas_users_cache SET tenant_id = 1 WHERE tenant_id IS NULL OR tenant_id = 0');
+    } catch (Exception $e) {
+    }
+    try {
+        $pdo->exec('UPDATE sas_users_cache SET sas_account_id = 0 WHERE sas_account_id IS NULL');
     } catch (Exception $e) {
     }
     if (tenants_sas_cache_pk_is_ok($pdo)) {
@@ -244,7 +253,8 @@ function tenants_migrate_sas_cache_pk($pdo)
             $pdo->exec('ALTER TABLE sas_users_cache DROP PRIMARY KEY');
         } catch (Exception $e) {
         }
-        $pdo->exec('ALTER TABLE sas_users_cache ADD PRIMARY KEY (tenant_id, username)');
+        // إيرث ونور قد يشتركان بنفس اليوزر — صف لكل حساب رسلر
+        $pdo->exec('ALTER TABLE sas_users_cache ADD PRIMARY KEY (tenant_id, username, sas_account_id)');
     } catch (Exception $e) {
         $pkDone = false;
         $pkOk = false;

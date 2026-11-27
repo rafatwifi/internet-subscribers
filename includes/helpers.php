@@ -1500,5 +1500,5 @@ function subscriber_grace_label($row, $config = null, $lang = 'ar')
         return (string) max(0, (int) $row['grace_days']);
     }
     $sys = subscriber_default_grace_days($config);
-    return $en ? ('System (' . $sys . ')') : ('حسب النظام (' . $sys . ')');
+    return $en ? ('Default ' . $sys) : ('افتراضي ' . $sys);
 }

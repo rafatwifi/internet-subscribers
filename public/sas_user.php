@@ -680,7 +680,7 @@ if (!$isNew && $localId > 0) {
 $daysShow = ($daysLeft === '' || $daysLeft === null) ? '—' : (string) $daysLeft;
 $graceShow = $graceIsCustom
     ? ((string) (int) $localGraceNum . ($isEn ? ' days' : ' يوم'))
-    : ($isEn ? ('System (' . (int) $sysGraceNum . ')') : ('حسب النظام (' . (int) $sysGraceNum . ')'));
+    : ($isEn ? ('Default ' . (int) $sysGraceNum) : ('افتراضي ' . (int) $sysGraceNum));
 $idCardText = '';
 if (!$isNew) {
     $idBits = array();
@@ -1364,7 +1364,7 @@ render_header($pageTitle, 'sas', $isNew ? '' : $username);
             <div class="su-grace-row">
                 <select name="grace_mode" id="graceModeSel">
                     <option value="system" <?php echo !$graceIsCustom ? 'selected' : ''; ?>>
-                        <?php echo e($isEn ? ('Follow system (' . $sysGraceNum . ' days)') : ('حسب النظام (' . $sysGraceNum . ' يوم)')); ?>
+                        <?php echo e($isEn ? ('Default ' . $sysGraceNum . ' days') : ('افتراضي ' . $sysGraceNum)); ?>
                     </option>
                     <option value="custom" <?php echo $graceIsCustom ? 'selected' : ''; ?>>
                         <?php echo e($isEn ? 'Custom number' : 'رقم مخصص'); ?>

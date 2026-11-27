@@ -278,6 +278,23 @@ function tenant_sas_account_row($pdo, $accountId, $tenantId = null)
 function tenant_sas_account_default($pdo, $tenantId)
 {
     $list = tenant_sas_accounts_list($pdo, $tenantId);
+    $firstSas = null;
+    foreach ($list as $r) {
+        $isEl = function_exists('tenant_sas_account_is_earthlink') && tenant_sas_account_is_earthlink($pdo, $r);
+        if ($isEl) {
+            continue;
+        }
+        if ($firstSas === null) {
+            $firstSas = $r;
+        }
+        if (!empty($r['is_default'])) {
+            return $r;
+        }
+    }
+    if ($firstSas) {
+        return $firstSas;
+    }
+    // لا إيرث كافتراضي لمزامنة الساس — إلا إذا ماكو غيرهم
     foreach ($list as $r) {
         if (!empty($r['is_default'])) {
             return $r;
@@ -647,11 +664,29 @@ function tenant_sas_account_retry_login($pdo, $tenantId, $accountId, $config = n
                      login_fail_count = 0, login_next_retry_at = NULL, updated_at = NOW()
                  WHERE id = :id AND tenant_id = :t'
             )->execute(array(':id' => $accountId, ':t' => $tenantId));
+            // بعد قطع الربط يُصفَّر is_default — أعده عند أول دخول ناجح إن ماكو افتراضي
+            $hasDef = false;
+            foreach (tenant_sas_accounts_list($pdo, $tenantId) as $rDef) {
+                if (!empty($rDef['is_default']) && !empty($rDef['sas_enabled']) && (int) $rDef['id'] !== $accountId) {
+                    $hasDef = true;
+                    break;
+                }
+                if (!empty($rDef['is_default']) && (int) $rDef['id'] === $accountId) {
+                    $hasDef = true;
+                    break;
+                }
+            }
+            if (!$hasDef && function_exists('tenant_sas_account_set_default')) {
+                tenant_sas_account_set_default($pdo, $tenantId, $accountId);
+            } elseif (function_exists('tenant_sas_accounts_mirror_default')) {
+                tenant_sas_accounts_mirror_default($pdo, $tenantId);
+            }
             if ($isEl && function_exists('earthlink_sync_to_cache')) {
                 $cid = !empty($row['company_id']) ? (int) $row['company_id'] : 0;
                 // مزامنة خفيفة لاحقاً — لا تمنع ردّ النجاح
                 try {
-                    earthlink_sync_to_cache($pdo, $tenantId, $host, $user, $pass, $cid);
+                    $GLOBALS['sas_force_account'] = $row;
+                    earthlink_sync_to_cache($pdo, $tenantId, $host, $user, $pass, $cid, '', $accountId);
                 } catch (Exception $eSync) {
                 }
             }
@@ -770,8 +805,15 @@ function tenant_sas_account_logout($pdo, $tenantId, $accountId)
         return array(false, 'الحساب غير موجود');
     }
     try {
+        // قطع الربط = إطفاء الحساب + مسح أثر الجلسة (last_ok_at)
+        // وإلا تبقى البطاقة «متصل» لأن الواجهة تعتمد last_ok_at بدون last_error
         $pdo->prepare(
-            'UPDATE tenant_sas_accounts SET sas_enabled = 0, is_default = 0, updated_at = NOW() WHERE id = :id AND tenant_id = :t'
+            'UPDATE tenant_sas_accounts
+             SET sas_enabled = 0, is_default = 0,
+                 last_ok_at = NULL, last_error = NULL,
+                 login_fail_count = 0, login_next_retry_at = NULL,
+                 updated_at = NOW()
+             WHERE id = :id AND tenant_id = :t'
         )->execute(array(':id' => $accountId, ':t' => $tenantId));
         $left = tenant_sas_accounts_list($pdo, $tenantId);
         $hasDef = false;
@@ -792,9 +834,22 @@ function tenant_sas_account_logout($pdo, $tenantId, $accountId)
         if (function_exists('tenant_sas_accounts_mirror_default')) {
             tenant_sas_accounts_mirror_default($pdo, $tenantId);
         }
-        return array(true, 'تم تسجيل الخروج');
+        // امسح JWT المخزّن حتى لا يبقى دخول فعلي بالخلفية
+        if (function_exists('sas_make_connector_from_account')) {
+            $conn = sas_make_connector_from_account($row);
+            if ($conn && method_exists($conn, 'forgetCachedSession')) {
+                $conn->forgetCachedSession();
+            }
+        }
+        if (function_exists('sas_mark_connection')) {
+            sas_mark_connection($pdo, array(), false, 'تم قطع الربط', $tenantId);
+        }
+        if (function_exists('dash_reseller_widget_forget')) {
+            dash_reseller_widget_forget($tenantId, $accountId);
+        }
+        return array(true, 'تم قطع الربط');
     } catch (Exception $e) {
-        return array(false, 'تعذر تسجيل الخروج');
+        return array(false, 'تعذر قطع الربط');
     }
 }
 
@@ -834,6 +889,9 @@ function tenant_sas_account_delete($pdo, $tenantId, $accountId)
                     'sas_company_id' => null,
                 ));
             }
+        }
+        if (function_exists('dash_reseller_widget_forget')) {
+            dash_reseller_widget_forget($tenantId, $accountId);
         }
         return array(true, 'تم الحذف');
     } catch (Exception $e) {

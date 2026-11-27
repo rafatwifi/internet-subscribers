@@ -459,6 +459,13 @@ class SASConnector
         }
     }
 
+    /** امسح الجلسة المخزّنة محلياً (قطع ربط الريسيلر من الإعدادات) */
+    public function forgetCachedSession()
+    {
+        $this->token = '';
+        $this->clearTokenCache();
+    }
+
     private function writeTokenCache($token)
     {
         $token = (string) $token;

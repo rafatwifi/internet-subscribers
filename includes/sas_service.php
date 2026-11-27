@@ -1485,6 +1485,78 @@ function dash_wallet_cache_save($payload, $tenantId = 0)
 }
 
 /**
+ * امسح وجدز الرصيد/النقاط/البنك بعد قطع ربط أو حذف ريسيلر.
+ * $accountId=0 يمسح كل كاش الوجدز للوكالة.
+ */
+function dash_reseller_widget_forget($tenantId, $accountId = 0)
+{
+    $tid = max(1, (int) $tenantId);
+    $aid = (int) $accountId;
+    $cacheDir = dirname(__DIR__) . '/storage/cache';
+
+    if (function_exists('dash_wallet_cache_path')) {
+        $wFile = dash_wallet_cache_path($tid);
+        if ($aid <= 0) {
+            if (is_file($wFile)) {
+                @unlink($wFile);
+            }
+        } elseif (function_exists('dash_wallet_cache_load') && function_exists('dash_wallet_cache_save')) {
+            $data = dash_wallet_cache_load($tid, 0);
+            if (is_array($data) && !empty($data['wallets']) && is_array($data['wallets'])) {
+                $kept = array();
+                foreach ($data['wallets'] as $w) {
+                    if (!is_array($w)) {
+                        continue;
+                    }
+                    $wa = isset($w['account_id']) ? (int) $w['account_id'] : 0;
+                    if ($wa === $aid) {
+                        continue;
+                    }
+                    $kept[] = $w;
+                }
+                if ($kept) {
+                    $data['wallets'] = $kept;
+                    $data['points'] = '';
+                    $data['balance'] = '';
+                    foreach ($kept as $w) {
+                        if ($data['points'] === '' && !empty($w['points'])) {
+                            $data['points'] = (string) $w['points'];
+                        }
+                        if ($data['balance'] === '' && !empty($w['balance'])) {
+                            $data['balance'] = (string) $w['balance'];
+                        }
+                    }
+                    dash_wallet_cache_save($data, $tid);
+                } elseif (is_file($wFile)) {
+                    @unlink($wFile);
+                }
+            } elseif (is_file($wFile)) {
+                @unlink($wFile);
+            }
+        }
+    }
+
+    foreach (array(
+        $cacheDir . '/sas_points_t' . $tid . '.json',
+        $cacheDir . '/sas_ping_t' . $tid . '.json',
+    ) as $extra) {
+        if (is_file($extra)) {
+            @unlink($extra);
+        }
+    }
+
+    if (isset($_SESSION) && is_array($_SESSION)) {
+        unset(
+            $_SESSION['sas_balance_disp'],
+            $_SESSION['sas_balance_raw'],
+            $_SESSION['sas_rp_val'],
+            $_SESSION['sas_rp_at']
+        );
+    }
+    return true;
+}
+
+/**
  * رصيد النقاط التشجيعية للمدير الحالي في SAS
  * يرجع array($ok, $points, $message)
  */

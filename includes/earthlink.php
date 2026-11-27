@@ -19,6 +19,42 @@ function earthlink_normalize_host($host)
     return $host;
 }
 
+/**
+ * تاريخ إيرث غالباً يوم/شهر/سنة (16/03/2026 07:29 PM).
+ * @return string|null Y-m-d H:i:s
+ */
+function earthlink_parse_expire_sql($raw)
+{
+    $raw = trim((string) $raw);
+    if ($raw === '') {
+        return null;
+    }
+    if (preg_match('/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})\s*([AP]M))?$/i', $raw, $m)) {
+        $d = (int) $m[1];
+        $mo = (int) $m[2];
+        $y = (int) $m[3];
+        $h = isset($m[4]) ? (int) $m[4] : 0;
+        $mi = isset($m[5]) ? (int) $m[5] : 0;
+        if (!empty($m[6])) {
+            $ampm = strtoupper($m[6]);
+            if ($ampm === 'PM' && $h < 12) {
+                $h += 12;
+            }
+            if ($ampm === 'AM' && $h === 12) {
+                $h = 0;
+            }
+        }
+        if (checkdate($mo, $d, $y)) {
+            return sprintf('%04d-%02d-%02d %02d:%02d:00', $y, $mo, $d, $h, $mi);
+        }
+    }
+    $ts = strtotime($raw);
+    if ($ts) {
+        return date('Y-m-d H:i:s', $ts);
+    }
+    return null;
+}
+
 function earthlink_default_alt_host()
 {
     return 'api.spicywifi-iq.com/earthlink-api';
@@ -387,8 +423,9 @@ function earthlink_http($method, $url, $body, $headers, $timeout = 25, $cookieFi
     $connectTo = 10;
     if (is_string($url) && (stripos($url, 'admin.earthlink.iq') !== false || stripos($url, '192.168.222.') !== false)) {
         $connectTo = 3;
-        if ((int) $timeout > 8) {
-            $timeout = 8;
+        // لايف خفيف: سقف 12ث — المزامنة الكاملة تحتاج مهلة أطول
+        if ((int) $timeout > 20) {
+            $timeout = 20;
         }
     }
     $opts = array(
@@ -657,6 +694,45 @@ function earthlink_fetch_all_subscribers($host, $username, $password, $altHost =
         }
         $start += $pageSize;
     }
+    // إن REST رجّع بدون أونلاين/IP — أثري من بوابة الإدارة إن أمكن
+    $needLive = true;
+    foreach ($merged as $subM) {
+        if (!empty($subM['is_online']) || (!empty($subM['framed_ip']) && $subM['framed_ip'] !== '')) {
+            $needLive = false;
+            break;
+        }
+    }
+    if ($needLive && $merged) {
+        $portal = earthlink_auth_portal($usedHost, $username, $password);
+        if (!empty($portal['ok'])) {
+            $portal['host'] = $usedHost;
+            $pp = earthlink_fetch_all_subscribers_portal($usedHost, $portal);
+            if (!empty($pp['ok']) && !empty($pp['rows']) && is_array($pp['rows'])) {
+                foreach ($pp['rows'] as $pr) {
+                    if (empty($pr['username'])) {
+                        continue;
+                    }
+                    $k = strtolower((string) $pr['username']);
+                    if (!isset($merged[$k])) {
+                        $merged[$k] = $pr;
+                        continue;
+                    }
+                    if (!empty($pr['is_online'])) {
+                        $merged[$k]['is_online'] = 1;
+                    }
+                    if (!empty($pr['framed_ip']) && $pr['framed_ip'] !== '') {
+                        $merged[$k]['framed_ip'] = $pr['framed_ip'];
+                    }
+                    if (!empty($pr['mac']) && (empty($merged[$k]['mac']) || $merged[$k]['mac'] === '')) {
+                        $merged[$k]['mac'] = $pr['mac'];
+                    }
+                    if (isset($pr['is_expired'])) {
+                        $merged[$k]['is_expired'] = (int) $pr['is_expired'];
+                    }
+                }
+            }
+        }
+    }
     return array('ok' => true, 'rows' => array_values($merged), 'host' => $usedHost);
 }
 
@@ -720,7 +796,14 @@ function earthlink_fetch_all_subscribers_portal($host, $auth)
                     $prevExp = !empty($prev['is_expired']);
                     $curExp = !empty($sub['is_expired']);
                     if ($prevExp && !$curExp) {
-                        $merged[$k] = $sub;
+                        // لا تستبدل منتهي/موقوف بصف «نشط» واهي — إبقي الانتهاء
+                        if (empty($prev['framed_ip']) && !empty($sub['framed_ip'])) {
+                            $prev['framed_ip'] = $sub['framed_ip'];
+                        }
+                        if (empty($prev['is_online']) && !empty($sub['is_online'])) {
+                            $prev['is_online'] = 1;
+                        }
+                        $merged[$k] = $prev;
                     } elseif (!$prevExp && $curExp) {
                         // خلّي النشط
                     } else {
@@ -825,6 +908,11 @@ function earthlink_portal_parse_users($html, $forceExpired = 0)
         }
         $ip = earthlink_html_id_text($trBody, 'userip');
         $mac = earthlink_html_id_text($trBody, 'usermac');
+        // ارفض آيبي نور على صف إيرث
+        if ($ip !== '' && preg_match('/^10\.(24|25|26)\./', $ip)) {
+            $ip = '';
+            $mac = '';
+        }
         $agent = earthlink_html_id_text($trBody, 'agentlabel');
         if ($agent === '' && preg_match('/class="[^"]*affiliatelabel[^"]*"[^>]*>([^<]*)</i', $trBody, $m)) {
             $agent = trim(html_entity_decode($m[1], ENT_QUOTES, 'UTF-8'));
@@ -850,15 +938,18 @@ function earthlink_portal_parse_users($html, $forceExpired = 0)
         }
 
         $status = $accStatus !== '' ? $accStatus : $netStatus;
+        $netLow = strtolower($netStatus);
         $blobLow = strtolower($netStatus . ' ' . $accStatus . ' ' . $status . ' ' . $plainRow);
-        $isOnline = (
-            stripos($netStatus, 'Online') !== false
-            || stripos($plainRow, 'Online') !== false
-            || strpos($blobLow, 'متصل') !== false
-        ) ? 1 : 0;
-        // IP حي + مو منتهي بالصف غالباً يعني أونلاين حتى لو الليبل ناقص
+        // Offline أولاً — لا تخلط Active مع Online من نص الصف
+        $isOnline = 0;
+        if (strpos($netLow, 'offline') === false && strpos($blobLow, 'غير متصل') === false) {
+            if (stripos($netStatus, 'Online') !== false || strpos($netLow, 'متصل') !== false) {
+                $isOnline = 1;
+            }
+        }
+        // IP حي (غير نور) يعني أونلاين حتى لو الليبل ناقص
         if (!$isOnline && $ip !== '' && filter_var($ip, FILTER_VALIDATE_IP)
-            && strpos($blobLow, 'offline') === false
+            && strpos($netLow, 'offline') === false
             && strpos($blobLow, 'expire') === false
             && !$forceExpired
         ) {
@@ -956,13 +1047,44 @@ function earthlink_parse_subscriber($item)
     if ($status === '') {
         $status = earthlink_find_string($userObject, array('status', 'Status'));
     }
-    $online = earthlink_find_string($value, array('onlineStatus', 'OnlineStatus'));
+    // حالة الجلسة فقط — لا تخلط مع accountStatus=Active (فعال ≠ متصل)
+    $online = earthlink_find_string($value, array(
+        'onlineStatus', 'OnlineStatus', 'connectionStatus', 'ConnectionStatus', 'sessionStatus',
+    ));
     if ($online === '') {
-        $online = earthlink_find_string($userObject, array('status', 'Status'));
+        $online = earthlink_find_string($userObject, array(
+            'onlineStatus', 'OnlineStatus', 'connectionStatus', 'ConnectionStatus', 'sessionStatus',
+        ));
     }
     $days = earthlink_find_string($value, array('activeDaysLeft', 'remaining_days', 'remainingDays'));
     $blocked = !empty($value['isBlocked']) || !empty($value['IsBlocked']);
-    $isOnline = (strcasecmp($online, 'Online') === 0);
+    $framedIp = earthlink_find_string($value, array(
+        'userIP', 'UserIP', 'lastIpAddress', 'last_ip_address', 'ipAddress', 'IpAddress',
+        'framedIP', 'framedIp', 'nasPortId', 'currentIP', 'CurrentIP',
+    ));
+    if ($framedIp === '') {
+        $framedIp = earthlink_find_string($userObject, array(
+            'userIP', 'lastIpAddress', 'ipAddress', 'framedIP', 'currentIP',
+        ));
+    }
+    // ارفض آيبي نور البداية إن تسرّب لحقل إيرث
+    if ($framedIp !== '' && preg_match('/^10\.(24|25|26)\./', $framedIp)) {
+        $framedIp = '';
+    }
+    $onLow = strtolower(trim($online));
+    $isOnline = (
+        $onLow === 'online'
+        || $onLow === 'connected'
+        || strpos($onLow, 'online') !== false
+        || (!empty($value['isOnline']) && $value['isOnline'] !== '0' && $value['isOnline'] !== false)
+        || (!empty($value['IsOnline']) && $value['IsOnline'] !== '0' && $value['IsOnline'] !== false)
+    );
+    // IP حي (غير نور) يعني متصل حتى لو الليبل ناقص
+    if (!$isOnline && $framedIp !== '' && filter_var($framedIp, FILTER_VALIDATE_IP)
+        && strpos($onLow, 'offline') === false
+    ) {
+        $isOnline = true;
+    }
     $expired = false;
     $stLow = strtolower($status);
     if ($blocked || strpos($stLow, 'suspend') !== false || strpos($stLow, 'expire') !== false
@@ -987,7 +1109,7 @@ function earthlink_parse_subscriber($item)
         'phone' => earthlink_find_string($value, array('mobileNumber', 'mobileNumber2', 'mobilePhone', 'phoneHome')),
         'email' => earthlink_find_string($value, array('email', 'Email')),
         'notes' => earthlink_find_string($value, array('userNotes', 'notes', 'Note')),
-        'framed_ip' => earthlink_find_string($value, array('userIP', 'lastIpAddress', 'last_ip_address', 'ipAddress')),
+        'framed_ip' => $framedIp,
         'mac' => earthlink_find_string($value, array('maxmac', 'mac', 'callerID', 'callerId')),
         'active_days_left' => $days,
         'agent_name' => earthlink_find_string($value, array('agentName', 'affiliateName')),
@@ -1004,12 +1126,16 @@ function earthlink_parse_subscriber($item)
  * مزامنة مشتركي Earthlink إلى sas_users_cache لنفس الـ tenant
  * @return array{ok:bool,count:int,message:string}
  */
-function earthlink_sync_to_cache($pdo, $tenantId, $host, $username, $password, $companyId = 0, $altHost = '')
+function earthlink_sync_to_cache($pdo, $tenantId, $host, $username, $password, $companyId = 0, $altHost = '', $accountId = 0)
 {
     $tenantId = (int) $tenantId;
     if ($tenantId <= 0 || !$pdo) {
         return array('ok' => false, 'count' => 0, 'message' => 'tenant غير صالح');
     }
+    if ($accountId <= 0 && !empty($GLOBALS['sas_force_account']['id'])) {
+        $accountId = (int) $GLOBALS['sas_force_account']['id'];
+    }
+    $accountId = max(0, (int) $accountId);
     if ($altHost === '' && $companyId > 0) {
         $altHost = earthlink_company_alt_host($pdo, $companyId);
     }
@@ -1018,6 +1144,12 @@ function earthlink_sync_to_cache($pdo, $tenantId, $host, $username, $password, $
     ) {
         // هوست أساسي غير سبايسي — خلّي سبايسي بديل افتراضي إن ما محدد
         $altHost = earthlink_default_alt_host();
+    }
+    if (function_exists('tenants_migrate_sas_cache_pk')) {
+        try {
+            tenants_migrate_sas_cache_pk($pdo);
+        } catch (Exception $ePk) {
+        }
     }
     $pack = earthlink_fetch_all_subscribers($host, $username, $password, $altHost);
     if (empty($pack['ok'])) {
@@ -1028,14 +1160,194 @@ function earthlink_sync_to_cache($pdo, $tenantId, $host, $username, $password, $
         );
     }
     $rows = isset($pack['rows']) ? $pack['rows'] : array();
+    // يوزر دخول الأدمن يظهر بالقائمة — مو مخفي
+    $loginUser = trim((string) $username);
+    if ($loginUser !== '') {
+        $hasLogin = false;
+        foreach ($rows as $subChk) {
+            if (!empty($subChk['username']) && strcasecmp((string) $subChk['username'], $loginUser) === 0) {
+                $hasLogin = true;
+                break;
+            }
+        }
+        if (!$hasLogin) {
+            $rows[] = array(
+                'username' => $loginUser,
+                'display_name' => $loginUser,
+                'firstname' => $loginUser,
+                'profile_name' => 'Admin',
+                'expiry_date' => '',
+                'status' => 'Active',
+                'phone' => '',
+                'email' => '',
+                'notes' => '',
+                'framed_ip' => '',
+                'mac' => '',
+                'active_days_left' => '',
+                'agent_name' => '',
+                'parent_name' => 'admin',
+                'user_index' => 0,
+                'account_index' => '',
+                'is_online' => 0,
+                'is_expired' => 0,
+                'provider' => 'earthlink',
+            );
+        }
+    }
     if (function_exists('ensure_sas_users_cache_table')) {
         ensure_sas_users_cache_table($pdo);
     }
     earthlink_ensure_cache_columns($pdo);
 
-    // امسح فقط مشتركي إيرث لهذه الشركة — لا تمسح كاش الساس/الرسلرات الثانية
+    // قبل المسح: احفظ اليوزرات الحالية لاكتشاف المسحوبين (للسجل + التوست)
+    $prevUsers = array();
     try {
-        if ($companyId > 0 && earthlink_cache_has_column($pdo, 'company_id')) {
+        if ($accountId > 0 && earthlink_cache_has_column($pdo, 'sas_account_id')) {
+            $stPrev = $pdo->prepare(
+                "SELECT username, display_name, parent_name FROM sas_users_cache
+                 WHERE tenant_id = :t AND sas_account_id = :a
+                   AND (provider = 'earthlink' OR provider IS NULL OR provider = '')"
+            );
+            $stPrev->execute(array(':t' => $tenantId, ':a' => $accountId));
+        } elseif ($companyId > 0 && earthlink_cache_has_column($pdo, 'company_id')) {
+            $stPrev = $pdo->prepare(
+                "SELECT username, display_name, parent_name FROM sas_users_cache
+                 WHERE tenant_id = :t AND company_id = :c AND provider = 'earthlink'"
+            );
+            $stPrev->execute(array(':t' => $tenantId, ':c' => (int) $companyId));
+        } else {
+            $stPrev = null;
+        }
+        if ($stPrev) {
+            foreach ($stPrev->fetchAll(PDO::FETCH_ASSOC) as $pr) {
+                $pu = isset($pr['username']) ? trim((string) $pr['username']) : '';
+                if ($pu === '') {
+                    continue;
+                }
+                $prevUsers[strtolower($pu)] = array(
+                    'username' => $pu,
+                    'display_name' => isset($pr['display_name']) ? trim((string) $pr['display_name']) : $pu,
+                    'parent_name' => isset($pr['parent_name']) ? trim((string) $pr['parent_name']) : '',
+                );
+            }
+        }
+    } catch (Exception $ePrev) {
+        $prevUsers = array();
+    }
+
+    $newUserSet = array();
+    foreach ($rows as $subNew) {
+        $nu = isset($subNew['username']) ? trim((string) $subNew['username']) : '';
+        if ($nu !== '') {
+            $newUserSet[strtolower($nu)] = true;
+        }
+    }
+    $withdrawn = array();
+    foreach ($prevUsers as $lk => $info) {
+        if (isset($newUserSet[$lk])) {
+            continue;
+        }
+        $who = $info['display_name'] !== '' ? $info['display_name'] : $info['username'];
+        if (strcasecmp($who, $info['username']) === 0) {
+            $who = $info['username'];
+        }
+        $dest = '';
+        try {
+            $stKeep = $pdo->prepare(
+                "SELECT provider, parent_name, company_id, sas_account_id FROM sas_users_cache
+                 WHERE tenant_id = :t AND LOWER(username) = LOWER(:u)
+                   AND (sas_account_id IS NULL OR sas_account_id <> :a)
+                 LIMIT 1"
+            );
+            $stKeep->execute(array(
+                ':t' => $tenantId,
+                ':u' => $info['username'],
+                ':a' => $accountId > 0 ? $accountId : -1,
+            ));
+            $keepRow = $stKeep->fetch(PDO::FETCH_ASSOC);
+            if ($keepRow) {
+                $dest = !empty($keepRow['parent_name']) ? trim((string) $keepRow['parent_name']) : '';
+                if ($dest === '') {
+                    $dest = (!empty($keepRow['provider']) && $keepRow['provider'] === 'earthlink')
+                        ? 'إيرث' : 'الساس';
+                }
+            }
+        } catch (Exception $eKeep) {
+            $dest = '';
+        }
+        $summary = 'سُحب المشترك ' . $who . ' (' . $info['username'] . ') من وكالتك إلى وكالة ثانية.';
+        if (function_exists('mb_strlen') && mb_strlen($summary, 'UTF-8') > 240) {
+            $summary = mb_substr($summary, 0, 237, 'UTF-8') . '...';
+        } elseif (strlen($summary) > 240) {
+            $summary = substr($summary, 0, 237) . '...';
+        }
+        $alreadyLogged = false;
+        try {
+            $dupEl = $pdo->prepare(
+                "SELECT COUNT(*) FROM activity_logs
+                 WHERE action = 'sas_withdrawn' AND details = :u
+                   AND created_at > (NOW() - INTERVAL 6 HOUR)"
+            );
+            $dupEl->execute(array(':u' => $info['username']));
+            $alreadyLogged = ((int) $dupEl->fetchColumn()) > 0;
+        } catch (Exception $eDupEl) {
+            $alreadyLogged = false;
+        }
+        if (!$alreadyLogged && function_exists('activity_log')) {
+            if (function_exists('current_admin')) {
+                $actorNow = current_admin();
+            } else {
+                $actorNow = null;
+            }
+            if (!$actorNow) {
+                try {
+                    $ad = $pdo->prepare(
+                        'SELECT id FROM admin_users WHERE tenant_id = :t AND role = "admin" ORDER BY id ASC LIMIT 1'
+                    );
+                    $ad->execute(array(':t' => $tenantId));
+                    $adId = (int) $ad->fetchColumn();
+                    if ($adId > 0) {
+                        $GLOBALS['activity_force_actor'] = array('id' => $adId, 'name' => 'النظام');
+                    }
+                } catch (Exception $eAd) {
+                }
+            }
+            activity_log($pdo, null, 'subscriber', 0, 'sas_withdrawn', $summary, $info['username']);
+            unset($GLOBALS['activity_force_actor']);
+        }
+        $withdrawn[] = array(
+            'username' => $info['username'],
+            'summary' => $summary,
+        );
+    }
+
+    // امسح فقط صفوف إيرث لهذا الحساب/الشركة — لا تمسح كاش الساس حتى لو نفس اليوزر
+    try {
+        if ($accountId > 0 && earthlink_cache_has_column($pdo, 'sas_account_id')) {
+            $pdo->prepare('DELETE FROM sas_users_cache WHERE tenant_id = :t AND sas_account_id = :a')
+                ->execute(array(':t' => $tenantId, ':a' => $accountId));
+            // صفوف إيرث قديمة التصقت بحساب ساس بالخطأ (نفس company_id)
+            if ($companyId > 0 && earthlink_cache_has_column($pdo, 'company_id')
+                && earthlink_cache_has_column($pdo, 'provider')
+            ) {
+                $pdo->prepare(
+                    "DELETE FROM sas_users_cache
+                     WHERE tenant_id = :t AND company_id = :c AND provider = 'earthlink'
+                       AND sas_account_id <> :a"
+                )->execute(array(
+                    ':t' => $tenantId,
+                    ':c' => (int) $companyId,
+                    ':a' => $accountId,
+                ));
+            }
+        } elseif ($companyId > 0 && earthlink_cache_has_column($pdo, 'company_id')
+            && earthlink_cache_has_column($pdo, 'provider')
+        ) {
+            $pdo->prepare(
+                "DELETE FROM sas_users_cache
+                 WHERE tenant_id = :t AND company_id = :c AND provider = 'earthlink'"
+            )->execute(array(':t' => $tenantId, ':c' => (int) $companyId));
+        } elseif ($companyId > 0 && earthlink_cache_has_column($pdo, 'company_id')) {
             $pdo->prepare('DELETE FROM sas_users_cache WHERE tenant_id = :t AND company_id = :c')
                 ->execute(array(':t' => $tenantId, ':c' => (int) $companyId));
         } elseif (earthlink_cache_has_column($pdo, 'provider')) {
@@ -1070,16 +1382,33 @@ function earthlink_sync_to_cache($pdo, $tenantId, $host, $username, $password, $
             $disp = $sub['username'];
         }
         $expRaw = isset($sub['expiry_date']) ? trim((string) $sub['expiry_date']) : '';
-        $expAt = null;
-        if ($expRaw !== '') {
-            $ts = strtotime($expRaw);
-            if ($ts) {
-                $expAt = date('Y-m-d H:i:s', $ts);
-            }
+        $expAt = earthlink_parse_expire_sql($expRaw);
+        $daysLeftRaw = isset($sub['active_days_left']) ? trim((string) $sub['active_days_left']) : '';
+        // إن ماكو تاريخ — احسب من الأيام المتبقية بإيرث
+        if ($expAt === null && $daysLeftRaw !== '' && preg_match('/^\d+$/', $daysLeftRaw) && (int) $daysLeftRaw > 0) {
+            $expAt = date('Y-m-d H:i:s', time() + ((int) $daysLeftRaw * 86400));
+        }
+        // موقوف/منتهي بأيام 0: لا تعرض أيام متبقية وهمية من تاريخ قديم بالصفحة
+        if (!empty($sub['is_expired']) && ($daysLeftRaw === '0' || $daysLeftRaw === '')) {
+            // أبقِ التاريخ للترتيب إن وُجد، والواجهة تعتمد enabled=0 (أحمر)
         }
         $first = isset($sub['firstname']) ? trim((string) $sub['firstname']) : '';
         if ($first === '') {
             $first = $disp;
+        }
+        $elIp = isset($sub['framed_ip']) ? trim((string) $sub['framed_ip']) : '';
+        $elOnline = !empty($sub['is_online']) ? 1 : 0;
+        $elExpired = !empty($sub['is_expired']) ? 1 : 0;
+        if ($elIp !== '' && preg_match('/^10\.(24|25|26)\./', $elIp)) {
+            $elIp = '';
+            $elOnline = 0;
+            $sub['mac'] = '';
+        }
+        // منتهي/موقوف بإيرث: لا يظهر متصل ولا يحتفظ بـ IP/MAC
+        if ($elExpired) {
+            $elOnline = 0;
+            $elIp = '';
+            $sub['mac'] = '';
         }
         $cols = array(
             'tenant_id' => $tenantId,
@@ -1089,9 +1418,9 @@ function earthlink_sync_to_cache($pdo, $tenantId, $host, $username, $password, $
             'parent_name' => $sub['parent_name'] !== '' ? $sub['parent_name'] : $sub['agent_name'],
             'phone' => $sub['phone'],
             'expire_at' => $expAt,
-            'is_online' => (int) $sub['is_online'],
-            'framed_ip' => $sub['framed_ip'],
-            'enabled' => empty($sub['is_expired']) ? 1 : 0,
+            'is_online' => $elOnline,
+            'framed_ip' => $elIp,
+            'enabled' => $elExpired ? 0 : 1,
             'synced_at' => date('Y-m-d H:i:s'),
         );
         if (!empty($sub['is_online']) && earthlink_cache_has_column($pdo, 'last_online')) {
@@ -1109,8 +1438,10 @@ function earthlink_sync_to_cache($pdo, $tenantId, $host, $username, $password, $
         if ($hasMac && !empty($sub['mac'])) {
             $cols['mac_address'] = $sub['mac'];
         }
-        if ($hasAcc && !empty($GLOBALS['sas_force_account']['id'])) {
-            $cols['sas_account_id'] = (int) $GLOBALS['sas_force_account']['id'];
+        if ($hasAcc) {
+            $cols['sas_account_id'] = $accountId > 0
+                ? $accountId
+                : (!empty($GLOBALS['sas_force_account']['id']) ? (int) $GLOBALS['sas_force_account']['id'] : 0);
         }
         if (earthlink_cache_has_column($pdo, 'email') && !empty($sub['email'])) {
             $cols['email'] = $sub['email'];
@@ -1127,18 +1458,274 @@ function earthlink_sync_to_cache($pdo, $tenantId, $host, $username, $password, $
             $pdo->prepare($sql)->execute($bind);
             $n++;
         } catch (Exception $e) {
-            // صف واحد فاشل لا يوقف الباقي
+            // تعارض سباق/مفتاح: حدّث صف إيرث هذا الحساب فقط — لا تترك بيانات نور
+            try {
+                if ($accountId > 0) {
+                    $pdo->prepare(
+                        'UPDATE sas_users_cache SET
+                            display_name = :display_name,
+                            firstname = :firstname,
+                            profile_name = :profile_name,
+                            parent_name = :parent_name,
+                            phone = :phone,
+                            expire_at = :expire_at,
+                            is_online = :is_online,
+                            framed_ip = :framed_ip,
+                            enabled = :enabled,
+                            provider = \'earthlink\',
+                            company_id = :company_id,
+                            synced_at = :synced_at,
+                            local_subscriber_id = NULL
+                         WHERE tenant_id = :tenant_id AND sas_account_id = :sas_account_id
+                           AND LOWER(username) = LOWER(:username)'
+                    )->execute(array(
+                        ':display_name' => $cols['display_name'],
+                        ':firstname' => isset($cols['firstname']) ? $cols['firstname'] : $cols['display_name'],
+                        ':profile_name' => $cols['profile_name'],
+                        ':parent_name' => $cols['parent_name'],
+                        ':phone' => $cols['phone'],
+                        ':expire_at' => $cols['expire_at'],
+                        ':is_online' => $cols['is_online'],
+                        ':framed_ip' => $cols['framed_ip'],
+                        ':enabled' => $cols['enabled'],
+                        ':company_id' => isset($cols['company_id']) ? $cols['company_id'] : 0,
+                        ':synced_at' => $cols['synced_at'],
+                        ':tenant_id' => $tenantId,
+                        ':sas_account_id' => $accountId,
+                        ':username' => $cols['username'],
+                    ));
+                    $n++;
+                }
+            } catch (Exception $e2) {
+            }
+        }
+    }
+    // امسح أي IP/MAC تسرّب من نور (10.24) على صفوف إيرث
+    try {
+        if ($accountId > 0) {
+            $pdo->prepare(
+                "UPDATE sas_users_cache
+                 SET is_online = 0, framed_ip = NULL, mac_address = NULL, online_ping = NULL
+                 WHERE tenant_id = :t AND sas_account_id = :a
+                   AND provider = 'earthlink'
+                   AND framed_ip IS NOT NULL AND framed_ip <> ''
+                   AND (framed_ip LIKE '10.24.%' OR framed_ip LIKE '10.25.%' OR framed_ip LIKE '10.26.%')"
+            )->execute(array(':t' => $tenantId, ':a' => $accountId));
+        }
+    } catch (Exception $eBleed) {
+    }
+    // جلب IP + انتهاء يوزر الدخول من بوابة إيرث (للأيام المتبقية والترتيب)
+    if ($loginUser !== '' && $accountId > 0) {
+        $adminMeta = earthlink_lookup_user_meta($host, $username, $password, $loginUser, $altHost);
+        $adminIp = isset($adminMeta['ip']) ? (string) $adminMeta['ip'] : '';
+        $adminExp = isset($adminMeta['expire_at']) ? $adminMeta['expire_at'] : null;
+        $adminDays = isset($adminMeta['days_left']) ? (int) $adminMeta['days_left'] : 0;
+        if ($adminExp === null && $adminDays > 0) {
+            $adminExp = date('Y-m-d H:i:s', time() + ($adminDays * 86400));
+        }
+        // لا تعتمد تاريخاً قديماً مأخوذاً بالخطأ من HTML الصفحة
+        if ($adminExp && strtotime($adminExp) < time() && $adminDays <= 0) {
+            $adminExp = null;
+        }
+        if ($adminIp !== '' || $adminExp) {
+            try {
+                $sets = array('last_online = NOW()');
+                $bind = array(':t' => $tenantId, ':a' => $accountId, ':u' => $loginUser);
+                if ($adminIp !== '') {
+                    $sets[] = 'framed_ip = :ip';
+                    $sets[] = 'is_online = 1';
+                    $bind[':ip'] = $adminIp;
+                }
+                if ($adminExp) {
+                    $sets[] = 'expire_at = :exp';
+                    $sets[] = 'enabled = 1';
+                    $bind[':exp'] = $adminExp;
+                }
+                $pdo->prepare(
+                    'UPDATE sas_users_cache SET ' . implode(', ', $sets)
+                    . ' WHERE tenant_id = :t AND sas_account_id = :a AND LOWER(username) = LOWER(:u)'
+                )->execute($bind);
+            } catch (Exception $eAdm) {
+            }
         }
     }
     // خزّن باقات إيرث من أسماء البروفايل الظاهرة بالمشتركين
     if (function_exists('earthlink_packages_persist_from_cache')) {
         earthlink_packages_persist_from_cache($pdo, $tenantId, $companyId);
     }
+    if (!empty($withdrawn)) {
+        if (empty($GLOBALS['sas_sync_withdrawn']) || !is_array($GLOBALS['sas_sync_withdrawn'])) {
+            $GLOBALS['sas_sync_withdrawn'] = array();
+        }
+        foreach ($withdrawn as $wRow) {
+            $GLOBALS['sas_sync_withdrawn'][] = $wRow;
+        }
+    }
     return array(
         'ok' => true,
         'count' => $n,
         'message' => 'تم جلب ' . $n . ' مشترك من Earthlink',
+        'withdrawn' => $withdrawn,
+        'withdrawn_count' => count($withdrawn),
     );
+}
+
+/**
+ * جلب IP حي ليوزر إيرث من صفحة التعديل بالبوابة.
+ */
+function earthlink_lookup_user_ip($host, $loginUser, $loginPass, $uid, $altHost = '')
+{
+    $meta = earthlink_lookup_user_meta($host, $loginUser, $loginPass, $uid, $altHost);
+    return isset($meta['ip']) ? (string) $meta['ip'] : '';
+}
+
+/**
+ * جلب IP + تاريخ انتهاء + أيام متبقية من صفحة UserEdit بإيرث.
+ * @return array{ip:string,expire_at:?string,days_left:int}
+ */
+function earthlink_lookup_user_meta($host, $loginUser, $loginPass, $uid, $altHost = '')
+{
+    $out = array('ip' => '', 'expire_at' => null, 'days_left' => 0);
+    $uid = trim((string) $uid);
+    if ($uid === '') {
+        return $out;
+    }
+    $sess = earthlink_portal_session($host, $loginUser, $loginPass, $altHost);
+    if (empty($sess['ok'])) {
+        return $out;
+    }
+    $usedHost = isset($sess['host']) ? $sess['host'] : earthlink_normalize_host($host);
+    $cookie = isset($sess['cookie']) ? $sess['cookie'] : '';
+    $base = earthlink_base_url($usedHost);
+    $url = $base . '/Users/UserEdit.aspx?uid=' . rawurlencode($uid);
+    list($html, $code, $err) = earthlink_http(
+        'GET',
+        $url,
+        null,
+        array(
+            'Accept: text/html',
+            'User-Agent: ' . earthlink_ua(),
+            'Referer: ' . $base . '/',
+        ),
+        25,
+        $cookie
+    );
+    if (!is_string($html) || $html === '' || earthlink_portal_looks_like_login($html)) {
+        return $out;
+    }
+    $ip = '';
+    foreach (array(
+        '/id="[^"]*(?:userIP|UserIP|lastIp|LastIP|ipAddress|IpAddress|currentIP)[^"]*"[^>]*value="([^"]+)"/i',
+        '/id="[^"]*(?:userIP|UserIP|lastIp|LastIP|ipAddress)[^"]*"[^>]*>([0-9.]+)</i',
+        '/>(\d{1,3}(?:\.\d{1,3}){3})</',
+    ) as $re) {
+        if (preg_match($re, $html, $m)) {
+            $cand = trim($m[1]);
+            if (filter_var($cand, FILTER_VALIDATE_IP) && !preg_match('/^10\.(24|25|26)\./', $cand)) {
+                $ip = $cand;
+                break;
+            }
+        }
+    }
+    if ($ip === '' && preg_match_all('/\b(\d{1,3}(?:\.\d{1,3}){3})\b/', $html, $mm)) {
+        foreach ($mm[1] as $cand) {
+            if (preg_match('/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./', $cand) && filter_var($cand, FILTER_VALIDATE_IP)) {
+                $ip = $cand;
+                break;
+            }
+        }
+        if ($ip === '') {
+            foreach ($mm[1] as $cand) {
+                if (preg_match('/^100\./', $cand) && filter_var($cand, FILTER_VALIDATE_IP)) {
+                    $ip = $cand;
+                    break;
+                }
+            }
+        }
+    }
+    $out['ip'] = $ip;
+
+    $days = 0;
+    foreach (array(
+        '/id="[^"]*ActiveDaysLeft[^"]*"[^>]*value="(\d+)"/i',
+        '/id="[^"]*ActiveDaysLeft[^"]*"[^>]*>(\d+)</i',
+        '/Days\s*left\s*:?\s*(\d+)/i',
+        '/الأيام\s*المتبقية[^0-9]*(\d+)/u',
+    ) as $re) {
+        if (preg_match($re, $html, $m)) {
+            $days = (int) $m[1];
+            if ($days > 0) {
+                break;
+            }
+        }
+    }
+    $out['days_left'] = $days;
+
+    $expAt = null;
+    foreach (array(
+        '/id="[^"]*(?:manualExpirationDate|accountExpirationDate|expirationDate|ExpiryDate)[^"]*"[^>]*value="([^"]+)"/i',
+        '/id="[^"]*(?:manualExpirationDate|accountExpirationDate|expirationDate)[^"]*"[^>]*>([^<]+)</i',
+    ) as $re) {
+        if (preg_match($re, $html, $m)) {
+            $raw = trim(html_entity_decode($m[1], ENT_QUOTES, 'UTF-8'));
+            $ts = strtotime($raw);
+            if ($ts) {
+                $expAt = date('Y-m-d H:i:s', $ts);
+                break;
+            }
+        }
+    }
+    if ($expAt === null && preg_match('/(\d{1,2}\/\d{1,2}\/\d{4}\s+\d{1,2}:\d{2}\s*[AP]M)/i', $html, $m)) {
+        $expAt = earthlink_parse_expire_sql($m[1]);
+    }
+    if ($expAt === null && $days > 0) {
+        $expAt = date('Y-m-d H:i:s', time() + ($days * 86400));
+    }
+    // تجاهل تاريخ منتهٍ بدون أيام متبقية (غالباً ضوضاء من HTML)
+    if ($expAt && strtotime($expAt) < time() && $days <= 0) {
+        $expAt = null;
+    }
+    $out['expire_at'] = $expAt;
+    return $out;
+}
+
+/**
+ * تحديث حي لحالة إيرث (متصل/فاصل + IP) بدون مسح صفوف ساس.
+ * يُستدعى من لايف الجدول حتى ما تبقى بيانات ميتة.
+ */
+function earthlink_refresh_online_for_tenant($pdo, $tenantId, $minInterval = 25)
+{
+    $tenantId = (int) $tenantId;
+    if ($tenantId <= 0 || !$pdo || !function_exists('tenant_sas_accounts_ready')) {
+        return 0;
+    }
+    $minInterval = max(8, (int) $minInterval);
+    $stamp = dirname(__DIR__) . '/storage/cache/el_online_t' . $tenantId . '.txt';
+    if (is_file($stamp) && (time() - (int) @filemtime($stamp)) < $minInterval) {
+        return 0;
+    }
+    @file_put_contents($stamp, (string) time());
+    $n = 0;
+    foreach (tenant_sas_accounts_ready($pdo, $tenantId) as $acc) {
+        if (!function_exists('tenant_sas_account_is_earthlink') || !tenant_sas_account_is_earthlink($pdo, $acc)) {
+            continue;
+        }
+        $GLOBALS['sas_force_account'] = $acc;
+        $el = earthlink_sync_to_cache(
+            $pdo,
+            $tenantId,
+            isset($acc['sas_host']) ? $acc['sas_host'] : '',
+            isset($acc['sas_username']) ? $acc['sas_username'] : '',
+            isset($acc['sas_password']) ? $acc['sas_password'] : '',
+            !empty($acc['company_id']) ? (int) $acc['company_id'] : 0,
+            '',
+            isset($acc['id']) ? (int) $acc['id'] : 0
+        );
+        if (!empty($el['ok'])) {
+            $n += isset($el['count']) ? (int) $el['count'] : 0;
+        }
+    }
+    return $n;
 }
 
 /**

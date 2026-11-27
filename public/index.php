@@ -190,7 +190,40 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_points') {
     if (!$forceWallet && function_exists('dash_wallet_cache_load')) {
         $cachedW = dash_wallet_cache_load($wTid, 0);
         if (is_array($cachedW) && (!empty($cachedW['points']) || !empty($cachedW['balance']) || !empty($cachedW['wallets']))) {
-            $cachedW['ok'] = true;
+            // اسقط من الكاش أي ريسلر مقطوع ربطه
+            if ($wTid > 0 && function_exists('tenant_sas_accounts_ready') && !empty($cachedW['wallets']) && is_array($cachedW['wallets'])) {
+                $readyIds = array();
+                foreach (tenant_sas_accounts_ready($pdo, $wTid) as $rr) {
+                    $readyIds[(int) $rr['id']] = 1;
+                }
+                $keptW = array();
+                foreach ($cachedW['wallets'] as $cw) {
+                    $ca = isset($cw['account_id']) ? (int) $cw['account_id'] : 0;
+                    if ($ca > 0 && isset($readyIds[$ca])) {
+                        $keptW[] = $cw;
+                    }
+                }
+                if (count($keptW) !== count($cachedW['wallets'])) {
+                    $cachedW['wallets'] = $keptW;
+                    $cachedW['points'] = '';
+                    $cachedW['balance'] = '';
+                    foreach ($keptW as $kw) {
+                        if ($cachedW['points'] === '' && !empty($kw['points'])) {
+                            $cachedW['points'] = (string) $kw['points'];
+                        }
+                        if ($cachedW['balance'] === '' && !empty($kw['balance'])) {
+                            $cachedW['balance'] = (string) $kw['balance'];
+                        }
+                    }
+                    if ($keptW && function_exists('dash_wallet_cache_save')) {
+                        dash_wallet_cache_save($cachedW, $wTid);
+                    } elseif (!$keptW && function_exists('dash_reseller_widget_forget')) {
+                        dash_reseller_widget_forget($wTid, 0);
+                        $cachedW = array('ok' => false, 'points' => '', 'balance' => '', 'wallets' => array(), 'from_cache' => true);
+                    }
+                }
+            }
+            $cachedW['ok'] = !empty($cachedW['points']) || !empty($cachedW['balance']) || !empty($cachedW['wallets']);
             $cachedW['from_cache'] = true;
             echo json_encode($cachedW);
             exit;
@@ -242,8 +275,15 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_points') {
         }
     }
     $freshWallets = array();
-    if ($wTid > 0 && function_exists('tenant_sas_accounts_list')) {
-        foreach (tenant_sas_accounts_list($pdo, $wTid) as $wAcc) {
+    // فقط الريسلرات المربوطة (sas_enabled) — المقطوع ربطه ما يظهر بالوجدز
+    $walletAccSource = ($wTid > 0 && function_exists('tenant_sas_accounts_ready'))
+        ? tenant_sas_accounts_ready($pdo, $wTid)
+        : (($wTid > 0 && function_exists('tenant_sas_accounts_list')) ? tenant_sas_accounts_list($pdo, $wTid) : array());
+    if ($walletAccSource) {
+        foreach ($walletAccSource as $wAcc) {
+            if (empty($wAcc['sas_enabled'])) {
+                continue;
+            }
             $wAid = isset($wAcc['id']) ? (int) $wAcc['id'] : 0;
             $wCid = !empty($wAcc['company_id']) ? (int) $wAcc['company_id'] : 0;
             $wProv = function_exists('tenant_sas_account_provider')
@@ -310,7 +350,30 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_points') {
             $freshWallets[] = $rowOut;
         }
     }
-    if ($freshWallets) {
+    if ($wTid > 0 && function_exists('tenant_sas_accounts_ready')) {
+        // النتيجة النهائية = المربوط فقط (حتى لو فارغ بعد قطع الربط)
+        $ptsOut['wallets'] = $freshWallets;
+        $ptsOut['points'] = '';
+        $ptsOut['balance'] = '';
+        $ptsOut['ok'] = false;
+        foreach ($freshWallets as $fw) {
+            if ($ptsOut['points'] === '' && !empty($fw['points'])) {
+                $ptsOut['points'] = $fw['points'];
+                $ptsOut['ok'] = true;
+            }
+            if ($ptsOut['balance'] === '' && !empty($fw['balance'])) {
+                $ptsOut['balance'] = $fw['balance'];
+                $ptsOut['ok'] = true;
+            }
+        }
+        if ($freshWallets) {
+            if (function_exists('dash_wallet_cache_save')) {
+                dash_wallet_cache_save($ptsOut, $wTid);
+            }
+        } elseif (function_exists('dash_reseller_widget_forget')) {
+            dash_reseller_widget_forget($wTid, 0);
+        }
+    } elseif ($freshWallets) {
         $ptsOut['wallets'] = $freshWallets;
         foreach ($freshWallets as $fw) {
             if ($ptsOut['points'] === '' && !empty($fw['points'])) {
@@ -321,6 +384,9 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_points') {
                 $ptsOut['balance'] = $fw['balance'];
                 $ptsOut['ok'] = true;
             }
+        }
+        if (function_exists('dash_wallet_cache_save')) {
+            dash_wallet_cache_save($ptsOut, $wTid);
         }
     } elseif (function_exists('sas_manager_reward_points')) {
         // لا حسابات متعددة — مسار واحد
@@ -335,9 +401,9 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'dash_points') {
             $ptsOut['balance'] = (string) $_SESSION['sas_balance_disp'];
             $ptsOut['ok'] = true;
         }
-    }
-    if (function_exists('dash_wallet_cache_save') && ($ptsOut['points'] !== '' || $ptsOut['balance'] !== '' || !empty($ptsOut['wallets']))) {
-        dash_wallet_cache_save($ptsOut, $wTid);
+        if (function_exists('dash_wallet_cache_save') && ($ptsOut['points'] !== '' || $ptsOut['balance'] !== '')) {
+            dash_wallet_cache_save($ptsOut, $wTid);
+        }
     }
     echo json_encode($ptsOut);
     exit;
@@ -810,8 +876,15 @@ if (function_exists('dash_wallet_cache_load')) {
         }
     }
 }
-if ($dashTidSeed > 0 && function_exists('tenant_sas_accounts_list')) {
-    foreach (tenant_sas_accounts_list($pdo, $dashTidSeed) as $wAcc) {
+$seedAccSource = ($dashTidSeed > 0 && function_exists('tenant_sas_accounts_ready'))
+    ? tenant_sas_accounts_ready($pdo, $dashTidSeed)
+    : (($dashTidSeed > 0 && function_exists('tenant_sas_accounts_list'))
+        ? tenant_sas_accounts_list($pdo, $dashTidSeed) : array());
+if ($seedAccSource) {
+    foreach ($seedAccSource as $wAcc) {
+        if (empty($wAcc['sas_enabled'])) {
+            continue;
+        }
         $wAid = isset($wAcc['id']) ? (int) $wAcc['id'] : 0;
         if ($wAid <= 0) {
             continue;
@@ -848,8 +921,11 @@ if ($dashTidSeed > 0 && function_exists('tenant_sas_accounts_list')) {
         }
     }
 }
-if (!$dashWalletsSeed && $seedByAid) {
-    $dashWalletsSeed = array_values($seedByAid);
+// لا ترجع كاش ريسلرات مقطوع ربطها حتى لو بقي ملف الكاش قديماً
+if (!$dashWalletsSeed) {
+    $sasPointsDisp = '—';
+    $sasPointsOk = false;
+    $dashBalSeedDisp = '—';
 }
 if ($sasPointsDisp === '—' || $sasPointsDisp === '') {
     $ptsTidSeed = $dashTidSeed > 0 ? $dashTidSeed : 1;

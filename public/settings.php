@@ -1331,13 +1331,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             list($okS, $msgS, $newId) = tenant_sas_account_save($pdo, $tidSas, $fieldsAcc, $editId);
             if ($okS) {
                 if ($coProvider === 'earthlink' && function_exists('earthlink_sync_to_cache')) {
+                    $accIdEl = (int) $newId > 0 ? (int) $newId : (int) $editId;
                     $syncEl = earthlink_sync_to_cache(
                         $pdo,
                         $tidSas,
                         $fieldsAcc['sas_host'],
                         $fieldsAcc['sas_username'],
                         $fieldsAcc['sas_password'],
-                        $companyId
+                        $companyId,
+                        '',
+                        $accIdEl
                     );
                     if (!empty($syncEl['ok'])) {
                         $msgT .= ' — ' . (isset($syncEl['message']) ? $syncEl['message'] : '');
@@ -3659,8 +3662,11 @@ if ($sasTenantIdUi > 1) {
                 }
                 $isElAcc = function_exists('tenant_sas_account_is_earthlink')
                     && tenant_sas_account_is_earthlink($pdo, $acc);
-                $logged = !empty($acc['last_ok_at']) && trim((string) (isset($acc['last_error']) ? $acc['last_error'] : '')) === '';
-                $loginFail = trim((string) (isset($acc['last_error']) ? $acc['last_error'] : '')) !== '';
+                $logged = !empty($acc['sas_enabled'])
+                    && !empty($acc['last_ok_at'])
+                    && trim((string) (isset($acc['last_error']) ? $acc['last_error'] : '')) === '';
+                $loginFail = !empty($acc['sas_enabled'])
+                    && trim((string) (isset($acc['last_error']) ? $acc['last_error'] : '')) !== '';
                 $liveDetail = (is_array($liveSas) && isset($liveSas['detail'])) ? (string) $liveSas['detail'] : '';
                 // حالة الساس الحية تخص حسابات SAS فقط — لا تلصّق فشل الساس على بطاقة إيرث
                 $liveDown = (!$isElAcc && $accKey !== '' && $accKey === $liveKey

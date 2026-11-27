@@ -99,9 +99,10 @@ function sas_outside_refresh_users($pdo, $config, $usernames)
         $en = function_exists('sas_cache_enabled') ? (int) sas_cache_enabled($row) : 1;
         try {
             $st = $pdo->prepare(
-                'UPDATE sas_users_cache
+                "UPDATE sas_users_cache
                  SET expire_at = :e, enabled = :en, synced_at = NOW()
-                 WHERE tenant_id = :t AND username = :u'
+                 WHERE tenant_id = :t AND username = :u
+                   AND IFNULL(provider, 'sas') <> 'earthlink'"
             );
             $st->execute(array(
                 ':e' => $exp,
